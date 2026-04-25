@@ -1,0 +1,15 @@
+[package]
+name = "rss-ai-news-domain"
+version.workspace = true
+edition.workspace = true
+
+# domain crate: no I/O dependencies, only data types and traits
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+url.workspace = true
+sha2.workspace = true
