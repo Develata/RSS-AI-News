@@ -1,0 +1,418 @@
+# RSS-AI-News 全 Rust 蓝图任务分解
+
+## 1. 说明
+
+本任务文档从 [工程蓝图](../plan/full-rust-rss-ai-news-blueprint.md) 拆解而来，参考 Spec Kit 的任务风格，但按本仓库工程宪法做了更强的骨架约束。
+
+规则：
+
+- 先骨架，后模块，最后实现
+- 先定义真相源、状态机、配置和 DTO，再写业务代码
+- 所有任务默认面向 `E:\gitclone\RSS-AI-News`
+
+任务状态建议：
+
+- `[ ]` 未开始
+- `[~]` 进行中
+- `[x]` 完成
+
+### 1.1 Workstream 与 Phase 的区分
+
+本文档的 `Workstream W0–W10` 是**工作流分组**，按"骨架→模块→闭环"的颗粒度组织任务。
+[蓝图 §15](../plan/full-rust-rss-ai-news-blueprint.md) 的 `Phase 0–5` 是**里程碑节点**，按"可交付的端到端能力"组织。
+
+二者并非一一对应，对应关系如下：
+
+| Blueprint Phase | 对应 Workstream | 交付物 |
+|---|---|---|
+| Phase 0 文档冻结 | W0 | 全套设计文档 |
+| Phase 1 最小闭环 | W1 + W2 + W3 + W4 + W5 | ingest 端到端可跑 |
+| Phase 2 正文提取 | W6 | extract 闭环 |
+| Phase 3 AI 闭环 | W7 | ai-run 闭环 |
+| Phase 4 发布闭环 | W8 | publish 闭环 |
+| Phase 5 硬化 | W9 + W10 | doctor / metrics / Docker / CI |
+
+实施时按 Workstream 推进，按 Phase 验收。
+
+## 2. Workstream W0：文档与骨架冻结
+
+### T001 文档目录标准化
+
+- [x] 建立并检查 `docs/constitution.md`
+- [x] 建立并检查 `docs/design/`
+- [x] 建立并检查 `docs/plan/`
+- [x] 建立并检查 `docs/task/`
+- [x] 建立并检查 `docs/handoffs/`
+- [x] 补充 `docs/README.md`
+
+### T002 宪法冻结
+
+- [x] 审阅 [工程宪法](../constitution.md)
+- [x] 确认优先级顺序无冲突
+- [x] 确认四层架构 + 对象层已进入正式骨架
+
+### T003 设计哲学冻结
+
+- [x] 审阅 [核心设计哲学](../design/design-philosophy.md)
+- [x] 确认"阶段驱动、快照驱动、回放驱动、租约驱动、版本化驱动"已成为终局约束
+
+### T004 蓝图冻结
+
+- [x] 审阅 [工程蓝图](../plan/full-rust-rss-ai-news-blueprint.md)
+- [x] 确认模块、状态机、调用关系、失败路径、扩展点完整
+- [x] 完成 A–T 一致性审阅并回写蓝图与对应设计文档
+
+### T005 后续文档补齐
+
+- [x] 新增 `docs/design/config-schema.md`
+- [x] 新增 `docs/design/internal-dto-contracts.md`
+- [x] 新增 `docs/design/cli-semantics.md`
+- [x] 新增 `docs/design/error-and-observability.md`
+- [x] 新增 `docs/design/replay-and-artifacts.md`
+- [x] 新增 `docs/design/dependency-choices.md`
+- [x] 新增 `docs/design/state-machine.md`
+- [x] 新增 `docs/design/storage-schema.md`
+
+## 3. Workstream W1：新仓库初始化
+
+### T101 初始化 Rust workspace
+
+- [x] 初始化根 `Cargo.toml`（`resolver = "3"`, `edition = "2024"`, `[workspace.dependencies]` 统一版本）
+- [x] 初始化 `Cargo.lock`
+- [x] 新增 `.gitignore`
+- [ ] 新增 `rustfmt.toml`
+- [ ] 新增 `clippy.toml`
+
+### T102 初始化 crate 骨架
+
+**最终决议**：根目录为二进制 crate `rss-ai-news`（对应旧方案的 `app` crate），其余全部下沉到 `crates/`。
+
+- [x] 根 `src/` 作为 `rss-ai-news` binary（替代 `crates/app`）
+- [x] 创建 `crates/cli`
+- [x] 创建 `crates/domain`
+- [x] 创建 `crates/config`
+- [x] 创建 `crates/runtime`
+- [x] 创建 `crates/storage`
+- [x] 创建 `crates/feed`
+- [x] 创建 `crates/extractor`
+- [x] 创建 `crates/ai`
+- [x] 创建 `crates/report`
+- [x] 创建 `crates/publish`
+- [x] 创建 `crates/observability`
+
+### T103 建立目录与静态资源骨架
+
+- [ ] 创建 `configs/`
+- [ ] 创建 `configs/categories/`
+- [ ] 创建 `migrations/`
+- [ ] 创建 `docker/`
+- [ ] 创建 `tests/fixtures/`
+- [ ] 创建 `tests/integration/`
+
+## 4. Workstream W2：领域对象与 DTO 契约
+
+### T201 定义核心对象
+
+- [ ] 在 `crates/domain` 中定义 `FeedSource`
+- [ ] 定义 `FeedEntry`
+- [ ] 定义 `Article`
+- [ ] 定义 `ArticleAiResult`
+- [ ] 定义 `PublishRecord`
+- [ ] 定义 `PublishItem`
+- [ ] 定义 `RawArtifact`
+
+### T202 定义状态机
+
+- [ ] 定义 `FeedEntryState`
+- [ ] 定义 `ArticleState`
+- [ ] 定义 `AiResultState`（不含 `RetryableFailed`；retryable 失败回落到 `Pending`）
+- [ ] 定义 `PublishState`
+
+### T203 定义内部 DTO
+
+- [ ] 定义 `FeedEntryMeta`（见 internal-dto-contracts §2.3）
+- [ ] 定义 `ArticleFetchTask`（§3.1）
+- [ ] 定义 `ExtractedArticle` 与 `FallbackArticle`（§3.2/§3.3）
+- [ ] 定义 `AiTask` / `AiOutput` / `AiFilteredOutput`（§4.1–§4.3）
+- [ ] 定义 `FrozenPublishItem` / `PublishCandidate` / `RenderedReport` / `PublishOutcome`（§5.2–§5.5）
+- [ ] 定义 `ReplayRequest/Result` 与 `BackfillRequest`（§6）
+
+### T204 定义稳定契约测试
+
+- [ ] 为状态机转换写单元测试
+- [ ] 为 link 规范化写单元测试
+- [ ] 为 DTO 序列化 / 反序列化写单元测试
+
+## 5. Workstream W3：配置系统
+
+### T301 定义配置 schema 文档
+
+- [ ] 完成 `docs/design/config-schema.md`
+- [ ] 明确 `schema_version`
+- [ ] 明确 `app.toml` 字段
+- [ ] 明确 `categories/*.toml` 字段
+- [ ] 明确 `.env` 字段
+
+### T302 实现 config crate
+
+- [ ] 加载 `.env`
+- [ ] 加载 `app.toml`
+- [ ] 加载 `categories/*.toml`
+- [ ] 实现 schema version 校验
+- [ ] 实现非法配置即退出
+
+### T303 配置测试
+
+- [ ] 合法配置通过测试
+- [ ] 缺失字段失败测试
+- [ ] 重复分类 key 失败测试
+- [ ] 非法 URL 失败测试
+
+## 6. Workstream W4：存储模型与 migration
+
+### T401 设计并冻结数据库 schema
+
+首版 migration **一次性**建齐所有表（见 storage-schema §3）；`raw_artifacts` 不是可选。
+
+- [ ] 在 `migrations/` 中创建初始 migration
+- [ ] 建 `feed_sources`
+- [ ] 建 `feed_entries`
+- [ ] 建 `articles`
+- [ ] 建 `article_ai_results`
+- [ ] 建 `publish_records`
+- [ ] 建 `publish_items`
+- [ ] 建 `raw_artifacts`
+- [ ] 建 `rule_versions`
+- [ ] 建 `run_events`
+
+### T402 实现 storage crate
+
+- [ ] 初始化连接池
+- [ ] 实现 migration 执行入口
+- [ ] 实现 repository trait
+- [ ] 实现 SQLite 适配
+- [ ] 预留 PostgreSQL 适配
+
+### T403 实现 claim + lease
+
+- [ ] 设计任务领取 SQL
+- [ ] 设计 lease 过期回收 SQL
+- [ ] 设计 attempt_count 更新逻辑
+- [ ] 编写并发领取测试
+
+### T404 幂等测试
+
+- [ ] 重复 feed entry 插入幂等测试
+- [ ] 重复 article 写入防重测试
+- [ ] 重复 publish 创建防重测试
+
+## 7. Workstream W5：Feed 抓取闭环
+
+### T501 实现 feed crate
+
+- [ ] 实现 HTTP client
+- [ ] 实现 RSS parser
+- [ ] 实现 Atom parser
+- [ ] 实现 JSON feed parser
+- [ ] 实现 `FeedEntryMeta` 规范化
+
+### T502 实现条件请求
+
+- [ ] 支持 ETag
+- [ ] 支持 Last-Modified
+- [ ] source 表更新条件请求字段
+
+### T503 实现 ingest use-case
+
+- [ ] 枚举可用 source
+- [ ] 拉取 feed
+- [ ] 解析 entry
+- [ ] 第一层去重
+- [ ] 第二层 `normalized_link` 去重
+- [ ] 生成正文抓取任务
+
+### T504 可观测性
+
+- [ ] 记录 source 抓取成功 / 失败事件
+- [ ] 输出新增 entry 数、跳过数、错误数
+
+## 8. Workstream W6：正文提取闭环
+
+### T601 初始化 extractor crate
+
+- [ ] 实现详情页 HTML 抓取
+- [ ] 实现内容大小限制
+- [ ] 实现媒体类型过滤
+
+### T602 实现多策略正文提取
+
+- [ ] 规则型提取入口
+- [ ] 通用 readability / 密度提取入口
+- [ ] summary fallback
+- [ ] content_quality 分级
+
+### T603 正文去重
+
+- [ ] 生成 `content_hash`
+- [ ] 第三层内容去重
+- [ ] 回退或失败状态推进
+
+### T604 replay(html)
+
+- [ ] 保存 HTML artifact 的策略开关
+- [ ] 实现 HTML payload 重放入口
+
+## 9. Workstream W7：AI 闭环
+
+### T701 初始化 ai crate
+
+- [ ] 实现 `AiClient`
+- [ ] 实现 prompt 组装
+- [ ] 实现输入裁剪
+- [ ] 实现 JSON 优先输出解析
+- [ ] 实现 JSON schema 漂移处理（向后兼容字段解析测试，不接受文本协议 fallback）
+
+### T702 实现 ai-run use-case
+
+- [ ] 为 `articles.state='persisted'` 生成 `article_ai_results` 任务行（同事务推进 `articles.state='ai_pending'`）
+- [ ] claim `article_ai_results.state='pending'` 批次
+- [ ] 执行 AI 调用
+- [ ] 更新 `article_ai_results`
+- [ ] 推进 `articles.state` 至 `ai_done` / `ready_for_publish` / `publish_skipped`
+
+### T703 失败与版本化
+
+- [ ] 记录 `prompt_version`
+- [ ] 记录 `output_schema_version`
+- [ ] 区分可重试与永久失败
+
+### T704 replay(ai) 与 backfill(ai)
+
+- [ ] 保存 AI raw response artifact
+- [ ] 实现 AI response replay
+- [ ] 实现历史 article 的 AI backfill
+
+## 10. Workstream W8：发布闭环
+
+### T801 初始化 report crate
+
+- [ ] 选稿逻辑
+- [ ] excerpt 逻辑
+- [ ] Markdown renderer
+- [ ] frontmatter builder
+
+### T802 实现发布快照
+
+- [ ] 设计 `PublishSnapshot`
+- [ ] 冻结 `publish_records`
+- [ ] 冻结 `publish_items`
+
+### T803 初始化 publish crate
+
+- [ ] 实现 local fs target
+- [ ] 实现 GitHub target
+- [ ] 实现本地 + GitHub 双目标协调
+
+### T804 实现 publish use-case
+
+- [ ] 领取待发布任务
+- [ ] 渲染 Markdown
+- [ ] 本地落盘
+- [ ] GitHub 提交
+- [ ] 更新发布状态
+
+### T805 rebuild-report
+
+- [ ] 根据 `publish_record_id` 重建 Markdown
+- [ ] 对比原始快照输出
+
+## 11. Workstream W9：运维与可靠性
+
+### T901 observability crate
+
+- [ ] tracing 初始化
+- [ ] metrics 注册
+- [ ] health probe
+- [ ] 关键事件结构化日志
+
+### T902 doctor 命令
+
+- [ ] 检查配置
+- [ ] 检查数据库
+- [ ] 检查 AI endpoint
+- [ ] 检查 GitHub token / repo
+- [ ] 检查 RSSHub base URL
+- [ ] 检查时区
+
+### T903 reindex
+
+- [ ] 设计 link 规则重算任务
+- [ ] 设计 hash 规则重算任务
+- [ ] 设计派生字段重算任务
+
+## 12. Workstream W10：交付
+
+### T1001 Docker 交付
+
+- [ ] 新增 multi-stage `docker/Dockerfile`
+- [ ] builder/runtime 分离
+- [ ] runtime 保留 CA 证书与 tzdata
+- [ ] 默认非 root 用户
+
+### T1002 镜像策略
+
+- [ ] 生产镜像
+- [ ] 调试镜像
+
+### T1003 CI
+
+- [ ] `cargo fmt --check`
+- [ ] `cargo clippy`
+- [ ] `cargo test`
+- [ ] migration smoke test
+- [ ] docker build smoke test
+
+## 13. 阶段验收点
+
+### A1 最小 ingest 闭环
+
+验收标准：
+
+- 能加载配置
+- 能抓 RSS / Atom / JSON
+- 能去重
+- 能入 SQLite
+
+### A2 正文提取闭环
+
+验收标准：
+
+- 能抓详情页
+- 能提正文
+- 能 fallback
+- 能 replay HTML
+
+### A3 AI 闭环
+
+验收标准：
+
+- 能跑分类 prompt
+- 能写 AI 结果
+- 能 replay AI
+- 能 backfill
+
+### A4 发布闭环
+
+验收标准：
+
+- 能冻结快照
+- 能渲染 Markdown
+- 能本地落盘
+- 能推送 GitHub
+- 能 rebuild-report
+
+## 14. 任务执行原则
+
+- 任何任务若触及骨架级变更，必须先暂停并提交变更分析
+- 任何任务若需要跨层写入，必须先回到工程宪法核对边界
+- 任何任务若不能说明真相源、状态变化、失败路径，则不得进入正式实现
