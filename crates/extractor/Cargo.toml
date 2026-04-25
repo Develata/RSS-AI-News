@@ -1,0 +1,14 @@
+[package]
+name = "rss-ai-news-extractor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rss-ai-news-domain.workspace = true
+reqwest.workspace = true
+scraper.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+url.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "rss-ai-news-report"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rss-ai-news-domain.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+time.workspace = true

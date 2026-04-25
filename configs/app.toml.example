@@ -1,0 +1,71 @@
+schema_version = "1"
+
+[database]
+driver = "sqlite"
+sqlite_path = "data/rss-ai-news.db"
+max_connections = 5
+busy_timeout_ms = 5000
+
+[http]
+user_agent = "RSS-AI-News/1.0"
+timeout_seconds = 30
+max_retries = 3
+retry_backoff_base_ms = 1000
+concurrent_feeds = 10
+concurrent_fetches = 5
+
+[ai]
+enabled = true
+model = "gpt-4o-mini"
+max_tokens = 4096
+temperature = 0.3
+request_timeout_seconds = 60
+max_input_chars = 8000
+
+[ai.rate_limit]
+requests_per_minute = 60
+tokens_per_minute = 0
+
+[publish]
+target_timezone = "Asia/Shanghai"
+github_owner = ""
+github_repo = ""
+github_branch = "main"
+github_path_prefix = "archive"
+local_output_dir = "output"
+include_unscored = false
+
+[dedup]
+enable_link_dedup = true
+enable_content_dedup = true
+link_normalizer_version = "1"
+
+[extractor]
+strategy_order = ["readability", "summary_fallback"]
+max_body_bytes = 1_048_576
+min_body_chars = 100
+
+[lease]
+fetch_duration_seconds = 300
+ai_duration_seconds = 600
+publish_duration_seconds = 600
+reclaim_interval_seconds = 120
+
+[retry]
+feed_entry_max_attempts = 5
+ai_max_attempts = 3
+publish_max_attempts = 5
+
+[artifact]
+retention_policy = "on_failure"
+sample_rate = 0.1
+inline_threshold_bytes = 65536
+file_storage_dir = "data/artifacts"
+ttl_days = 30
+
+[observability]
+log_level = "info"
+log_format = "pretty"
+log_file = ""
+enable_metrics = false
+metrics_bind = "127.0.0.1:9090"

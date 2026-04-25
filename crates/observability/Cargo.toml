@@ -1,0 +1,9 @@
+[package]
+name = "rss-ai-news-observability"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true

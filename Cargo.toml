@@ -1,0 +1,101 @@
+[workspace]
+members = [
+    ".",
+    "crates/cli",
+    "crates/domain",
+    "crates/config",
+    "crates/runtime",
+    "crates/storage",
+    "crates/feed",
+    "crates/extractor",
+    "crates/ai",
+    "crates/report",
+    "crates/publish",
+    "crates/observability",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Develata/RSS-AI-News"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "json"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "time", "migrate"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Time
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+
+# Logging & observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Error handling
+thiserror = "2"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Hashing
+sha2 = "0.10"
+
+# URL
+url = "2"
+
+# Unique IDs
+ulid = "1"
+
+# Environment
+dotenvy = "0.15"
+
+# Feed parsing
+feed-rs = "2"
+
+# AI client
+async-openai = "0.27"
+
+# GitHub API
+octocrab = "0.44"
+
+# HTML parsing
+scraper = "0.22"
+
+# Workspace crates (internal)
+rss-ai-news-cli = { path = "crates/cli" }
+rss-ai-news-domain = { path = "crates/domain" }
+rss-ai-news-config = { path = "crates/config" }
+rss-ai-news-runtime = { path = "crates/runtime" }
+rss-ai-news-storage = { path = "crates/storage" }
+rss-ai-news-feed = { path = "crates/feed" }
+rss-ai-news-extractor = { path = "crates/extractor" }
+rss-ai-news-ai = { path = "crates/ai" }
+rss-ai-news-report = { path = "crates/report" }
+rss-ai-news-publish = { path = "crates/publish" }
+rss-ai-news-observability = { path = "crates/observability" }
+
+[package]
+name = "rss-ai-news"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rss-ai-news-cli.workspace = true
+rss-ai-news-config.workspace = true
+rss-ai-news-observability.workspace = true
+rss-ai-news-runtime.workspace = true
+rss-ai-news-storage.workspace = true
+tokio.workspace = true
+tracing.workspace = true

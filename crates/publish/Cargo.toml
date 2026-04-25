@@ -1,0 +1,11 @@
+[package]
+name = "rss-ai-news-publish"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rss-ai-news-domain.workspace = true
+octocrab.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true

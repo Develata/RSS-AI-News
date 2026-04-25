@@ -1,0 +1,12 @@
+services:
+  rss-ai-news:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: rss-ai-news:local
+    env_file:
+      - ../.env
+    volumes:
+      - ../configs:/app/configs:ro
+      - ../data:/app/data
+    command: ["rss-ai-news", "--help"]

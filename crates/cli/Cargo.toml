@@ -1,0 +1,13 @@
+[package]
+name = "rss-ai-news-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rss-ai-news-domain.workspace = true
+rss-ai-news-config.workspace = true
+rss-ai-news-runtime.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true

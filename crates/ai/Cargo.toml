@@ -1,0 +1,13 @@
+[package]
+name = "rss-ai-news-ai"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rss-ai-news-domain.workspace = true
+async-openai.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
