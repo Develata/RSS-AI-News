@@ -1,0 +1,15 @@
+[package]
+name = "rss-ai-news-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rss-ai-news-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+dotenvy.workspace = true
+tracing.workspace = true
+url.workspace = true
+sha2.workspace = true
