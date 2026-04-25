@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -24,10 +25,14 @@ pub fn compute_config_sha256(
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-pub trait ConfigVersionStore {
+#[async_trait]
+pub trait ConfigVersionStore: Send + Sync {
     /// Returns the rule_versions.id for the given config sha256.
     /// Inserts a new row if not found.
-    fn get_or_create_config_version(&self, sha256: &str) -> Result<i64, ConfigVersionStoreError>;
+    async fn get_or_create_config_version(
+        &self,
+        sha256: &str,
+    ) -> Result<i64, ConfigVersionStoreError>;
 }
 
 #[derive(Debug, Error)]

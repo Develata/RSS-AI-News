@@ -2179,6 +2179,7 @@ dependencies = [
 name = "rss-ai-news-config"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "dotenvy",
  "rss-ai-news-domain",
  "serde",
@@ -2285,6 +2286,7 @@ name = "rss-ai-news-storage"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "rss-ai-news-config",
  "rss-ai-news-domain",
  "sqlx",
  "thiserror 2.0.18",

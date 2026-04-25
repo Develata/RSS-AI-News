@@ -344,6 +344,26 @@ async fn rule_version_config_get_or_create_returns_different_ids_for_different_s
 }
 
 #[tokio::test]
+async fn config_version_store_trait_impl_round_trip() {
+    use rss_ai_news_config::ConfigVersionStore;
+
+    let (_dir, pool) = make_test_pool().await;
+    let repo = SqliteRuleVersionRepo::new(pool);
+    let store: &dyn ConfigVersionStore = &repo;
+
+    let first = store
+        .get_or_create_config_version("ccccccccccccdddd")
+        .await
+        .expect("first trait call should succeed");
+    let second = store
+        .get_or_create_config_version("ccccccccccccdddd")
+        .await
+        .expect("second trait call should succeed");
+
+    assert_eq!(first, second);
+}
+
+#[tokio::test]
 async fn down_sql_then_up_sql_succeeds() {
     let (_dir, pool) = make_test_pool().await;
 

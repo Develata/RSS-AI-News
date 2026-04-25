@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use rss_ai_news_config::{ConfigVersionStore, ConfigVersionStoreError};
 use sqlx::SqlitePool;
 
 use crate::{StorageError, classify_sqlite_error};
@@ -43,11 +44,18 @@ impl SqliteRuleVersionRepo {
         self.get_or_create("config", &version_tag, "auto-registered config", sha256)
             .await
     }
+}
 
-    /// `ConfigVersionStore` is synchronous while sqlx storage is async.
-    /// A direct impl is intentionally deferred until W4b can choose between
-    /// an async trait contract or an explicit runtime bridge.
-    pub fn config_version_store_sync_trait_deferred(&self) {}
+#[async_trait]
+impl ConfigVersionStore for SqliteRuleVersionRepo {
+    async fn get_or_create_config_version(
+        &self,
+        sha256: &str,
+    ) -> Result<i64, ConfigVersionStoreError> {
+        self.get_or_create_config_version_async(sha256)
+            .await
+            .map_err(|err| ConfigVersionStoreError::Storage(err.to_string()))
+    }
 }
 
 #[async_trait]
