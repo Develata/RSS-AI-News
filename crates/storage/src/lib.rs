@@ -1,13 +1,15 @@
 //! Persistence layer: SQLite-first with PostgreSQL as replacement target.
 //!
-//! Owns: migrations, repositories, lease/claim primitives, raw_artifacts store.
+//! Owns migrations, repository traits and SQLite adapters.
 
-// TODO Phase 1:
-// - mod error;              // StorageError (ClassifiedError impl)
-// - mod pool;               // sqlx connection pool builder
-// - mod migrations;         // embed sqlx::migrate!()
-// - mod repo {              // repositories per object
-//       feed_source, feed_entry, article, article_ai_result,
-//       publish_record, raw_artifact, run_event, rule_version,
-//   }
-// - mod lease;              // claim/lease/reclaim helpers
+pub mod error;
+pub mod migrate;
+pub mod pool;
+pub mod repo;
+
+pub use error::{StorageError, classify_sqlite_error};
+pub use migrate::run_migrations;
+pub use pool::build_sqlite_pool;
+pub use repo::{
+    FeedSourceRepository, RuleVersionRepository, SqliteFeedSourceRepo, SqliteRuleVersionRepo,
+};
