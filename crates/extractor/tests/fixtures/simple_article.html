@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Reliable Extraction for Research News</title>
+</head>
+<body>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/topics">Topics</a>
+    <a href="/login">Login</a>
+  </nav>
+  <article>
+    <header>
+      <h1>Reliable Extraction for Research News</h1>
+    </header>
+    <p>Research news systems need deterministic article extraction because downstream ranking and summarization depend on stable input text. A crawler may see many pages with banners, subscription prompts, navigation menus, and recommendation blocks, but the persisted article should keep only the material a reader would recognize as the story.</p>
+    <p>The first concern is correctness. The extraction layer must preserve enough paragraph structure for later processing while removing incidental page furniture. Paragraph boundaries are useful because they allow tests and future models to distinguish argument flow from unrelated snippets that happen to appear nearby in the document tree.</p>
+    <p>The second concern is replay. Every raw response should be saved before parsing so that a failed parse can be reproduced without another network request. This makes failures observable and lets maintainers compare old artifacts against new extraction strategies when dependency versions or scoring rules change.</p>
+    <p>The third concern is conservative quality assessment. A long article with a title is likely suitable for the main pipeline, while a short fragment should be rejected and handled by fallback logic. This boundary is intentionally simple for the first implementation and can later be replaced by richer source-specific rules.</p>
+    <p>Finally, the implementation should remain easy to replace. A readability based strategy provides a reasonable default for broad web pages, and a separate rule based strategy can later handle sources that publish predictable markup. Keeping those responsibilities separate avoids coupling HTTP fetching, artifact storage, and parsing decisions.</p>
+  </article>
+  <footer>
+    Copyright Example News. Related links, archive widgets, newsletter signup.
+  </footer>
+</body>
+</html>

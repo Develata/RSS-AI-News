@@ -1,10 +1,10 @@
-//! Article fetching + body extraction (readability / rule / summary fallback).
-//! See docs/design/internal-dto-contracts.md § Extract stage.
+//! HTML fetching and content extraction.
 
-// TODO Phase 1:
-// - mod error;       // ExtractorError (ClassifiedError impl)
-// - mod fetcher;     // HTML fetch with timeout + retry
-// - mod readability; // primary strategy
-// - mod rule;        // per-source rule-based strategy
-// - mod fallback;    // summary-only fallback
-// - mod content_hash;
+pub mod error;
+pub mod fetcher;
+pub mod strategy;
+
+pub use error::ExtractorError;
+pub use fetcher::{HtmlFetcher, RawHtmlFetch, ReqwestHtmlFetcher};
+pub use rss_ai_news_domain::dto::extract::{ArticleFetchTask, ExtractedArticle, FallbackArticle};
+pub use strategy::{ContentStrategy, ReadabilityStrategy, RuleStrategy, summary_fallback};
