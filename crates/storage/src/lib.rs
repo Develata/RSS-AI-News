@@ -15,7 +15,9 @@ pub use pool::build_sqlite_pool;
 pub use repo::{
     AiSuccessOutcome, ArticleAiResultRepository, ClaimedAiResult, ClaimedFeedEntry,
     ClaimedPublishRecord, FeedEntry, FeedEntryRepository, FeedSourceRepository, NewAiResult,
-    NewFeedEntry, NewPublishRecord, PublishAdvanceExtras, PublishRecord, PublishRecordRepository,
-    PublishState, PublishTimestampField, RuleVersionRepository, SqliteArticleAiResultRepo,
-    SqliteFeedEntryRepo, SqliteFeedSourceRepo, SqlitePublishRecordRepo, SqliteRuleVersionRepo,
+    NewFeedEntry, NewPublishRecord, NewRawArtifact, NewRunEvent, PublishAdvanceExtras,
+    PublishRecord, PublishRecordRepository, PublishState, PublishTimestampField,
+    RawArtifactRepository, RuleVersionRepository, RunEventRepository, SqliteArticleAiResultRepo,
+    SqliteFeedEntryRepo, SqliteFeedSourceRepo, SqlitePublishRecordRepo, SqliteRawArtifactRepo,
+    SqliteRuleVersionRepo, SqliteRunEventRepo,
 };

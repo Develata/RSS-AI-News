@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use rss_ai_news_domain::error::ClassifiedError;
+
 #[derive(Error, Debug)]
 pub enum StorageError {
     #[error("conflict on {table}: {key}")]
@@ -33,6 +35,36 @@ impl StorageError {
             }
             _ => false,
         }
+    }
+}
+
+impl ClassifiedError for StorageError {
+    fn is_retryable(&self) -> bool {
+        StorageError::is_retryable(self)
+    }
+
+    fn error_kind(&self) -> &str {
+        match self {
+            Self::Conflict { .. } => "conflict",
+            Self::Integrity { .. } => "integrity",
+            Self::Unavailable(_) => "db_unavailable",
+            Self::Timeout => "db_timeout",
+            Self::Corruption(_) => "corruption",
+            Self::Migration(_) => "migration",
+            Self::Sqlx(error) => match error {
+                sqlx::Error::PoolTimedOut => "db_timeout",
+                sqlx::Error::Io(_) => "db_unavailable",
+                _ => "db_error",
+            },
+        }
+    }
+
+    fn display_user(&self) -> String {
+        format!("{self}")
+    }
+
+    fn display_debug(&self) -> String {
+        format!("{self:?}")
     }
 }
 

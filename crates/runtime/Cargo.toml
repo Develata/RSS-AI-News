@@ -12,8 +12,18 @@ rss-ai-news-extractor.workspace = true
 rss-ai-news-ai.workspace = true
 rss-ai-news-report.workspace = true
 rss-ai-news-publish.workspace = true
+async-trait = "0.1"
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+fastrand.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 time.workspace = true
 ulid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio", "macros"] }
+tempfile.workspace = true

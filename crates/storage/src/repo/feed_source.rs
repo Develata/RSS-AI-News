@@ -18,6 +18,21 @@ pub trait FeedSourceRepository: Send + Sync {
         source_key: &str,
     ) -> Result<Option<FeedSource>, StorageError>;
     async fn list_by_category(&self, category_key: &str) -> Result<Vec<FeedSource>, StorageError>;
+    async fn update_after_fetch_success(
+        &self,
+        id: i64,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        fetched_at: OffsetDateTime,
+        success_at: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+    async fn update_after_fetch_failure(
+        &self,
+        id: i64,
+        fetched_at: OffsetDateTime,
+        error_msg: &str,
+        error_kind: &str,
+    ) -> Result<bool, StorageError>;
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +149,71 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         .map_err(StorageError::from)?;
 
         rows.into_iter().map(FeedSource::try_from).collect()
+    }
+
+    async fn update_after_fetch_success(
+        &self,
+        id: i64,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        fetched_at: OffsetDateTime,
+        success_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE feed_sources
+            SET etag = ?,
+                last_modified = ?,
+                last_fetched_at = ?,
+                last_success_at = ?,
+                consecutive_failures = 0,
+                last_error = NULL,
+                last_error_kind = NULL,
+                updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(etag)
+        .bind(last_modified)
+        .bind(fetched_at)
+        .bind(success_at)
+        .bind(fetched_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn update_after_fetch_failure(
+        &self,
+        id: i64,
+        fetched_at: OffsetDateTime,
+        error_msg: &str,
+        error_kind: &str,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE feed_sources
+            SET last_fetched_at = ?,
+                consecutive_failures = consecutive_failures + 1,
+                last_error = ?,
+                last_error_kind = ?,
+                updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(fetched_at)
+        .bind(error_msg)
+        .bind(error_kind)
+        .bind(fetched_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+
+        Ok(result.rows_affected() == 1)
     }
 }
 
