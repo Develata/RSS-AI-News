@@ -521,11 +521,14 @@ WHERE id = :id AND lease_owner = :owner;
 
 ### 5.5 lease reclaim 扫描
 
-后台周期任务：
+后台周期任务。reclaim 必须既清 lease 字段、又把 `state` 回滚到对应 claim SQL 能匹配的状态，否则下一轮 claim（§5.1 / §5.6 只匹配 `pending_fetch` / `pending`）会看不见这些行。
+
+**`feed_entries`**：
 
 ```sql
 UPDATE feed_entries
 SET
+    state = 'pending_fetch',
     lease_owner = NULL,
     lease_expires_at = NULL,
     updated_at = :now
@@ -534,7 +537,34 @@ WHERE lease_expires_at IS NOT NULL
   AND state IN ('fetching', 'extracting');
 ```
 
-reclaim 不改 `state`，只清 lease 字段。下一轮 claim 会把它视为可领取。
+**`article_ai_results`**：
+
+```sql
+UPDATE article_ai_results
+SET
+    state = 'pending',
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = :now
+WHERE lease_expires_at IS NOT NULL
+  AND lease_expires_at < :now
+  AND state = 'running';
+```
+
+**`publish_records`**（§5.7 的多个 claim 方法各自按当前中间态 `:from` 匹配，因此 reclaim 只清 lease、不改 state）：
+
+```sql
+UPDATE publish_records
+SET
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = :now
+WHERE lease_expires_at IS NOT NULL
+  AND lease_expires_at < :now
+  AND state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local');
+```
+
+reclaim 不应触及 `attempt_count`：失败计数仍由 `release_*_failure` 控制，避免 reclaim 把"已尝试一次"的 lease 静默回滚为"未尝试"。
 
 ### 5.6 `article_ai_results` 的领取
 
