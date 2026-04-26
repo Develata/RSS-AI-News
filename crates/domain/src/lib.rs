@@ -5,6 +5,7 @@
 
 pub mod dto;
 pub mod error;
+pub mod link_normalizer;
 pub mod model;
 pub mod score;
 pub mod state;

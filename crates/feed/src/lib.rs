@@ -1,9 +1,13 @@
-//! Feed fetching + parsing + three-layer deduplication.
-//! See docs/design/internal-dto-contracts.md § Feed stage.
+//! Feed fetching and parsing.
 
-// TODO Phase 1:
-// - mod error;       // FeedError (ClassifiedError impl)
-// - mod fetcher;     // reqwest + conditional GET (ETag / If-Modified-Since)
-// - mod parser;      // feed-rs wrapper → FeedEntryMeta
-// - mod normalize;   // link normalization + hash
-// - mod dedup;       // three-layer: source+guid / link_hash / content_hash
+pub mod error;
+pub mod fetcher;
+pub mod parser;
+
+pub use error::FeedError;
+pub use fetcher::{FeedFetcher, ReqwestFeedFetcher};
+pub use parser::parse_feed;
+
+pub use rss_ai_news_domain::dto::feed::{
+    DedupResult, FeedEntryMeta, FeedFetchRequest, FeedFetchResponse,
+};

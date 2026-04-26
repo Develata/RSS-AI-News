@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example RSS</title>
+    <link>https://example.com/</link>
+    <description>Example RSS feed</description>
+    <item>
+      <guid>rss-1</guid>
+      <title>RSS item 1</title>
+      <link>https://example.com/rss/1</link>
+      <description>RSS summary 1</description>
+      <pubDate>Wed, 01 Jan 2025 00:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <guid>rss-2</guid>
+      <title>RSS item 2</title>
+      <link>https://example.com/rss/2</link>
+      <description>RSS summary 2</description>
+      <pubDate>Thu, 02 Jan 2025 00:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <guid>rss-3</guid>
+      <title>RSS item 3</title>
+      <link>https://example.com/rss/3</link>
+      <description>RSS summary 3</description>
+      <pubDate>Fri, 03 Jan 2025 00:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
