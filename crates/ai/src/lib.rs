@@ -1,9 +1,15 @@
 //! OpenAI-compatible client + prompt rendering + response parsing.
-//! See docs/design/internal-dto-contracts.md § AI stage.
 
-// TODO Phase 1 (deferred — Phase 1 is minimum ingest closure):
-// - mod error;        // AiError (ClassifiedError impl, retryable vs permanent)
-// - mod client;       // async-openai wrapper
-// - mod prompt;       // category prompt template rendering
-// - mod parser;       // structured response → AiOutput / AiFilteredOutput
-// - mod rate_limit;   // per-model RPS / token budget
+pub mod client;
+pub mod error;
+pub mod parser;
+pub mod prompt;
+
+pub use client::{
+    AiClient, AiClientConfig, AiResponse, InvokeOptions, OpenAiCompatClient, TokenUsage,
+};
+pub use error::AiError;
+pub use parser::{ParsedResponse, parse_response};
+pub use prompt::{PromptInput, PromptRenderConfig, render_prompt};
+
+pub use rss_ai_news_domain::dto::ai::{AiFilteredOutput, AiOutput, AiTask};

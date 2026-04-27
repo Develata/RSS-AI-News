@@ -2352,12 +2352,16 @@ name = "rss-ai-news-ai"
 version = "0.1.0"
 dependencies = [
  "async-openai",
+ "async-trait",
+ "reqwest",
  "rss-ai-news-domain",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
