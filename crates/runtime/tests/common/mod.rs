@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
+use rss_ai_news_ai::{AiClient, AiError, AiResponse, AiTask};
 use rss_ai_news_config::{
     AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, CategoryConfig, CategoryMeta,
     DatabaseConfig, DatabaseDriver, DedupConfig, ExtractorConfig, HttpConfig, LeaseConfig,
@@ -16,8 +17,8 @@ use rss_ai_news_extractor::{ExtractorError, HtmlFetcher, RawHtmlFetch};
 use rss_ai_news_feed::FeedFetcher;
 use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
-    SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo, SqliteRawArtifactRepo,
-    SqliteRunEventRepo, build_sqlite_pool, run_migrations,
+    SqliteArticleAiResultRepo, SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo,
+    SqliteRawArtifactRepo, SqliteRunEventRepo, build_sqlite_pool, run_migrations,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -169,9 +170,11 @@ pub fn full_context(
             feed_fetcher,
             html_fetcher: Arc::new(DummyHtmlFetcher),
             strategies: Vec::new(),
+            ai_client: Arc::new(DummyAiClient),
             feed_source_repo: Arc::new(SqliteFeedSourceRepo::new(pool.clone())),
             feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
             article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),
+            ai_result_repo: Arc::new(SqliteArticleAiResultRepo::new(pool.clone())),
             artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
             event_repo: Arc::new(SqliteRunEventRepo::new(pool)),
         },
@@ -224,6 +227,51 @@ pub async fn seed_extractor_rule_version(pool: &SqlitePool) -> i64 {
     .expect("extractor rule should insert")
 }
 
+pub async fn seed_persisted_article(
+    pool: &SqlitePool,
+    content_hash: &str,
+    title: &str,
+    body_text: &str,
+) -> i64 {
+    let extractor_version = seed_extractor_rule_version(pool).await;
+    let config_version = insert_config_rule(pool).await;
+    let source_id = insert_source(
+        pool,
+        config_version,
+        &format!("source-{content_hash}"),
+        &format!("https://example.com/{content_hash}.xml"),
+    )
+    .await;
+    let entry_id = seed_pending_fetch_entry(
+        pool,
+        source_id,
+        &format!("uid-{content_hash}"),
+        &format!("link-hash-{content_hash}"),
+        None,
+    )
+    .await;
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO articles (
+            content_hash, canonical_link, title, body_text, extractor_strategy,
+            extractor_version, content_quality, word_count, origin_feed_entry_id, state
+        )
+        VALUES (?, ?, ?, ?, 'readability', ?, 'high', ?, ?, 'persisted')
+        RETURNING id
+        "#,
+    )
+    .bind(content_hash)
+    .bind(format!("https://example.com/article/{content_hash}"))
+    .bind(title)
+    .bind(body_text)
+    .bind(extractor_version)
+    .bind(body_text.split_whitespace().count() as i64)
+    .bind(entry_id)
+    .fetch_one(pool)
+    .await
+    .expect("persisted article should insert")
+}
+
 pub fn category_with_sources(source_keys: &[&str]) -> CategoryConfig {
     CategoryConfig {
         schema_version: "1".to_string(),
@@ -254,5 +302,14 @@ pub struct DummyHtmlFetcher;
 impl HtmlFetcher for DummyHtmlFetcher {
     async fn fetch_html(&self, _task: &ArticleFetchTask) -> Result<RawHtmlFetch, ExtractorError> {
         Err(ExtractorError::ConnectionFailed)
+    }
+}
+
+pub struct DummyAiClient;
+
+#[async_trait]
+impl AiClient for DummyAiClient {
+    async fn invoke(&self, _task: &AiTask) -> Result<AiResponse, AiError> {
+        Err(AiError::ConnectionFailed("dummy".to_string()))
     }
 }

@@ -15,15 +15,15 @@ use rss_ai_news_runtime::{
     ExtractEntryStatus, ExtractFlow, ExtractOptions, RunContext, RunContextDeps,
 };
 use rss_ai_news_storage::{
-    ArticleRepository, NewArticle, SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo,
-    SqliteRawArtifactRepo, SqliteRunEventRepo,
+    ArticleRepository, NewArticle, SqliteArticleAiResultRepo, SqliteArticleRepo,
+    SqliteFeedEntryRepo, SqliteFeedSourceRepo, SqliteRawArtifactRepo, SqliteRunEventRepo,
 };
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
 
 use common::{
-    app_config, insert_config_rule, insert_source, make_test_pool, seed_extractor_rule_version,
-    seed_pending_fetch_entry,
+    DummyAiClient, app_config, insert_config_rule, insert_source, make_test_pool,
+    seed_extractor_rule_version, seed_pending_fetch_entry,
 };
 
 struct MockHtmlFetcher {
@@ -360,9 +360,11 @@ fn flow(
                 responses: Mutex::new(responses),
             }),
             strategies,
+            ai_client: Arc::new(DummyAiClient),
             feed_source_repo: Arc::new(SqliteFeedSourceRepo::new(pool.clone())),
             feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
             article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),
+            ai_result_repo: Arc::new(SqliteArticleAiResultRepo::new(pool.clone())),
             artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
             event_repo: Arc::new(SqliteRunEventRepo::new(pool)),
         },

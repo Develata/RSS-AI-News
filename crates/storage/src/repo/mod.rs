@@ -9,10 +9,12 @@ pub mod raw_artifact;
 pub mod rule_version;
 pub mod run_event;
 
-pub use article::{ArticleInsertOutcome, ArticleRepository, NewArticle, SqliteArticleRepo};
+pub use article::{
+    ArticleAiTaskCandidate, ArticleInsertOutcome, ArticleRepository, NewArticle, SqliteArticleRepo,
+};
 pub use article_ai_result::{
-    AiSuccessOutcome, ArticleAiResultRepository, ClaimedAiResult, NewAiResult,
-    SqliteArticleAiResultRepo,
+    AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepository, ClaimedAiResult,
+    InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome, SqliteArticleAiResultRepo,
 };
 pub use feed_entry::{
     ClaimedFeedEntry, FeedEntry, FeedEntryRepository, NewFeedEntry, SqliteFeedEntryRepo,

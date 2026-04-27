@@ -26,6 +26,14 @@ pub struct ArticleInsertOutcome {
     pub newly_created: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ArticleAiTaskCandidate {
+    pub article_id: i64,
+    pub title: String,
+    pub body_text: String,
+    pub origin_feed_entry_id: i64,
+}
+
 #[async_trait]
 pub trait ArticleRepository: Send + Sync {
     async fn insert_or_get_by_content_hash(
@@ -34,6 +42,13 @@ pub trait ArticleRepository: Send + Sync {
     ) -> Result<ArticleInsertOutcome, StorageError>;
 
     async fn find_by_id(&self, id: i64) -> Result<Option<Article>, StorageError>;
+
+    /// task_gen 候选：按 id 升序扫描 `state='persisted'` 的 article。
+    async fn list_persisted_for_ai_task_gen(
+        &self,
+        batch_size: u32,
+        after_id: i64,
+    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +131,28 @@ impl ArticleRepository for SqliteArticleRepo {
 
         row.map(Article::try_from).transpose()
     }
+
+    async fn list_persisted_for_ai_task_gen(
+        &self,
+        batch_size: u32,
+        after_id: i64,
+    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
+        sqlx::query_as::<_, ArticleAiTaskCandidateRow>(
+            r#"
+            SELECT id AS article_id, title, body_text, origin_feed_entry_id
+            FROM articles
+            WHERE state = 'persisted' AND id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            "#,
+        )
+        .bind(after_id)
+        .bind(i64::from(batch_size))
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(ArticleAiTaskCandidate::from).collect())
+        .map_err(StorageError::from)
+    }
 }
 
 #[derive(Debug, FromRow)]
@@ -134,6 +171,25 @@ struct ArticleRow {
     state: String,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, FromRow)]
+struct ArticleAiTaskCandidateRow {
+    article_id: i64,
+    title: String,
+    body_text: String,
+    origin_feed_entry_id: i64,
+}
+
+impl From<ArticleAiTaskCandidateRow> for ArticleAiTaskCandidate {
+    fn from(row: ArticleAiTaskCandidateRow) -> Self {
+        Self {
+            article_id: row.article_id,
+            title: row.title,
+            body_text: row.body_text,
+            origin_feed_entry_id: row.origin_feed_entry_id,
+        }
+    }
 }
 
 impl TryFrom<ArticleRow> for Article {
