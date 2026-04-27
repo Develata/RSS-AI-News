@@ -1,3 +1,4 @@
+pub mod article;
 pub mod article_ai_result;
 pub mod feed_entry;
 pub mod feed_source;
@@ -8,6 +9,7 @@ pub mod raw_artifact;
 pub mod rule_version;
 pub mod run_event;
 
+pub use article::{ArticleInsertOutcome, ArticleRepository, NewArticle, SqliteArticleRepo};
 pub use article_ai_result::{
     AiSuccessOutcome, ArticleAiResultRepository, ClaimedAiResult, NewAiResult,
     SqliteArticleAiResultRepo,

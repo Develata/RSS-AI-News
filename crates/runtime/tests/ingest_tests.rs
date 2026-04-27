@@ -10,18 +10,15 @@ use rss_ai_news_domain::dto::feed::FeedFetchRequest;
 use rss_ai_news_domain::link_normalizer::normalize_link;
 use rss_ai_news_feed::fetcher::RawFeedFetch;
 use rss_ai_news_feed::{FeedError, FeedFetcher};
-use rss_ai_news_runtime::{IngestFlow, IngestOptions, IngestSourceStatus, RunContext};
-use rss_ai_news_storage::{
-    FeedEntryRepository, NewFeedEntry, SqliteFeedEntryRepo, SqliteFeedSourceRepo,
-    SqliteRawArtifactRepo, SqliteRunEventRepo,
-};
+use rss_ai_news_runtime::{IngestFlow, IngestOptions, IngestSourceStatus};
+use rss_ai_news_storage::{FeedEntryRepository, NewFeedEntry, SqliteFeedEntryRepo};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
 use common::{
-    app_config, category_with_sources, insert_config_rule, insert_source, make_test_pool,
-    make_test_pool_with_connections,
+    app_config, category_with_sources, full_context, insert_config_rule, insert_source,
+    make_test_pool, make_test_pool_with_connections,
 };
 
 const RSS_BODY: &[u8] = include_bytes!("../../feed/tests/fixtures/rss_2.0_minimal.xml");
@@ -324,15 +321,7 @@ fn flow(
     let fetcher = Arc::new(MockFeedFetcher {
         responses: Mutex::new(responses),
     });
-    let ctx = Arc::new(RunContext::new_for_stage(
-        "ingest",
-        app,
-        fetcher,
-        Arc::new(SqliteFeedSourceRepo::new(pool.clone())),
-        Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
-        Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
-        Arc::new(SqliteRunEventRepo::new(pool)),
-    ));
+    let ctx = Arc::new(full_context("ingest", pool, app, fetcher));
     IngestFlow::new(ctx, vec![category])
 }
 

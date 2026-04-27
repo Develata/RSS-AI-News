@@ -83,6 +83,21 @@ pub trait FeedEntryRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
     async fn reclaim_expired_leases(&self, now: OffsetDateTime) -> Result<u64, StorageError>;
+    async fn release_dedup_skipped(
+        &self,
+        id: i64,
+        owner: &str,
+        article_id: i64,
+        decision: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+    async fn release_fallback_persisted(
+        &self,
+        id: i64,
+        owner: &str,
+        article_id: i64,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +267,69 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected())
+    }
+
+    async fn release_dedup_skipped(
+        &self,
+        id: i64,
+        owner: &str,
+        article_id: i64,
+        decision: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE feed_entries
+            SET state = 'dedup_skipped',
+                dedup_decision = ?,
+                article_id = ?,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                last_error = NULL,
+                last_error_kind = NULL,
+                updated_at = ?
+            WHERE id = ? AND lease_owner = ?
+            "#,
+        )
+        .bind(decision)
+        .bind(article_id)
+        .bind(now)
+        .bind(id)
+        .bind(owner)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn release_fallback_persisted(
+        &self,
+        id: i64,
+        owner: &str,
+        article_id: i64,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE feed_entries
+            SET state = 'fallback_persisted',
+                article_id = ?,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                last_error = NULL,
+                last_error_kind = NULL,
+                updated_at = ?
+            WHERE id = ? AND lease_owner = ?
+            "#,
+        )
+        .bind(article_id)
+        .bind(now)
+        .bind(id)
+        .bind(owner)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(result.rows_affected() == 1)
     }
 }
 

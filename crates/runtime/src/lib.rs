@@ -6,8 +6,9 @@ pub mod error;
 pub mod events;
 pub mod flows;
 
-pub use context::RunContext;
+pub use context::{RunContext, RunContextDeps};
 pub use error::RuntimeError;
 pub use flows::{
+    ExtractEntryOutcome, ExtractEntryStatus, ExtractFlow, ExtractOptions, ExtractSummary,
     IngestFlow, IngestOptions, IngestSourceOutcome, IngestSourceStatus, IngestSummary,
 };

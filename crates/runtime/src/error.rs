@@ -1,4 +1,5 @@
 use rss_ai_news_domain::error::ClassifiedError;
+use rss_ai_news_extractor::ExtractorError;
 use rss_ai_news_feed::FeedError;
 use rss_ai_news_storage::StorageError;
 use thiserror::Error;
@@ -7,6 +8,8 @@ use thiserror::Error;
 pub enum RuntimeError {
     #[error("feed: {0}")]
     Feed(#[from] FeedError),
+    #[error("extractor: {0}")]
+    Extractor(#[from] ExtractorError),
     #[error("storage: {0}")]
     Storage(#[from] StorageError),
     #[error("link normalize: {0}")]
@@ -21,6 +24,7 @@ impl ClassifiedError for RuntimeError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::Feed(error) => error.is_retryable(),
+            Self::Extractor(error) => error.is_retryable(),
             Self::Storage(error) => error.is_retryable(),
             Self::LinkNormalize(_) | Self::Config(_) | Self::Cancelled => false,
         }
@@ -29,6 +33,7 @@ impl ClassifiedError for RuntimeError {
     fn error_kind(&self) -> &str {
         match self {
             Self::Feed(error) => error.error_kind(),
+            Self::Extractor(error) => error.error_kind(),
             Self::Storage(error) => error.error_kind(),
             Self::LinkNormalize(_) => "link_normalize",
             Self::Config(_) => "runtime_config",

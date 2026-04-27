@@ -1,16 +1,26 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
 use rss_ai_news_config::{
     AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, CategoryConfig, CategoryMeta,
     DatabaseConfig, DatabaseDriver, DedupConfig, ExtractorConfig, HttpConfig, LeaseConfig,
     ObservabilityConfig, PublishConfig, RetentionPolicy, RetryConfig, SourceConfig,
 };
+use rss_ai_news_domain::dto::extract::ArticleFetchTask;
 use rss_ai_news_domain::state::FeedKind;
-use rss_ai_news_storage::{build_sqlite_pool, run_migrations};
+use rss_ai_news_extractor::{ExtractorError, HtmlFetcher, RawHtmlFetch};
+use rss_ai_news_feed::FeedFetcher;
+use rss_ai_news_runtime::{RunContext, RunContextDeps};
+use rss_ai_news_storage::{
+    SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo, SqliteRawArtifactRepo,
+    SqliteRunEventRepo, build_sqlite_pool, run_migrations,
+};
 use sqlx::SqlitePool;
+use time::OffsetDateTime;
 
 static TEST_DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -146,6 +156,74 @@ pub fn app_config(retention_policy: RetentionPolicy, concurrent_feeds: u32) -> A
     }
 }
 
+pub fn full_context(
+    stage: &str,
+    pool: SqlitePool,
+    app: Arc<AppConfig>,
+    feed_fetcher: Arc<dyn FeedFetcher>,
+) -> RunContext {
+    RunContext::new_for_stage(
+        stage,
+        app,
+        RunContextDeps {
+            feed_fetcher,
+            html_fetcher: Arc::new(DummyHtmlFetcher),
+            strategies: Vec::new(),
+            feed_source_repo: Arc::new(SqliteFeedSourceRepo::new(pool.clone())),
+            feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
+            article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),
+            artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
+            event_repo: Arc::new(SqliteRunEventRepo::new(pool)),
+        },
+    )
+}
+
+pub async fn seed_pending_fetch_entry(
+    pool: &SqlitePool,
+    source_id: i64,
+    uid: &str,
+    link_hash: &str,
+    summary_raw: Option<&str>,
+) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO feed_entries (
+            source_id, feed_entry_uid, normalized_link, link_hash, title_raw,
+            summary_raw, discovered_at, state, dedup_decision
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_fetch', 'fresh')
+        RETURNING id
+        "#,
+    )
+    .bind(source_id)
+    .bind(uid)
+    .bind(format!("https://example.com/{uid}"))
+    .bind(link_hash)
+    .bind(format!("title {uid}"))
+    .bind(summary_raw)
+    .bind(OffsetDateTime::now_utc())
+    .fetch_one(pool)
+    .await
+    .expect("pending fetch entry should insert")
+}
+
+pub async fn seed_extractor_rule_version(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256) VALUES ('extractor', ?, 'test extractor', ?) RETURNING id",
+    )
+    .bind(format!(
+        "extractor-{}",
+        TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+    .bind(format!(
+        "extractor-sha-{}",
+        TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+    .fetch_one(pool)
+    .await
+    .expect("extractor rule should insert")
+}
+
 pub fn category_with_sources(source_keys: &[&str]) -> CategoryConfig {
     CategoryConfig {
         schema_version: "1".to_string(),
@@ -167,5 +245,14 @@ pub fn category_with_sources(source_keys: &[&str]) -> CategoryConfig {
                 enabled: true,
             })
             .collect(),
+    }
+}
+
+pub struct DummyHtmlFetcher;
+
+#[async_trait]
+impl HtmlFetcher for DummyHtmlFetcher {
+    async fn fetch_html(&self, _task: &ArticleFetchTask) -> Result<RawHtmlFetch, ExtractorError> {
+        Err(ExtractorError::ConnectionFailed)
     }
 }

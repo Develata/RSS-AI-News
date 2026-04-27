@@ -13,11 +13,11 @@ pub use lease::{ClaimRequest, ReleaseOutcome, build_owner_id, lease_expires_at};
 pub use migrate::run_migrations;
 pub use pool::build_sqlite_pool;
 pub use repo::{
-    AiSuccessOutcome, ArticleAiResultRepository, ClaimedAiResult, ClaimedFeedEntry,
-    ClaimedPublishRecord, FeedEntry, FeedEntryRepository, FeedSourceRepository, NewAiResult,
-    NewFeedEntry, NewPublishRecord, NewRawArtifact, NewRunEvent, PublishAdvanceExtras,
-    PublishRecord, PublishRecordRepository, PublishState, PublishTimestampField,
-    RawArtifactRepository, RuleVersionRepository, RunEventRepository, SqliteArticleAiResultRepo,
-    SqliteFeedEntryRepo, SqliteFeedSourceRepo, SqlitePublishRecordRepo, SqliteRawArtifactRepo,
-    SqliteRuleVersionRepo, SqliteRunEventRepo,
+    AiSuccessOutcome, ArticleAiResultRepository, ArticleInsertOutcome, ArticleRepository,
+    ClaimedAiResult, ClaimedFeedEntry, ClaimedPublishRecord, FeedEntry, FeedEntryRepository,
+    FeedSourceRepository, NewAiResult, NewArticle, NewFeedEntry, NewPublishRecord, NewRawArtifact,
+    NewRunEvent, PublishAdvanceExtras, PublishRecord, PublishRecordRepository, PublishState,
+    PublishTimestampField, RawArtifactRepository, RuleVersionRepository, RunEventRepository,
+    SqliteArticleAiResultRepo, SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo,
+    SqlitePublishRecordRepo, SqliteRawArtifactRepo, SqliteRuleVersionRepo, SqliteRunEventRepo,
 };
