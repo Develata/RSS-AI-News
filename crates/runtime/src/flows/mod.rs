@@ -2,6 +2,7 @@ pub mod ai_run;
 pub mod extract;
 pub mod ingest;
 pub mod publish;
+pub mod rebuild_report;
 
 pub use ai_run::{
     AiProcessSummary, AiRunFlow, AiRunOptions, AiRunSummary, AiTaskOutcome, AiTaskStatus,
@@ -15,5 +16,8 @@ pub use ingest::{
 };
 pub use publish::{
     PublishFlow, PublishFreezeOptions, PublishFreezeOutcome, PublishFreezeStatus,
-    PublishInitOptions, PublishInitOutcome,
+    PublishInitOptions, PublishInitOutcome, PublishRenderOptions, PublishRenderOutcome,
+    PublishRenderStatus, PublishStoreLocalOptions, PublishStoreLocalOutcome,
+    PublishStoreLocalStatus,
 };
+pub use rebuild_report::{RebuildReportFlow, RebuildReportOptions};

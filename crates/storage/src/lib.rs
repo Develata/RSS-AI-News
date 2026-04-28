@@ -22,5 +22,6 @@ pub use repo::{
     PublishState, PublishTimestampField, RawArtifactRepository, ReleaseSuccessOutcome,
     RuleVersionRepository, RunEventRepository, SqliteArticleAiResultRepo, SqliteArticleRepo,
     SqliteFeedEntryRepo, SqliteFeedSourceRepo, SqlitePublishItemRepo, SqlitePublishRecordRepo,
-    SqliteRawArtifactRepo, SqliteRuleVersionRepo, SqliteRunEventRepo,
+    SqliteRawArtifactRepo, SqliteRuleVersionRepo, SqliteRunEventRepo, TerminalAdvanceOutcome,
+    TerminalAdvanceStatus,
 };

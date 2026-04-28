@@ -28,6 +28,7 @@ pub use publish_item::{
 pub use publish_record::{
     ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord,
     PublishRecordRepository, PublishState, PublishTimestampField, SqlitePublishRecordRepo,
+    TerminalAdvanceOutcome, TerminalAdvanceStatus,
 };
 pub use raw_artifact::{NewRawArtifact, RawArtifactRepository, SqliteRawArtifactRepo};
 pub use rule_version::{RuleVersionRepository, SqliteRuleVersionRepo};

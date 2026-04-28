@@ -4,6 +4,7 @@ use rss_ai_news_ai::AiClient;
 use rss_ai_news_config::AppConfig;
 use rss_ai_news_extractor::{ContentStrategy, HtmlFetcher};
 use rss_ai_news_feed::FeedFetcher;
+use rss_ai_news_publish::PublishTarget;
 use rss_ai_news_storage::{
     ArticleAiResultRepository, ArticleRepository, FeedEntryRepository, FeedSourceRepository,
     PublishItemRepository, PublishRecordRepository, RawArtifactRepository, RunEventRepository,
@@ -23,6 +24,7 @@ pub struct RunContext {
     pub html_fetcher: Arc<dyn HtmlFetcher>,
     pub strategies: Vec<Arc<dyn ContentStrategy>>,
     pub ai_client: Arc<dyn AiClient>,
+    pub publish_target_local: Arc<dyn PublishTarget>,
     pub feed_source_repo: Arc<dyn FeedSourceRepository>,
     pub feed_entry_repo: Arc<dyn FeedEntryRepository>,
     pub article_repo: Arc<dyn ArticleRepository>,
@@ -38,6 +40,7 @@ pub struct RunContextDeps {
     pub html_fetcher: Arc<dyn HtmlFetcher>,
     pub strategies: Vec<Arc<dyn ContentStrategy>>,
     pub ai_client: Arc<dyn AiClient>,
+    pub publish_target_local: Arc<dyn PublishTarget>,
     pub feed_source_repo: Arc<dyn FeedSourceRepository>,
     pub feed_entry_repo: Arc<dyn FeedEntryRepository>,
     pub article_repo: Arc<dyn ArticleRepository>,
@@ -59,6 +62,7 @@ impl RunContext {
             html_fetcher: deps.html_fetcher,
             strategies: deps.strategies,
             ai_client: deps.ai_client,
+            publish_target_local: deps.publish_target_local,
             feed_source_repo: deps.feed_source_repo,
             feed_entry_repo: deps.feed_entry_repo,
             article_repo: deps.article_repo,

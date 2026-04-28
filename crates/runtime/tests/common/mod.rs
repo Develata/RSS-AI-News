@@ -12,9 +12,11 @@ use rss_ai_news_config::{
     ObservabilityConfig, PublishConfig, RetentionPolicy, RetryConfig, SourceConfig,
 };
 use rss_ai_news_domain::dto::extract::ArticleFetchTask;
+use rss_ai_news_domain::dto::publish::RenderedReport;
 use rss_ai_news_domain::state::FeedKind;
 use rss_ai_news_extractor::{ExtractorError, HtmlFetcher, RawHtmlFetch};
 use rss_ai_news_feed::FeedFetcher;
+use rss_ai_news_publish::{LocalFsTarget, PublishError, PublishTarget, PublishedArtifact};
 use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
     SqliteArticleAiResultRepo, SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo,
@@ -164,6 +166,28 @@ pub fn full_context(
     app: Arc<AppConfig>,
     feed_fetcher: Arc<dyn FeedFetcher>,
 ) -> RunContext {
+    let dir = std::env::temp_dir().join(format!(
+        "rss-ai-news-runtime-publish-output-{}-{}",
+        std::process::id(),
+        TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("publish output dir should be created");
+    full_context_with_publish_target(
+        stage,
+        pool,
+        app,
+        feed_fetcher,
+        Arc::new(LocalFsTarget::new(dir)),
+    )
+}
+
+pub fn full_context_with_publish_target(
+    stage: &str,
+    pool: SqlitePool,
+    app: Arc<AppConfig>,
+    feed_fetcher: Arc<dyn FeedFetcher>,
+    publish_target_local: Arc<dyn PublishTarget>,
+) -> RunContext {
     RunContext::new_for_stage(
         stage,
         app,
@@ -172,6 +196,7 @@ pub fn full_context(
             html_fetcher: Arc::new(DummyHtmlFetcher),
             strategies: Vec::new(),
             ai_client: Arc::new(DummyAiClient),
+            publish_target_local,
             feed_source_repo: Arc::new(SqliteFeedSourceRepo::new(pool.clone())),
             feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
             article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),
@@ -182,6 +207,82 @@ pub fn full_context(
             event_repo: Arc::new(SqliteRunEventRepo::new(pool)),
         },
     )
+}
+
+pub async fn seed_snapshot_frozen_publish_record(
+    pool: &SqlitePool,
+    remote_target: Option<String>,
+) -> i64 {
+    let render = insert_config_rule(pool).await;
+    let policy = insert_config_rule(pool).await;
+    let id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO publish_records (
+            idempotency_key, category_key, report_date, target_timezone,
+            render_version, selection_policy_version, state, snapshot_frozen_at, remote_target
+        )
+        VALUES (?, 'ai', '2026-04-28', 'Asia/Shanghai', ?, ?, 'snapshot_frozen', ?, ?)
+        RETURNING id
+        "#,
+    )
+    .bind(format!(
+        "ai-2026-04-28-v{}",
+        TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+    .bind(render)
+    .bind(policy)
+    .bind(OffsetDateTime::now_utc())
+    .bind(remote_target)
+    .fetch_one(pool)
+    .await
+    .expect("snapshot frozen record should insert");
+
+    let (article_id, ai_result_id) = seed_ai_succeeded_article(
+        pool,
+        "ai",
+        &format!(
+            "snapshot-{}",
+            TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ),
+        "Title",
+        "body",
+        "summary",
+        88,
+        1,
+    )
+    .await;
+    sqlx::query(
+        r#"
+        INSERT INTO publish_items (
+            publish_record_id, position, article_id, article_ai_result_id,
+            frozen_title, frozen_summary, frozen_tags_json, frozen_score,
+            frozen_canonical_link, frozen_source_display_name
+        )
+        VALUES (?, 1, ?, ?, 'Title', 'summary', '["ai"]', 88, 'https://example.com/article', 'Source')
+        "#,
+    )
+    .bind(id)
+    .bind(article_id)
+    .bind(ai_result_id)
+    .execute(pool)
+    .await
+    .expect("publish item should insert");
+    id
+}
+
+pub async fn seed_rendered_publish_record(
+    pool: &SqlitePool,
+    remote_target: Option<String>,
+    rendered_at: OffsetDateTime,
+) -> i64 {
+    let id = seed_snapshot_frozen_publish_record(pool, remote_target).await;
+    sqlx::query("UPDATE publish_records SET state = 'rendered', rendered_at = ? WHERE id = ?")
+        .bind(rendered_at)
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("record should advance to rendered");
+    id
 }
 
 pub async fn seed_pending_fetch_entry(
@@ -476,5 +577,17 @@ pub struct DummyAiClient;
 impl AiClient for DummyAiClient {
     async fn invoke(&self, _task: &AiTask) -> Result<AiResponse, AiError> {
         Err(AiError::ConnectionFailed("dummy".to_string()))
+    }
+}
+
+pub struct MockFailingTarget;
+
+#[async_trait]
+impl PublishTarget for MockFailingTarget {
+    async fn publish(&self, _report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        Err(PublishError::LocalIoError(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "mock local write denied",
+        )))
     }
 }

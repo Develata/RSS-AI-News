@@ -2455,9 +2455,12 @@ dependencies = [
 name = "rss-ai-news-publish"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "octocrab",
  "rss-ai-news-domain",
+ "tempfile",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tracing",
 ]
@@ -2471,6 +2474,7 @@ dependencies = [
  "rss-ai-news-storage",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror 2.0.18",
  "time",
  "tokio",

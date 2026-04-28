@@ -11,6 +11,7 @@ use rss_ai_news_domain::state::{ContentQuality, ExtractorStrategy};
 use rss_ai_news_extractor::{ContentStrategy, ExtractorError, HtmlFetcher, RawHtmlFetch};
 use rss_ai_news_feed::fetcher::RawFeedFetch;
 use rss_ai_news_feed::{FeedError, FeedFetcher};
+use rss_ai_news_publish::LocalFsTarget;
 use rss_ai_news_runtime::{
     ExtractEntryStatus, ExtractFlow, ExtractOptions, RunContext, RunContextDeps,
 };
@@ -362,6 +363,7 @@ fn flow(
             }),
             strategies,
             ai_client: Arc::new(DummyAiClient),
+            publish_target_local: Arc::new(LocalFsTarget::new(std::env::temp_dir())),
             feed_source_repo: Arc::new(SqliteFeedSourceRepo::new(pool.clone())),
             feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
             article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),

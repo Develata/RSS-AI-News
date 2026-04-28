@@ -5,7 +5,13 @@ edition.workspace = true
 
 [dependencies]
 rss-ai-news-domain.workspace = true
+async-trait = "0.1"
 octocrab.workspace = true
+time.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -95,6 +95,18 @@ pub struct PublishAdvanceExtras {
     pub commit_sha: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalAdvanceStatus {
+    Advanced,
+    PublishRecordConflict,
+    ArticleStateConflict { article_id: i64 },
+}
+
+#[derive(Debug, Clone)]
+pub struct TerminalAdvanceOutcome {
+    pub status: TerminalAdvanceStatus,
+}
+
 #[async_trait]
 pub trait PublishRecordRepository: Send + Sync {
     async fn create_if_new(&self, item: &NewPublishRecord) -> Result<Option<i64>, StorageError>;
@@ -146,6 +158,18 @@ pub trait PublishRecordRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
     async fn reclaim_expired_leases(&self, now: OffsetDateTime) -> Result<u64, StorageError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn release_terminal_advance_with_articles(
+        &self,
+        id: i64,
+        owner: &str,
+        from: PublishState,
+        to: PublishState,
+        timestamp_field: PublishTimestampField,
+        promote_article_ids: Vec<i64>,
+        extras: PublishAdvanceExtras,
+        now: OffsetDateTime,
+    ) -> Result<TerminalAdvanceOutcome, StorageError>;
 }
 
 #[derive(Debug, Clone)]

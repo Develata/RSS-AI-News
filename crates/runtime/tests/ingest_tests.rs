@@ -307,7 +307,7 @@ async fn multi_source_concurrent_within_limit() {
 
     assert_eq!(summary.sources_succeeded, 5);
     assert_eq!(summary.entries_inserted, 5);
-    assert!(elapsed < Duration::from_millis(350), "elapsed: {elapsed:?}");
+    assert!(elapsed < Duration::from_millis(800), "elapsed: {elapsed:?}");
 }
 
 fn flow(

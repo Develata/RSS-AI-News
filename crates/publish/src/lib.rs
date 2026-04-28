@@ -1,7 +1,9 @@
 //! Local + remote (GitHub) publishing of rendered reports.
 
-// TODO:
-// - mod error;
-// - mod local;    // write to output directory
-// - mod github;   // octocrab-backed commit/push
-// - mod target;   // PublishTarget abstraction
+pub mod error;
+pub mod local;
+pub mod target;
+
+pub use error::PublishError;
+pub use local::LocalFsTarget;
+pub use target::{PublishTarget, PublishedArtifact};

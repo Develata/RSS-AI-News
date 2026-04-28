@@ -9,6 +9,7 @@ use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_domain::dto::feed::FeedFetchRequest;
 use rss_ai_news_feed::fetcher::RawFeedFetch;
 use rss_ai_news_feed::{FeedError, FeedFetcher};
+use rss_ai_news_publish::LocalFsTarget;
 use rss_ai_news_runtime::{AiRunFlow, AiRunOptions, RunContext, RunContextDeps};
 use rss_ai_news_storage::{
     SqliteArticleAiResultRepo, SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo,
@@ -215,6 +216,7 @@ fn flow(pool: SqlitePool, ai_client: Arc<MockAiClient>) -> AiRunFlow {
             html_fetcher: Arc::new(DummyHtmlFetcher),
             strategies: Vec::new(),
             ai_client,
+            publish_target_local: Arc::new(LocalFsTarget::new(std::env::temp_dir())),
             feed_source_repo: Arc::new(SqliteFeedSourceRepo::new(pool.clone())),
             feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
             article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),

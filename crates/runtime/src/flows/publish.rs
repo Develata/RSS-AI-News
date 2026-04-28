@@ -4,12 +4,13 @@ use rss_ai_news_domain::Score0To100;
 use rss_ai_news_domain::dto::publish::PublishRequest;
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_report::{
-    ReportError, SelectionConfig, SnapshotConfig, freeze as snapshot_freeze, load_candidates,
-    to_storage_items,
+    RenderConfig, ReportError, SelectionConfig, SnapshotConfig, freeze as snapshot_freeze,
+    load_candidates, to_storage_items,
 };
 use rss_ai_news_storage::{
-    ClaimRequest, FreezeSnapshotOutcome, FreezeSnapshotStatus, NewPublishRecord, build_owner_id,
-    lease_expires_at,
+    ClaimRequest, FreezeSnapshotOutcome, FreezeSnapshotStatus, NewPublishRecord,
+    PublishAdvanceExtras, PublishState, PublishTimestampField, TerminalAdvanceOutcome,
+    TerminalAdvanceStatus, build_owner_id, lease_expires_at,
 };
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
@@ -59,6 +60,52 @@ pub struct PublishFreezeOutcome {
 pub enum PublishFreezeStatus {
     Frozen,
     SnapshotEmpty,
+    NothingToClaim,
+    Conflicted,
+    ArticleConflict { article_id: i64 },
+    Failed { error_kind: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishRenderOptions {
+    pub category_display_name: String,
+    pub report_title: String,
+    pub generated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishStoreLocalOptions {
+    pub category_display_name: String,
+    pub report_title: String,
+    pub generated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishRenderOutcome {
+    pub publish_record_id: i64,
+    pub status: PublishRenderStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishRenderStatus {
+    Rendered,
+    NothingToClaim,
+    Conflicted,
+    Failed { error_kind: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishStoreLocalOutcome {
+    pub publish_record_id: i64,
+    pub status: PublishStoreLocalStatus,
+    pub local_path: Option<String>,
+    pub item_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishStoreLocalStatus {
+    StoredLocal,
+    PublishedLocal,
     NothingToClaim,
     Conflicted,
     ArticleConflict { article_id: i64 },
@@ -380,5 +427,375 @@ impl PublishFlow {
                 Some(json!({ "phase": "freeze", "error_kind": error.error_kind() })),
             )
             .await;
+    }
+
+    pub async fn render(&self, opts: PublishRenderOptions) -> PublishRenderOutcome {
+        let emitter = RunEventEmitter {
+            run_id: &self.ctx.run_id,
+            stage: "publish",
+            repo: self.ctx.event_repo.as_ref(),
+        };
+        let now = OffsetDateTime::now_utc();
+        let owner = build_owner_id();
+        let claim = ClaimRequest {
+            owner: owner.clone(),
+            now,
+            lease_expires_at: lease_expires_at(
+                now,
+                Duration::seconds(self.ctx.app.lease.publish_duration_seconds as i64),
+            ),
+            batch_size: 1,
+            max_attempts: self.ctx.app.retry.publish_max_attempts,
+        };
+        let claimed = match self
+            .ctx
+            .publish_record_repo
+            .claim_frozen_for_render(&claim)
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                tracing::error!("claim frozen for render failed: {error}");
+                return PublishRenderOutcome {
+                    publish_record_id: 0,
+                    status: PublishRenderStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    },
+                };
+            }
+        };
+        let claimed = match claimed.into_iter().next() {
+            Some(claimed) => claimed,
+            None => {
+                return PublishRenderOutcome {
+                    publish_record_id: 0,
+                    status: PublishRenderStatus::NothingToClaim,
+                };
+            }
+        };
+
+        let render_config = RenderConfig {
+            category_display_name: opts.category_display_name,
+            report_title: opts.report_title,
+            generated_at: opts.generated_at,
+        };
+        if let Err(error) = rss_ai_news_report::rebuild_markdown(
+            self.ctx.publish_record_repo.as_ref(),
+            self.ctx.publish_item_repo.as_ref(),
+            claimed.id,
+            &render_config,
+        )
+        .await
+        {
+            self.fail_claimed(claimed.id, &owner, &error, now, &emitter)
+                .await;
+            return PublishRenderOutcome {
+                publish_record_id: claimed.id,
+                status: PublishRenderStatus::Failed {
+                    error_kind: error.error_kind().to_string(),
+                },
+            };
+        }
+
+        match self
+            .ctx
+            .publish_record_repo
+            .release_advance(
+                claimed.id,
+                &owner,
+                PublishState::SnapshotFrozen,
+                PublishState::Rendered,
+                PublishTimestampField::RenderedAt,
+                now,
+                PublishAdvanceExtras::default(),
+            )
+            .await
+        {
+            Ok(true) => PublishRenderOutcome {
+                publish_record_id: claimed.id,
+                status: PublishRenderStatus::Rendered,
+            },
+            Ok(false) => PublishRenderOutcome {
+                publish_record_id: claimed.id,
+                status: PublishRenderStatus::Conflicted,
+            },
+            Err(error) => {
+                tracing::error!("release_advance to rendered failed: {error}");
+                PublishRenderOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishRenderStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    },
+                }
+            }
+        }
+    }
+
+    pub async fn store_local(&self, opts: PublishStoreLocalOptions) -> PublishStoreLocalOutcome {
+        let emitter = RunEventEmitter {
+            run_id: &self.ctx.run_id,
+            stage: "publish",
+            repo: self.ctx.event_repo.as_ref(),
+        };
+        let now = OffsetDateTime::now_utc();
+        let owner = build_owner_id();
+        let claim = ClaimRequest {
+            owner: owner.clone(),
+            now,
+            lease_expires_at: lease_expires_at(
+                now,
+                Duration::seconds(self.ctx.app.lease.publish_duration_seconds as i64),
+            ),
+            batch_size: 1,
+            max_attempts: self.ctx.app.retry.publish_max_attempts,
+        };
+        let claimed = match self
+            .ctx
+            .publish_record_repo
+            .claim_rendered_for_local_store(&claim)
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                tracing::error!("claim rendered for local store failed: {error}");
+                return PublishStoreLocalOutcome {
+                    publish_record_id: 0,
+                    status: PublishStoreLocalStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    },
+                    local_path: None,
+                    item_count: 0,
+                };
+            }
+        };
+        let claimed = match claimed.into_iter().next() {
+            Some(claimed) => claimed,
+            None => {
+                return PublishStoreLocalOutcome {
+                    publish_record_id: 0,
+                    status: PublishStoreLocalStatus::NothingToClaim,
+                    local_path: None,
+                    item_count: 0,
+                };
+            }
+        };
+
+        let render_config = RenderConfig {
+            category_display_name: opts.category_display_name,
+            report_title: opts.report_title,
+            generated_at: opts.generated_at,
+        };
+        let report = match rss_ai_news_report::rebuild_markdown(
+            self.ctx.publish_record_repo.as_ref(),
+            self.ctx.publish_item_repo.as_ref(),
+            claimed.id,
+            &render_config,
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                self.fail_claimed(claimed.id, &owner, &error, now, &emitter)
+                    .await;
+                return PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    },
+                    local_path: None,
+                    item_count: 0,
+                };
+            }
+        };
+
+        let items = match self
+            .ctx
+            .publish_item_repo
+            .list_by_publish_record(claimed.id)
+            .await
+        {
+            Ok(items) => items,
+            Err(error) => {
+                let _ = self
+                    .ctx
+                    .publish_record_repo
+                    .release_permanent_failure(
+                        claimed.id,
+                        &owner,
+                        &error.to_string(),
+                        error.error_kind(),
+                        now,
+                    )
+                    .await;
+                return PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    },
+                    local_path: None,
+                    item_count: 0,
+                };
+            }
+        };
+        let item_count = items.len() as u32;
+
+        let artifact = match self.ctx.publish_target_local.publish(&report).await {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                if error.is_retryable() {
+                    let _ = self
+                        .ctx
+                        .publish_record_repo
+                        .release_retryable_failure(
+                            claimed.id,
+                            &owner,
+                            &error.display_user(),
+                            error.error_kind(),
+                            now,
+                        )
+                        .await;
+                } else {
+                    let _ = self
+                        .ctx
+                        .publish_record_repo
+                        .release_permanent_failure(
+                            claimed.id,
+                            &owner,
+                            &error.display_user(),
+                            error.error_kind(),
+                            now,
+                        )
+                        .await;
+                }
+                emitter
+                    .emit(
+                        "publish_failed",
+                        "error",
+                        Some("publish_record"),
+                        Some(claimed.id),
+                        &error.display_user(),
+                        Some(json!({ "phase": "store_local", "error_kind": error.error_kind() })),
+                    )
+                    .await;
+                return PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    },
+                    local_path: None,
+                    item_count,
+                };
+            }
+        };
+
+        let extras = PublishAdvanceExtras {
+            local_path: artifact.local_path.clone(),
+            remote_target: artifact.remote_target.clone(),
+            commit_sha: artifact.commit_sha.clone(),
+        };
+
+        if claimed.remote_target.is_none() {
+            let promote_article_ids = items.into_iter().map(|item| item.article_id).collect();
+            match self
+                .ctx
+                .publish_record_repo
+                .release_terminal_advance_with_articles(
+                    claimed.id,
+                    &owner,
+                    PublishState::Rendered,
+                    PublishState::PublishedLocal,
+                    PublishTimestampField::LocalStoredAt,
+                    promote_article_ids,
+                    extras,
+                    now,
+                )
+                .await
+            {
+                Ok(TerminalAdvanceOutcome {
+                    status: TerminalAdvanceStatus::Advanced,
+                }) => {
+                    emitter
+                        .emit(
+                            "publish_succeeded",
+                            "info",
+                            Some("publish_record"),
+                            Some(claimed.id),
+                            "published locally",
+                            Some(json!({
+                                "phase": "store_local",
+                                "mode": "local_only",
+                                "item_count": item_count
+                            })),
+                        )
+                        .await;
+                    PublishStoreLocalOutcome {
+                        publish_record_id: claimed.id,
+                        status: PublishStoreLocalStatus::PublishedLocal,
+                        local_path: artifact.local_path,
+                        item_count,
+                    }
+                }
+                Ok(TerminalAdvanceOutcome {
+                    status: TerminalAdvanceStatus::PublishRecordConflict,
+                }) => PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::Conflicted,
+                    local_path: artifact.local_path,
+                    item_count,
+                },
+                Ok(TerminalAdvanceOutcome {
+                    status: TerminalAdvanceStatus::ArticleStateConflict { article_id },
+                }) => PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::ArticleConflict { article_id },
+                    local_path: artifact.local_path,
+                    item_count,
+                },
+                Err(error) => PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    },
+                    local_path: artifact.local_path,
+                    item_count,
+                },
+            }
+        } else {
+            match self
+                .ctx
+                .publish_record_repo
+                .release_advance(
+                    claimed.id,
+                    &owner,
+                    PublishState::Rendered,
+                    PublishState::StoredLocal,
+                    PublishTimestampField::LocalStoredAt,
+                    now,
+                    extras,
+                )
+                .await
+            {
+                Ok(true) => PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::StoredLocal,
+                    local_path: artifact.local_path,
+                    item_count,
+                },
+                Ok(false) => PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::Conflicted,
+                    local_path: artifact.local_path,
+                    item_count,
+                },
+                Err(error) => PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    },
+                    local_path: artifact.local_path,
+                    item_count,
+                },
+            }
+        }
     }
 }

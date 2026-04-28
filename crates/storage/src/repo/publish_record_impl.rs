@@ -7,6 +7,7 @@ use super::{
     publish_record::{
         ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord,
         PublishRecordRepository, PublishState, PublishTimestampField, SqlitePublishRecordRepo,
+        TerminalAdvanceOutcome, TerminalAdvanceStatus,
     },
     publish_record_sql::{
         ADVANCE_LOCAL_SQL, ADVANCE_REMOTE_SQL, ADVANCE_RENDERED_SQL, ADVANCE_SNAPSHOT_SQL,
@@ -179,5 +180,67 @@ impl PublishRecordRepository for SqlitePublishRecordRepo {
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected())
+    }
+
+    async fn release_terminal_advance_with_articles(
+        &self,
+        id: i64,
+        owner: &str,
+        from: PublishState,
+        to: PublishState,
+        timestamp_field: PublishTimestampField,
+        promote_article_ids: Vec<i64>,
+        extras: PublishAdvanceExtras,
+        now: OffsetDateTime,
+    ) -> Result<TerminalAdvanceOutcome, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+
+        let sql = match timestamp_field {
+            PublishTimestampField::SnapshotFrozenAt => ADVANCE_SNAPSHOT_SQL,
+            PublishTimestampField::RenderedAt => ADVANCE_RENDERED_SQL,
+            PublishTimestampField::LocalStoredAt => ADVANCE_LOCAL_SQL,
+            PublishTimestampField::RemotePublishedAt => ADVANCE_REMOTE_SQL,
+        };
+        let result = sqlx::query(sql)
+            .bind(to.as_str())
+            .bind(now)
+            .bind(&extras.local_path)
+            .bind(&extras.remote_target)
+            .bind(&extras.commit_sha)
+            .bind(now)
+            .bind(id)
+            .bind(owner)
+            .bind(from.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+        if result.rows_affected() != 1 {
+            tx.rollback().await.map_err(StorageError::from)?;
+            return Ok(TerminalAdvanceOutcome {
+                status: TerminalAdvanceStatus::PublishRecordConflict,
+            });
+        }
+
+        for article_id in promote_article_ids {
+            let result = sqlx::query(
+                "UPDATE articles SET state = 'published', updated_at = ? WHERE id = ? AND state = 'ready_for_publish'",
+            )
+            .bind(now)
+            .bind(article_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+            if result.rows_affected() != 1 {
+                tx.rollback().await.map_err(StorageError::from)?;
+                return Ok(TerminalAdvanceOutcome {
+                    status: TerminalAdvanceStatus::ArticleStateConflict { article_id },
+                });
+            }
+        }
+
+        tx.commit().await.map_err(StorageError::from)?;
+        Ok(TerminalAdvanceOutcome {
+            status: TerminalAdvanceStatus::Advanced,
+        })
     }
 }
