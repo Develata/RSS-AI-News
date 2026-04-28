@@ -65,28 +65,28 @@ impl PublishRecordRepository for SqlitePublishRecordRepo {
         &self,
         request: &ClaimRequest,
     ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
-        claim_publish(&self.pool, request, "pending", "snapshot_frozen").await
+        claim_publish(&self.pool, request, "pending").await
     }
 
     async fn claim_frozen_for_render(
         &self,
         request: &ClaimRequest,
     ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
-        claim_publish(&self.pool, request, "snapshot_frozen", "rendered").await
+        claim_publish(&self.pool, request, "snapshot_frozen").await
     }
 
     async fn claim_rendered_for_local_store(
         &self,
         request: &ClaimRequest,
     ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
-        claim_publish(&self.pool, request, "rendered", "stored_local").await
+        claim_publish(&self.pool, request, "rendered").await
     }
 
     async fn claim_local_for_remote_publish(
         &self,
         request: &ClaimRequest,
     ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
-        claim_publish(&self.pool, request, "stored_local", "published_remote").await
+        claim_publish(&self.pool, request, "stored_local").await
     }
 
     async fn release_advance(

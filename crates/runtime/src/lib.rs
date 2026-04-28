@@ -11,6 +11,7 @@ pub use error::RuntimeError;
 pub use flows::{
     AiProcessSummary, AiRunFlow, AiRunOptions, AiRunSummary, AiTaskOutcome, AiTaskStatus,
     ExtractEntryOutcome, ExtractEntryStatus, ExtractFlow, ExtractOptions, ExtractSummary,
-    IngestFlow, IngestOptions, IngestSourceOutcome, IngestSourceStatus, IngestSummary,
-    TaskGenSummary,
+    IngestFlow, IngestOptions, IngestSourceOutcome, IngestSourceStatus, IngestSummary, PublishFlow,
+    PublishFreezeOptions, PublishFreezeOutcome, PublishFreezeStatus, PublishInitOptions,
+    PublishInitOutcome, TaskGenSummary,
 };

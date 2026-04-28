@@ -8,13 +8,10 @@ pub(super) async fn claim_publish(
     pool: &SqlitePool,
     request: &ClaimRequest,
     from: &str,
-    to: &str,
 ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
     sqlx::query_as::<_, ClaimedPublishRecord>(CLAIM_PUBLISH_SQL)
-        .bind(to)
         .bind(&request.owner)
         .bind(request.lease_expires_at)
-        .bind(request.now)
         .bind(request.now)
         .bind(from)
         .bind(request.now)
@@ -37,7 +34,7 @@ WHERE id = ?
 
 const CLAIM_PUBLISH_SQL: &str = r#"
 UPDATE publish_records
-SET state = ?, lease_owner = ?, lease_expires_at = ?,
+SET lease_owner = ?, lease_expires_at = ?,
     attempt_count = attempt_count + 1, updated_at = ?
 WHERE id IN (
     SELECT id FROM publish_records

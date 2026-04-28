@@ -2,6 +2,7 @@ pub mod article;
 pub mod article_ai_result;
 pub mod feed_entry;
 pub mod feed_source;
+pub mod publish_item;
 pub mod publish_record;
 mod publish_record_impl;
 mod publish_record_sql;
@@ -20,6 +21,10 @@ pub use feed_entry::{
     ClaimedFeedEntry, FeedEntry, FeedEntryRepository, NewFeedEntry, SqliteFeedEntryRepo,
 };
 pub use feed_source::{FeedSourceRepository, SqliteFeedSourceRepo};
+pub use publish_item::{
+    FreezeSnapshotItem, FreezeSnapshotOutcome, FreezeSnapshotStatus, PublishCandidateRow,
+    PublishItemRepository, SqlitePublishItemRepo,
+};
 pub use publish_record::{
     ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord,
     PublishRecordRepository, PublishState, PublishTimestampField, SqlitePublishRecordRepo,

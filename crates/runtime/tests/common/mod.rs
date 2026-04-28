@@ -18,7 +18,8 @@ use rss_ai_news_feed::FeedFetcher;
 use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
     SqliteArticleAiResultRepo, SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo,
-    SqliteRawArtifactRepo, SqliteRunEventRepo, build_sqlite_pool, run_migrations,
+    SqlitePublishItemRepo, SqlitePublishRecordRepo, SqliteRawArtifactRepo, SqliteRunEventRepo,
+    build_sqlite_pool, run_migrations,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -175,6 +176,8 @@ pub fn full_context(
             feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
             article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),
             ai_result_repo: Arc::new(SqliteArticleAiResultRepo::new(pool.clone())),
+            publish_record_repo: Arc::new(SqlitePublishRecordRepo::new(pool.clone())),
+            publish_item_repo: Arc::new(SqlitePublishItemRepo::new(pool.clone())),
             artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
             event_repo: Arc::new(SqliteRunEventRepo::new(pool)),
         },
@@ -270,6 +273,168 @@ pub async fn seed_persisted_article(
     .fetch_one(pool)
     .await
     .expect("persisted article should insert")
+}
+
+pub async fn seed_ai_succeeded_article(
+    pool: &SqlitePool,
+    category_key: &str,
+    content_hash: &str,
+    title: &str,
+    body_text: &str,
+    summary: &str,
+    importance_score: i32,
+    keep_decision: i32,
+) -> (i64, i64) {
+    let extractor_version = seed_extractor_rule_version(pool).await;
+    let prompt_version = insert_config_rule(pool).await;
+    let output_schema_version = seed_output_schema_rule_version(pool).await;
+    let config_version = insert_config_rule(pool).await;
+    let source_id = insert_source_with_category(
+        pool,
+        config_version,
+        category_key,
+        &format!("source-{content_hash}"),
+        &format!("https://example.com/{content_hash}.xml"),
+    )
+    .await;
+    let entry_id = seed_pending_fetch_entry(
+        pool,
+        source_id,
+        &format!("uid-{content_hash}"),
+        &format!("link-hash-{content_hash}"),
+        Some("raw summary"),
+    )
+    .await;
+    let article_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO articles (
+            content_hash, canonical_link, title, body_text, extractor_strategy,
+            extractor_version, content_quality, word_count, origin_feed_entry_id, state
+        )
+        VALUES (?, ?, ?, ?, 'readability', ?, 'high', ?, ?, 'ready_for_publish')
+        RETURNING id
+        "#,
+    )
+    .bind(content_hash)
+    .bind(format!("https://example.com/article/{content_hash}"))
+    .bind(title)
+    .bind(body_text)
+    .bind(extractor_version)
+    .bind(body_text.split_whitespace().count() as i64)
+    .bind(entry_id)
+    .fetch_one(pool)
+    .await
+    .expect("ready article should insert");
+    let ai_result_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO article_ai_results (
+            article_id, prompt_version, output_schema_version, model_id, state,
+            summary, tags_json, importance_score, keep_decision, completed_at
+        )
+        VALUES (?, ?, ?, 'test-model', 'succeeded', ?, '["ai"]', ?, ?, ?)
+        RETURNING id
+        "#,
+    )
+    .bind(article_id)
+    .bind(prompt_version)
+    .bind(output_schema_version)
+    .bind(summary)
+    .bind(importance_score)
+    .bind(keep_decision)
+    .bind(OffsetDateTime::now_utc())
+    .fetch_one(pool)
+    .await
+    .expect("AI result should insert");
+    (article_id, ai_result_id)
+}
+
+pub async fn seed_persisted_article_for_passthrough(
+    pool: &SqlitePool,
+    category_key: &str,
+    content_hash: &str,
+    title: &str,
+    summary_raw: &str,
+) -> i64 {
+    let extractor_version = seed_extractor_rule_version(pool).await;
+    let config_version = insert_config_rule(pool).await;
+    let source_id = insert_source_with_category(
+        pool,
+        config_version,
+        category_key,
+        &format!("source-{content_hash}"),
+        &format!("https://example.com/{content_hash}.xml"),
+    )
+    .await;
+    let entry_id = seed_pending_fetch_entry(
+        pool,
+        source_id,
+        &format!("uid-{content_hash}"),
+        &format!("link-hash-{content_hash}"),
+        Some(summary_raw),
+    )
+    .await;
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO articles (
+            content_hash, canonical_link, title, body_text, extractor_strategy,
+            extractor_version, content_quality, word_count, origin_feed_entry_id, state
+        )
+        VALUES (?, ?, ?, ?, 'readability', ?, 'high', 1, ?, 'persisted')
+        RETURNING id
+        "#,
+    )
+    .bind(content_hash)
+    .bind(format!("https://example.com/article/{content_hash}"))
+    .bind(title)
+    .bind(summary_raw)
+    .bind(extractor_version)
+    .bind(entry_id)
+    .fetch_one(pool)
+    .await
+    .expect("passthrough article should insert")
+}
+
+pub async fn seed_output_schema_rule_version(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256) VALUES ('ai_output_schema', ?, 'test output schema', ?) RETURNING id",
+    )
+    .bind(format!(
+        "schema-{}",
+        TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+    .bind(format!(
+        "schema-sha-{}",
+        TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+    .fetch_one(pool)
+    .await
+    .expect("output schema rule should insert")
+}
+
+pub async fn insert_source_with_category(
+    pool: &SqlitePool,
+    config_version: i64,
+    category_key: &str,
+    source_key: &str,
+    feed_url: &str,
+) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO feed_sources (
+            category_key, source_key, display_name, feed_url, feed_kind, config_version
+        )
+        VALUES (?, ?, ?, ?, 'rss', ?)
+        RETURNING id
+        "#,
+    )
+    .bind(category_key)
+    .bind(source_key)
+    .bind(format!("Source {source_key}"))
+    .bind(feed_url)
+    .bind(config_version)
+    .fetch_one(pool)
+    .await
+    .expect("feed source should insert")
 }
 
 pub fn category_with_sources(source_keys: &[&str]) -> CategoryConfig {

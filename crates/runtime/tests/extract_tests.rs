@@ -16,7 +16,8 @@ use rss_ai_news_runtime::{
 };
 use rss_ai_news_storage::{
     ArticleRepository, NewArticle, SqliteArticleAiResultRepo, SqliteArticleRepo,
-    SqliteFeedEntryRepo, SqliteFeedSourceRepo, SqliteRawArtifactRepo, SqliteRunEventRepo,
+    SqliteFeedEntryRepo, SqliteFeedSourceRepo, SqlitePublishItemRepo, SqlitePublishRecordRepo,
+    SqliteRawArtifactRepo, SqliteRunEventRepo,
 };
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
@@ -365,6 +366,8 @@ fn flow(
             feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
             article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),
             ai_result_repo: Arc::new(SqliteArticleAiResultRepo::new(pool.clone())),
+            publish_record_repo: Arc::new(SqlitePublishRecordRepo::new(pool.clone())),
+            publish_item_repo: Arc::new(SqlitePublishItemRepo::new(pool.clone())),
             artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
             event_repo: Arc::new(SqliteRunEventRepo::new(pool)),
         },
