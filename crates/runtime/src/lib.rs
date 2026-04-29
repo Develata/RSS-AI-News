@@ -13,7 +13,8 @@ pub use flows::{
     ExtractEntryOutcome, ExtractEntryStatus, ExtractFlow, ExtractOptions, ExtractSummary,
     IngestFlow, IngestOptions, IngestSourceOutcome, IngestSourceStatus, IngestSummary, PublishFlow,
     PublishFreezeOptions, PublishFreezeOutcome, PublishFreezeStatus, PublishInitOptions,
-    PublishInitOutcome, PublishRenderOptions, PublishRenderOutcome, PublishRenderStatus,
-    PublishStoreLocalOptions, PublishStoreLocalOutcome, PublishStoreLocalStatus, RebuildReportFlow,
-    RebuildReportOptions, TaskGenSummary,
+    PublishInitOutcome, PublishRemoteOptions, PublishRemoteOutcome, PublishRemoteStatus,
+    PublishRenderOptions, PublishRenderOutcome, PublishRenderStatus, PublishStoreLocalOptions,
+    PublishStoreLocalOutcome, PublishStoreLocalStatus, RebuildReportFlow, RebuildReportOptions,
+    TaskGenSummary,
 };

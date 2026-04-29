@@ -16,8 +16,8 @@ pub use ingest::{
 };
 pub use publish::{
     PublishFlow, PublishFreezeOptions, PublishFreezeOutcome, PublishFreezeStatus,
-    PublishInitOptions, PublishInitOutcome, PublishRenderOptions, PublishRenderOutcome,
-    PublishRenderStatus, PublishStoreLocalOptions, PublishStoreLocalOutcome,
-    PublishStoreLocalStatus,
+    PublishInitOptions, PublishInitOutcome, PublishRemoteOptions, PublishRemoteOutcome,
+    PublishRemoteStatus, PublishRenderOptions, PublishRenderOutcome, PublishRenderStatus,
+    PublishStoreLocalOptions, PublishStoreLocalOutcome, PublishStoreLocalStatus,
 };
 pub use rebuild_report::{RebuildReportFlow, RebuildReportOptions};

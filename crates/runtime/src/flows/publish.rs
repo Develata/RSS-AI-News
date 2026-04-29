@@ -81,6 +81,13 @@ pub struct PublishStoreLocalOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct PublishRemoteOptions {
+    pub category_display_name: String,
+    pub report_title: String,
+    pub generated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
 pub struct PublishRenderOutcome {
     pub publish_record_id: i64,
     pub status: PublishRenderStatus,
@@ -102,6 +109,15 @@ pub struct PublishStoreLocalOutcome {
     pub item_count: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct PublishRemoteOutcome {
+    pub publish_record_id: i64,
+    pub status: PublishRemoteStatus,
+    pub commit_sha: Option<String>,
+    pub remote_target: Option<String>,
+    pub item_count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishStoreLocalStatus {
     StoredLocal,
@@ -109,6 +125,16 @@ pub enum PublishStoreLocalStatus {
     NothingToClaim,
     Conflicted,
     ArticleConflict { article_id: i64 },
+    Failed { error_kind: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishRemoteStatus {
+    PublishedRemote,
+    NothingToClaim,
+    Conflicted,
+    ArticleConflict { article_id: i64 },
+    MissingTarget,
     Failed { error_kind: String },
 }
 
@@ -797,5 +823,319 @@ impl PublishFlow {
                 },
             }
         }
+    }
+
+    pub async fn publish_remote(&self, opts: PublishRemoteOptions) -> PublishRemoteOutcome {
+        let emitter = RunEventEmitter {
+            run_id: &self.ctx.run_id,
+            stage: "publish",
+            repo: self.ctx.event_repo.as_ref(),
+        };
+        let target = match self.ctx.publish_target_remote.as_ref() {
+            Some(target) => Arc::clone(target),
+            None => {
+                tracing::warn!("publish_remote called without publish_target_remote configured");
+                return PublishRemoteOutcome {
+                    publish_record_id: 0,
+                    status: PublishRemoteStatus::MissingTarget,
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count: 0,
+                };
+            }
+        };
+
+        let now = OffsetDateTime::now_utc();
+        let owner = build_owner_id();
+        let claim = ClaimRequest {
+            owner: owner.clone(),
+            now,
+            lease_expires_at: lease_expires_at(
+                now,
+                Duration::seconds(self.ctx.app.lease.publish_duration_seconds as i64),
+            ),
+            batch_size: 1,
+            max_attempts: self.ctx.app.retry.publish_max_attempts,
+        };
+        let claimed = match self
+            .ctx
+            .publish_record_repo
+            .claim_local_for_remote_publish(&claim)
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                tracing::error!("claim local for remote publish failed: {error}");
+                return PublishRemoteOutcome {
+                    publish_record_id: 0,
+                    status: PublishRemoteStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    },
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count: 0,
+                };
+            }
+        };
+        let claimed = match claimed.into_iter().next() {
+            Some(claimed) => claimed,
+            None => {
+                return PublishRemoteOutcome {
+                    publish_record_id: 0,
+                    status: PublishRemoteStatus::NothingToClaim,
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count: 0,
+                };
+            }
+        };
+
+        emitter
+            .emit(
+                "publish_started",
+                "info",
+                Some("publish_record"),
+                Some(claimed.id),
+                "remote publish started",
+                Some(json!({ "phase": "publish_remote" })),
+            )
+            .await;
+
+        let render_config = RenderConfig {
+            category_display_name: opts.category_display_name,
+            report_title: opts.report_title,
+            generated_at: opts.generated_at,
+        };
+        let report = match rss_ai_news_report::rebuild_markdown(
+            self.ctx.publish_record_repo.as_ref(),
+            self.ctx.publish_item_repo.as_ref(),
+            claimed.id,
+            &render_config,
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                self.release_report_error(claimed.id, &owner, &error, now, &emitter)
+                    .await;
+                return PublishRemoteOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishRemoteStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    },
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count: 0,
+                };
+            }
+        };
+
+        let items = match self
+            .ctx
+            .publish_item_repo
+            .list_by_publish_record(claimed.id)
+            .await
+        {
+            Ok(items) => items,
+            Err(error) => {
+                let _ = self
+                    .ctx
+                    .publish_record_repo
+                    .release_permanent_failure(
+                        claimed.id,
+                        &owner,
+                        &error.to_string(),
+                        error.error_kind(),
+                        now,
+                    )
+                    .await;
+                emitter
+                    .emit(
+                        "publish_failed",
+                        "error",
+                        Some("publish_record"),
+                        Some(claimed.id),
+                        &error.to_string(),
+                        Some(json!({
+                            "phase": "publish_remote",
+                            "error_kind": error.error_kind()
+                        })),
+                    )
+                    .await;
+                return PublishRemoteOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishRemoteStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    },
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count: 0,
+                };
+            }
+        };
+        let item_count = items.len() as u32;
+
+        let artifact = match target.publish(&report).await {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                if error.is_retryable() {
+                    let _ = self
+                        .ctx
+                        .publish_record_repo
+                        .release_retryable_failure(
+                            claimed.id,
+                            &owner,
+                            &error.display_user(),
+                            error.error_kind(),
+                            now,
+                        )
+                        .await;
+                } else {
+                    let _ = self
+                        .ctx
+                        .publish_record_repo
+                        .release_permanent_failure(
+                            claimed.id,
+                            &owner,
+                            &error.display_user(),
+                            error.error_kind(),
+                            now,
+                        )
+                        .await;
+                }
+                emitter
+                    .emit(
+                        "publish_failed",
+                        "error",
+                        Some("publish_record"),
+                        Some(claimed.id),
+                        &error.display_user(),
+                        Some(json!({
+                            "phase": "publish_remote",
+                            "error_kind": error.error_kind()
+                        })),
+                    )
+                    .await;
+                return PublishRemoteOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishRemoteStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    },
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count,
+                };
+            }
+        };
+
+        let promote_article_ids = items.into_iter().map(|item| item.article_id).collect();
+        let extras = PublishAdvanceExtras {
+            local_path: None,
+            remote_target: artifact.remote_target.clone(),
+            commit_sha: artifact.commit_sha.clone(),
+        };
+        match self
+            .ctx
+            .publish_record_repo
+            .release_terminal_advance_with_articles(
+                claimed.id,
+                &owner,
+                PublishState::StoredLocal,
+                PublishState::PublishedRemote,
+                PublishTimestampField::RemotePublishedAt,
+                promote_article_ids,
+                extras,
+                now,
+            )
+            .await
+        {
+            Ok(TerminalAdvanceOutcome {
+                status: TerminalAdvanceStatus::Advanced,
+            }) => {
+                emitter
+                    .emit(
+                        "publish_succeeded",
+                        "info",
+                        Some("publish_record"),
+                        Some(claimed.id),
+                        "published remotely",
+                        Some(json!({
+                            "phase": "publish_remote",
+                            "commit_sha": artifact.commit_sha.as_deref(),
+                            "remote_target": artifact.remote_target.as_deref(),
+                            "item_count": item_count
+                        })),
+                    )
+                    .await;
+                PublishRemoteOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishRemoteStatus::PublishedRemote,
+                    commit_sha: artifact.commit_sha,
+                    remote_target: artifact.remote_target,
+                    item_count,
+                }
+            }
+            Ok(TerminalAdvanceOutcome {
+                status: TerminalAdvanceStatus::PublishRecordConflict,
+            }) => PublishRemoteOutcome {
+                publish_record_id: claimed.id,
+                status: PublishRemoteStatus::Conflicted,
+                commit_sha: artifact.commit_sha,
+                remote_target: artifact.remote_target,
+                item_count,
+            },
+            Ok(TerminalAdvanceOutcome {
+                status: TerminalAdvanceStatus::ArticleStateConflict { article_id },
+            }) => PublishRemoteOutcome {
+                publish_record_id: claimed.id,
+                status: PublishRemoteStatus::ArticleConflict { article_id },
+                commit_sha: artifact.commit_sha,
+                remote_target: artifact.remote_target,
+                item_count,
+            },
+            Err(error) => PublishRemoteOutcome {
+                publish_record_id: claimed.id,
+                status: PublishRemoteStatus::Failed {
+                    error_kind: error.error_kind().to_string(),
+                },
+                commit_sha: artifact.commit_sha,
+                remote_target: artifact.remote_target,
+                item_count,
+            },
+        }
+    }
+
+    async fn release_report_error(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        error: &ReportError,
+        now: OffsetDateTime,
+        emitter: &RunEventEmitter<'_>,
+    ) {
+        let _ = self
+            .ctx
+            .publish_record_repo
+            .release_permanent_failure(
+                publish_record_id,
+                owner,
+                &error.display_user(),
+                error.error_kind(),
+                now,
+            )
+            .await;
+        emitter
+            .emit(
+                "publish_failed",
+                "error",
+                Some("publish_record"),
+                Some(publish_record_id),
+                &error.display_user(),
+                Some(json!({
+                    "phase": "publish_remote",
+                    "error_kind": error.error_kind()
+                })),
+            )
+            .await;
     }
 }

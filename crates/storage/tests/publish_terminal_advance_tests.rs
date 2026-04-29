@@ -47,6 +47,51 @@ async fn terminal_advance_published_local_advances_record_and_promotes_articles(
 }
 
 #[tokio::test]
+async fn publish_terminal_advance_stored_local_to_published_remote_with_articles() {
+    let (_dir, pool) = make_test_pool().await;
+    let (record_id, owner) = claimed_stored_local_record(&pool).await;
+    let article_id = seed_article(&pool, "terminal-remote-ok", "ready_for_publish").await;
+    let repo = SqlitePublishRecordRepo::new(pool.clone());
+
+    let outcome = repo
+        .release_terminal_advance_with_articles(
+            record_id,
+            &owner,
+            PublishState::StoredLocal,
+            PublishState::PublishedRemote,
+            PublishTimestampField::RemotePublishedAt,
+            vec![article_id],
+            PublishAdvanceExtras {
+                remote_target: Some("github://owner/repo/main/reports/ai.md".to_string()),
+                commit_sha: Some("remote-commit-sha".to_string()),
+                ..PublishAdvanceExtras::default()
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, TerminalAdvanceStatus::Advanced);
+    assert_record_state(&pool, record_id, "published_remote").await;
+    assert_article_state(&pool, article_id, "published").await;
+    let row: (Option<String>, Option<String>, Option<OffsetDateTime>, Option<String>) =
+        sqlx::query_as(
+            "SELECT commit_sha, remote_target, remote_published_at, local_path FROM publish_records WHERE id = ?",
+        )
+        .bind(record_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.0.as_deref(), Some("remote-commit-sha"));
+    assert_eq!(
+        row.1.as_deref(),
+        Some("github://owner/repo/main/reports/ai.md")
+    );
+    assert!(row.2.is_some());
+    assert_eq!(row.3.as_deref(), Some("local/report.md"));
+}
+
+#[tokio::test]
 async fn terminal_advance_returns_publish_record_conflict_when_lease_owner_mismatched() {
     let (_dir, pool) = make_test_pool().await;
     let (record_id, _owner) = claimed_rendered_record(&pool).await;
@@ -193,6 +238,41 @@ async fn claimed_rendered_record(pool: &SqlitePool) -> (i64, String) {
     let owner = build_owner_id();
     let rows = repo
         .claim_rendered_for_local_store(&ClaimRequest {
+            owner: owner.clone(),
+            now: now(),
+            lease_expires_at: lease_expires_at(now(), Duration::seconds(30)),
+            batch_size: 1,
+            max_attempts: 5,
+        })
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    (id, owner)
+}
+
+async fn claimed_stored_local_record(pool: &SqlitePool) -> (i64, String) {
+    let (id, _) = claimed_rendered_record(pool).await;
+    sqlx::query(
+        r#"
+        UPDATE publish_records
+        SET state = 'stored_local',
+            local_path = 'local/report.md',
+            local_stored_at = ?,
+            remote_target = 'github://owner/repo/main/reports/ai.md',
+            lease_owner = NULL,
+            lease_expires_at = NULL
+        WHERE id = ?
+        "#,
+    )
+    .bind(now())
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap();
+    let owner = build_owner_id();
+    let repo = SqlitePublishRecordRepo::new(pool.clone());
+    let rows = repo
+        .claim_local_for_remote_publish(&ClaimRequest {
             owner: owner.clone(),
             now: now(),
             lease_expires_at: lease_expires_at(now(), Duration::seconds(30)),

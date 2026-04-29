@@ -188,6 +188,17 @@ pub fn full_context_with_publish_target(
     feed_fetcher: Arc<dyn FeedFetcher>,
     publish_target_local: Arc<dyn PublishTarget>,
 ) -> RunContext {
+    full_context_with_publish_targets(stage, pool, app, feed_fetcher, publish_target_local, None)
+}
+
+pub fn full_context_with_publish_targets(
+    stage: &str,
+    pool: SqlitePool,
+    app: Arc<AppConfig>,
+    feed_fetcher: Arc<dyn FeedFetcher>,
+    publish_target_local: Arc<dyn PublishTarget>,
+    publish_target_remote: Option<Arc<dyn PublishTarget>>,
+) -> RunContext {
     RunContext::new_for_stage(
         stage,
         app,
@@ -197,6 +208,7 @@ pub fn full_context_with_publish_target(
             strategies: Vec::new(),
             ai_client: Arc::new(DummyAiClient),
             publish_target_local,
+            publish_target_remote,
             feed_source_repo: Arc::new(SqliteFeedSourceRepo::new(pool.clone())),
             feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
             article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),

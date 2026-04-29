@@ -217,6 +217,7 @@ fn flow(pool: SqlitePool, ai_client: Arc<MockAiClient>) -> AiRunFlow {
             strategies: Vec::new(),
             ai_client,
             publish_target_local: Arc::new(LocalFsTarget::new(std::env::temp_dir())),
+            publish_target_remote: None,
             feed_source_repo: Arc::new(SqliteFeedSourceRepo::new(pool.clone())),
             feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
             article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),
