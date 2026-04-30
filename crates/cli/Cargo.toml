@@ -7,7 +7,22 @@ edition.workspace = true
 rss-ai-news-domain.workspace = true
 rss-ai-news-config.workspace = true
 rss-ai-news-runtime.workspace = true
+rss-ai-news-storage.workspace = true
+rss-ai-news-feed.workspace = true
+rss-ai-news-extractor.workspace = true
+rss-ai-news-ai.workspace = true
+rss-ai-news-publish.workspace = true
 clap.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 tokio.workspace = true
+async-trait = "0.1"
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+sqlx.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+wiremock = "0.6"

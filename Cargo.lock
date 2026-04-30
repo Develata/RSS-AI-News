@@ -2368,13 +2368,26 @@ dependencies = [
 name = "rss-ai-news-cli"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "clap",
+ "rss-ai-news-ai",
  "rss-ai-news-config",
  "rss-ai-news-domain",
+ "rss-ai-news-extractor",
+ "rss-ai-news-feed",
+ "rss-ai-news-publish",
  "rss-ai-news-runtime",
+ "rss-ai-news-storage",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

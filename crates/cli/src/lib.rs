@@ -1,17 +1,45 @@
 //! Command interface: clap-based parser + output formatting.
-//! See docs/design/cli-semantics.md for the 11 commands.
 
-// TODO Phase 1:
-// - mod error;
-// - mod args;           // clap derive: Cli, Command enum
-// - mod commands {
-//       ingest, ai_run, publish, doctor, replay, backfill,
-//       rebuild_report, reindex, migrate, validate_config, run,
-//   }
-// - mod output;         // pretty vs json formatter
-// - mod exit_code;      // stable exit-code mapping
+pub mod args;
+pub mod commands;
+pub mod context_factory;
+pub mod error;
+pub mod exit_code;
+pub mod output;
 
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // placeholder until Phase 1
-    Ok(())
+use clap::Parser;
+
+pub use exit_code::ExitCode;
+
+use crate::{
+    args::Cli,
+    commands::dispatch,
+    output::{OutputFormat, OutputWriter},
+};
+
+pub async fn run() -> ExitCode {
+    let cli = Cli::parse();
+    init_tracing(&cli.log_level, cli.log_format.as_str());
+
+    let mut writer = OutputWriter::new(OutputFormat::from(cli.output_format));
+    match dispatch(cli, &mut writer).await {
+        Ok(()) => ExitCode::Success,
+        Err(error) => {
+            let exit = error.exit_code();
+            let _ = writer.emit_failure(error.command_name(), &error);
+            exit
+        }
+    }
+}
+
+fn init_tracing(log_level: &str, log_format: &str) {
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
+    let builder = fmt().with_env_filter(filter).with_writer(std::io::stderr);
+    if log_format == "json" {
+        builder.json().init();
+    } else {
+        builder.init();
+    }
 }
