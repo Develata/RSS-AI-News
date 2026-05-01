@@ -22,6 +22,7 @@ tracing.workspace = true
 tokio.workspace = true
 time.workspace = true
 ulid.workspace = true
+sqlx.workspace = true
 
 [dev-dependencies]
 rss-ai-news-ai.workspace = true

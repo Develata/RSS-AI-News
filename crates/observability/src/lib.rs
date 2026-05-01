@@ -1,8 +1,9 @@
-//! Tracing subscriber, run_events writer, metrics, doctor health helpers.
-//! See docs/design/error-and-observability.md.
+//! Tracing subscriber, redaction, metrics facade, doctor health primitives.
 
-// TODO Phase 1:
-// - mod tracing_init;  // subscriber setup (env filter, json formatter)
-// - mod run_events;    // persistent run_events record builder
-// - mod metrics;       // counter/histogram façade
-// - mod doctor;        // health-check primitives
+pub mod health;
+pub mod metrics;
+pub mod redact;
+pub mod tracing_init;
+
+pub use health::{CheckOutcome, CheckReport, HealthCheck};
+pub use metrics::{InMemoryMetrics, MetricsRecorder, NullMetrics};

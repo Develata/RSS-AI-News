@@ -1,8 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use reqwest::Client;
 use rss_ai_news_ai::{AiClient, AiClientConfig, AiError, AiResponse, AiTask, OpenAiCompatClient};
-use rss_ai_news_config::LoadedConfig;
+use rss_ai_news_config::{self as config, LoadedConfig};
 use rss_ai_news_extractor::{ContentStrategy, ReqwestHtmlFetcher};
 use rss_ai_news_feed::ReqwestFeedFetcher;
 use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, LocalFsTarget, PublishTarget};
@@ -99,6 +100,39 @@ pub async fn build_run_context(
     );
 
     Ok((pool, Arc::new(ctx)))
+}
+
+pub struct DoctorDeps {
+    pub loaded: Arc<LoadedConfig>,
+    pub pool: SqlitePool,
+    pub http_client: Client,
+}
+
+pub async fn build_doctor_deps(cli: &crate::args::Cli) -> Result<DoctorDeps, CliError> {
+    let loaded = Arc::new(config::load(&cli.config_dir, None, cli.to_cli_overrides())?);
+    let app = &loaded.app;
+    let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
+    let pool = build_sqlite_pool(
+        &app.database.sqlite_path,
+        app.database.max_connections,
+        busy_timeout_ms,
+    )
+    .await
+    .map_err(CliError::Storage)?;
+    run_migrations(&pool).await.map_err(CliError::Storage)?;
+    ensure_default_rule_version(&pool, &loaded.config_sha256)
+        .await
+        .map_err(CliError::Storage)?;
+    let http_client = Client::builder()
+        .timeout(Duration::from_secs(app.http.timeout_seconds.max(1)))
+        .build()
+        .map_err(|error| CliError::Io(std::io::Error::other(error)))?;
+
+    Ok(DoctorDeps {
+        loaded,
+        pool,
+        http_client,
+    })
 }
 
 async fn ensure_default_rule_version(

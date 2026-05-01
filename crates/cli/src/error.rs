@@ -16,6 +16,8 @@ pub enum CliError {
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Storage(#[from] StorageError),
+    #[error("doctor detected failing checks")]
+    DoctorFailed,
     #[error("{feature}: 该命令在 W9b/W9c 接入 (not implemented yet)")]
     NotImplementedYet { feature: String },
 }
@@ -27,6 +29,7 @@ impl CliError {
             Self::Runtime(_) => "runtime",
             Self::Io(_) => "io",
             Self::Storage(_) => "storage",
+            Self::DoctorFailed => "doctor_failed",
             Self::NotImplementedYet { .. } => "not_implemented_yet",
         }
     }
@@ -34,9 +37,11 @@ impl CliError {
     pub fn exit_code(&self) -> ExitCode {
         match self {
             Self::Config(_) => ExitCode::ConfigError,
-            Self::Runtime(_) | Self::Io(_) | Self::Storage(_) | Self::NotImplementedYet { .. } => {
-                ExitCode::RuntimeError
-            }
+            Self::Runtime(_)
+            | Self::Io(_)
+            | Self::Storage(_)
+            | Self::DoctorFailed
+            | Self::NotImplementedYet { .. } => ExitCode::RuntimeError,
         }
     }
 
@@ -46,6 +51,7 @@ impl CliError {
             Self::Runtime(error) => error.display_user(),
             Self::Io(error) => format!("I/O error: {error}"),
             Self::Storage(error) => error.display_user(),
+            Self::DoctorFailed => "doctor detected failing checks".to_string(),
             Self::NotImplementedYet { feature } => {
                 format!("{feature}: 该命令在 W9b/W9c 接入 (not implemented yet)")
             }
@@ -54,6 +60,7 @@ impl CliError {
 
     pub fn command_name(&self) -> &str {
         match self {
+            Self::DoctorFailed => "doctor",
             Self::NotImplementedYet { feature } => feature.as_str(),
             _ => "unknown",
         }

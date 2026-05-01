@@ -37,7 +37,7 @@ pub async fn dispatch(cli: Cli, writer: &mut OutputWriter) -> Result<(), CliErro
             publish::run(args).await?;
         }
         Command::Doctor(args) => {
-            doctor::run(args).await?;
+            doctor::run(&cli, args, writer).await?;
         }
         Command::Replay(args) => {
             replay::run(args).await?;

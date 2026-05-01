@@ -2,6 +2,7 @@
 
 pub mod artifact;
 pub mod context;
+pub mod doctor;
 pub mod error;
 pub mod events;
 pub mod flows;
