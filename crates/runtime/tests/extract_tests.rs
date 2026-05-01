@@ -372,7 +372,8 @@ fn flow(
             publish_record_repo: Arc::new(SqlitePublishRecordRepo::new(pool.clone())),
             publish_item_repo: Arc::new(SqlitePublishItemRepo::new(pool.clone())),
             artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
-            event_repo: Arc::new(SqliteRunEventRepo::new(pool)),
+            event_repo: Arc::new(SqliteRunEventRepo::new(pool.clone())),
+            rule_version_repo: Arc::new(rss_ai_news_storage::SqliteRuleVersionRepo::new(pool)),
         },
     ));
     ExtractFlow::new(ctx)

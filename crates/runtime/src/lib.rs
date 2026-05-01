@@ -11,11 +11,13 @@ pub use context::{RunContext, RunContextDeps};
 pub use error::RuntimeError;
 pub use flows::{
     AiProcessSummary, AiRunFlow, AiRunOptions, AiRunSummary, AiTaskOutcome, AiTaskStatus,
-    ExtractEntryOutcome, ExtractEntryStatus, ExtractFlow, ExtractOptions, ExtractSummary,
-    IngestFlow, IngestOptions, IngestSourceOutcome, IngestSourceStatus, IngestSummary, PublishFlow,
-    PublishFreezeOptions, PublishFreezeOutcome, PublishFreezeStatus, PublishInitOptions,
-    PublishInitOutcome, PublishRemoteOptions, PublishRemoteOutcome, PublishRemoteStatus,
-    PublishRenderOptions, PublishRenderOutcome, PublishRenderStatus, PublishStoreLocalOptions,
-    PublishStoreLocalOutcome, PublishStoreLocalStatus, RebuildReportFlow, RebuildReportOptions,
+    BackfillAiOptions, BackfillAiSummary, BackfillExtractOptions, BackfillExtractSummary,
+    BackfillFlow, ExtractEntryOutcome, ExtractEntryStatus, ExtractFlow, ExtractOptions,
+    ExtractSummary, IngestFlow, IngestOptions, IngestSourceOutcome, IngestSourceStatus,
+    IngestSummary, PublishFlow, PublishFreezeOptions, PublishFreezeOutcome, PublishFreezeStatus,
+    PublishInitOptions, PublishInitOutcome, PublishRemoteOptions, PublishRemoteOutcome,
+    PublishRemoteStatus, PublishRenderOptions, PublishRenderOutcome, PublishRenderStatus,
+    PublishStoreLocalOptions, PublishStoreLocalOutcome, PublishStoreLocalStatus, RebuildReportFlow,
+    RebuildReportOptions, ReindexFlow, ReindexOptions, ReindexSummary, ReindexTarget,
     TaskGenSummary,
 };

@@ -10,8 +10,8 @@ use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, LocalFsTarget, Publi
 use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
     SqliteArticleAiResultRepo, SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo,
-    SqlitePublishItemRepo, SqlitePublishRecordRepo, SqliteRawArtifactRepo, SqliteRunEventRepo,
-    build_sqlite_pool, run_migrations,
+    SqlitePublishItemRepo, SqlitePublishRecordRepo, SqliteRawArtifactRepo, SqliteRuleVersionRepo,
+    SqliteRunEventRepo, build_sqlite_pool, run_migrations,
 };
 use sqlx::SqlitePool;
 
@@ -96,10 +96,39 @@ pub async fn build_run_context(
             publish_item_repo: Arc::new(SqlitePublishItemRepo::new(pool.clone())),
             artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
             event_repo: Arc::new(SqliteRunEventRepo::new(pool.clone())),
+            rule_version_repo: Arc::new(SqliteRuleVersionRepo::new(pool.clone())),
         },
     );
 
     Ok((pool, Arc::new(ctx)))
+}
+
+pub struct ReplayDeps {
+    pub pool: SqlitePool,
+    pub artifact_repo: Arc<dyn rss_ai_news_storage::RawArtifactRepository>,
+    pub article_repo: Arc<dyn rss_ai_news_storage::ArticleRepository>,
+    pub feed_entry_repo: Arc<dyn rss_ai_news_storage::FeedEntryRepository>,
+}
+
+pub async fn build_replay_deps(cli: &crate::args::Cli) -> Result<ReplayDeps, CliError> {
+    let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
+    let app = &loaded.app;
+    let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
+    let pool = build_sqlite_pool(
+        &app.database.sqlite_path,
+        app.database.max_connections,
+        busy_timeout_ms,
+    )
+    .await
+    .map_err(CliError::Storage)?;
+    run_migrations(&pool).await.map_err(CliError::Storage)?;
+
+    Ok(ReplayDeps {
+        pool: pool.clone(),
+        artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
+        article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),
+        feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool)),
+    })
 }
 
 pub struct DoctorDeps {

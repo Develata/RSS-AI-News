@@ -1,12 +1,18 @@
 pub mod ai_run;
+pub mod backfill;
 pub mod extract;
 pub mod ingest;
 pub mod publish;
 pub mod rebuild_report;
+pub mod reindex;
 
 pub use ai_run::{
     AiProcessSummary, AiRunFlow, AiRunOptions, AiRunSummary, AiTaskOutcome, AiTaskStatus,
     TaskGenSummary,
+};
+pub use backfill::{
+    BackfillAiOptions, BackfillAiSummary, BackfillExtractOptions, BackfillExtractSummary,
+    BackfillFlow,
 };
 pub use extract::{
     ExtractEntryOutcome, ExtractEntryStatus, ExtractFlow, ExtractOptions, ExtractSummary,
@@ -21,3 +27,4 @@ pub use publish::{
     PublishStoreLocalOptions, PublishStoreLocalOutcome, PublishStoreLocalStatus,
 };
 pub use rebuild_report::{RebuildReportFlow, RebuildReportOptions};
+pub use reindex::{ReindexFlow, ReindexOptions, ReindexSummary, ReindexTarget};

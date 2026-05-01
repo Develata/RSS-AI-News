@@ -31,36 +31,61 @@ pub async fn dispatch(cli: Cli, writer: &mut OutputWriter) -> Result<(), CliErro
                 .map_err(CliError::Io)?;
         }
         Command::AiRun(args) => {
-            ai_run::run(args).await?;
+            let summary = ai_run::run(&cli, args).await?;
+            writer
+                .emit_success("ai-run", &summary)
+                .map_err(CliError::Io)?;
         }
         Command::Publish(args) => {
-            publish::run(args).await?;
+            let summary = publish::run(&cli, args).await?;
+            writer
+                .emit_success("publish", &summary)
+                .map_err(CliError::Io)?;
         }
         Command::Doctor(args) => {
             doctor::run(&cli, args, writer).await?;
         }
         Command::Replay(args) => {
-            replay::run(args).await?;
+            let summary = replay::run(&cli, args).await?;
+            writer
+                .emit_success("replay", &summary)
+                .map_err(CliError::Io)?;
         }
         Command::Backfill(args) => {
-            backfill::run(args).await?;
+            let summary = backfill::run(&cli, args).await?;
+            writer
+                .emit_success("backfill", &summary)
+                .map_err(CliError::Io)?;
         }
         Command::RebuildReport(args) => {
-            rebuild_report::run(args).await?;
+            let summary = rebuild_report::run(&cli, args).await?;
+            writer
+                .emit_success("rebuild-report", &summary)
+                .map_err(CliError::Io)?;
         }
         Command::Reindex(args) => {
-            reindex::run(args).await?;
+            let summary = reindex::run(&cli, args).await?;
+            writer
+                .emit_success("reindex", &summary)
+                .map_err(CliError::Io)?;
         }
         Command::Migrate(args) => match args.action {
             MigrateAction::Run => {
-                migrate::run().await?;
+                let summary = migrate::run(&cli).await?;
+                writer
+                    .emit_success("migrate", &summary)
+                    .map_err(CliError::Io)?;
             }
             MigrateAction::Check => {
-                migrate::check().await?;
+                let summary = migrate::check(&cli).await?;
+                writer
+                    .emit_success("migrate", &summary)
+                    .map_err(CliError::Io)?;
             }
         },
         Command::Run(args) => {
-            run::run(args).await?;
+            let summary = run::run(&cli, args).await?;
+            writer.emit_success("run", &summary).map_err(CliError::Io)?;
         }
     }
     Ok(())

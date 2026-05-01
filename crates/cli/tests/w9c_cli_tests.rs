@@ -1,0 +1,281 @@
+use rss_ai_news_cli::{
+    commands::{
+        ai_run::AiRunCommandSummary,
+        backfill::{BackfillCommandSummary, parse_date_start, sha256_hex},
+        migrate::MigrateCommandSummary,
+        publish::{PublishCommandSummary, PublishStageOutcome},
+        rebuild_report::RebuildReportCommandSummary,
+        reindex::ReindexCommandSummary,
+        replay::ReplayCommandSummary,
+        run::RunCommandSummary,
+    },
+    error::CliError,
+    output::CommandSummary,
+};
+use serde_json::json;
+
+#[test]
+fn ai_run_summary_pretty_renders() {
+    assert_pretty_contains(&ai_summary(), "AI run completed");
+}
+
+#[test]
+fn ai_run_summary_serializes_json_fields() {
+    assert_eq!(json_value(&ai_summary(), "process_succeeded"), 2);
+}
+
+#[test]
+fn publish_summary_pretty_renders() {
+    assert_pretty_contains(&publish_summary(), "Publish completed");
+}
+
+#[test]
+fn publish_summary_serializes_stages() {
+    let value = serde_json::to_value(publish_summary()).unwrap();
+    assert_eq!(value["stages"][0]["stage"], "init");
+}
+
+#[test]
+fn rebuild_report_summary_pretty_renders() {
+    assert_pretty_contains(&rebuild_summary(), "Rebuild report completed");
+}
+
+#[test]
+fn rebuild_report_summary_serializes_bytes() {
+    assert_eq!(json_value(&rebuild_summary(), "markdown_bytes"), 42);
+}
+
+#[test]
+fn migrate_summary_pretty_renders() {
+    assert_pretty_contains(&migrate_summary(), "Migrate check completed");
+}
+
+#[test]
+fn migrate_summary_serializes_current_version() {
+    assert_eq!(json_value(&migrate_summary(), "current_version"), 2);
+}
+
+#[test]
+fn replay_summary_pretty_renders() {
+    assert_pretty_contains(&replay_summary(), "Replay completed");
+}
+
+#[test]
+fn replay_summary_serializes_parsed_payload() {
+    let value = serde_json::to_value(replay_summary()).unwrap();
+    assert_eq!(value["parsed"]["entry_count"], 1);
+}
+
+#[test]
+fn backfill_summary_pretty_renders() {
+    assert_pretty_contains(&backfill_summary(), "Backfill completed");
+}
+
+#[test]
+fn backfill_summary_serializes_inserted_count() {
+    assert_eq!(json_value(&backfill_summary(), "ai_tasks_inserted"), 3);
+}
+
+#[test]
+fn reindex_summary_pretty_renders() {
+    assert_pretty_contains(&reindex_summary(), "Reindex completed");
+}
+
+#[test]
+fn reindex_summary_serializes_archived_count() {
+    assert_eq!(json_value(&reindex_summary(), "archived"), 1);
+}
+
+#[test]
+fn run_summary_pretty_renders() {
+    assert_pretty_contains(&run_summary(), "Run completed");
+}
+
+#[test]
+fn run_summary_serializes_nested_publish() {
+    let value = serde_json::to_value(run_summary()).unwrap();
+    assert_eq!(value["publish"]["publish_record_id"], 7);
+}
+
+#[test]
+fn parse_date_start_accepts_yyyy_mm_dd() {
+    assert!(parse_date_start(Some("2026-05-01")).unwrap().is_some());
+}
+
+#[test]
+fn parse_date_start_accepts_none() {
+    assert!(parse_date_start(None).unwrap().is_none());
+}
+
+#[test]
+fn parse_date_start_rejects_bad_month() {
+    assert!(parse_date_start(Some("2026-99-01")).is_err());
+}
+
+#[test]
+fn sha256_hex_is_stable() {
+    assert_eq!(
+        sha256_hex(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+#[test]
+fn replay_not_found_error_kind_is_specific() {
+    let error = CliError::ReplayArtifactNotFound {
+        kind: "feed_payload".to_string(),
+        key: "missing".to_string(),
+    };
+    assert_eq!(error.error_kind(), "replay_artifact_not_found");
+}
+
+#[test]
+fn publish_record_not_found_error_kind_is_specific() {
+    let error = CliError::PublishRecordNotFound {
+        idempotency_key: "k".to_string(),
+    };
+    assert_eq!(error.error_kind(), "publish_record_not_found");
+}
+
+#[test]
+fn publish_conflict_error_kind_is_specific() {
+    let error = CliError::PublishConflict {
+        state: "failed".to_string(),
+    };
+    assert_eq!(error.error_kind(), "publish_conflict");
+}
+
+#[test]
+fn ingest_specific_not_implemented_errors_are_split() {
+    assert_eq!(
+        CliError::DryRunNotImplemented.error_kind(),
+        "dry_run_not_implemented"
+    );
+    assert_eq!(
+        CliError::IngestSourceFilterNotImplemented.error_kind(),
+        "ingest_source_not_implemented"
+    );
+}
+
+fn ai_summary() -> AiRunCommandSummary {
+    AiRunCommandSummary {
+        task_gen_scanned: 4,
+        task_gen_inserted: 3,
+        task_gen_conflict_skipped: 1,
+        process_claimed: 3,
+        process_succeeded: 2,
+        process_filtered: 1,
+        process_retryable_failed: 0,
+        process_permanent_failed: 0,
+        duration_seconds: 1.25,
+    }
+}
+
+fn publish_summary() -> PublishCommandSummary {
+    PublishCommandSummary {
+        category: "ai".to_string(),
+        date: "2026-05-01".to_string(),
+        render_version: 5,
+        publish_record_id: 7,
+        mode: "local".to_string(),
+        items: 2,
+        local_path: Some("output/ai.md".to_string()),
+        commit_sha: None,
+        remote_target: None,
+        stages: vec![PublishStageOutcome {
+            stage: "init".to_string(),
+            status: "created".to_string(),
+        }],
+        forced: false,
+    }
+}
+
+fn rebuild_summary() -> RebuildReportCommandSummary {
+    RebuildReportCommandSummary {
+        publish_record_id: 7,
+        category: "ai".to_string(),
+        date: "2026-05-01".to_string(),
+        output_path: None,
+        markdown_bytes: 42,
+        items: 2,
+    }
+}
+
+fn migrate_summary() -> MigrateCommandSummary {
+    MigrateCommandSummary {
+        action: "check".to_string(),
+        applied_versions: vec![1, 2],
+        current_version: Some(2),
+    }
+}
+
+fn replay_summary() -> ReplayCommandSummary {
+    ReplayCommandSummary {
+        kind: "feed_payload".to_string(),
+        artifact_id: 1,
+        artifact_key: "k".to_string(),
+        byte_size: 10,
+        parsed: json!({ "entry_count": 1 }),
+        diff: None,
+    }
+}
+
+fn backfill_summary() -> BackfillCommandSummary {
+    BackfillCommandSummary {
+        target: "ai".to_string(),
+        date_from: None,
+        date_to: None,
+        feed_entries_examined: 0,
+        feed_entries_reset: 0,
+        new_prompt_version_id: Some(9),
+        articles_scanned: 3,
+        ai_tasks_inserted: 3,
+        ai_tasks_conflict: 0,
+    }
+}
+
+fn reindex_summary() -> ReindexCommandSummary {
+    ReindexCommandSummary {
+        target: "categories".to_string(),
+        new_rule_version_id: 11,
+        scanned: 2,
+        updated: 2,
+        unchanged: 0,
+        conflict_skipped: 0,
+        archived: 1,
+        errors: 0,
+    }
+}
+
+fn run_summary() -> RunCommandSummary {
+    RunCommandSummary {
+        ingest: rss_ai_news_cli::commands::ingest::IngestCommandSummary {
+            sources_attempted: 1,
+            sources_succeeded: 1,
+            sources_not_modified: 0,
+            sources_failed: 0,
+            entries_discovered: 1,
+            entries_inserted: 1,
+            articles_persisted: 1,
+            articles_fallback: 0,
+            fetch_failed: 0,
+            duration_seconds: 1.0,
+        },
+        ai_run: ai_summary(),
+        publish: Some(publish_summary()),
+        overall_duration_seconds: 2.0,
+    }
+}
+
+fn assert_pretty_contains(summary: &impl CommandSummary, needle: &str) {
+    let mut buf = Vec::new();
+    summary.render_pretty(&mut buf).unwrap();
+    let text = String::from_utf8(buf).unwrap();
+    assert!(text.contains(needle));
+}
+
+fn json_value(summary: &impl serde::Serialize, key: &str) -> i64 {
+    serde_json::to_value(summary).unwrap()[key]
+        .as_i64()
+        .unwrap()
+}

@@ -14,14 +14,15 @@ pub use migrate::run_migrations;
 pub use pool::build_sqlite_pool;
 pub use repo::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepository, ArticleAiTaskCandidate,
-    ArticleInsertOutcome, ArticleRepository, ClaimedAiResult, ClaimedFeedEntry,
-    ClaimedPublishRecord, FeedEntry, FeedEntryRepository, FeedSourceRepository, FreezeSnapshotItem,
-    FreezeSnapshotOutcome, FreezeSnapshotStatus, InsertPendingOutcome, NewAiResult, NewArticle,
+    ArticleInsertOutcome, ArticleRepository, BackfillArticleCandidate, ClaimedAiResult,
+    ClaimedFeedEntry, ClaimedPublishRecord, ContentHashReindexCandidate, FeedEntry,
+    FeedEntryRepository, FeedSourceRepository, FreezeSnapshotItem, FreezeSnapshotOutcome,
+    FreezeSnapshotStatus, InsertPendingOutcome, LinkHashReindexCandidate, NewAiResult, NewArticle,
     NewFeedEntry, NewPublishRecord, NewRawArtifact, NewRunEvent, PublishAdvanceExtras,
     PublishCandidateRow, PublishItemRepository, PublishRecord, PublishRecordRepository,
     PublishState, PublishTimestampField, RawArtifactRepository, ReleaseSuccessOutcome,
-    RuleVersionRepository, RunEventRepository, SqliteArticleAiResultRepo, SqliteArticleRepo,
-    SqliteFeedEntryRepo, SqliteFeedSourceRepo, SqlitePublishItemRepo, SqlitePublishRecordRepo,
-    SqliteRawArtifactRepo, SqliteRuleVersionRepo, SqliteRunEventRepo, TerminalAdvanceOutcome,
-    TerminalAdvanceStatus,
+    ResetFailedFilter, ResetFailedOutcome, RuleVersionRepository, RunEventRepository,
+    SqliteArticleAiResultRepo, SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo,
+    SqlitePublishItemRepo, SqlitePublishRecordRepo, SqliteRawArtifactRepo, SqliteRuleVersionRepo,
+    SqliteRunEventRepo, TerminalAdvanceOutcome, TerminalAdvanceStatus, UpdateContentHashOutcome,
 };

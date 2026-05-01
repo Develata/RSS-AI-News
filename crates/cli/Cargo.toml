@@ -24,6 +24,8 @@ serde_json.workspace = true
 time.workspace = true
 sqlx.workspace = true
 reqwest.workspace = true
+sha2.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

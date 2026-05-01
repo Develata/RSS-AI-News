@@ -7,6 +7,15 @@ use serde_json::json;
 
 use crate::{args, error::CliError};
 
+pub use crate::commands::ai_run::AiRunCommandSummary;
+pub use crate::commands::backfill::BackfillCommandSummary;
+pub use crate::commands::migrate::MigrateCommandSummary;
+pub use crate::commands::publish::{PublishCommandSummary, PublishStageOutcome};
+pub use crate::commands::rebuild_report::RebuildReportCommandSummary;
+pub use crate::commands::reindex::ReindexCommandSummary;
+pub use crate::commands::replay::ReplayCommandSummary;
+pub use crate::commands::run::RunCommandSummary;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     Pretty,

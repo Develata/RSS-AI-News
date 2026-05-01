@@ -50,6 +50,25 @@ pub struct ClaimedFeedEntry {
     pub attempt_count: i64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ResetFailedFilter {
+    pub date_from: Option<OffsetDateTime>,
+    pub date_to: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResetFailedOutcome {
+    pub examined: u32,
+    pub reset: u32,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct LinkHashReindexCandidate {
+    pub id: i64,
+    pub normalized_link: String,
+    pub link_hash: String,
+}
+
 #[async_trait]
 pub trait FeedEntryRepository: Send + Sync {
     async fn insert_if_new(&self, entry: &NewFeedEntry) -> Result<Option<i64>, StorageError>;
@@ -98,6 +117,16 @@ pub trait FeedEntryRepository: Send + Sync {
         article_id: i64,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
+    async fn reset_failed_in_window(
+        &self,
+        filter: &ResetFailedFilter,
+    ) -> Result<ResetFailedOutcome, StorageError>;
+    async fn list_for_link_hash_reindex(
+        &self,
+        after_id: i64,
+        batch_size: u32,
+    ) -> Result<Vec<LinkHashReindexCandidate>, StorageError>;
+    async fn update_link_hash(&self, id: i64, new_link_hash: &str) -> Result<bool, StorageError>;
 }
 
 #[derive(Debug, Clone)]
@@ -326,6 +355,88 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         .bind(now)
         .bind(id)
         .bind(owner)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn reset_failed_in_window(
+        &self,
+        filter: &ResetFailedFilter,
+    ) -> Result<ResetFailedOutcome, StorageError> {
+        let examined = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM feed_entries
+            WHERE (?1 IS NULL OR created_at >= ?1)
+              AND (?2 IS NULL OR created_at < ?2)
+            "#,
+        )
+        .bind(filter.date_from)
+        .bind(filter.date_to)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+
+        let result = sqlx::query(
+            r#"
+            UPDATE feed_entries
+            SET state = 'discovered',
+                attempt_count = 0,
+                last_error = NULL,
+                last_error_kind = NULL,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE state = 'failed'
+              AND (?1 IS NULL OR created_at >= ?1)
+              AND (?2 IS NULL OR created_at < ?2)
+            "#,
+        )
+        .bind(filter.date_from)
+        .bind(filter.date_to)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+
+        Ok(ResetFailedOutcome {
+            examined: u32::try_from(examined).unwrap_or(u32::MAX),
+            reset: u32::try_from(result.rows_affected()).unwrap_or(u32::MAX),
+        })
+    }
+
+    async fn list_for_link_hash_reindex(
+        &self,
+        after_id: i64,
+        batch_size: u32,
+    ) -> Result<Vec<LinkHashReindexCandidate>, StorageError> {
+        sqlx::query_as::<_, LinkHashReindexCandidate>(
+            r#"
+            SELECT id, normalized_link, link_hash
+            FROM feed_entries
+            WHERE id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            "#,
+        )
+        .bind(after_id)
+        .bind(i64::from(batch_size))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::from)
+    }
+
+    async fn update_link_hash(&self, id: i64, new_link_hash: &str) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE feed_entries
+            SET link_hash = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            "#,
+        )
+        .bind(new_link_hash)
+        .bind(id)
         .execute(&self.pool)
         .await
         .map_err(StorageError::from)?;

@@ -11,14 +11,16 @@ pub mod rule_version;
 pub mod run_event;
 
 pub use article::{
-    ArticleAiTaskCandidate, ArticleInsertOutcome, ArticleRepository, NewArticle, SqliteArticleRepo,
+    ArticleAiTaskCandidate, ArticleInsertOutcome, ArticleRepository, BackfillArticleCandidate,
+    ContentHashReindexCandidate, NewArticle, SqliteArticleRepo, UpdateContentHashOutcome,
 };
 pub use article_ai_result::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepository, ClaimedAiResult,
     InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome, SqliteArticleAiResultRepo,
 };
 pub use feed_entry::{
-    ClaimedFeedEntry, FeedEntry, FeedEntryRepository, NewFeedEntry, SqliteFeedEntryRepo,
+    ClaimedFeedEntry, FeedEntry, FeedEntryRepository, LinkHashReindexCandidate, NewFeedEntry,
+    ResetFailedFilter, ResetFailedOutcome, SqliteFeedEntryRepo,
 };
 pub use feed_source::{FeedSourceRepository, SqliteFeedSourceRepo};
 pub use publish_item::{

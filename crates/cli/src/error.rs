@@ -18,8 +18,16 @@ pub enum CliError {
     Storage(#[from] StorageError),
     #[error("doctor detected failing checks")]
     DoctorFailed,
-    #[error("{feature}: 该命令在 W9b/W9c 接入 (not implemented yet)")]
-    NotImplementedYet { feature: String },
+    #[error("dry-run is not implemented for ingest yet")]
+    DryRunNotImplemented,
+    #[error("ingest --source is not implemented yet")]
+    IngestSourceFilterNotImplemented,
+    #[error("replay artifact not found: {kind}/{key}")]
+    ReplayArtifactNotFound { kind: String, key: String },
+    #[error("publish record not found: {idempotency_key}")]
+    PublishRecordNotFound { idempotency_key: String },
+    #[error("publish record is in conflicting state: {state}")]
+    PublishConflict { state: String },
 }
 
 impl CliError {
@@ -30,7 +38,11 @@ impl CliError {
             Self::Io(_) => "io",
             Self::Storage(_) => "storage",
             Self::DoctorFailed => "doctor_failed",
-            Self::NotImplementedYet { .. } => "not_implemented_yet",
+            Self::DryRunNotImplemented => "dry_run_not_implemented",
+            Self::IngestSourceFilterNotImplemented => "ingest_source_not_implemented",
+            Self::ReplayArtifactNotFound { .. } => "replay_artifact_not_found",
+            Self::PublishRecordNotFound { .. } => "publish_record_not_found",
+            Self::PublishConflict { .. } => "publish_conflict",
         }
     }
 
@@ -41,7 +53,11 @@ impl CliError {
             | Self::Io(_)
             | Self::Storage(_)
             | Self::DoctorFailed
-            | Self::NotImplementedYet { .. } => ExitCode::RuntimeError,
+            | Self::DryRunNotImplemented
+            | Self::IngestSourceFilterNotImplemented
+            | Self::ReplayArtifactNotFound { .. }
+            | Self::PublishRecordNotFound { .. }
+            | Self::PublishConflict { .. } => ExitCode::RuntimeError,
         }
     }
 
@@ -52,8 +68,18 @@ impl CliError {
             Self::Io(error) => format!("I/O error: {error}"),
             Self::Storage(error) => error.display_user(),
             Self::DoctorFailed => "doctor detected failing checks".to_string(),
-            Self::NotImplementedYet { feature } => {
-                format!("{feature}: 该命令在 W9b/W9c 接入 (not implemented yet)")
+            Self::DryRunNotImplemented => "ingest --dry-run is not implemented yet".to_string(),
+            Self::IngestSourceFilterNotImplemented => {
+                "ingest --source is not implemented yet".to_string()
+            }
+            Self::ReplayArtifactNotFound { kind, key } => {
+                format!("replay artifact not found: {kind}/{key}")
+            }
+            Self::PublishRecordNotFound { idempotency_key } => {
+                format!("publish record not found: {idempotency_key}")
+            }
+            Self::PublishConflict { state } => {
+                format!("publish record is in conflicting state: {state}")
             }
         }
     }
@@ -61,7 +87,9 @@ impl CliError {
     pub fn command_name(&self) -> &str {
         match self {
             Self::DoctorFailed => "doctor",
-            Self::NotImplementedYet { feature } => feature.as_str(),
+            Self::DryRunNotImplemented | Self::IngestSourceFilterNotImplemented => "ingest",
+            Self::ReplayArtifactNotFound { .. } => "replay",
+            Self::PublishRecordNotFound { .. } | Self::PublishConflict { .. } => "publish",
             _ => "unknown",
         }
     }

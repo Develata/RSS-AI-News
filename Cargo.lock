@@ -2380,6 +2380,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "clap",
+ "hex",
  "reqwest",
  "rss-ai-news-ai",
  "rss-ai-news-config",
@@ -2392,6 +2393,7 @@ dependencies = [
  "rss-ai-news-storage",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",

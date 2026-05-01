@@ -62,14 +62,10 @@ impl CommandSummary for IngestCommandSummary {
 
 pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, CliError> {
     if cli.dry_run {
-        return Err(CliError::NotImplementedYet {
-            feature: "ingest --dry-run".to_string(),
-        });
+        return Err(CliError::DryRunNotImplemented);
     }
     if args.source.is_some() {
-        return Err(CliError::NotImplementedYet {
-            feature: "ingest --source".to_string(),
-        });
+        return Err(CliError::IngestSourceFilterNotImplemented);
     }
 
     let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;

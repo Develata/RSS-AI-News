@@ -25,6 +25,7 @@ pub trait RawArtifactRepository: Send + Sync {
         kind: &str,
         artifact_key: &str,
     ) -> Result<Option<RawArtifact>, StorageError>;
+    async fn find_by_id(&self, id: i64) -> Result<Option<RawArtifact>, StorageError>;
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +95,23 @@ impl RawArtifactRepository for SqliteRawArtifactRepo {
         )
         .bind(kind)
         .bind(artifact_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+
+        row.map(RawArtifact::try_from).transpose()
+    }
+
+    async fn find_by_id(&self, id: i64) -> Result<Option<RawArtifact>, StorageError> {
+        let row = sqlx::query_as::<_, RawArtifactRow>(
+            r#"
+            SELECT id, kind, artifact_key, content_encoding, storage_kind, inline_body,
+                   file_path, byte_size, sha256, retention_policy, expires_at, created_at
+            FROM raw_artifacts
+            WHERE id = ?
+            "#,
+        )
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(StorageError::from)?;

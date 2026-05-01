@@ -18,6 +18,8 @@ pub trait FeedSourceRepository: Send + Sync {
         source_key: &str,
     ) -> Result<Option<FeedSource>, StorageError>;
     async fn list_by_category(&self, category_key: &str) -> Result<Vec<FeedSource>, StorageError>;
+    async fn list_all(&self) -> Result<Vec<FeedSource>, StorageError>;
+    async fn mark_archived(&self, id: i64) -> Result<bool, StorageError>;
     async fn update_after_fetch_success(
         &self,
         id: i64,
@@ -139,7 +141,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
                    consecutive_failures, last_error, last_error_kind, config_version,
                    created_at, updated_at
             FROM feed_sources
-            WHERE category_key = ?
+            WHERE category_key = ? AND status = 'active'
             ORDER BY priority ASC, source_key ASC
             "#,
         )
@@ -149,6 +151,40 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         .map_err(StorageError::from)?;
 
         rows.into_iter().map(FeedSource::try_from).collect()
+    }
+
+    async fn list_all(&self) -> Result<Vec<FeedSource>, StorageError> {
+        let rows = sqlx::query_as::<_, FeedSourceRow>(
+            r#"
+            SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
+                   priority, etag, last_modified, last_fetched_at, last_success_at,
+                   consecutive_failures, last_error, last_error_kind, config_version,
+                   created_at, updated_at
+            FROM feed_sources
+            ORDER BY id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+
+        rows.into_iter().map(FeedSource::try_from).collect()
+    }
+
+    async fn mark_archived(&self, id: i64) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE feed_sources
+            SET status = 'archived', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status <> 'archived'
+            "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+
+        Ok(result.rows_affected() == 1)
     }
 
     async fn update_after_fetch_success(

@@ -34,6 +34,26 @@ pub struct ArticleAiTaskCandidate {
     pub origin_feed_entry_id: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct BackfillArticleCandidate {
+    pub article_id: i64,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct ContentHashReindexCandidate {
+    pub id: i64,
+    pub body_text: String,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateContentHashOutcome {
+    Updated,
+    Conflict,
+    Unchanged,
+}
+
 #[async_trait]
 pub trait ArticleRepository: Send + Sync {
     async fn insert_or_get_by_content_hash(
@@ -49,6 +69,23 @@ pub trait ArticleRepository: Send + Sync {
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
+    async fn list_in_window_for_backfill(
+        &self,
+        date_from: Option<OffsetDateTime>,
+        date_to: Option<OffsetDateTime>,
+        batch_size: u32,
+        after_id: i64,
+    ) -> Result<Vec<BackfillArticleCandidate>, StorageError>;
+    async fn list_for_content_hash_reindex(
+        &self,
+        after_id: i64,
+        batch_size: u32,
+    ) -> Result<Vec<ContentHashReindexCandidate>, StorageError>;
+    async fn update_content_hash(
+        &self,
+        id: i64,
+        new_content_hash: &str,
+    ) -> Result<UpdateContentHashOutcome, StorageError>;
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +190,110 @@ impl ArticleRepository for SqliteArticleRepo {
         .map(|rows| rows.into_iter().map(ArticleAiTaskCandidate::from).collect())
         .map_err(StorageError::from)
     }
+
+    async fn list_in_window_for_backfill(
+        &self,
+        date_from: Option<OffsetDateTime>,
+        date_to: Option<OffsetDateTime>,
+        batch_size: u32,
+        after_id: i64,
+    ) -> Result<Vec<BackfillArticleCandidate>, StorageError> {
+        sqlx::query_as::<_, BackfillArticleCandidateRow>(
+            r#"
+            SELECT id AS article_id, state
+            FROM articles
+            WHERE state <> 'retired'
+              AND id > ?1
+              AND (?2 IS NULL OR created_at >= ?2)
+              AND (?3 IS NULL OR created_at < ?3)
+            ORDER BY id ASC
+            LIMIT ?4
+            "#,
+        )
+        .bind(after_id)
+        .bind(date_from)
+        .bind(date_to)
+        .bind(i64::from(batch_size))
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(BackfillArticleCandidate::from)
+                .collect()
+        })
+        .map_err(StorageError::from)
+    }
+
+    async fn list_for_content_hash_reindex(
+        &self,
+        after_id: i64,
+        batch_size: u32,
+    ) -> Result<Vec<ContentHashReindexCandidate>, StorageError> {
+        sqlx::query_as::<_, ContentHashReindexCandidate>(
+            r#"
+            SELECT id, body_text, content_hash
+            FROM articles
+            WHERE id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            "#,
+        )
+        .bind(after_id)
+        .bind(i64::from(batch_size))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::from)
+    }
+
+    async fn update_content_hash(
+        &self,
+        id: i64,
+        new_content_hash: &str,
+    ) -> Result<UpdateContentHashOutcome, StorageError> {
+        let current =
+            sqlx::query_scalar::<_, String>("SELECT content_hash FROM articles WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StorageError::from)?;
+        let Some(current) = current else {
+            return Ok(UpdateContentHashOutcome::Conflict);
+        };
+        if current == new_content_hash {
+            return Ok(UpdateContentHashOutcome::Unchanged);
+        }
+
+        let conflict = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM articles WHERE content_hash = ? AND id <> ?)",
+        )
+        .bind(new_content_hash)
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StorageError::from)?
+            != 0;
+        if conflict {
+            return Ok(UpdateContentHashOutcome::Conflict);
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE articles
+            SET content_hash = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            "#,
+        )
+        .bind(new_content_hash)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        if result.rows_affected() == 1 {
+            Ok(UpdateContentHashOutcome::Updated)
+        } else {
+            Ok(UpdateContentHashOutcome::Conflict)
+        }
+    }
 }
 
 #[derive(Debug, FromRow)]
@@ -181,6 +322,12 @@ struct ArticleAiTaskCandidateRow {
     origin_feed_entry_id: i64,
 }
 
+#[derive(Debug, FromRow)]
+struct BackfillArticleCandidateRow {
+    article_id: i64,
+    state: String,
+}
+
 impl From<ArticleAiTaskCandidateRow> for ArticleAiTaskCandidate {
     fn from(row: ArticleAiTaskCandidateRow) -> Self {
         Self {
@@ -188,6 +335,15 @@ impl From<ArticleAiTaskCandidateRow> for ArticleAiTaskCandidate {
             title: row.title,
             body_text: row.body_text,
             origin_feed_entry_id: row.origin_feed_entry_id,
+        }
+    }
+}
+
+impl From<BackfillArticleCandidateRow> for BackfillArticleCandidate {
+    fn from(row: BackfillArticleCandidateRow) -> Self {
+        Self {
+            article_id: row.article_id,
+            state: row.state,
         }
     }
 }
