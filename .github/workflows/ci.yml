@@ -28,8 +28,8 @@ jobs:
     name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
@@ -43,8 +43,8 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
@@ -57,8 +57,8 @@ jobs:
     name: migration smoke (sqlite)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
@@ -88,10 +88,10 @@ jobs:
     name: docker build smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
       - name: build runtime image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
@@ -102,7 +102,7 @@ jobs:
           cache-from: type=gha,scope=runtime
           cache-to: type=gha,mode=max,scope=runtime
       - name: build debug image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
@@ -116,3 +116,22 @@ jobs:
         run: docker run --rm rss-ai-news:runtime --help
       - name: smoke run --help (debug)
         run: docker run --rm rss-ai-news:debug --help
+      # validate-config 不需要外部凭据；只需要示例 config 触发 W3 fail-fast 校验。
+      # 容器启动 + 配置加载 + 错误退出码 78 (ConfigError) 一并被 smoke 覆盖。
+      - name: prepare smoke config
+        run: |
+          mkdir -p smoke/configs/categories
+          cp configs/app.toml.example smoke/configs/app.toml
+          cp configs/categories/ai.toml.example smoke/configs/categories/ai.toml
+      - name: smoke validate-config (runtime, expect exit 78)
+        run: |
+          set +e
+          docker run --rm -v "$PWD/smoke/configs:/app/configs:ro" \
+            rss-ai-news:runtime --config-dir /app/configs validate-config
+          code=$?
+          set -e
+          if [ "$code" -ne 78 ]; then
+            echo "::error::expected exit 78 (ConfigError), got $code"
+            exit 1
+          fi
+          echo "validate-config produced expected exit 78"
