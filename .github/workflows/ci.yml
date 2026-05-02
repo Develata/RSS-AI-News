@@ -1,0 +1,105 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --locked
+
+  migration-smoke:
+    name: migration smoke (sqlite)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - name: build binary
+        run: cargo build --release --bin rss-ai-news --locked
+      - name: prepare workspace
+        run: |
+          mkdir -p smoke/configs smoke/data
+          cp configs/app.toml.example smoke/configs/app.toml
+          mkdir -p smoke/configs/categories
+          cp configs/categories/ai.toml.example smoke/configs/categories/ai.toml
+      - name: migrate run
+        run: |
+          ./target/release/rss-ai-news \
+            --config-dir smoke/configs \
+            --db-path smoke/data/smoke.db \
+            migrate run
+      - name: migrate check
+        run: |
+          ./target/release/rss-ai-news \
+            --config-dir smoke/configs \
+            --db-path smoke/data/smoke.db \
+            migrate check
+
+  docker-build:
+    name: docker build smoke
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: runtime
+          push: false
+          tags: rss-ai-news:runtime
+          cache-from: type=gha,scope=runtime
+          cache-to: type=gha,mode=max,scope=runtime
+      - name: build debug image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: debug
+          push: false
+          tags: rss-ai-news:debug
+          cache-from: type=gha,scope=debug
+          cache-to: type=gha,mode=max,scope=debug
+      - name: smoke run --help
+        run: |
+          docker run --rm rss-ai-news:runtime --help

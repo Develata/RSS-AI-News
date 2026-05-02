@@ -1,12 +1,28 @@
 services:
   rss-ai-news:
+    profiles: ["runtime"]
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: rss-ai-news:local
+      target: runtime
+    image: rss-ai-news:runtime
     env_file:
       - ../.env
     volumes:
       - ../configs:/app/configs:ro
       - ../data:/app/data
-    command: ["rss-ai-news", "--help"]
+    command: ["--help"]
+
+  rss-ai-news-debug:
+    profiles: ["debug"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: debug
+    image: rss-ai-news:debug
+    env_file:
+      - ../.env
+    volumes:
+      - ../configs:/app/configs:ro
+      - ../data:/app/data
+    command: ["--help"]
