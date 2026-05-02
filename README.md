@@ -3,7 +3,7 @@
 Rust 重构版的 RSS-AI-News：单进程一次性 CLI，按调度外部触发，串起
 **抓取 → 正文提取 → AI 摘要/分类 → 报告生成 → 发布** 的端到端管线。
 
-- 12 crate workspace，edition 2024 / resolver 3，MSRV 1.85（实际构建工具链 1.88+，受 Cargo.lock 中传递依赖约束）
+- 12 crate workspace，edition 2024 / resolver 3，构建工具链下限 **Rust 1.88+**（受 Cargo.lock 中 `time@0.3.47` / `icu_*@2.2.0` 等传递依赖约束）
 - 默认 SQLite，PostgreSQL 通过 `DATABASE_URL` 切换；rustls-only TLS，无 OpenSSL native
 - 单进程 / 单次执行，**无内置 cron**：调度交给外部（cron / systemd timer / GitHub Actions / k8s CronJob）
 - 状态机驱动 + artifact 留痕，所有"对外副作用"均可幂等回放
@@ -54,7 +54,7 @@ cargo build --release --bin rss-ai-news
 cargo run --bin rss-ai-news -- --config-dir configs validate-config
 ```
 
-需要本地 Rust 1.88+（Cargo.lock 中 `time@0.3.47` / `icu_*@2.2` 的下限）。
+需要本地 Rust 1.88+（同上工具链下限说明）。
 
 ---
 

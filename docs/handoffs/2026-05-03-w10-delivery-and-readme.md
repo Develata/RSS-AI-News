@@ -137,3 +137,29 @@
   2. `docs/plan/full-rust-rss-ai-news-blueprint.md` §14 与 `docs/task/full-rust-rss-ai-news-blueprint-tasks.md` W10 节"实际工具链下限"对齐为 1.88.0
   3. 把 `.claude/` 加入 `.gitignore`（或在用户层面统一处理）
 - 历史背景：W0–W9 没有 handoff 记录，只能从 git log 反推（`git log --oneline` 已有清晰的 `feat(...): W?? — ...` 序列）；如要补 handoff 应基于真实 commit / PR 描述，而非凭印象重写
+
+---
+
+## 修订追加 — 2026-05-03（同日）
+
+### 事实更正
+
+本文 26 / 67 / 124 行声称"蓝图 §14 / 任务 W10 文本仍写 MSRV 1.85"，**该陈述错误**。经全仓库 grep（`MSRV|rust-version|Rust 1\.|rustc 1\.|1\.85|1\.88` over `**/*.{md,toml,yml,yaml}`）核实：
+
+- `docs/plan/full-rust-rss-ai-news-blueprint.md` 与 `docs/task/full-rust-rss-ai-news-blueprint-tasks.md` **从未出现 MSRV 数字**
+- 仓库中提及 1.85 / 1.88 的文件仅 3 个：本 handoff、`README.md`、`.github/workflows/ci.yml`
+- "MSRV 1.85" 是本次会话撰写 README 时引入的凭印象推断，**并非来自蓝图**
+
+按 handoffs append-only 规则，原段落保留不改写；以本节为最终事实源。
+
+### 后续修复
+
+- `README.md`：删除"MSRV 1.85"措辞，改为"构建工具链下限 Rust 1.88+（受 Cargo.lock 中 `time@0.3.47` / `icu_*@2.2.0` 等传递依赖约束）"
+- `.gitignore`：扩展为包含 `.claude/`、`.vscode/`、`.idea/`、`.env` 模式（保留 `.env.example`）
+- `git rm --cached .claude/settings.local.json`：从索引移除（磁盘文件保留），未来 Claude Code 写入 `settings.local.json` / `scheduled_tasks.lock` 不再 dirty
+- 删除 `tests/.gitkeep`：4/25 起的孤儿空占位（从未被 `git add`），删后 `tests/` 目录消失；未来真要加 cargo workspace-level integration tests 时新建即可
+
+### 新增 commit
+
+待落 — 一次性涵盖上述四项修复
+
