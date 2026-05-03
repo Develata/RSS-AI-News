@@ -30,6 +30,19 @@ pub fn run_general_checks(
     fail_if_needed(report)
 }
 
+/// Structural checks only: schema_version, category/source uniqueness, URL
+/// well-formedness, app value ranges. Skips env-credential presence checks
+/// so infrastructure commands (migrate) can run without OPENAI_* / RSSHUB_BASE_URL.
+pub fn run_structural_checks(
+    app: &AppConfig,
+    categories: &[CategoryConfig],
+    env: &EnvConfig,
+) -> Result<(), ConfigError> {
+    let mut report = DiagnosticReport::new(Vec::new());
+    collect_general_checks(&mut report, app, categories, env);
+    fail_if_needed(report)
+}
+
 pub fn run_env_checks(
     app: &AppConfig,
     categories: &[CategoryConfig],
@@ -302,6 +315,39 @@ mod tests {
             &EnvConfig::default(),
         )
         .expect_err("unsupported schema fails");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
+    fn structural_checks_ignore_missing_openai_env_when_ai_enabled() {
+        run_structural_checks(
+            &app(true),
+            &[category("ai", "https://example.test/feed")],
+            &EnvConfig::default(),
+        )
+        .expect("structural checks ignore missing OPENAI_* when ai enabled");
+    }
+
+    #[test]
+    fn structural_checks_ignore_missing_rsshub_env_when_placeholder_used() {
+        run_structural_checks(
+            &app(false),
+            &[category("ai", "{RSSHUB}/feed")],
+            &EnvConfig::default(),
+        )
+        .expect("structural checks ignore missing RSSHUB_BASE_URL placeholder");
+    }
+
+    #[test]
+    fn structural_checks_still_fail_on_unsupported_schema() {
+        let mut app = app(false);
+        app.schema_version = "2".to_string();
+        let err = run_structural_checks(
+            &app,
+            &[category("ai", "https://example.test/feed")],
+            &EnvConfig::default(),
+        )
+        .expect_err("structural checks still enforce schema_version");
         assert!(matches!(err, ConfigError::ValidationFailed { .. }));
     }
 

@@ -31,15 +31,19 @@ impl CommandSummary for MigrateCommandSummary {
     }
 }
 
+// migrate is an infrastructure command: it only opens SQLite and runs the
+// embedded schema migrations. It must not be gated by OPENAI_* / RSSHUB_BASE_URL
+// env presence — those are business-credential concerns enforced for AI / fetch
+// commands by `validate::run_general_checks`. See loader::load_skip_env_checks.
 pub async fn run(cli: &Cli) -> Result<MigrateCommandSummary, CliError> {
-    let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
+    let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
     let pool = open_pool(&loaded.app).await?;
     run_migrations(&pool).await?;
     summary("run", &pool).await
 }
 
 pub async fn check(cli: &Cli) -> Result<MigrateCommandSummary, CliError> {
-    let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
+    let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
     let pool = open_pool(&loaded.app).await?;
     summary("check", &pool).await
 }
