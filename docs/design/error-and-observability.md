@@ -63,7 +63,7 @@ trait ClassifiedError {
 | `ConnectionFailed` | true | `connection_failed` | DNS / TLS / 连接拒绝 |
 | `ParseFailed { reason }` | false | `feed_parse` | feed XML/JSON 格式错误 |
 | `TooLarge { bytes }` | false | `too_large` | 响应超过限额 |
-| `InvalidUrl` | false | `invalid_url` | URL 格式错误 |
+| `InvalidUrl` | false | `invalid_url` | URL 格式错误。**触发边界**：（a）`config` 校验在加载阶段已对 `sources[].feed_url` 做兜底 URL 解析，正常运行下不会到达 feed crate；（b）但 feed crate 仍在每次请求前对 `Url::parse` 结果防御，覆盖以下未被 config 校验完全拦截的场景：`{RSSHUB}` 占位符替换后产生非法 URL、测试代码或上游内部调用直接传入错误字符串、运行时配置热更换时尚未通过 `validate-config`。即使代码上看似冗余，仍应保留显式错误而非 panic |
 
 #### `ExtractorError`
 
@@ -306,8 +306,8 @@ run(run_id)
 | `RSSHUB_BASE_URL` 可达 | HTTP GET 首页 | 2xx |
 | 时区数据可用 | 解析 `target_timezone` | 成功 |
 | 磁盘空间 | 检查数据库目录 | > 100 MB |
-| 过期 lease 数量 | 查询过期未回收 | 0（或报告数量）|
-| 永久失败积压 | 查询 `state='failed'` 行数 | 报告数量 |
+| 过期 lease 数量 | 查询过期未回收 | 见下方"健康阈值"表 |
+| 永久失败积压 | 查询 `state='failed'` 行数 | 见下方"健康阈值"表 |
 
 输出格式：
 
@@ -324,7 +324,24 @@ run(run_id)
 [INFO] 12 permanently failed entries
 ```
 
-exit code：全部 OK → 0；存在 WARN → 0；存在 FAIL → 1。
+**健康阈值**（覆盖上表"过期 lease 数量"与"永久失败积压"两项）：
+
+| 检查项 | 表 | INFO | WARN | FAIL |
+|---|---|---|---|---|
+| 过期 lease 数量 | `feed_entries` | = 0 | 1–9 或最早一条过期 < 30 min | ≥ 10 或最早一条过期 ≥ 30 min |
+| 过期 lease 数量 | `article_ai_results` | = 0 | 1–9 或最早一条过期 < 30 min | ≥ 10 或最早一条过期 ≥ 30 min |
+| 过期 lease 数量 | `publish_records` | = 0 | 任意 ≥ 1 | 最早一条过期 ≥ 30 min |
+| 永久失败积压（24 h 内新增）| `feed_entries.state='failed'` | ≤ 5 | 6–50 | > 50 |
+| 永久失败积压（24 h 内新增）| `article_ai_results.state='permanent_failed'` | ≤ 5 | 6–50 | > 50 |
+| 永久失败积压（24 h 内新增）| `publish_records.state='failed'` | = 0 | 1–2 | ≥ 3 |
+
+阈值理由：
+
+- publish_records 体量小、可见性高，单条 stuck 也值得报警，因此 WARN 阈值最严
+- feed/AI 失败属于常态尾部分布，需要"突增"才视为 FAIL
+- 30 min 过期阈值对应 lease 默认时长的 ~10 倍上限，超过即 reclaim 任务停摆
+
+exit code：全部 OK / INFO → 0；存在 WARN → 0；存在 FAIL → 1。
 
 ## 6. 六问检查清单
 

@@ -45,8 +45,10 @@
 
 - 数据库内所有时间列存 UTC
 - 时区转换只在 `config` / `report` / `cli` 边界执行
-- SQLite 使用 `TEXT` 存 ISO8601（`YYYY-MM-DD HH:MM:SS.fff`），PostgreSQL 使用 `TIMESTAMPTZ`
-- Rust 侧统一用 `time::OffsetDateTime`（见 [dependency-choices](./dependency-choices.md)，Phase C 产出）
+- SQLite 使用 `TEXT` 存 RFC3339 UTC，**唯一允许的字面形式**为 `YYYY-MM-DDTHH:MM:SS.fffZ`（`T` 与 `Z` 必填，三位毫秒必填，零毫秒写 `.000Z`）。该格式同时是 ISO8601 子集，并保证 SQLite 文本排序等价于时间排序
+- 所有时间列的 serializer 必须使用同一格式串，parser 必须能往返还原相同字面值；契约测试覆盖：（a）排序与时间序一致；（b）`format → parse → format` 字面相等；（c）拒绝带空格分隔符或缺 `Z` 的旧格式
+- PostgreSQL 使用 `TIMESTAMPTZ`，由驱动负责 RFC3339 ↔ binary 互转；不直接落地文本
+- Rust 侧 DB 读写使用 `time::OffsetDateTime`（UTC-only），跨时区业务逻辑使用 `jiff::Timestamp`，二者在边界显式互转（见 [dependency-choices §2.5](./dependency-choices.md)）
 
 ### 2.4 主键策略
 
@@ -337,7 +339,7 @@ AI 结果真相源表。一篇文章允许多行（不同 prompt / 协议 / 模�
 | `byte_size` | `INTEGER` | NOT NULL | 原始字节数 |
 | `sha256` | `TEXT` | NOT NULL | 内容 hash |
 | `retention_policy` | `TEXT` | NOT NULL | `always` / `on_failure` / `sampled` / `debug_only` |
-| `expires_at` | `TIMESTAMPTZ` | NULL | TTL 到期时间 |
+| `expires_at` | `TIMESTAMPTZ` | NULL | TTL 到期时间。`NULL` 表示永不过期，仅当 `retention_policy='always'` 或其他无需 TTL 的保留策略使用；非 NULL 值由 runtime 在写入时按策略计算（与 [replay-and-artifacts §3.2](./replay-and-artifacts.md) 保持一致）|
 | `created_at` | `TIMESTAMPTZ` | NOT NULL | - |
 
 约束与索引：
@@ -422,7 +424,11 @@ AI 结果真相源表。一篇文章允许多行（不同 prompt / 协议 / 模�
 **绑定参数来源**（由 `storage` crate 调用前计算）：
 
 - `:now = OffsetDateTime::now_utc()`
-- `:lease_expires_at = :now + config.runtime.lease_duration`（Rust 侧 `Duration` 加法）
+- `:lease_expires_at = :now + lease_duration`，其中 `lease_duration` 按调用阶段从 `[lease]` 段读取（见 [config-schema §4](./config-schema.md)）：
+  - feed 抓取（§5.1 / §5.2 / §5.3 / §5.4）使用 `config.lease.fetch_duration_seconds`
+  - AI 调用（§5.6）使用 `config.lease.ai_duration_seconds`
+  - 发布阶段（§5.7）使用 `config.lease.publish_duration_seconds`
+  - 调用方在准备 SQL 参数时把对应阶段的 `Duration` 加到 `:now`，SQL 模板只接收最终的绝对时间戳
 - `:max_attempts`、`:batch_size`、`:owner` 由调用方显式提供
 
 ```sql
@@ -446,7 +452,7 @@ RETURNING id, source_id, normalized_link, link_hash, title_raw, discovered_at, a
 
 注意：
 
-- SQLite 3.35+ 支持 `RETURNING`。低版本回退为事务内"先 SELECT 持锁后 UPDATE"
+- **SQLite 最低支持版本：3.35.0（2021-03，`RETURNING` 引入版本）**。runtime 启动时 `doctor preflight` 通过 `SELECT sqlite_version()` 校验；低于 3.35 直接 fail-fast 退出（exit 78），不再提供低版本回退路径
 - 禁止用"先 SELECT 后 UPDATE 不加锁"的方式实现——必然双抢
 - 禁止在 SQL 中做时间加法（`:now + :lease_duration` 等写法不在 SQLite/PG 间可移植）；所有时间常量与偏移都必须在 Rust 端算好
 - `owner` 推荐格式：`{hostname}-{pid}-{random_ulid}`

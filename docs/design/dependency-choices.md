@@ -91,6 +91,13 @@ features：`runtime-tokio`, `sqlite`, `postgres`, `time`, `migrate`
 
 **转换约定**：跨边界时显式转换 `time::OffsetDateTime ↔ jiff::Timestamp`，不引入隐式类型互转。`domain` crate 暴露 `TimeZone` 新类型包装 `jiff::tz::TimeZone`，避免下游 crate 直接依赖 `jiff` 类型。
 
+**`jiff` pre-1.0 风险与锁定策略**：截至本设计版本（W0），`jiff = "0.1"` 仍为 pre-1.0，作者明确保留破坏性 API 变更可能。为避免上游次版本升级冲击业务代码：
+
+1. **依赖锁定**：workspace `Cargo.toml` 使用精确次版本 `jiff = { version = "0.1", features = ["serde"] }`，并在 `Cargo.lock` 中提交锁定具体修订号；任何 `jiff` 升级走独立 PR 并跑全量集成测试
+2. **API 边界封装**：仅 `domain` crate 直接 `use jiff::*`；其他 crate 仅可使用 `domain::TimeZone` / `domain::ZonedDateTime` 等 newtype。下游禁止直接接触 `jiff::tz::TimeZone` / `jiff::Zoned`，使升级时只需改动一个 crate
+3. **跟踪指标**：在 `docs/handoffs/` 中跟踪 `jiff` 1.0 发布时间；`jiff` 进入 1.0 后，本节降级为常规依赖记录
+4. **替代方案**：若 `jiff` 0.x → 1.0 升级风险过高（API 大改），备选方案为退回 `time` + `time-tz` 组合，但需重写所有时区相关业务逻辑；该回退由 W10 阶段的容量规划任务收口
+
 ### 2.8 CLI
 
 | 选项 | 决策 | 理由 |
@@ -120,10 +127,20 @@ features：`derive`, `env`
 
 | 选项 | 决策 | 理由 |
 |---|---|---|
-| **readability** (Rust port) | ✅ 首选 | Mozilla Readability 的 Rust 实现 |
-| **scraper** | ✅ 辅助 | CSS 选择器提取，自定义规则场景 |
+| **scraper** | ✅ 采用 | CSS 选择器提取，覆盖首版规则化提取与 fallback 路径 |
+| readability (Rust port) | ⏸️ 待评估 | 见下方说明；首版**不**纳入依赖图 |
 
-注意：Rust 生态的 readability 实现不如 Python 的 `trafilatura` 成熟。如果 Rust 实现质量不足，备选方案是通过 HTTP 调用一个轻量的 readability 微服务。`extractor` crate 通过 trait 抽象提取策略，替换不影响上层。
+**首版提取策略**：仅使用 `scraper` + 自研 readability-lite 启发式规则（密度评分、boilerplate 剥离）。Rust 生态主流候选 `readability` (`crate readability = "0.3"`) 与 `readable-readability` 维护活跃度参差，且与 Mozilla 官方算法的对齐度未做基准；纳入主依赖会带来未量化的语义偏差。
+
+**`readability` 决策门**（W4 / W5 阶段重新评估）：
+
+| 评估项 | 通过条件 | 不通过的处置 |
+|---|---|---|
+| 主流 crate 是否进入 1.0 | crate 版本 ≥ 1.0 且 ≥ 12 个月稳定更新 | 维持"不采用"，继续靠 `scraper` + 启发式 |
+| 与 trafilatura 输出对齐度 | 在 50 篇基准文章上 F1 ≥ 0.80 | 维持"不采用" |
+| 引入后 binary size 增量 | < 1 MB | 改为微服务调用而非 in-process 依赖 |
+
+通过则在 W4/W5 的 extractor crate 内以 trait 形式追加为可选 strategy；不通过则本节状态保持为"不采用"，文档不再保留 `readability (Rust port)` 作为"首选"。
 
 ### 2.12 AI 客户端
 
@@ -195,7 +212,7 @@ link 规范化逻辑（去 fragment、排序 query、去 tracking 参数等）�
 | **mockall** | ✅ 采用 | trait mock，用于单元测试 |
 | **tempfile** | ✅ 采用 | 临时文件/目录，用于 SQLite 测试 |
 | **wiremock** | ✅ 采用 | HTTP mock server，用于集成测试 |
-| **insta** | ✅ 考虑 | 快照测试，用于报告渲染验证 |
+| **insta** | ✅ 采用 | 快照测试，用于 report 渲染（W8 / T805）与 publish frontmatter 输出契约；`cargo insta review` 是主要审阅工具 |
 
 ## 3. 不采用的依赖
 

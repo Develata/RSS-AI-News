@@ -168,6 +168,17 @@
 - [ ] 重复分类 key 失败测试
 - [ ] 非法 URL 失败测试
 
+### T304 实现 `validate-config` 子命令
+
+参见 [cli-semantics §4.10](../design/cli-semantics.md)。命令在 W3 阶段完成端到端落地，避免 W9 doctor 重复包装配置校验逻辑。
+
+- [ ] 在 `cli` crate 注册 `validate-config` 子命令（clap derive）
+- [ ] 调用 `config::load_all` 完整加载 `.env` + `app.toml` + `categories/*.toml`
+- [ ] 输出每个被加载文件路径与 schema_version
+- [ ] 输出 effective `[ai].enabled × [publish].include_unscored` 真值表行（见 [config-schema §4.1](../design/config-schema.md#41-aienabled--publishinclude_unscored-真值表)）
+- [ ] 退出码：合法 → 0；schema 不匹配 / 缺必填 / 非法 URL → exit 78；I/O 错误 → exit 74
+- [ ] CLI 集成测试：合法配置返回 0；故意篡改的非法 toml 返回 78；缺失 OPENAI_API_KEY（且 `ai.enabled=true`）返回 78
+
 ## 6. Workstream W4：存储模型与 migration
 
 ### T401 设计并冻结数据库 schema

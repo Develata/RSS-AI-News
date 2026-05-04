@@ -30,8 +30,15 @@
 - `FeedEntry`
 - `Article`
 - `ArticleAiResult`
-- `PublishSnapshot`
-- `PublishedArtifact`
+- `PublishRecord` — 单次发布过程的状态机载体（一行 = 一次 publish 任务）
+- `PublishItem` — 一次 `PublishRecord` 冻结后的发布条目（多行，引用具体 `Article`）
+- `RawArtifact` — 原始输入留档对象（feed payload / HTML payload / AI raw response）
+
+**对象命名口径**：
+
+- "PublishSnapshot" 不是独立本体对象，而是**概念聚合**——指 `PublishRecord` 与其名下 `PublishItem` 集合在某一时刻的冻结状态；落地表现为 `publish_records + publish_items` 两表的关联读取（见 [storage-schema](./storage-schema.md)）
+- "PublishedArtifact" 同样不是独立本体；发布的最终产物（Markdown 文件、commit SHA、远端 URL）作为字段持久化在 `PublishRecord` 行内，不另设对象
+- 真相源对象按蓝图 §2 与本文一致：`PublishRecord` / `PublishItem` / `RawArtifact`；其他文档使用同一词表
 
 所有模块、状态机、数据库和 CLI 命令都必须围绕这些对象展开。
 
@@ -44,9 +51,12 @@
 3. 抓正文
 4. 提正文
 5. 存文章
-6. 跑 AI
-7. 冻结发布快照
-8. 渲染与发布
+6. 生成 AI 任务（持久化 `article_ai_results.state='pending'` 行）
+7. 跑 AI（claim → run → succeeded / permanent_failed / filtered）
+8. 冻结发布快照
+9. 渲染与发布
+
+阶段 6（生成 AI 任务）单列，因为它把 article 推进到 `ai_pending` 并写入持久任务行；脱离它后续 claim 路径无可领取行。`ai.enabled=false` 时阶段 6 / 7 整体跳过，由阶段 8 在选稿事务内将 `persisted` 直通升格为 `ready_for_publish`（见 [state-machine §4.1.3](./state-machine.md#413-ai-关闭--无-ai-发布降级)）。
 
 一切运行时行为都应表达成阶段状态变化。
 
@@ -74,6 +84,12 @@
 ### 2.6 租约优先
 
 只要某任务可能被多个 worker 消费，就必须从第一版开始按 claim + lease 模型设计。
+
+本项目带 lease 三联字段（`lease_owner` / `lease_expires_at` / `attempt_count`）的表至少包括：
+
+- `feed_entries`（ingest / extract 阶段的领取，见 [storage-schema §4.1](./storage-schema.md)）
+- `article_ai_results`（AI 调用阶段的领取，见 §4.4）
+- `publish_records`（发布阶段每一步 transition 的领取——freeze / render / local_store / remote_push 都先 claim 后推进，见 §4.6 与 [state-machine §5.2](./state-machine.md)）
 
 不能依赖：
 

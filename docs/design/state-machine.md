@@ -36,8 +36,23 @@
 - `lease_owner` 非空代表某 worker 已认领
 - `lease_expires_at` 是认领过期的绝对时间
 - 认领方必须在 `lease_expires_at / 2` 之前完成或主动 renew
-- 过期 lease 由后台 reclaim 任务释放；reclaim 本身不改 `state`，只清空 lease 字段，让下一轮 claim 重新领取
 - `attempt_count` 在每次 claim 时 +1，不在 reclaim 时递增
+
+**claim 与 reclaim 的状态语义边界**（区分二者，避免相互覆盖）：
+
+- **claim**：从可领取状态原子转入运行态（`pending_fetch → fetching`、`pending → running`、…），同事务写入 `lease_owner / lease_expires_at`、`attempt_count += 1`。claim 不推进任何业务成功终态，仅完成"领取"动作
+- **reclaim**：仅作用于运行中状态的过期 lease，把行回滚到下一轮 claim 可见的状态，并清空 lease 字段；`attempt_count` 不递增
+
+reclaim 的具体状态行为按表分别规定：
+
+| 表 | 运行态 | reclaim 后的目标状态 | 备注 |
+|---|---|---|---|
+| `feed_entries` | `fetching` | `pending_fetch` | 由 ingest 阶段 reclaim 释放 |
+| `feed_entries` | `extracting` | `pending_fetch` | 抓取已成功但提取阶段崩溃；下一轮重新走 fetch 路径以保证 body 与 artifact 一致 |
+| `article_ai_results` | `running` | `pending` | 见 §4.2 |
+| `publish_records` | `snapshot_frozen` / `rendered` / `stored_local` | 维持原状态 | publish 阶段 reclaim 仅清 lease；render / local_store / remote_push 自身幂等可在原状态重入（见 §5.3） |
+
+注：上表是"reclaim 总则"。状态机各章 transition 表中标注"运行态 → 自身保持，lease 清空"的行表示对应表 reclaim 不回滚业务状态；标注"运行态 → 可领取状态"的行表示需要回滚。所有 reclaim SQL 模板见 [storage-schema §5.5](./storage-schema.md#55-lease-reclaim-扫描)。
 
 ### 2.4 retry budget
 
@@ -47,7 +62,7 @@
 - `article_ai_results`：`max_attempts = 3`
 - `publish_records`：`max_attempts = 5`
 
-具体数值由 `config::app::retry_budgets` 覆盖，不是硬编码。
+具体数值由 `config::app::retry`（即 `[retry]` 段，字段为 `feed_entry_max_attempts` / `ai_max_attempts` / `publish_max_attempts`，见 [config-schema §4](./config-schema.md)）覆盖，不是硬编码。
 
 ### 2.5 错误分类
 
@@ -66,6 +81,15 @@
 
 典型边界：`PublishError::LocalIoError` 的 `is_retryable()` 在 Rust 实现层按原始 `io::ErrorKind` 判定（`WouldBlock` / `Interrupted` / `TimedOut` → Retryable；其余 Permanent）。文档里的"retryable=false"指默认/典型情况，不替代编译期实现。
 
+**fallback 与 retry class 的优先级**：当某条状态机的 transition 表（如 §3.4）显式列出 fallback 路径（典型为 `ExtractorError::ParseFailed` / `ContentTooShort` 的 summary fallback），分发顺序为：
+
+1. 先按本节通用规则计算 `is_retryable()`，但**不**立即按结果跳转
+2. 若该错误在状态机 transition 表中标记有 fallback，则先执行 fallback 分支
+3. fallback 成功 → 转入 fallback 成功终态（如 `fallback_persisted`），不进入失败终态
+4. fallback 失败或不可用 → 回到第 1 步的 `is_retryable()` 结论：true 走重试，false 走失败终态
+
+这一例外只对状态机文档明确登记 fallback 的错误生效；其他错误仍按 §2.5 通用规则直接分发。
+
 ## 3. FeedEntry 状态机
 
 ### 3.1 状态集合
@@ -80,6 +104,18 @@
 | `persisted` | 正文已入库，已生成 `articles` 行 | 是（成功终态）|
 | `fallback_persisted` | 正文抓取失败，但 summary fallback 成功入库 | 是（软终态）|
 | `failed` | 超出 retry budget 或永久错误 | 是（失败终态）|
+
+#### 3.1.1 软终态语义
+
+`dedup_skipped` 与 `fallback_persisted` 是"已经达成阶段目标但与正常成功终态有差异"的状态，与失败终态不同——它们不进入 retry 路径，但允许后续命令在受控条件下再处理：
+
+- **不参与 lease**：原行的 `lease_owner` / `lease_expires_at` 始终保持空，不会被任何 worker 或 reclaim 任务接触
+- **状态不可回退**：禁止任何 transition 从软终态回到非终态（包括 `pending_fetch` / `fetching` / `extracting`）；该约束由各阶段 claim SQL 的 `WHERE state IN (...)` 白名单兜底
+- **`dedup_skipped` 的再处理**：通过 `backfill --target extract` 仅作用于失败行（`failed`），不重处理软终态行；同一 entry 的重复发现走 §3.2 的 UID/link 去重路径，**不**新建 feed_entries 行
+- **`fallback_persisted` 的再处理**：通过 `backfill --target extract` 同样**不**改写原 feed_entries 行，而是在 `articles` 层按 `content_quality='fallback'` 升级到 `high` / `medium` 的策略**新建** AI 任务（见 §4），原 feed_entries 行保持 `fallback_persisted`
+- **`reindex` 的影响**：只更新 `articles` / `links` / `categories` 派生表，不读取或更新 `feed_entries.state`，因此与软终态无交互
+
+实现校验：claim SQL 的状态白名单只列非终态；契约测试覆盖"软终态行被错误地传入 claim → UPDATE 影响 0 行"。
 
 ### 3.2 transition 表
 
@@ -102,7 +138,7 @@
 | `extracting` | `dedup_skipped` | 同上 | 第三层 `content_hash` 命中已有文章 | 写 `dedup_decision='hash_dup'` + 关联 `article_id` | — |
 | `extracting` | `pending_fetch` | 同上 | 提取失败且 retryable，`attempt_count < max` | 清 lease | — |
 | `extracting` | `failed` | 同上 | 提取失败且不可重试 或 retry 耗尽 | 写 `last_error*` | — |
-| `fetching` / `extracting` | 自身保持 | lease reclaim 扫描 | 租约过期 | 清 lease 字段，状态不变 | 下一轮 claim 会重新领取 |
+| `fetching` / `extracting` | `pending_fetch` | lease reclaim 扫描 | 租约过期 | 清 lease 字段并回滚 `state='pending_fetch'`（见 §2.3 reclaim 总则与 [storage-schema §5.5](./storage-schema.md#55-lease-reclaim-扫描)）；`attempt_count` 已在 claim 时递增，不再变 | 下一轮 claim 重新领取 |
 
 ### 3.3 冲突解决
 
@@ -173,7 +209,7 @@
 | `ai_pending` | `publish_skipped` | 同上 | 当前 `article_ai_results` 转 `filtered`（`keep_decision=0`）且不存在其他 `succeeded` 行 | 同事务 UPDATE | — |
 | `ai_done` | `ready_for_publish` | `runtime::ai_run::complete` 或 `backfill` | 新版本 `article_ai_results` 成功且分数达门槛 | 同事务 UPDATE | — |
 | `ai_pending` / `ai_done` | 保持 | `runtime::ai_run::complete` | 当前 `article_ai_results` 转 `permanent_failed`，但允许其他 prompt/model 版本继续补跑 | 不更新 `articles.state` | — |
-| `ready_for_publish` | `published` | `runtime::publish::remote_push` | 同事务 `publish_records` 进入 `published_remote` | 批量 `UPDATE articles SET state='published' WHERE id IN (...) AND state='ready_for_publish'` | 任一行 UPDATE 影响 0 行 → 整批 publish 回滚转 `failed`，下一轮基于真相源重新选稿 |
+| `ready_for_publish` | `published` | `runtime::publish::local_store` 或 `runtime::publish::remote_push` | 同事务 `publish_records` 进入 `published_local`（本地模式）或 `published_remote`（远端模式）| 批量 `UPDATE articles SET state='published' WHERE id IN (...) AND state='ready_for_publish'` | 任一行 UPDATE 影响 0 行 → 整批 publish 回滚转 `failed`，下一轮基于真相源重新选稿 |
 | `persisted` / `ai_pending` / `ai_done` | `retired` | `runtime::admin::retire`（首版不启用） | 管理员命令 | UPDATE | — |
 | `persisted` | `ready_for_publish` | `runtime::publish::promote_no_ai` | **AI 关闭模式**：`config.ai.enabled=false` 且 `config.publish.include_unscored=true` | 直接升格；`article_ai_results` 不新建行 | AI 关闭但 `include_unscored=false` → article 停留在 `persisted`，不进入发布路径 |
 
@@ -276,14 +312,18 @@ run_events 只写 [error-and-observability §4.3](./error-and-observability.md) 
 
 ### 5.2 transition 表
 
+publish_records 同样使用 §2.3 的 lease 模型。每条非终态业务 transition（`pending → snapshot_frozen`、`snapshot_frozen → rendered`、`rendered → stored_local`、`rendered → published_local`、`stored_local → published_remote`）在执行业务副作用之前必须先通过 [storage-schema §5.7](./storage-schema.md#57-publish_records-的领取) 的 claim SQL 按当前 state 取得 lease；claim 自身不推进 state，仅写 `lease_owner` / `lease_expires_at` 并 `attempt_count += 1`。下表的"触发者"行隐含一次前置 claim，不再单列。
+
+reclaim 行为见 §2.3：publish_records 的 reclaim 仅清 lease 字段、不回滚 state，因为 render / local_store / remote_push 自身幂等，下一轮 claim 可在原中间态继续推进。
+
 | 起始 | 目标 | 触发者 | 前置条件 | 副作用 | 失败分支 |
 |---|---|---|---|---|---|
-| (insert) | `pending` | `runtime::publish::init` | `idempotency_key` 未冲突 | INSERT | UNIQUE 冲突 → 视恢复策略 |
-| `pending` | `snapshot_frozen` | `runtime::publish::freeze` | 选稿返回非空集合 | 批量 INSERT `publish_items`，事务提交 | 空集合 → `failed` (`SnapshotEmpty`) |
-| `snapshot_frozen` | `rendered` | `runtime::publish::render` | 渲染成功 | 无持久副作用 | 渲染错误 → `failed` |
-| `rendered` | `stored_local` | `runtime::publish::local_store` | 写文件成功 且 `publish_records.remote_target` 非空（远端模式）| 写 `local_path`, `local_stored_at` | IO 失败 → 保持 `rendered`，计入 retry |
-| `rendered` | `published_local` | 同上 | 写文件成功 且 `publish_records.remote_target` 为空（`--local-only` 模式）| 同上；下游同步更新 `articles.state='published'` | IO 失败 → 保持 `rendered`，计入 retry |
-| `stored_local` | `published_remote` | `runtime::publish::remote_push` | GitHub API 成功 | 写 `commit_sha`, `remote_published_at`；下游同步更新 `articles.state='published'` | 网络失败 → 保持 `stored_local`，retry；auth 失败 → `failed` |
+| (insert) | `pending` | `runtime::publish::init` | `idempotency_key` 未冲突 | INSERT；不需要 claim（首次写入即所有权确立）| UNIQUE 冲突 → 视恢复策略 |
+| `pending` | `snapshot_frozen` | `runtime::publish::freeze` | 前置 claim 成功 + 选稿返回非空集合 | 批量 INSERT `publish_items`，事务提交，UPDATE state | claim 冲突 → 本轮跳过；空集合 → `failed` (`SnapshotEmpty`) |
+| `snapshot_frozen` | `rendered` | `runtime::publish::render` | 前置 claim 成功 + 渲染成功 | UPDATE state，无其他持久副作用 | claim 冲突 → 本轮跳过；渲染错误 → `failed` |
+| `rendered` | `stored_local` | `runtime::publish::local_store` | 前置 claim 成功 + 写文件成功 + `publish_records.remote_target` 非空（远端模式）| 写 `local_path`, `local_stored_at`，UPDATE state | IO 失败 → 保持 `rendered`，计入 retry |
+| `rendered` | `published_local` | 同上 | 前置 claim 成功 + 写文件成功 + `publish_records.remote_target` 为空（`--local-only` 模式）| 同上；下游同步更新 `articles.state='published'` | IO 失败 → 保持 `rendered`，计入 retry |
+| `stored_local` | `published_remote` | `runtime::publish::remote_push` | 前置 claim 成功 + GitHub API 成功 | 写 `commit_sha`, `remote_published_at`，UPDATE state；下游同步更新 `articles.state='published'` | 网络失败 → 保持 `stored_local`，retry；auth 失败 → `failed` |
 | 任一非终态 | `failed` | 异常处理 | retry 耗尽或永久错误 | 写 `last_error*` | — |
 
 **模式判定**：`publish_records.remote_target` 由 `runtime::publish::init` 按 CLI flag / 配置写入。`--local-only` 或 `config.publish.github_*` 为空时 `remote_target=NULL`，本轮只走 `published_local`；否则写 `github://owner/repo/branch/path`，走完整远端链路。

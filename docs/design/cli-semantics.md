@@ -318,6 +318,14 @@ WHERE pr.state IN ('published_remote', 'published_local')
 
 **行为**：按顺序执行三个阶段。任一阶段失败不阻塞后续阶段（除非 `ingest` 全量失败导致无新文章）。
 
+**`ai.enabled=false` 下的阶段编排**：当 effective `config.ai.enabled=false` 时，`run` 命令**主动跳过** `ai-run` 阶段，直接进入 `publish` 阶段（依赖 [config-schema §4.1](./config-schema.md#41-aienabled--publishinclude_unscored-真值表) 的 `(ai=false, include_unscored)` 行为）。具体：
+
+- `run` 在 ai-run 阶段产生一行 `[INFO] AI disabled (ai.enabled=false), skipping ai-run` 并直接推进；不返回 exit 78
+- `publish` 阶段按真值表行为执行：`include_unscored=true` 时正常发布直通候选；`include_unscored=false` 时本轮无候选，发布产生 0 条 publish_items 并返回 exit 0
+- 整体 exit code：以最严重的阶段结果为准（ingest WARN + publish OK → 0；任一阶段 FAIL → 非 0）
+
+**`ai-run` 单独调用与 `run` 内部跳过的差异**：`ai.enabled=false` 时显式调用 `ai-run` 仍按 [config-schema §6.2](./config-schema.md) 返回配置语义错误 exit 78（用户显式表达了与配置矛盾的意图，应失败）；而 `run` 是隐式编排，跳过更符合调用者意图。该差异由 `runtime::orchestrator` 区分调用路径实现，**不**通过新增 CLI flag 暴露。
+
 ## 5. 输出格式约定
 
 ### 5.1 人类可读（默认）

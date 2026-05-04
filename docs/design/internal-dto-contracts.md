@@ -297,7 +297,7 @@ BackfillRequest
 - 指定具体 id → 使用历史版本（用于复现某次历史结果），不再 bump，只复用已有版本行
 - `target=Ai` 只消费 AI 相关版本字段，`target=Extract` 只消费 extractor 版本字段；错配的字段组合应在 `cli` 层拒绝
 
-## 6.5 受约束 newtype（值域）
+## 6.4 受约束 newtype（值域）
 
 部分语义带值域的字段在 `domain` crate 用 newtype 包装，避免 `u8` 0–255 误差范围流入业务逻辑：
 
@@ -339,7 +339,9 @@ ArticleState       = Persisted | AiPending | AiDone | ReadyForPublish
 AiResultState      = Pending | Running | Succeeded | PermanentFailed | Filtered
                    # retryable 失败不是独立状态，失败后直接回 Pending（见 state-machine §4.2）
 PublishState       = Pending | SnapshotFrozen | Rendered | StoredLocal
-                   | PublishedRemote | Failed
+                   | PublishedLocal | PublishedRemote | Failed
+                   # PublishedLocal 与 PublishedRemote 均为成功终态，分别对应本地模式与远端模式
+                   # （见 state-machine §5 publish_records 表）
 ```
 
 ## 8. 命名约定：PascalCase 与 snake_case

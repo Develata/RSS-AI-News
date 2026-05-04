@@ -184,7 +184,7 @@
 
 - `ai` crate 强制要求 JSON 输出（prompt 内明确约束 + 解析层严格模式）
 - `article_ai_results` 保存 `output_schema_version` 字段
-- 解析失败作为 `AiError::SchemaMismatch` 显式存在，不静默 fallback
+- 解析失败作为 `AiError::OutputParseFailed { raw }` 显式存在（见 [error-and-observability §2.3](./error-and-observability.md)），不静默 fallback
 - `prompt_version` 与 `output_schema_version` 双版本号绑定
 
 ### 4.8 观测性只靠 `logging`

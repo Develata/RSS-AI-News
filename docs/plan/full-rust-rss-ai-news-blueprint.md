@@ -301,7 +301,9 @@ retryable 失败不作为独立持久状态（见 [state-machine §4.2](../desig
 
 ## 6. 模块清单
 
-### 6.1 `app`
+### 6.1 根二进制 crate `rss-ai-news`
+
+> 命名说明：W1 实施时把旧方案的 `app` crate 上提到根目录，根 `Cargo.toml` 直接声明 binary `rss-ai-news`，其余子模块全部下沉到 `crates/`。本节标题保留概念名"主二进制入口"，文中引用按现状使用 `rss-ai-news`。
 
 职责：
 

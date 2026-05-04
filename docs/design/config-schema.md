@@ -156,6 +156,31 @@ metrics_bind = "127.0.0.1:9090"
 
 **`include_unscored` 不是 AI failure fallback**：当 `ai.enabled=true` 时，即使 `include_unscored=true` 也不会让 `permanent_failed` / `filtered` 的 article 绕过 AI 直接发布。AI 永久失败的 article 必须经 `backfill --target ai`（新模型 / 修正 prompt）重跑后才能进入 `ready_for_publish`。完整流程见 [state-machine §4.1.3](./state-machine.md#413-ai-关闭--无-ai-发布降级)。
 
+### 4.2 `[http]` 字段语义
+
+`[http]` 段同时影响 ingest（feed 拉取）、extract（详情页抓取）与 doctor 探活，下表给出每个字段的作用域、默认值与默认值理由。
+
+| 字段 | 作用阶段 | 作用域 | 默认值 | 说明 |
+|---|---|---|---|---|
+| `user_agent` | 全部 HTTP 请求 | 单进程 | `"RSS-AI-News/1.0"` | 同一进程内所有 HTTP 客户端共享；不允许 per-source 覆盖 |
+| `timeout_seconds` | 全部 HTTP 请求 | 单请求 | `30` | 端到端超时；不区分 connect / read |
+| `max_retries` / `retry_backoff_base_ms` | 全部 HTTP 请求 | 单请求 | `3` / `1000` | reqwest 客户端层指数退避；与状态机 retry budget（§4 `[retry]`）不同维度，前者覆盖瞬时网络故障，后者控制业务级重试 |
+| `concurrent_feeds` | ingest（`runtime::ingest`）| 全局并发预算 | `10` | feed 源拉取阶段的最大并发请求数（`futures::stream::buffer_unordered(concurrent_feeds)`）；与 CLI `--batch-size` 是不同维度——`--batch-size` 控制单次 run 处理的 feed 行数上限，`concurrent_feeds` 控制其中并发执行的请求数。`min(batch_size, concurrent_feeds)` 决定实际峰值并发 |
+| `concurrent_fetches` | extract（`runtime::extract`）| 全局并发预算 | `5` | 详情页 HTML 抓取阶段的最大并发请求数；与 `concurrent_feeds` 独立计数，二者可同时跑满。CLI `--batch-size` 同样仅控制本轮处理的行数上限 |
+
+并发预算在 runtime 启动时构造一次 `Semaphore(concurrent_feeds)` / `Semaphore(concurrent_fetches)` 并向各阶段共享；不允许 per-source / per-category 覆盖（避免 effective 配置空间膨胀）。如需限速到 source 粒度，使用 `governor` 在 ingest crate 内追加 quota，而非通过本段配置。
+
+### 4.3 HTTP 代理传播
+
+`HTTP_PROXY` / `HTTPS_PROXY` 通过 `.env` 注入，不进入 `app.toml`。其传播路径如下：
+
+1. `config::env::EnvConfig` 在加载阶段读取 `HTTP_PROXY` / `HTTPS_PROXY`（也兼容大写变体），存为 `Option<String>`，并对非空值校验是否为合法 URL；非法 → 启动失败 exit 78
+2. `runtime` 构造共享 `reqwest::Client` 时显式调用 `reqwest::Proxy::http(url)` / `reqwest::Proxy::https(url)`；**不依赖** reqwest 默认的进程环境读取，避免子进程或被覆盖环境变量造成行为漂移
+3. 同一 client 被 ingest / extract / ai / doctor 共用；不存在 per-command 代理覆盖。如需临时绕过代理，请通过 `unset HTTP_PROXY HTTPS_PROXY` 后重启 runtime
+4. PG 连接、SQLite 等非 HTTP 调用不受本配置影响
+
+**校验**：当 `HTTP_PROXY` / `HTTPS_PROXY` 设置但格式非法时，`validate-config` 与 `doctor` 都返回 FAIL；`doctor preflight` 在网络可达性检查时按代理路径访问。
+
 ## 5. `categories/*.toml` Schema
 
 每个文件代表一个分类：
