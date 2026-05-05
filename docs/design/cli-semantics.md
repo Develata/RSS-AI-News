@@ -168,7 +168,7 @@ Publish completed:
 
 | 参数 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `--deep` | bool | false | 扫描 [state-machine §6.2](./state-machine.md) 定义的 canonical 不变量集 I1–I8 + I4'。典型违反示例分别对应 I2、I5、I6：`ai_pending` 无任一 AI 行、`published` 无成功发布、`published_remote` 或 `published_local` 但被引用的 article 未同步为 `published` |
+| `--deep` | bool | false | 扫描 [state-machine §7.2](./state-machine.md#72-跨状态机不变量) 定义的 canonical 不变量集 I1–I8 + I4'。典型违反示例分别对应 I2、I5、I6：`ai_pending` 无任一 AI 行、`published` 无成功发布、`published_remote` 或 `published_local` 但被引用的 article 未同步为 `published` |
 
 **行为与输出**：见 [error-and-observability §5](./error-and-observability.md)。`--deep` 会额外输出不变量扫描结果，可能显著延长执行时间（全表扫描若干）。
 
@@ -278,16 +278,53 @@ WHERE pr.state IN ('published_remote', 'published_local')
 
 ### 4.8 `reindex`
 
-**用途**：重算派生字段（link_hash、content_hash、分类映射等）。
+**用途**：规则升级触发的批量重算（`link-hash` / `content-hash` / `categories`）。运行模型见 [state-machine §6](./state-machine.md#6-reindex_job-独立状态轮)，持久化 schema 见 [storage-schema §4.10](./storage-schema.md#410-reindex_jobs)。
 
 **参数**：
 
 | 参数 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `--target` | enum | 必填 | `link-hash` / `content-hash` / `categories` |
-| `--batch-size` | u32 | 100 | 每批数量 |
+| `--target` | enum | 必填 | `link-hash` / `content-hash` / `categories` / `all`（顺序执行三类，逐类提交独立 job）|
+| `--batch-size` | u32 | 100 | 每批 commit 行数；不受 `runtime.max_batches_per_run` 控制 |
+| `--dry-run` | bool | false | 仅统计将更新行数与待写入 rule_versions 元数据；不 INSERT `rule_versions`、不 INSERT `reindex_jobs`、不更新任何数据行 |
+| `--abort` | string | - | 取消指定 job_id（`reindex_jobs.id`），状态推进到 `aborted`；保留已更新批次（active rule 保护数据语义正确）|
 
-**行为**：全表扫描指定字段，用当前规则重算并更新。写 `rule_versions` 新行。
+**行为（两阶段语义）**：
+
+1. **启动阶段**（同事务）：
+   - INSERT `rule_versions` 新行，`status='pending'`，`payload_sha256` 取自当前规则配置
+   - INSERT `reindex_jobs` 新行，`state='pending'`，`rule_version_id` 指向上行
+   - `target='all'` 时按顺序生成三个独立 job（每个 target 一个 reindex_job + 一个 pending rule_version）
+2. **claim 阶段**：runtime 取得 lease（同 target 已有 `pending`/`running` job 时拒绝，partial unique index 保证）；状态 `pending → running`
+3. **批次执行阶段**：
+   - 按 `id` 升序批量 SELECT 待更新行（`WHERE id > last_processed_id ORDER BY id LIMIT batch_size`）
+   - 重算派生字段，UPDATE 数据行 + UPDATE `reindex_jobs.last_processed_id`，**每批一个事务 COMMIT**
+   - 批次提交后 lease 续期；崩溃/超时由 reclaim 总则按 `running → pending` 处理，下次 claim 从 checkpoint 继续
+4. **激活阶段**（终止事务）：
+   - 当 `last_processed_id == max(target_table.id)`：同一事务内 UPDATE `rule_versions.status: pending → active`、同 kind 旧 active 行 → `superseded` + `retired_at`、`reindex_jobs.state='completed'` + `finished_at`
+   - 此事务对外原子可见：`active_rule(kind)` resolver 在事务前后一致返回单一 active 行
+5. **失败/取消**：见 [state-machine §6.6 失败路径](./state-machine.md#66-失败路径)；新 `rule_versions` 保持 `pending` 直到管理员清理
+
+**与其它命令的并发约束**：
+
+- 同 target 的 reindex_job 互斥（partial unique index）；不同 target 可并发（`link-hash` 与 `categories` 同时 reindex 不冲突）
+- ingest / ai-run / publish / extract 与 reindex **不互斥**：所有读规则的命令通过 `active_rule(kind)` resolver 取规则，reindex 期间始终读到旧 active rule（详见 [state-machine §6.4](./state-machine.md#64-active-rule-resolver)）
+- `migrate run` 与 `running` reindex_job 互斥：migrate 启动前必须无 running reindex（doctor 应验证）；规则升级走 reindex，schema 升级走 migrate，二者职责边界明确
+
+**进度输出**：
+
+```text
+Reindex started: target=link-hash job_id=42 rule_version_id=17
+  [batch 1/?] processed 100 rows, last_id=10042 (12.3 rows/s)
+  [batch 2/?] processed 200 rows, last_id=10142 (15.1 rows/s)
+  ...
+  Activating: rule_versions 17 pending → active, 16 active → superseded
+Reindex completed: 12834 rows in 142s
+```
+
+`--dry-run` 输出仅前两行（启动信息）+ 「Would update N rows for target X with new rule sha256 ...」；不写任何表。
+
+**Exit code**：0 完成；1 运行时错误（job 进入 `failed`）；2 参数错误；其它见 [§6](#6-exit-code-约定)。
 
 ### 4.9 `migrate`
 

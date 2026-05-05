@@ -121,6 +121,7 @@
 - [ ] 定义 `PublishRecord`
 - [ ] 定义 `PublishItem`
 - [ ] 定义 `RawArtifact`
+- [ ] 定义 `ReindexJob`（见 [storage-schema §4.10](../design/storage-schema.md#410-reindex_jobs)）
 
 ### T202 定义状态机
 
@@ -128,6 +129,8 @@
 - [ ] 定义 `ArticleState`
 - [ ] 定义 `AiResultState`（不含 `RetryableFailed`；retryable 失败回落到 `Pending`）
 - [ ] 定义 `PublishState`
+- [ ] 定义 `ReindexJobState`（pending / running / completed / failed / aborted；见 [state-machine §6.2](../design/state-machine.md#62-状态集合)）
+- [ ] 定义 `RuleVersionStatus`（pending / active / superseded；见 [storage-schema §4.8](../design/storage-schema.md#48-rule_versions)）
 
 ### T203 定义内部 DTO
 
@@ -194,8 +197,9 @@
 - [ ] 建 `publish_records`
 - [ ] 建 `publish_items`
 - [ ] 建 `raw_artifacts`
-- [ ] 建 `rule_versions`
+- [ ] 建 `rule_versions`（含 `status` 列 + partial unique index `UNIQUE (kind) WHERE status='active'`；首版数据 INSERT 时直接 `status='active'`）
 - [ ] 建 `run_events`
+- [ ] 建 `reindex_jobs`（含 `UNIQUE (target) WHERE state IN ('pending','running')` partial unique index；见 [storage-schema §4.10](../design/storage-schema.md#410-reindex_jobs)）
 
 ### T402 实现 storage crate
 
@@ -358,9 +362,63 @@
 
 ### T903 reindex
 
-- [ ] 设计 link 规则重算任务
-- [ ] 设计 hash 规则重算任务
-- [ ] 设计派生字段重算任务
+参见 [cli-semantics §4.8](../design/cli-semantics.md#48-reindex)、[state-machine §6](../design/state-machine.md#6-reindex_job-独立状态轮)、[storage-schema §4.10](../design/storage-schema.md#410-reindex_jobs)。
+
+#### CLI 与 runtime 入口
+
+- [ ] `crates/cli` 注册 `reindex` 子命令（clap derive）：`--target` / `--batch-size` / `--dry-run` / `--abort`
+- [ ] `runtime::reindex` use-case：按 `--target` 分派；`target='all'` 时顺序生成三个独立 job
+
+#### active rule resolver
+
+- [ ] `storage` 实现 `active_rule(kind) -> RuleVersion` resolver；所有读取规则的命令（ingest / extract / ai-run / publish）改用此 resolver 取规则，禁止直接 `SELECT FROM rule_versions WHERE id = ?`
+- [ ] `active_rule` resolver 单元测试：partial unique index 保证返回 0 或 1 行；migration 后所有 kind 各有 1 行 active
+
+#### 三类 target 实现
+
+- [ ] `storage`: `link-hash` 重算（扫描 `feed_entries` + `articles`，重算 `link_hash` 派生字段，注意 `feed_entries.link_hash` 参与三层去重，去重含义随 reindex 迁移到新 active）
+- [ ] `storage`: `content-hash` 重算（扫描 `articles`，重算 `content_hash`）
+- [ ] `storage`: `categories` 重算（扫描 `articles`，重算分类映射 `category_key`）
+
+#### 两阶段激活
+
+- [ ] `runtime`: 启动事务 INSERT 新 `rule_versions` (`status='pending'`) + INSERT `reindex_jobs` (`state='pending'`)
+- [ ] `runtime`: claim/lease 推进 `pending → running`，按 batch-size 分批 commit，每批更新 `last_processed_id` + 数据行 `*_rule_version_id` 指向 pending 行
+- [ ] `runtime`: 终止事务 `pending → active`、旧 active → `superseded` + `retired_at`、`reindex_jobs` → `completed`，对外原子可见
+
+#### checkpoint 与失败恢复
+
+- [ ] `runtime`: `last_processed_id` checkpoint 持久化（每批 commit 一并写入）
+- [ ] `runtime`: lease 过期 reclaim 时保留 checkpoint，下次 claim 从 `last_processed_id` 继续
+- [ ] `runtime`: crash-after-batch 恢复（已 commit 批次保留，未 commit 批次丢失，重启从 checkpoint 重做）
+- [ ] `runtime`: 批次内部重试上限（`[retry] reindex_max_attempts`，待 W3/T301 加入 config-schema）；超限 → `failed`
+
+#### 并发与 abort
+
+- [ ] `runtime`: 同 target 启动 reindex 时 partial unique index 冲突 → 返回 exit 1 + 友好错误（"target X 已有 pending/running job"）
+- [ ] `runtime`: `--abort <job_id>` 实现：仅允许 `running` / `pending` → `aborted`；写 `aborted_reason`
+- [ ] `runtime`: migrate 启动前检查无 `running` reindex_job，否则拒绝 migrate
+
+#### 进度输出
+
+- [ ] CLI 默认输出每批进度（target / batch_index / processed / last_id / 速率）
+- [ ] 终态行输出激活信息（rule_versions pending → active / 旧 active → superseded）
+- [ ] `--dry-run` 仅输出启动信息 + "Would update N rows"
+
+#### 测试
+
+- [ ] 幂等：同 target 重跑生成新 `rule_versions` 行，`payload_sha256` 一致 → 完成后激活无差异
+- [ ] 批处理：`--batch-size` 边界（1 / max(id)+1 / 单批跨完整表）
+- [ ] dry-run：不写入任何表，输出预估行数
+- [ ] crash-after-batch 恢复：注入 batch 间 panic，重启后从 `last_processed_id` 继续，最终激活成功
+- [ ] 隔离：reindex `running` 期间调用 ingest，ingest 通过 `active_rule()` 取到旧 active rule 的 `payload_sha256`
+- [ ] 并发拒绝：同 target 第二个 `reindex --target X` 启动失败（partial unique index）
+- [ ] target='all' 部分失败：第一个 target completed、第二个 target failed 时，第三个 target 不启动；前一个的 active 状态保持
+- [ ] active rule 不被 pending 污染：`active_rule(kind)` 在 reindex 全程返回旧 active 行（验证 sha256）
+
+#### migrate 边界（文档）
+
+- [ ] 在 [cli-semantics §4.9 migrate](../design/cli-semantics.md#49-migrate) 增补：migrate 启动前 doctor preflight 检查无 `running` reindex_job；规则升级走 reindex，schema 升级走 migrate
 
 ## 12. Workstream W10：交付
 

@@ -31,6 +31,7 @@
 | `RawArtifact` | `raw_artifacts` |
 | `RuleVersion` | `rule_versions` |
 | `RunEvent` | `run_events` |
+| `ReindexJob` | `reindex_jobs` |
 
 ### 2.2 版本责任
 
@@ -360,7 +361,8 @@ AI 结果真相源表。一篇文章允许多行（不同 prompt / 协议 / 模�
 | `version_tag` | `TEXT` | NOT NULL | 语义版本或日期版本 |
 | `description` | `TEXT` | NOT NULL | 人类可读说明 |
 | `payload_sha256` | `TEXT` | NOT NULL | 规则内容 hash |
-| `retired_at` | `TIMESTAMPTZ` | NULL | 退役时间 |
+| `status` | `TEXT` | NOT NULL DEFAULT `'active'` | 见下 |
+| `retired_at` | `TIMESTAMPTZ` | NULL | 退役时间（`status='superseded'` 时回填）|
 | `created_at` | `TIMESTAMPTZ` | NOT NULL | - |
 
 `kind` 枚举：
@@ -374,9 +376,23 @@ AI 结果真相源表。一篇文章允许多行（不同 prompt / 协议 / 模�
 - `link_normalizer`
 - `content_hash`
 
+`status` 枚举（见 [state-machine §6](./state-machine.md#6-reindex_job-独立状态轮) reindex_job 状态轮）：
+
+- `pending` — 由 reindex 创建但尚未激活；其它命令通过 `active_rule(kind)` resolver 取规则时看不见此行
+- `active` — 当前生效；同 `kind` 至多一行 `active`
+- `superseded` — 被新 `active` 行替换；写 `retired_at`；为审计与历史 join 保留外键有效
+
+**状态转换**：
+- 首版 migration 创建的所有 `rule_versions` 行直接以 `status='active'` 写入（无 reindex 流程，无需 pending）
+- reindex 启动 → INSERT 新行 `status='pending'`
+- reindex 完成 → 同一事务 UPDATE 新行 `status='pending' → 'active'`，旧 active 行 `'active' → 'superseded'` + `retired_at`
+- reindex 失败/aborted → 新行保持 `pending`（管理员决策清理）
+
 约束与索引：
 
 - `UNIQUE (kind, version_tag)`
+- `UNIQUE (kind) WHERE status = 'active'`（partial unique index，保证同 kind 至多一 active）
+- `INDEX ON (kind, status)`
 - `INDEX ON (kind, retired_at)`
 
 ### 4.9 `run_events`
@@ -414,6 +430,46 @@ AI 结果真相源表。一篇文章允许多行（不同 prompt / 协议 / 模�
 - `INDEX ON (run_id)`
 - `INDEX ON (stage, severity, created_at)`
 - `INDEX ON (target_kind, target_id)`
+
+### 4.10 `reindex_jobs`
+
+reindex 作业元数据与 checkpoint 持久化表。详见 [state-machine §6](./state-machine.md#6-reindex_job-独立状态轮) reindex_job 状态轮、[cli-semantics §4.8](./cli-semantics.md#48-reindex) reindex 子命令。
+
+| 列名 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| `id` | `INTEGER` | PRIMARY KEY | - |
+| `target` | `TEXT` | NOT NULL | `link-hash` / `content-hash` / `categories` |
+| `rule_version_id` | `INTEGER` | NOT NULL | 指向新 `rule_versions` 行（status=`pending` 直到 reindex 完成）|
+| `last_processed_id` | `INTEGER` | NULL | 当前批次 checkpoint；NULL = 尚未开始扫描 |
+| `total_estimated` | `INTEGER` | NULL | 预计总行数；NULL = 不可估计 |
+| `state` | `TEXT` | NOT NULL | 见下 |
+| `error` | `TEXT` | NULL | failed / aborted 时填错误说明 |
+| `aborted_reason` | `TEXT` | NULL | aborted 时填用户提供的 reason |
+| `lease_owner` | `TEXT` | NULL | 见 [§5](#5-claim--lease-sql-模板) lease 模型 |
+| `lease_expires_at` | `TIMESTAMPTZ` | NULL | 同上 |
+| `attempt_count` | `INTEGER` | NOT NULL DEFAULT `0` | claim/reclaim 计数 |
+| `started_at` | `TIMESTAMPTZ` | NULL | 首次 `pending → running` 时间 |
+| `finished_at` | `TIMESTAMPTZ` | NULL | `completed` / `failed` / `aborted` 时间 |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL | - |
+| `updated_at` | `TIMESTAMPTZ` | NOT NULL | - |
+
+`state` 枚举（语义见 [state-machine §6.2](./state-machine.md#62-状态集合)）：
+
+- `pending`
+- `running`
+- `completed`
+- `failed`
+- `aborted`
+
+约束与索引：
+
+- `FOREIGN KEY (rule_version_id) REFERENCES rule_versions(id)`
+- `UNIQUE (target) WHERE state IN ('pending', 'running')` — 同 target 至多一个未完成 job
+- `INDEX ON (state, lease_expires_at)` — reclaim 扫描
+- `CHECK (state != 'completed' OR finished_at IS NOT NULL)`
+- `CHECK (state != 'aborted' OR aborted_reason IS NOT NULL)`
+
+**lease 复用**：reindex_job 复用 [§5](#5-claim--lease-sql-模板) 的 lease 模型；reclaim 总则按 [§2.3 lease reclaim](./state-machine.md#23-lease-模型) 处理（运行态 → `pending`，清 lease）。
 
 ## 5. Claim + Lease SQL 模板
 

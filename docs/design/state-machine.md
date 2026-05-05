@@ -217,7 +217,7 @@ reclaim 的具体状态行为按表分别规定：
 
 - `articles.state` 的任何变更都必须发生在导致派生的那个事务内
 - 没有任何 `runtime` 流程会独立读取 `articles.state` 并推进它，而不同时修改 `article_ai_results` 或 `publish_records`（**例外**：§4.1.3 的 AI 关闭直通路径，此时不存在 `article_ai_results` 可供联动，由 `publish` 阶段在选稿事务中直接升格）
-- `doctor --deep` 会校验 §6.2 列出的跨状态机不变量
+- `doctor --deep` 会校验 §7.2 列出的跨状态机不变量
 
 #### 4.1.3 AI 关闭 / 无 AI 发布降级
 
@@ -373,9 +373,87 @@ run_events 只写 [error-and-observability §4.3](./error-and-observability.md) 
 - 集成测试：完整 freeze → render → local → remote 链路 + 断电重启恢复
 - rebuild-report 契约测试：从 `publish_items` 构造 Markdown 与历史产出 byte-equal
 
-## 6. 并发与时序一致性
+## 6. reindex_job 独立状态轮
 
-### 6.1 冲突分类
+### 6.1 定位
+
+reindex 是规则升级触发的批量重算操作（`link-hash` / `content-hash` / `categories`），由 [storage-schema §4.10 `reindex_jobs`](./storage-schema.md#410-reindex_jobs) 表持久化 job 元数据与 checkpoint。
+
+reindex_job **不属于真相源对象状态机**：它不修改任何 `feed_entries.state` / `articles.state` / `article_ai_results.state` / `publish_records.state`。它只更新数据行的 `*_rule_version_id` 外键，并控制 `rule_versions.status` 的两阶段激活时序。因此 §7.2 跨状态机不变量 I1–I8 不受 reindex 直接影响。
+
+### 6.2 状态集合
+
+| 状态 | 语义 | 是否运行态 |
+|---|---|---|
+| `pending` | reindex_job 已创建、新 `rule_versions` 行 INSERT 为 `status='pending'`、尚未开始扫描或被 reclaim 后等待重领 | 否 |
+| `running` | 持有 lease，扫描 + 批量更新进行中；按 `--batch-size` 提交 checkpoint（每批 commit）| 是 |
+| `completed` | 全部行已更新；同一终止事务内 `rule_versions.status: pending → active`、旧 active 同 kind 行 → `superseded` + `retired_at` | 否（成功终态）|
+| `failed` | 不可恢复失败（如规则签名校验失败、批次重试上限耗尽）；`rule_versions` 仍保持 `pending` | 否（失败终态）|
+| `aborted` | 用户主动终止（`reindex --abort`）；管理员决策清理 pending `rule_versions` | 否（取消终态）|
+
+### 6.3 transition 表
+
+| from | to | 触发 | 副作用 | 备注 |
+|---|---|---|---|---|
+| (无) | `pending` | `cli reindex --target X` 启动 | INSERT `rule_versions` (`status='pending'`) + INSERT `reindex_jobs` (`state='pending'`) 同事务 | 同 target 已有 `pending`/`running` job 时拒绝（partial unique index）|
+| `pending` | `running` | runtime claim | 写 `lease_owner` / `lease_expires_at` / `started_at`；`attempt_count += 1` | 见 [storage-schema §5](./storage-schema.md#5-claim--lease-sql-模板) lease 模板 |
+| `running` | `running` | 批次完成 | UPDATE `last_processed_id = batch_max_id`；同一批次的数据行 `*_rule_version_id` 已指向 pending 行；批次内 COMMIT | 每批一个 SQLite 事务，避免长事务 |
+| `running` | `pending` | lease 过期 reclaim | 清 lease 字段，保留 `last_processed_id`；下次 claim 从 checkpoint 继续 | 与 [§2.3 lease reclaim 总则](#23-lease-模型) 一致；`attempt_count` 不变 |
+| `running` | `completed` | `last_processed_id == max(target_table.id)` | 终止事务内：`rule_versions.status: pending → active`，同 kind 旧 active 行 → `superseded` + `retired_at`；`reindex_jobs.state='completed'` + `finished_at` | 关键：版本激活与 job 完成同一事务，对外原子可见 |
+| `running` | `failed` | 规则 sha256 不匹配 / 批次重试上限耗尽 / 不可恢复 SQL 错误 | 写 `error` + `finished_at`；**不**激活 `rule_versions`；pending 行保留供管理员介入 | 与 retry budget 不同：reindex 内部批次重试由 runtime 控制；超限后整个 job failed |
+| `running` | `aborted` | `cli reindex --abort <job_id>` | 写 `aborted_reason` + `finished_at`；保留 pending `rule_versions` 行直到管理员清理 | 已更新的数据行 `*_rule_version_id` 指向 pending 行；不回滚（数据语义仍正确，因为 active resolver 取的是旧 active）|
+
+### 6.4 active rule resolver
+
+所有读取规则的命令（ingest / extract / ai-run / publish）通过 `active_rule(kind)` resolver 取规则：
+
+```sql
+SELECT id, payload_sha256, ... FROM rule_versions
+WHERE kind = :kind AND status = 'active';
+```
+
+partial unique index `UNIQUE (kind) WHERE status = 'active'` 保证返回 0 或 1 行；首版 migration 后保证返回 1 行。
+
+**reindex 期间的可见性**：
+
+- 旧 active rule 仍 `status='active'`，其它命令使用旧规则不受影响
+- 已更新批次的数据行 `*_rule_version_id` 指向 `pending` 行；这些数据行从查询角度（`JOIN rule_versions WHERE status='active'`）查不到当前关联的规则版本——这是设计意图：reindex 期间数据行的"逻辑规则版本"仍由旧 active 决定，pending 行只是"未来某一刻的快照"
+- reindex `running → completed` 的瞬间（`pending → active` 同事务），所有引用 pending 行的数据行立刻成为新 active 的成员；旧版降为 `superseded`
+- 此设计避免「reindex 期间新写入的数据行该用哪个规则版本」的歧义：新写入数据行始终通过 `active_rule(kind)` 取旧 active 写入；reindex 不感知 reindex 期间的新增行（不变量见 §6.5）
+
+### 6.5 与 ingest 的并发不变量
+
+reindex 期间 ingest 持续运行；由于 reindex 不阻塞 ingest，可能出现「reindex 完成时仍有数据行用旧 active 写入但 last_processed_id 已超过该行 id」的情况。处理约定：
+
+- reindex 完成后立即跑一遍 `doctor --deep`，会发现有 `*_rule_version_id` 仍指向已变 `superseded` 的旧版（这是预期，**不**算违反不变量；记 INFO 不告警）
+- 真正需要新规则覆盖这些"漏网行"时，调用方应在 reindex 完成后再启动一次 reindex（同 target），或在 ingest 流量低谷期触发；不引入「reindex 排空 ingest 队列」的机制
+
+### 6.6 失败路径
+
+| 失败类型 | 终态 | 处理 |
+|---|---|---|
+| 规则 sha256 与配置不匹配 | `failed` | runtime 启动前校验，发现不匹配 → `failed`，不进入 running |
+| 批次 SQL 错误（瞬时） | 重试 → `running` 内部重试 | 重试上限由 `[retry] reindex_max_attempts`（待 W3 加入）决定；超限 → `failed` |
+| 批次 SQL 错误（永久，如 schema 不匹配） | `failed` | 终止；管理员介入修 schema 或回退 reindex 启动决策 |
+| 进程崩溃 / lease 过期 | reclaim → `pending` | 下次 claim 从 `last_processed_id` 继续 |
+| 用户 abort | `aborted` | 见 §6.3 备注；不自动清理 pending rule_versions |
+
+### 6.7 观测点
+
+- 每次 `state` 变更写 `run_events`（stage=`reindex`）
+- batch 提交不写 `run_events`（避免膨胀）；只在 trace span 中记录
+- `running → completed` 写 INFO 事件，包含：target / rule_version_id / 受影响行数 / 耗时
+- `running → failed` / `aborted` 写 error / warn 事件
+
+### 6.8 验证方式
+
+- 单元测试：每条 transition + 失败回退（lease 过期、sha256 不匹配、abort、批次 SQL 错误）
+- 集成测试：完整 `pending → running → completed` 链路 + crash-after-batch 恢复 + ingest 期间 reindex 不污染 active resolver
+- 隔离测试：reindex 期间调用 ingest，验证 ingest 取到旧 active rule（payload_sha256 比对）
+
+## 7. 并发与时序一致性
+
+### 7.1 冲突分类
 
 | 冲突 | 检测方式 | 解决 |
 |---|---|---|
@@ -384,7 +462,7 @@ run_events 只写 [error-and-observability §4.3](./error-and-observability.md) 
 | 状态被并发改动 | `WHERE state = :expected` 返回 0 行 | 放弃，重新读取真相源 |
 | UNIQUE 冲突 | SQL error | 视业务语义决定幂等 skip 或错误 |
 
-### 6.2 跨状态机不变量
+### 7.2 跨状态机不变量
 
 这份列表是 `doctor --deep` 扫描的 **canonical 不变量集**。CLI 中列出的任何 `--deep` 示例必须是本集合的子集。
 
@@ -406,7 +484,7 @@ run_events 只写 [error-and-observability §4.3](./error-and-observability.md) 
 
 上述不变量由 `runtime` 在事务内保证；通过 `doctor --deep` 扫描持续验证。若发现破坏，写 critical 事件并人工介入。
 
-## 7. 与宪法的对齐检查
+## 8. 与宪法的对齐检查
 
 - §5.5 幂等与并发：claim + lease + `WHERE lease_owner = :owner AND state = :expected` ✓
 - §5.1 失败优先：每条 transition 都有失败分支 ✓
