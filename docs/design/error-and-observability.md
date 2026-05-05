@@ -145,6 +145,53 @@ trait ClassifiedError {
 - 禁止 `if let Ok(x) = ... { } // 忽略 Err`
 - 允许的唯一例外：日志写入本身失败（避免递归 panic）
 
+#### Enforcement（三层）
+
+约束以三层机制硬性 enforce，而非仅靠 PR review：
+
+**第 1 层：workspace 级 lint deny**（W1 / T101 落地）
+
+根 `Cargo.toml` 启用 `[workspace.lints]`（Rust 1.74+）：
+
+```toml
+[workspace.lints.rust]
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+let_underscore_must_use = "deny"   # let _ = result; 因 Result 自带 #[must_use]
+let_underscore_future = "deny"     # let _ = async_fn(); 未 await 的 Future
+ok_expect = "warn"                 # .ok().expect("...") 反模式
+ignored_unit_patterns = "warn"
+```
+
+**第 2 层：CI ripgrep 扫描**（W10 / T1003 落地）
+
+clippy 兜不住的两类模式由 CI 步骤的 ripgrep 检查捕获：
+
+```bash
+# 模式 A：if let Ok(_) = fallible() {} （单分支忽略 Err）
+rg -nP 'if\s+let\s+Ok\([^)]*\)\s*=' crates/ src/
+
+# 模式 B：.ok(); 独立语句（丢弃 Result，非赋值或链式调用）
+rg -nP '\.ok\(\)\s*;\s*$' crates/ src/
+```
+
+任一非空匹配 → CI fail。
+
+**第 3 层：allowlist 显式豁免**
+
+`.ci/swallowed-error-allowlist.txt` 维护例外清单，每行格式：
+
+```
+<file>:<line>:<reason>
+# 例：
+crates/observability/src/sink.rs:42:tracing fallback writer 失败时的递归 panic 防护
+```
+
+**唯一允许豁免来源**：日志写入失败（`tracing` / `log` crate 的 sink 自身错误）。其它任何例外申请须在 PR 中说明并经设计 owner 批准；非允许来源的条目在 review 阶段 reject。
+
+ripgrep 步骤运行时先减去 allowlist 中的 `<file>:<line>` 集合再判定结果。
+
 ## 4. 可观测性架构
 
 ### 4.1 三个层次

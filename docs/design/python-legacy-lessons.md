@@ -119,7 +119,7 @@
 - 能力层不得吞错误，必须向 `runtime` 返回 `Result`
 - `runtime` 负责把失败写入 `run_events` 表和 `feed_entries.last_error` / `articles.last_error` 等字段
 - `observability` 把每个错误作为结构化事件推入 `tracing`
-- 代码风格检查禁止 `let _ = some_fallible_op();` 这种静默吞错写法
+- 代码风格检查禁止 `let _ = some_fallible_op();` 这种静默吞错写法（具体三层 enforcement——workspace lints / CI ripgrep / allowlist——见 [error-and-observability §3.3](./error-and-observability.md#33-绝不静默吞掉错误)）
 
 详见 [error-and-observability](./error-and-observability.md)（Phase C 产出）。
 

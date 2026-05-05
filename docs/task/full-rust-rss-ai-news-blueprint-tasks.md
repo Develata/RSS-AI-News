@@ -82,6 +82,7 @@
 - [x] 新增 `.gitignore`
 - [ ] 新增 `rustfmt.toml`
 - [ ] 新增 `clippy.toml`
+- [ ] 在根 `Cargo.toml` 启用 `[workspace.lints]` 禁止吞错误 lint：`unused_must_use=deny`、`clippy::let_underscore_must_use=deny`、`clippy::let_underscore_future=deny`、`clippy::ok_expect=warn`、`clippy::ignored_unit_patterns=warn`（依据 [error-and-observability §3.3 Enforcement 第 1 层](../design/error-and-observability.md#33-绝不静默吞掉错误)）
 
 ### T102 初始化 crate 骨架
 
@@ -382,6 +383,8 @@
 - [ ] `cargo test`
 - [ ] migration smoke test
 - [ ] docker build smoke test
+- [ ] 禁止吞错误的 ripgrep 扫描步骤：模式 A `if\s+let\s+Ok\([^)]*\)\s*=`、模式 B `\.ok\(\)\s*;\s*$`；任一非空匹配 fail（依据 [error-and-observability §3.3 Enforcement 第 2 层](../design/error-and-observability.md#33-绝不静默吞掉错误)）
+- [ ] 维护 `.ci/swallowed-error-allowlist.txt`（唯一允许来源：日志写入失败；新增条目须在 PR 中说明并经设计 owner 批准）
 
 ## 13. 阶段验收点
 
