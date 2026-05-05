@@ -628,7 +628,7 @@ retryable 失败不作为独立持久状态（见 [state-machine §4.2](../desig
 
 **不允许**：在 Rust 二进制内部引入 tokio interval、cron 解析器、或任何形式的"等待下一个周期"循环。任何这类需求都改写为宿主调度 + 单次 CLI。
 
-唯一例外：`ingest` / `ai-run` 内部的批次处理循环（处理当前批次直到 `pending` 清空或达到 `batch_size * max_batches_per_run`）。这是单次运行内的工作分片，不是跨运行的调度。
+唯一例外：`ingest` / `ai-run` 内部的批次处理循环（处理当前批次直到 `pending` 清空或达到 `batch_size * max_batches_per_run`）。这是单次运行内的工作分片，不是跨运行的调度。`max_batches_per_run` 字段定义、默认值（`10`）、退出语义与 `--max-batches` CLI 覆盖见 [config-schema §4.4](../design/config-schema.md#44-runtime-字段语义)；该字段同时被 `cli-semantics.md` §4.1 / §4.2 / §4.11 引用。
 
 ## 15. 实施阶段
 

@@ -59,6 +59,7 @@ rss-ai-news
 | `--source` | string | 全部 | 只处理指定源（`category_key:source_key`）|
 | `--skip-fetch` | bool | false | 跳过正文抓取（只发现 + 去重）|
 | `--batch-size` | u32 | 50 | 每批抓取任务数 |
+| `--max-batches` | u32 | `runtime.max_batches_per_run`（默认 10）| 单次 run 内部批次循环上限；`0` = 不限。详见 [config-schema §4.4](./config-schema.md#44-runtime-字段语义) |
 
 **行为**：
 
@@ -93,6 +94,7 @@ Ingest completed:
 | 参数 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `--batch-size` | u32 | 20 | 每批处理数 |
+| `--max-batches` | u32 | `runtime.max_batches_per_run`（默认 10）| 单次 run 内部批次循环上限；`0` = 不限。详见 [config-schema §4.4](./config-schema.md#44-runtime-字段语义) |
 | `--model` | string | `app.toml` 中的值 | 覆盖模型 |
 
 **行为**：
@@ -315,6 +317,8 @@ WHERE pr.state IN ('published_remote', 'published_local')
 **用途**：一体化执行 `ingest` + `ai-run` + `publish`。
 
 **参数**：接受所有三个子命令的参数，通过前缀区分（如 `--ingest-batch-size`），或直接继承全局 flag。
+
+**`--max-batches` 继承语义**：`run` 自身接受 `--max-batches`（覆盖 `runtime.max_batches_per_run`）；`run` 内部触发的 `ingest` / `ai-run` 阶段沿用同一个生效值（即 CLI flag > config > 默认 10），不引入 `--ingest-max-batches` / `--ai-run-max-batches` 复合参数。`publish` 阶段不受 `max_batches_per_run` 控制（见 [config-schema §4.4](./config-schema.md#44-runtime-字段语义)）。
 
 **行为**：按顺序执行三个阶段。任一阶段失败不阻塞后续阶段（除非 `ingest` 全量失败导致无新文章）。
 

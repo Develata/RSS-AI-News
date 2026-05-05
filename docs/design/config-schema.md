@@ -126,6 +126,10 @@ feed_entry_max_attempts = 5
 ai_max_attempts = 3
 publish_max_attempts = 5
 
+# === 单次 run 工作量边界 ===
+[runtime]
+max_batches_per_run = 10                 # ingest / ai-run 内部批次循环上限；0 = 不限（仅由 lease/宿主超时兜底）
+
 # === Raw Artifact ===
 [artifact]
 retention_policy = "on_failure"          # "always" | "on_failure" | "sampled" | "debug_only" | "off"
@@ -180,6 +184,32 @@ metrics_bind = "127.0.0.1:9090"
 4. PG 连接、SQLite 等非 HTTP 调用不受本配置影响
 
 **校验**：当 `HTTP_PROXY` / `HTTPS_PROXY` 设置但格式非法时，`validate-config` 与 `doctor` 都返回 FAIL；`doctor preflight` 在网络可达性检查时按代理路径访问。
+
+### 4.4 `[runtime]` 字段语义
+
+`[runtime]` 段控制单次 CLI 运行内部的工作量边界，与跨运行调度无关（跨运行调度由宿主 cron / GitHub Actions 负责，见 [蓝图 §14.3](../plan/full-rust-rss-ai-news-blueprint.md)）。
+
+| 字段 | 作用阶段 | 单位 | 默认值 | 说明 |
+|---|---|---|---|---|
+| `max_batches_per_run` | ingest / ai-run 内部批次循环 | 批次数 | `10` | 单次 run 内部循环最多处理多少批；与 `--batch-size` 相乘得到本次运行的处理上限（如 `batch_size=50 × max_batches_per_run=10` = 500 条/run）。`0` 表示不限，仅由 lease 过期 + 宿主超时兜底。CLI `--max-batches` 可覆盖 |
+
+**触达上限的退出语义**：达到 `max_batches_per_run` 后，runtime 退出本阶段循环并返回 exit code 0（视为本次配额完成，不是错误），同时写一行 INFO 日志：
+
+```text
+[INFO] max_batches_per_run reached (10 batches × 50 size = 500 items processed); leaving N pending entries for next run
+```
+
+剩余 `pending` 条目自然由下一次 cron / 宿主调度的 run 继续处理，符合"宿主负责调度，进程负责单次执行"的分工。
+
+**与 `[lease]` / 宿主超时的关系**：三者构成单次 run 的边界三层兜底：
+
+1. `max_batches_per_run`（应用层显式上限，主防线）
+2. `lease.*_duration_seconds` 过期回收（防止单批次卡死，副防线）
+3. 宿主超时（GitHub Actions 360 min / 自定义 cron 超时，最后兜底）
+
+backfill 等已知大量待处理场景，调用方应显式 `--max-batches=0` 解除应用层上限，仅依赖 lease 与宿主超时；常规增量场景维持默认值 `10`。
+
+**与 `publish` 命令的关系**：`publish` 不受 `max_batches_per_run` 控制（publish 的工作量天然受当日 `ready_for_publish` 候选集与 `max_items_per_report` 限制；不存在"分多批跨 run"的概念）。
 
 ## 5. `categories/*.toml` Schema
 
@@ -294,6 +324,8 @@ AppConfig
 ├── extractor: ExtractorConfig
 ├── lease: LeaseConfig
 ├── retry: RetryConfig
+├── runtime: RuntimeConfig
+│   └── max_batches_per_run: u32         # 0 = 不限
 ├── artifact: ArtifactConfig
 └── observability: ObservabilityConfig
 
@@ -330,6 +362,7 @@ SourceConfig
 | `--dry-run` | 全局 flag，禁止写入操作 |
 | `--category <key>` | 过滤只处理指定分类 |
 | `--timezone <tz>` | `publish.target_timezone` |
+| `--max-batches <n>` | `runtime.max_batches_per_run`（仅 `ingest` / `ai-run` / `run`）；`0` = 不限 |
 
 覆盖在 `app.toml` 反序列化之后、校验之前应用。
 
