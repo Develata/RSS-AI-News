@@ -127,7 +127,12 @@ trait ClassifiedError {
 - `runtime` 根据 `is_retryable()` 决定：
   - `true` → 释放 lease 为可重试（`state` 回退，`attempt_count` 已递增）
   - `false` → 释放 lease 为永久失败（`state` 进入终态）
-- 无论哪种，必须同时写 `last_error` + `last_error_kind` 到对应行
+- 无论哪种，必须同时写 `last_error` + `last_error_kind` 到失败发生的真相源行：
+  - feed 拉取失败 → `feed_sources`
+  - 正文提取失败 → `feed_entries`
+  - AI 调用失败 → `article_ai_results`
+  - 发布失败 → `publish_records`
+- `articles` 表不承载阶段错误：其状态机（[state-machine §4.1](./state-machine.md#41-articlesstate)）无失败终态，articles 行无 `last_error*` 列。AI `permanent_failed` 不更新 `articles.state`，让其他 prompt/model 版本仍有机会补跑（错误真相在 `article_ai_results.last_error*`）
 
 ### 3.2 流程协调层 → 交互层
 

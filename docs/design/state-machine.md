@@ -217,6 +217,7 @@ reclaim 的具体状态行为按表分别规定：
 
 - `articles.state` 的任何变更都必须发生在导致派生的那个事务内
 - 没有任何 `runtime` 流程会独立读取 `articles.state` 并推进它，而不同时修改 `article_ai_results` 或 `publish_records`（**例外**：§4.1.3 的 AI 关闭直通路径，此时不存在 `article_ai_results` 可供联动，由 `publish` 阶段在选稿事务中直接升格）
+- **`articles` 不承载阶段错误**：`articles.state` 无失败终态；任意阶段失败（fetch / extract / AI / publish）的 `last_error` / `last_error_kind` 写在对应真相源行（`feed_sources` / `feed_entries` / `article_ai_results` / `publish_records`），不写 `articles` 行（`articles` 表也无 `last_error*` 列）。错误传播规则见 [error-and-observability §3.1](./error-and-observability.md#31-能力层--流程协调层)
 - `doctor --deep` 会校验 §7.2 列出的跨状态机不变量
 
 #### 4.1.3 AI 关闭 / 无 AI 发布降级

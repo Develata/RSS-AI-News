@@ -208,6 +208,8 @@ feed 条目真相源表。承载"发现 → 抓取 → 提取 → 入库"状态�
 - `FOREIGN KEY (extractor_version) REFERENCES rule_versions(id)`
 - `FOREIGN KEY (body_html_artifact_id) REFERENCES raw_artifacts(id) ON DELETE SET NULL`
 
+**设计注（无 `last_error*` 列）**：`articles.state`（见 [state-machine §4.1](./state-machine.md#41-articlesstate)）只有 `publish_skipped` / `published` / `retired` 三种终态，没有失败终态。任意阶段失败（fetch / extract / AI / publish）的 `last_error` / `last_error_kind` 写在对应的真相源行 `feed_sources` / `feed_entries` / `article_ai_results` / `publish_records`，因此 `articles` 表不需要 `last_error*` 列。错误传播规则见 [error-and-observability §3.1](./error-and-observability.md#31-能力层--流程协调层)。
+
 ### 4.4 `article_ai_results`
 
 AI 结果真相源表。一篇文章允许多行（不同 prompt / 协议 / 模型）。

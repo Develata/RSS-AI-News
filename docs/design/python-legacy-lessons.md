@@ -117,7 +117,7 @@
 
 - `domain` 层定义分层错误 enum：`FeedError` / `ExtractError` / `AiError` / `PublishError` / `StorageError`，每种带 `retryable: bool` 与 `kind` 枚举
 - 能力层不得吞错误，必须向 `runtime` 返回 `Result`
-- `runtime` 负责把失败写入 `run_events` 表和 `feed_entries.last_error` / `articles.last_error` 等字段
+- `runtime` 负责把失败按真相源行写入 `last_error` / `last_error_kind`：feed 拉取失败 → `feed_sources`，正文提取失败 → `feed_entries`，AI 调用失败 → `article_ai_results`，发布失败 → `publish_records`；同时所有可观测失败按 [error-and-observability §4.3](./error-and-observability.md) 的 canonical 子集写 `run_events`。`articles` 表本身不承载阶段错误（无失败终态、无 `last_error*` 列），详见 [state-machine §4.1](./state-machine.md#41-articlesstate)
 - `observability` 把每个错误作为结构化事件推入 `tracing`
 - 代码风格检查禁止 `let _ = some_fallible_op();` 这种静默吞错写法（具体三层 enforcement——workspace lints / CI ripgrep / allowlist——见 [error-and-observability §3.3](./error-and-observability.md#33-绝不静默吞掉错误)）
 
