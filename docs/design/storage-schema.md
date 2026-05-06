@@ -341,8 +341,8 @@ AI 结果真相源表。一篇文章允许多行（不同 prompt / 协议 / 模�
 | `file_path` | `TEXT` | NULL | 大于阈值时落外部文件 |
 | `byte_size` | `INTEGER` | NOT NULL | 原始字节数 |
 | `sha256` | `TEXT` | NOT NULL | 内容 hash |
-| `retention_policy` | `TEXT` | NOT NULL | `always` / `on_failure` / `sampled` / `debug_only` |
-| `expires_at` | `TIMESTAMPTZ` | NULL | TTL 到期时间。`NULL` 表示永不过期，仅当 `retention_policy='always'` 或其他无需 TTL 的保留策略使用；非 NULL 值由 runtime 在写入时按策略计算（与 [replay-and-artifacts §3.2](./replay-and-artifacts.md) 保持一致）|
+| `retention_policy` | `TEXT` | NOT NULL | `always` / `on_failure` / `sampled` / `debug_only`（`off` 不写入本表，详见 [replay-and-artifacts §3.1](./replay-and-artifacts.md)）|
+| `expires_at` | `TIMESTAMPTZ` | NULL | TTL 到期时间。`NULL` 仅当 `retention_policy='always'` 时使用（永不过期）；其余策略写 `created_at + ttl_days`。`on_failure` 在关联操作成功时由 runtime 同步 DELETE（不依赖 expires_at），scanner 仅作崩溃恢复兜底；详见 [replay-and-artifacts §3.2 / §6.4](./replay-and-artifacts.md)。Artifact 写入与业务事务隔离（独立短事务 commit），见 [replay-and-artifacts §6.4](./replay-and-artifacts.md#64-写入时序与持久化边界) |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL | - |
 
 约束与索引：

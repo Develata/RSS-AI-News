@@ -239,7 +239,7 @@ FeedSource
 4. AI 任务只从数据库领取
 5. 发布必须先冻结快照，再渲染，再推送
 6. 所有并行任务都必须 claim + lease
-7. 所有外部输入**必须具备 replay 能力**：系统设计层面为 feed payload、HTML payload、AI raw response 留出 artifact 通道；实际是否持久化由 `config.artifact.retention_policy` 控制（默认 `on_failure`，调试时可设 `always`）。宪法要求的是"能力常备"，不是"默认全量保留"
+7. 所有外部输入**必须具备 replay 能力**：系统设计层面为 feed payload、HTML payload、AI raw response 留出 artifact 通道；解析/处理之前由 `config.artifact.retention_policy` 决定是否捕获并独立事务持久化（默认 `on_failure` = 总是捕获、关联操作成功后同步清理；`off` = 完全不捕获；调试时可设 `always`）。宪法要求的是"能力常备"，不是"默认全量保留"。详见 [replay-and-artifacts §3.2 / §6.4](../design/replay-and-artifacts.md)
 8. 核心对象、核心状态、核心配置必须有单一真相源
 9. 所有核心流程都必须显式定义失败路径、观测点和验证方式
 

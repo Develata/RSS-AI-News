@@ -62,26 +62,56 @@
 
 ### 3.1 五种策略
 
-| retention_policy | 行为 | 适用场景 |
-|---|---|---|
-| `always` | 始终保留，不设 TTL | 调试环境、关键数据 |
-| `on_failure` | 仅在关联操作失败时保留 | 生产环境默认 |
-| `sampled` | 按概率采样保留 | 生产环境审计 |
-| `debug_only` | 仅在 `log_level=debug/trace` 时保留 | 开发环境 |
-| `off` | **完全不写入** `raw_artifacts`；该配置只影响写入路径，DB 列永不出现该值 | 纯离线测试 / 磁盘紧张场景 |
+> **术语**：`retention_policy` 在本设计中同时承担两个职责——**捕获门控**（决定是否在解析/处理前持久化 artifact）与**保留策略**（决定写入后保留多久）。"凡被捕获的 artifact，必须在解析/处理之前持久化"是 §6.4 的硬约束；保留与否由各策略自行决定。
+
+| retention_policy | 捕获门控 | 保留策略 | 适用场景 |
+|---|---|---|---|
+| `always` | 总是捕获 | 永不过期（`expires_at = NULL`）| 调试环境、关键数据 |
+| `on_failure` | 总是捕获 | 关联操作成功 → 由 runtime 同步清理（DELETE 行 + 删除文件，幂等，best-effort）；失败 / panic / 流式截断 / 部分失败 → 按 TTL 保留 | 生产环境默认 |
+| `sampled` | 按 `config.artifact.sample_rate` 概率门控 | 按 TTL 保留 | 生产环境审计 |
+| `debug_only` | 仅在 `log_level ∈ {debug, trace}` 时捕获 | 按 TTL 保留 | 开发环境 |
+| `off` | **完全不捕获**（不写入 `raw_artifacts`，DB 列永不出现该值）| n/a | 纯离线测试 / 磁盘紧张场景 |
 
 ### 3.2 策略执行
 
-写入时：
-1. 根据 `config.artifact.retention_policy` 和当前操作结果决定是否保留
-2. `on_failure`：操作成功 → 不写入 artifact；操作失败 → 写入
-3. `sampled`：按 `config.artifact.sample_rate` 概率决定
-4. `debug_only`：检查当前日志级别
+#### 3.2.1 捕获门控（解析/处理前）
 
-清理时：
-1. 后台任务定期扫描 `expires_at < NOW()` 的行
-2. 如果 `storage_kind = 'file'`，先删除文件，再删除行
+| `retention_policy` | 捕获判定 |
+|---|---|
+| `off` | 跳过，不写入 `raw_artifacts` |
+| `debug_only` | 仅当 `log_level ∈ {debug, trace}` 时捕获 |
+| `sampled` | 按 `config.artifact.sample_rate` 概率随机命中才捕获 |
+| `on_failure` / `always` | 总是捕获 |
+
+捕获时序由 §6.4 强制：被捕获的 artifact 必须在能力层调用解析/处理逻辑之前完成 artifact 写入并 commit（**独立短事务**，不与可能回滚的业务事务合并）。
+
+#### 3.2.2 保留与清理
+
+| `retention_policy` | 保留行为 |
+|---|---|
+| `always` | `expires_at = NULL`；永不过期；仅由管理员显式删除 |
+| `on_failure` | `expires_at = created_at + ttl_days`；关联操作成功后由 runtime **同步清理**（DELETE DB 行 + 删除文件，幂等）；失败路径不触发清理，由 expires_at scanner 按 TTL 兜底 |
+| `sampled` / `debug_only` | `expires_at = created_at + ttl_days`；仅由 expires_at scanner 清理 |
+
+后台清理 scanner：
+
+1. 定期扫描 `expires_at < NOW()` 的行
+2. 如果 `storage_kind = 'file'`，先删除文件再删除行；文件删除失败的孤儿行由下一轮 scanner 重试，幂等
 3. 删除事件写入 `run_events`
+
+崩溃恢复与补偿语义见 §6.4。
+
+#### 3.2.3 `on_failure` 失败粒度
+
+`on_failure` 触发"保留"还是"同步清理"取决于该 artifact 关联的具体操作单元：
+
+| artifact kind | 关联操作单元 | 失败定义（保留触发） |
+|---|---|---|
+| `feed_payload` | 单次 feed 拉取 + 解析 + entry 写入 | feed-rs 解析失败 / `link_normalizer` 失败 / 任一 entry 入库失败 / panic / 业务事务回滚 |
+| `html_payload` | 单 entry 详情页抓取 + extract | extractor 失败 / `content_hash` 计算失败 / panic |
+| `ai_raw_response` | 单 `article_ai_result` 调用 + 输出解析 | AI HTTP 失败 / 输出解析失败 / 流式响应被截断 / panic |
+
+整次操作单元内部任一子失败均视作整次失败：artifact 保留，同步清理不触发。
 
 ### 3.3 TTL 计算
 
@@ -89,7 +119,9 @@
 expires_at = created_at + config.artifact.ttl_days
 ```
 
-`retention_policy = "always"` 时 `expires_at = NULL`，永不过期。
+- `retention_policy = "always"`：`expires_at = NULL`，永不过期。
+- `retention_policy = "on_failure"`：`expires_at` 仍按 `created_at + ttl_days` 写入；关联操作成功的同步清理（§3.2.2 / §6.4）会在 `expires_at` 之前直接 DELETE，scanner 仅作崩溃恢复兜底。
+- `retention_policy = "sampled" / "debug_only"`：`expires_at` 按 TTL 写入，仅由 scanner 清理。
 
 ## 4. Replay 能力
 
@@ -205,8 +237,8 @@ Backfill 和 Replay 共享解析逻辑，但 Backfill 会实际修改数据库�
 
 ```text
 触发：feed crate 完成 HTTP 拉取、收到响应 body 后
-条件：retention_policy 允许
-写入：runtime 层调用 storage::artifact_repository.upsert()
+条件：retention_policy 捕获门控通过（见 §3.2.1）
+写入：runtime 层调用 storage::artifact_repository.upsert()，独立短事务 commit
 时序：在 feed 解析之前写入（保证解析失败也有 artifact）
 ```
 
@@ -214,8 +246,8 @@ Backfill 和 Replay 共享解析逻辑，但 Backfill 会实际修改数据库�
 
 ```text
 触发：extractor crate 完成详情页 HTTP 拉取后
-条件：retention_policy 允许
-写入：runtime 层调用 storage::artifact_repository.upsert()
+条件：retention_policy 捕获门控通过（见 §3.2.1）
+写入：runtime 层调用 storage::artifact_repository.upsert()，独立短事务 commit
 时序：在正文提取之前写入
 ```
 
@@ -223,14 +255,32 @@ Backfill 和 Replay 共享解析逻辑，但 Backfill 会实际修改数据库�
 
 ```text
 触发：ai crate 收到 AI API 响应后
-条件：retention_policy 允许（AI 响应建议 on_failure 或 always）
-写入：runtime 层调用 storage::artifact_repository.upsert()
+条件：retention_policy 捕获门控通过（见 §3.2.1；AI 响应建议 on_failure 或 always）
+写入：runtime 层调用 storage::artifact_repository.upsert()，独立短事务 commit
 时序：在输出解析之前写入
 ```
 
-### 6.4 写入时序的关键约束
+### 6.4 写入时序与持久化边界
 
-**Artifact 写入必须在解析/处理之前完成。** 理由：如果解析过程 panic 或崩溃，artifact 已经落盘，可以通过 replay 重现问题。如果先解析后写 artifact，崩溃场景下 artifact 丢失。
+**写入时序**：被捕获的 artifact（§3.2.1 命中）必须在解析/处理之前完成写入并 commit。理由：如果解析过程 panic 或崩溃，artifact 已经落盘，可以通过 replay 重现问题。如果先解析后写 artifact，崩溃场景下 artifact 丢失。
+
+**事务隔离**：artifact 写入必须使用**独立短事务**单独 commit，**不能**与后续业务事务（解析结果写入 / 状态机推进）合并。否则业务事务回滚会撤销 artifact 行，违反崩溃可追溯性。具体地：
+
+- 能力层在自己的事务里调用 `storage::artifact_repository.upsert(...)` 并 commit
+- runtime 随后开启业务事务执行解析逻辑、状态推进、写入 `feed_entries` / `articles` / `article_ai_results` / `publish_records`
+- 业务事务回滚不影响已 commit 的 artifact
+
+**`on_failure` 同步清理**：业务事务**成功**后，runtime 在该事务**之外**对 `on_failure` artifact 触发幂等清理（DELETE 行 + 删除文件）。清理路径必须满足：
+
+- **幂等**：重复清理同一 artifact 不报错（DELETE 影响 0 行视作已清理）
+- **best-effort**：清理失败不回滚业务事务，由 expires_at scanner 按 TTL 兜底
+
+**清理补偿**：DB 行 / 文件删除非原子，可能产生残留：
+
+- DB 行残留（文件已删，行未删）：下一轮 scanner 看到 `storage_kind='file'` 但 `file_path` 不存在 → 直接 DELETE 行
+- 孤儿文件（行已删，文件未删）：scanner 不再可见，由独立的 orphan-file 扫描或对象存储 lifecycle 兜底；首版可由运维脚本周期清理
+
+**`retention_policy` 不能影响"是否在解析前 commit"**：除 `off` / `debug_only` / `sampled` 未命中这三条**捕获门控**短路（§3.2.1）外，所有其他策略的 artifact 必须在解析前 commit；`on_failure` 的"成功后清理"是事后动作，不是写入条件。
 
 ## 7. 与 `rebuild-report` 的区别
 

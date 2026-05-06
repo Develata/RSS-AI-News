@@ -132,7 +132,7 @@ max_batches_per_run = 10                 # ingest / ai-run 内部批次循环上
 
 # === Raw Artifact ===
 [artifact]
-retention_policy = "on_failure"          # "always" | "on_failure" | "sampled" | "debug_only" | "off"
+retention_policy = "on_failure"          # 默认；"always" | "on_failure" | "sampled" | "debug_only" | "off"。on_failure = 解析前总是捕获并独立事务 commit，关联操作成功后同步清理；详见 replay-and-artifacts §3.1 / §3.2
 sample_rate = 0.1                        # retention_policy = "sampled" 时生效
 inline_threshold_bytes = 65536           # 小于此阈值存 inline，大于存文件
 file_storage_dir = "data/artifacts"
