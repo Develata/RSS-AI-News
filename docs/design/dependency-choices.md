@@ -193,7 +193,26 @@ tree commit 推送需要使用 octocrab 的低级 API（`repos().create_tree` / 
 |---|---|---|
 | **url** | ✅ 采用 | 标准 URL 解析与规范化 |
 
-link 规范化逻辑（去 fragment、排序 query、去 tracking 参数等）在 `domain` crate 的 `link_normalizer` 模块自行实现，`url` crate 只负责解析。
+link 规范化逻辑在 `domain` crate 的 `link_normalizer` 模块自行实现（`crates/domain/src/link_normalizer.rs`），`url` crate 只负责解析。
+
+#### 2.16.1 `link_normalizer` v1 算法规约
+
+> **版本号**：当前规约为 **v1**，由 [config-schema §4](./config-schema.md) 中 `[dedup] link_normalizer_version = "1"` 显式声明。算法变更必须推 v2，并通过 [cli-semantics reindex](./cli-semantics.md#reindex) 流程重算所有 `feed_entries.link_hash` / `articles.canonical_link` 派生字段（见 [storage-schema §4.8 rule_versions](./storage-schema.md#48-rule_versions) 的 `pending → active → superseded` 三态）。
+
+| 步骤 | 处理 | 实现锚点 |
+|---|---|---|
+| 1. 解析 | `Url::parse(raw)` 失败 → `LinkNormalizeError::InvalidUrl` | `link_normalizer.rs::normalize_link` |
+| 2. scheme 白名单 | 仅接受 `http` / `https`；其他（含 `ftp` / `file` / 自定义）→ `LinkNormalizeError::UnsupportedScheme` | 同上 |
+| 3. userinfo 清除 | `username = ""`, `password = None` | 同上 |
+| 4. fragment 清除 | `fragment = None` | 同上 |
+| 5. 路径尾斜杠 | 非 `"/"` 的路径 trim 末尾 `/`；trim 后为空则恢复 `"/"`（保护根路径） | `normalize_path` |
+| 6. query 过滤 | 删除以下 **tracking key 白名单**（精确匹配，区分大小写）：`utm_source` / `utm_medium` / `utm_campaign` / `utm_term` / `utm_content` / `fbclid` / `gclid` / `mc_cid` / `mc_eid` / `igshid` / `ref_src` | `TRACKING_QUERY_KEYS` 常量 + `normalize_query` |
+| 7. query 排序 | 剩余 query pair 按 `(key, value)` 字典序稳定排序后重写 | `normalize_query` |
+| 8. `link_hash` | `sha256(normalized_string)` 的 lowercase hex（64 字符） | `sha256_hex` |
+
+**`url` crate 默认行为（v1 隐式依赖，未显式触发）**：scheme 与 host 转小写、默认端口（`http:80` / `https:443`）移除、路径百分号编码规整。这些行为由 `url` crate 实现保证，v1 测试 `normalizes_scheme_and_host_case` / `removes_default_port` 锁定其行为；如未来升级 `url` crate 改变以上默认，等同于隐式 v1 → v2 行为漂移，必须主动推 v2 并重算。
+
+**v1 不做**（以下行为留给将来版本，不应在 v1 引入）：punycode 处理（IDN 国际化域名）、查询大小写归一化、相对链接解析（输入须为 absolute URL）、IPv4 / IPv6 主机归一化（依赖 `url` 默认）、Referer-Policy 派生 tracking key 删除。
 
 ### 2.17 错误处理
 
