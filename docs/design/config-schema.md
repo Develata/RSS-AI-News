@@ -99,7 +99,9 @@ github_repo = ""
 github_branch = "main"
 github_path_prefix = "archive"
 local_output_dir = "output"
-include_unscored = false                 # 直通发布开关；语义见下方 ai.enabled × include_unscored 真值表
+max_items_per_report = 30                # 单次报告最大入选数；映射 NonZeroU32（必须 ≥ 1）；可被 [category.publish_override] 按字段覆盖（见 §4.5）
+min_importance_score = 30                # 0-100，AI 路径下的发布门槛；0 表示"显式无下限"，与缺省语义不同；可被 [category.publish_override] 按字段覆盖；ai.enabled=false 直通路径下不参与过滤
+include_unscored = false                 # 直通发布开关；语义见下方 ai.enabled × include_unscored 真值表；可被 [category.publish_override] 按字段覆盖
 
 # === 去重 ===
 [dedup]
@@ -211,6 +213,32 @@ backfill 等已知大量待处理场景，调用方应显式 `--max-batches=0` �
 
 **与 `publish` 命令的关系**：`publish` 不受 `max_batches_per_run` 控制（publish 的工作量天然受当日 `ready_for_publish` 候选集与 `max_items_per_report` 限制；不存在"分多批跨 run"的概念）。
 
+### 4.5 effective publish 配置（全局默认 + category 覆盖）
+
+`[publish]` 全局段与 `[category.publish_override]` 之间采用**按字段覆盖**（不是"整个 override 表覆盖"）。effective 计算规则：
+
+```text
+effective_publish.max_items_per_report =
+    category.publish_override.max_items_per_report.unwrap_or(publish.max_items_per_report)
+
+effective_publish.min_importance_score =
+    category.publish_override.min_importance_score.unwrap_or(publish.min_importance_score)
+
+effective_publish.include_unscored =
+    category.publish_override.include_unscored.unwrap_or(publish.include_unscored)
+```
+
+关键约束：
+
+- **零值与 false 是显式覆盖，不是缺省**：`min_importance_score = 0` 表示"显式无下限"，`include_unscored = false` 表示"显式禁用直通"。缺省只能由 TOML 中**字段缺席**表达；`config` crate 反序列化时把缺席映射为 `None`、把 `0` / `false` 映射为 `Some(0)` / `Some(false)`。详见 §8 的 Rust 类型签名
+- **`max_items_per_report` 必须 ≥ 1**：用 `NonZeroU32` 表达；不允许 `0`（既不解释为"无限制"也不解释为"空报告"）
+- **AI 关闭时各字段语义**：
+    - `min_importance_score`：直通路径无 AI score，**不参与过滤**（即使分类显式覆盖也无效）
+    - `max_items_per_report`：**仍生效**（限制报告规模与 AI 路径独立）
+    - `include_unscored`：见 §4.1 真值表；只决定 `persisted` 是否进入候选
+
+`runtime::publish::freeze` 在构造 [`PublishRequest`](./internal-dto-contracts.md#51-publishrequest) 前完成上述合并，把 effective 值写入 DTO；DTO 的 `max_items` / `min_importance_score` 是必填非 Option，因此**必须**在 freeze 阶段消解 `None`。
+
 ## 5. `categories/*.toml` Schema
 
 每个文件代表一个分类：
@@ -232,11 +260,11 @@ prompt_template = """
 max_input_chars = 10000                  # 覆盖全局
 model = ""                               # 空则沿用全局
 
-# === 发布定制 ===
+# === 发布定制（按字段覆盖 [publish] 全局默认；任意字段省略即继承全局；详见 §4.5）===
 [category.publish_override]
-max_items_per_report = 30
-min_importance_score = 30
-include_unscored = false                 # AI 关闭时是否仍发布
+max_items_per_report = 30                # NonZeroU32；省略 → 继承 publish.max_items_per_report
+min_importance_score = 30                # 0-100；显式 0 = 无下限（≠ 缺省）；省略 → 继承 publish.min_importance_score；ai.enabled=false 直通路径下不参与过滤
+include_unscored = false                 # 显式 false ≠ 缺省；省略 → 继承 publish.include_unscored；AI 关闭时是否仍发布
 
 # === 订阅源列表 ===
 [[sources]]
@@ -320,6 +348,15 @@ AppConfig
 ├── http: HttpConfig
 ├── ai: AiConfig
 ├── publish: PublishConfig
+│   ├── target_timezone: String
+│   ├── github_owner: String              # 空 → 本地发布模式
+│   ├── github_repo: String
+│   ├── github_branch: String
+│   ├── github_path_prefix: String
+│   ├── local_output_dir: PathBuf
+│   ├── max_items_per_report: NonZeroU32  # ≥ 1；effective 来源见 §4.5
+│   ├── min_importance_score: Score0To100 # 0-100；effective 来源见 §4.5
+│   └── include_unscored: bool            # effective 来源见 §4.5
 ├── dedup: DedupConfig
 ├── extractor: ExtractorConfig
 ├── lease: LeaseConfig
@@ -337,6 +374,9 @@ CategoryConfig
 │   └── priority: u32
 ├── ai_override: Option<AiOverride>
 ├── publish_override: Option<PublishOverride>
+│   ├── max_items_per_report: Option<NonZeroU32>  # None = 继承全局；Some(n) = 显式覆盖
+│   ├── min_importance_score: Option<Score0To100> # None = 继承全局；Some(0) = 显式无下限
+│   └── include_unscored: Option<bool>            # None = 继承全局；Some(false) = 显式禁用
 └── sources: Vec<SourceConfig>
 
 SourceConfig

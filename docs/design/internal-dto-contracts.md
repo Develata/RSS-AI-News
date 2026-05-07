@@ -182,10 +182,12 @@ PublishRequest
 ├── target_timezone: String             # IANA tz
 ├── render_version_id: i64
 ├── selection_policy_version_id: i64
-├── max_items: u32
-├── min_importance_score: Score0To100   # 见 §6.5
-├── include_unscored: bool
+├── max_items: NonZeroU32               # effective publish 值（见 config §4.5）
+├── min_importance_score: Score0To100   # effective publish 值；见 §6.5；ai.enabled=false 时不参与过滤（详见 config §4.5）
+├── include_unscored: bool              # effective publish 值
 ```
+
+`max_items` / `min_importance_score` / `include_unscored` 三者均为必填非 Option，由 `runtime::publish::freeze` 在构造前完成 `[publish]` 全局默认与 `[category.publish_override]` 的**按字段覆盖**合并（详见 [config §4.5](./config-schema.md#45-effective-publish-配置全局默认--category-覆盖)）。`runtime` 必须在 freeze 阶段消解 `None`，DTO 边界后不再存在"未设置"语义。
 
 ### 5.2 `PublishCandidate`
 
