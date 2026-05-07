@@ -1,6 +1,23 @@
 //! Shared error traits and classification.
 
-/// All domain-level errors must implement this trait.
+/// Trait for errors that flow through the cross-crate retry / failure-state /
+/// observability dispatch.
+///
+/// **In scope** — required to impl `ClassifiedError`:
+/// - The capability-layer error enums enumerated in
+///   `docs/design/error-and-observability.md` §2.3: `FeedError`,
+///   `ExtractorError`, `AiError`, `StorageError`, `PublishError`.
+/// - Domain-layer errors that surface during a capability operation and are
+///   classified by `runtime` for retry / failure-state transition. Today this
+///   is `link_normalizer::LinkNormalizeError` (raised inside ingest).
+///
+/// **Out of scope** — must NOT be required to impl this trait:
+/// - Pure construction-validation errors that signal API misuse rather than
+///   external failure (e.g. `score::ScoreOutOfRange`,
+///   `dto::publish::PublishCandidateError`). These are wrapped by upstream
+///   capability errors before classification (see
+///   `crates/report/src/error.rs::ReportError::InvalidCandidate` for a
+///   concrete example) and never themselves drive retry decisions.
 pub trait ClassifiedError {
     /// Whether this error is safe to retry.
     fn is_retryable(&self) -> bool;
