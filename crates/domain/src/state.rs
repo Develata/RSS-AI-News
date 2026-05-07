@@ -132,6 +132,23 @@ pub enum BackfillTarget {
     Ai,
 }
 
+/// Rule version lifecycle status. See `docs/design/storage-schema.md` §4.8 +
+/// `state-machine.md` §6 (reindex_job state machine).
+///
+/// - `Active`: currently effective; at most one row per `kind` may be `Active`.
+/// - `Pending`: created by reindex but not yet activated; resolvers using
+///   `active_rule(kind)` ignore these rows.
+/// - `Superseded`: replaced by a newer `Active` row; preserved for audit
+///   joins. `retired_at` is non-NULL for these rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum RuleVersionStatus {
+    Pending,
+    Active,
+    Superseded,
+}
+
 impl fmt::Display for FeedEntryState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = serde_json::to_value(self)
@@ -272,6 +289,15 @@ mod tests {
         assert_all_round_trip(&[
             (BackfillTarget::Extract, "extract"),
             (BackfillTarget::Ai, "ai"),
+        ]);
+    }
+
+    #[test]
+    fn rule_version_status_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (RuleVersionStatus::Pending, "pending"),
+            (RuleVersionStatus::Active, "active"),
+            (RuleVersionStatus::Superseded, "superseded"),
         ]);
     }
 
