@@ -146,32 +146,133 @@ impl fmt::Display for FeedEntryState {
 mod tests {
     use super::*;
 
-    fn assert_round_trip<T>(value: T, serialized: &str)
+    fn assert_all_round_trip<T>(cases: &[(T, &str)])
     where
-        T: fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        T: Copy + fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>,
     {
-        let json = serde_json::to_string(&value).expect("state serialization should succeed");
-        assert_eq!(json, format!("\"{serialized}\""));
+        for (value, expected) in cases {
+            let json = serde_json::to_string(value).expect("state serialization should succeed");
+            assert_eq!(json, format!("\"{expected}\""), "serialize {value:?}");
 
-        let decoded: T = serde_json::from_str(&json).expect("state deserialization should succeed");
-        assert_eq!(decoded, value);
+            let decoded: T =
+                serde_json::from_str(&json).expect("state deserialization should succeed");
+            assert_eq!(decoded, *value, "deserialize {expected}");
+        }
     }
 
     #[test]
-    fn state_enums_use_snake_case_round_trip_values() {
-        assert_round_trip(FeedEntryState::PendingFetch, "pending_fetch");
-        assert_round_trip(ArticleState::ReadyForPublish, "ready_for_publish");
-        assert_round_trip(AiResultState::Pending, "pending");
-        assert_round_trip(AiResultState::PermanentFailed, "permanent_failed");
-        assert_round_trip(PublishState::PublishedLocal, "published_local");
-        assert_round_trip(PublishState::PublishedRemote, "published_remote");
-        assert_round_trip(FeedSourceStatus::Archived, "archived");
-        assert_round_trip(FeedKind::JsonFeed, "json_feed");
-        assert_round_trip(DedupDecision::UidDup, "uid_dup");
-        assert_round_trip(ExtractorStrategy::SummaryFallback, "summary_fallback");
-        assert_round_trip(ContentQuality::Fallback, "fallback");
-        assert_round_trip(ArtifactKind::AiRawResponse, "ai_raw_response");
-        assert_round_trip(BackfillTarget::Ai, "ai");
+    fn feed_entry_state_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (FeedEntryState::Discovered, "discovered"),
+            (FeedEntryState::DedupSkipped, "dedup_skipped"),
+            (FeedEntryState::PendingFetch, "pending_fetch"),
+            (FeedEntryState::Fetching, "fetching"),
+            (FeedEntryState::Extracting, "extracting"),
+            (FeedEntryState::Persisted, "persisted"),
+            (FeedEntryState::FallbackPersisted, "fallback_persisted"),
+            (FeedEntryState::Failed, "failed"),
+        ]);
+    }
+
+    #[test]
+    fn article_state_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (ArticleState::Persisted, "persisted"),
+            (ArticleState::AiPending, "ai_pending"),
+            (ArticleState::AiDone, "ai_done"),
+            (ArticleState::ReadyForPublish, "ready_for_publish"),
+            (ArticleState::PublishSkipped, "publish_skipped"),
+            (ArticleState::Published, "published"),
+            (ArticleState::Retired, "retired"),
+        ]);
+    }
+
+    #[test]
+    fn ai_result_state_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (AiResultState::Pending, "pending"),
+            (AiResultState::Running, "running"),
+            (AiResultState::Succeeded, "succeeded"),
+            (AiResultState::PermanentFailed, "permanent_failed"),
+            (AiResultState::Filtered, "filtered"),
+        ]);
+    }
+
+    #[test]
+    fn publish_state_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (PublishState::Pending, "pending"),
+            (PublishState::SnapshotFrozen, "snapshot_frozen"),
+            (PublishState::Rendered, "rendered"),
+            (PublishState::StoredLocal, "stored_local"),
+            (PublishState::PublishedLocal, "published_local"),
+            (PublishState::PublishedRemote, "published_remote"),
+            (PublishState::Failed, "failed"),
+        ]);
+    }
+
+    #[test]
+    fn feed_source_status_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (FeedSourceStatus::Active, "active"),
+            (FeedSourceStatus::Paused, "paused"),
+            (FeedSourceStatus::Archived, "archived"),
+        ]);
+    }
+
+    #[test]
+    fn feed_kind_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (FeedKind::Rss, "rss"),
+            (FeedKind::Atom, "atom"),
+            (FeedKind::JsonFeed, "json_feed"),
+            (FeedKind::RssHub, "rss_hub"),
+        ]);
+    }
+
+    #[test]
+    fn dedup_decision_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (DedupDecision::Fresh, "fresh"),
+            (DedupDecision::UidDup, "uid_dup"),
+            (DedupDecision::LinkDup, "link_dup"),
+            (DedupDecision::HashDup, "hash_dup"),
+        ]);
+    }
+
+    #[test]
+    fn extractor_strategy_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (ExtractorStrategy::Readability, "readability"),
+            (ExtractorStrategy::Rule, "rule"),
+            (ExtractorStrategy::SummaryFallback, "summary_fallback"),
+        ]);
+    }
+
+    #[test]
+    fn content_quality_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (ContentQuality::High, "high"),
+            (ContentQuality::Medium, "medium"),
+            (ContentQuality::Fallback, "fallback"),
+        ]);
+    }
+
+    #[test]
+    fn artifact_kind_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (ArtifactKind::FeedPayload, "feed_payload"),
+            (ArtifactKind::HtmlPayload, "html_payload"),
+            (ArtifactKind::AiRawResponse, "ai_raw_response"),
+        ]);
+    }
+
+    #[test]
+    fn backfill_target_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (BackfillTarget::Extract, "extract"),
+            (BackfillTarget::Ai, "ai"),
+        ]);
     }
 
     #[test]
