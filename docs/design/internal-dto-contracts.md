@@ -106,7 +106,7 @@ ExtractedArticle
 ├── body_html: Option<Vec<u8>>          # 原始 HTML（供 artifact 存储）
 ├── extractor_strategy: ExtractorStrategy  # enum { Readability, Rule, SummaryFallback }
 ├── content_quality: ContentQuality     # enum { High, Medium, Fallback }
-├── word_count: u32
+├── word_count: u32                     # 持久化对应 articles.word_count（i64 + CHECK ≥ 0），见 storage-schema §4.3 类型映射注
 ├── content_hash: String                # body_text 的 SHA-256
 ```
 
@@ -121,7 +121,7 @@ FallbackArticle
 ├── title: String
 ├── body_text: String                   # 来自 summary_raw
 ├── content_quality: ContentQuality     # 固定为 Fallback
-├── word_count: u32
+├── word_count: u32                     # 与 ExtractedArticle.word_count 同语义（u32 业务边界 / i64 持久化），见 storage-schema §4.3
 ├── content_hash: String
 ```
 

@@ -193,7 +193,7 @@ feed 条目真相源表。承载"发现 → 抓取 → 提取 → 入库"状态�
 | `extractor_strategy` | `TEXT` | NOT NULL | `readability` / `rule` / `summary_fallback` |
 | `extractor_version` | `INTEGER` | NOT NULL | `rule_versions.id` |
 | `content_quality` | `TEXT` | NOT NULL | `high` / `medium` / `fallback` |
-| `word_count` | `INTEGER` | NOT NULL, DEFAULT 0 | - |
+| `word_count` | `INTEGER` | NOT NULL, DEFAULT 0, CHECK (`word_count >= 0`) | 见下方"类型映射注"|
 | `origin_feed_entry_id` | `INTEGER` | NOT NULL | `feed_entries.id` |
 | `state` | `TEXT` | NOT NULL, DEFAULT `'persisted'` | 见状态机 §4 |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL | - |
@@ -209,6 +209,10 @@ feed 条目真相源表。承载"发现 → 抓取 → 提取 → 入库"状态�
 - `FOREIGN KEY (body_html_artifact_id) REFERENCES raw_artifacts(id) ON DELETE SET NULL`
 
 **设计注（无 `last_error*` 列）**：`articles.state`（见 [state-machine §4.1](./state-machine.md#41-articlesstate)）只有 `publish_skipped` / `published` / `retired` 三种终态，没有失败终态。任意阶段失败（fetch / extract / AI / publish）的 `last_error` / `last_error_kind` 写在对应的真相源行 `feed_sources` / `feed_entries` / `article_ai_results` / `publish_records`，因此 `articles` 表不需要 `last_error*` 列。错误传播规则见 [error-and-observability §3.1](./error-and-observability.md#31-能力层--流程协调层)。
+
+**类型映射注（`word_count` 双层不变量）**：`articles.word_count` 在持久化层使用 sqlx 对 `INTEGER` 列的标准映射（Rust 端 `i64`，见 `crates/storage/src/repo/article.rs`、`crates/domain/src/model/article.rs`）；在业务 DTO 边界（`crates/domain/src/dto/extract.rs::ExtractedArticle` / `FallbackArticle`，见 [internal-dto-contracts §3.2 / §3.3](./internal-dto-contracts.md#32-extractedarticle)）使用 `u32` 表达"无符号字数"语义。两层不变量：
+1. **DB 层**：`CHECK (word_count >= 0)` 在数据库层硬性拦截负值。**当前 migration `0001_init.up.sql:80` 尚未带此 CHECK**，需要在下一个 schema 修订 migration 中补齐（首版 schema 冻结后的第二个 migration）；W2–W10 现有代码路径已在 `extractor` 通过 `usize → u32` 转换源头保证非负，运行时不会写入负值
+2. **DTO 层**：`u32` 让 runtime / report 边界以编译期类型表达"非负"，避免每个调用点重复运行时检查。`storage::repo` ↔ `domain::model` 的 `i64` ↔ `u32` 转换由 `crates/runtime/src/flows/extract.rs:321,345` 的 `i64::from(article.word_count)` 单向无损升位完成；反向 storage → DTO 方向（理论上 `i64 → u32`）目前无调用路径，若未来需要应使用 `u32::try_from` 并在失败时返回 `StorageError::Corruption`
 
 ### 4.4 `article_ai_results`
 
