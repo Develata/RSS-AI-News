@@ -313,7 +313,7 @@ AI 结果真相源表。一篇文章允许多行（不同 prompt / 协议 / 模�
 | `article_id` | `INTEGER` | NOT NULL | - |
 | `article_ai_result_id` | `INTEGER` | NULL | 直通路径 NULL，AI 路径 NOT NULL；语义见 [state-machine §4.1.3](./state-machine.md#413-ai-关闭--无-ai-发布降级) |
 | `frozen_title` | `TEXT` | NOT NULL | - |
-| `frozen_summary` | `TEXT` | NOT NULL | 直通时取 `articles.summary_raw`；AI 路径取 AI 摘要 |
+| `frozen_summary` | `TEXT` | NOT NULL | 直通时取 `feed_entries.summary_raw`（通过 `articles.origin_feed_entry_id` 关联；`articles` 表无 `summary_raw` 列）；AI 路径取 AI 摘要 |
 | `frozen_tags_json` | `TEXT` | NOT NULL | 直通时固定为 `"[]"` |
 | `frozen_score` | `INTEGER` | NULL | 与 `article_ai_result_id` 同 NULL；值域 0–100（见下方 CHECK）|
 | `frozen_canonical_link` | `TEXT` | NOT NULL | - |

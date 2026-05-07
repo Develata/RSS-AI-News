@@ -227,7 +227,7 @@ reclaim 的具体状态行为按表分别规定：
 - 触发条件：`config.ai.enabled = false`，且 `config.publish.include_unscored = true`
 - 语义：`persisted → ready_for_publish` 直通，不经过 `ai_pending` / `ai_done`；`article_ai_results` 不新建行
 - 发布选稿：`runtime::publish::freeze` 时除选 `ready_for_publish` 外，当 `ai.enabled=false` 时还将 `persisted` 行视为候选并在入选的同事务内升格到 `ready_for_publish`
-- 渲染降级：`publish_items` 的 `frozen_summary` 使用 `articles.summary_raw`（而非 AI 生成摘要）；`frozen_tags_json` 为 `[]`；`frozen_score` 为 NULL
+- 渲染降级：`publish_items` 的 `frozen_summary` 取 `feed_entries.summary_raw`（通过 `articles.origin_feed_entry_id` 关联，参见 [storage-schema §4.6](./storage-schema.md#46-publish_items) 的 `frozen_summary` 列说明 + `crates/storage/src/repo/publish_item.rs` 的 `COALESCE(fe.summary_raw, '') AS summary` 实现）；`frozen_tags_json` 为 `[]`；`frozen_score` 为 NULL
 - 若 `ai.enabled=false` 但 `include_unscored=false`，`persisted` 行永不进入发布路径，仅作为历史数据保留（与当前"AI 未跑完前不发布"语义一致）
 - **`include_unscored` 不是 AI failure fallback**：当 `ai.enabled=true` 时，即使 `include_unscored=true` 也**不会**触发本节直通路径。具体地：
   - `articles.state` 在 AI 路径中由 `running → permanent_failed` 转换不更新（保持 `ai_pending`），见 §4.2 的"AI 永久失败不更新 articles.state"约定

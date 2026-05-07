@@ -158,7 +158,7 @@ metrics_bind = "127.0.0.1:9090"
 | `true` | `false` | 仅 `articles.state='ready_for_publish'` 且有 `article_ai_results.state='succeeded' AND keep_decision=1` | `NOT NULL` | 走 AI 路径（I4.a / I4'.a）|
 | `true` | `true` | 同 `ai=true/include=false` | `NOT NULL` | 同上；`include_unscored` 在 `ai.enabled=true` 时无效（详见表后说明） |
 | `false` | `false` | 空 | 不适用 | 没有可发布候选，publish 退出码 0、产生 0 条 publish_items |
-| `false` | `true` | `articles.state='persisted'` 或 `'ready_for_publish'` 且 [无任何 AI 行](./state-machine.md#413-ai-关闭--无-ai-发布降级)；`persisted` 候选在入选 freeze 事务内升格为 `ready_for_publish` | `NULL` | 走直通路径（I4.b / I4'.b）；`frozen_summary` 取 `articles.summary_raw`，`frozen_tags_json='[]'`，`frozen_score=NULL` |
+| `false` | `true` | `articles.state='persisted'` 或 `'ready_for_publish'` 且 [无任何 AI 行](./state-machine.md#413-ai-关闭--无-ai-发布降级)；`persisted` 候选在入选 freeze 事务内升格为 `ready_for_publish` | `NULL` | 走直通路径（I4.b / I4'.b）；`frozen_summary` 取 `feed_entries.summary_raw`（`articles.origin_feed_entry_id` 关联），`frozen_tags_json='[]'`，`frozen_score=NULL` |
 
 **`include_unscored` 不是 AI failure fallback**：当 `ai.enabled=true` 时，即使 `include_unscored=true` 也不会让 `permanent_failed` / `filtered` 的 article 绕过 AI 直接发布。AI 永久失败的 article 必须经 `backfill --target ai`（新模型 / 修正 prompt）重跑后才能进入 `ready_for_publish`。完整流程见 [state-machine §4.1.3](./state-machine.md#413-ai-关闭--无-ai-发布降级)。
 

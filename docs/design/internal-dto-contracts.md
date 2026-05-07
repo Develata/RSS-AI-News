@@ -119,7 +119,7 @@ FallbackArticle
 ├── feed_entry_id: i64
 ├── canonical_link: String
 ├── title: String
-├── body_text: String                   # 来自 summary_raw
+├── body_text: String                   # 来自 feed_entries.summary_raw（articles 表无 summary_raw 列；下游通过 articles.origin_feed_entry_id 关联）
 ├── content_quality: ContentQuality     # 固定为 Fallback
 ├── word_count: u32                     # 与 ExtractedArticle.word_count 同语义（u32 业务边界 / i64 持久化），见 storage-schema §4.3
 ├── content_hash: String
