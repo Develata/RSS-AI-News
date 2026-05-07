@@ -258,10 +258,11 @@ PublishOutcome
 ```text
 ReplayRequest
 ├── artifact_kind: ArtifactKind         # enum { FeedPayload, HtmlPayload, AiRawResponse }
-├── artifact_key: Option<String>        # 指定 key，或
-├── artifact_id: Option<i64>            # 指定 id
+├── selector: ReplayArtifactSelector    # enum { Key(String), Id(i64) }（类型层强制 cli-semantics §4.5 的 --key / --id 互斥）
 ├── dry_run: bool
 ```
+
+`ReplayArtifactSelector` 用 sum type 表达定位字段的"二选一"语义，杜绝两者同时缺失或同时设置。如未来需要新增其他定位维度（例如 `(kind, sha256)`），通过新增 enum variant 扩展，调用方的 `match` 由编译器强制覆盖。
 
 ### 6.2 `ReplayResult`
 
