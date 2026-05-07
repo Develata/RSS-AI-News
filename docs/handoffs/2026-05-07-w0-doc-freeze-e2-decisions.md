@@ -17,7 +17,9 @@
 
 ## 工作摘要
 
-W0 文档冻结的最后一轮：把 DeepSeek "找茬" 报告中 E2 等级（**需决策再修**）的 6 个 issue 逐个分析、codex 二审、独立 commit 落地，同时修正 E2 评审过程中发现的两处文档泛化错误。E1（事实错）+ E3（措辞优化）批量已在 `cae743b` 落地；本轮收口意味着 W0 的全部"找茬"反馈消化完毕，文档真相源进入冻结态，后续可放心进入 W1 仓库初始化阶段（实际 W1–W10 已先行实现至 v0.1.0 候选，现在文档与代码进入一致冻结）。
+W0 文档冻结的最后一轮：把 DeepSeek "找茬" 报告中归到 E2 桶（**需独立决策再修**）的 6 个 issue 逐个分析、codex 二审、独立 commit 落地。E1（事实错 + schema/命名一致性）+ E3（措辞优化）共 26 条已在 `cae743b` 批量落地；本轮收口意味着 W0 的全部"找茬"反馈消化完毕，文档真相源进入冻结态，后续可放心进入 W1 仓库初始化阶段（实际 W1–W10 已先行实现至 v0.1.0 候选，现在文档与代码进入一致冻结）。
+
+> **术语澄清**：本 handoff 里的 E1 / E2 / E3 是 commit message 沿用的"决策轮次"分桶，**不是严重度等级**。W0 找茬实际使用的等级是 codex 二审给出的 severity_revised 字段：`critical / high / medium / low / non_issue`（详见 `.codex-tmp/w0_codex_verdicts.md`）。
 
 ## 影响范围
 
@@ -124,13 +126,16 @@ codex 普遍给出 `yes_with_revisions` 并贡献了若干关键修订（典型�
 
 ## 结果
 
-- W0 文档冻结的找茬-决策-修订环节全部消化完毕；E1/E3 已在 `cae743b`、E2 在 `c40627f → 8e63c44`，**剩余等级 D 的 issue 全部归档为"不修，无碍"**（具体名单见 `.codex-tmp/w0_deepseek_issues.md` 与 `w0_codex_verdicts.md`）。
+- W0 文档冻结的找茬-决策-修订环节全部消化完毕：33 条 issue（Part A 27 + Part B 6）全数有去向。
+    - **`cae743b` 批量（26 条）**：Issues 1, 2, 3, 5, 6, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24, 25, 27, 28 + B-1, B-2, B-4, B-6
+    - **本轮 E2 6 commits**：Issues 4, 9, 15, 20, B-3, B-5
+    - **codex `refuted` 为 `non_issue`，不需修（1 条）**：Issue 26（蓝图 §3.2 非功能需求"退出路径"——DeepSeek 漏读了同一蓝图后续专门的"生命周期与退出路径"章节）
+- 详细判决见 `.codex-tmp/w0_codex_verdicts.md`，原始 issue 列表见 `.codex-tmp/w0_deepseek_issues.md`。
 - 文档真相源与现有 W1–W10 实现保持一致：本轮修订均为措辞校准 / 字段补全 / 语义澄清，**未产生需要回追代码的 schema 或 DTO 字段变更**（注：B-5 提到 `PublishOverride` 字段应为 `Option<...>` —— 现有代码已是该形态，无需迁移；详见 `crates/domain/src/dto/publish.rs` 与 `crates/config/src/category.rs`）。
 - 与 `docs/handoffs/2026-05-04-...-migrate-decoupling.md` 之间无依赖；本 handoff 之后可直接进入下一阶段（v0.1.0 tag / 第二批功能 / 后续 workstream）。
 
 ## 风险与后续事项
 
-- **D 等级 issue 归档**：仍有少量 D 等级 issue 留在 `.codex-tmp/w0_deepseek_issues.md`。这些是"措辞偏好不一致"或"未来某个工作项才需要解决"的低优先级条目，本轮决议不修；任何工作开始前若发现 D 条目变成阻塞，应单独立 issue 处理。
 - **`PublishOverride` 内部字段为 Option** 的语义在 §4.5 已明确，但 [config §6.1 校验规则](../design/config-schema.md#6-校验规则) 中没有对应的"零值不视为缺省"的 unit test 覆盖；W1 在补 `[workspace.lints]` 时如顺手补 config crate test，应把这个 invariant 写进去。
 - **Issue 15 reindex 一致性**：现在的实现（`crates/cli/.../backfill.rs`）已经存在但未严格按新文档定义的"按 article 原子"语义校验；后续如要为 reindex 加性能指标或观测点，应回看 §6.5 的边界。
 
