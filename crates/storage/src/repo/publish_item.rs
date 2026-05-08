@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use async_trait::async_trait;
 use rss_ai_news_domain::{Score0To100, model::PublishItem};
 use sqlx::{FromRow, SqlitePool};
@@ -51,13 +53,13 @@ pub trait PublishItemRepository: Send + Sync {
         &self,
         category_key: &str,
         min_importance_score: i32,
-        max_items: u32,
+        max_items: NonZeroU32,
     ) -> Result<Vec<PublishCandidateRow>, StorageError>;
 
     async fn select_ai_off_passthrough_candidates(
         &self,
         category_key: &str,
-        max_items: u32,
+        max_items: NonZeroU32,
     ) -> Result<Vec<PublishCandidateRow>, StorageError>;
 
     async fn freeze_snapshot(
@@ -92,7 +94,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
         &self,
         category_key: &str,
         min_importance_score: i32,
-        max_items: u32,
+        max_items: NonZeroU32,
     ) -> Result<Vec<PublishCandidateRow>, StorageError> {
         sqlx::query_as::<_, PublishCandidateRow>(
             r#"
@@ -131,7 +133,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
         )
         .bind(min_importance_score)
         .bind(category_key)
-        .bind(i64::from(max_items))
+        .bind(i64::from(max_items.get()))
         .fetch_all(&self.pool)
         .await
         .map_err(StorageError::from)
@@ -140,7 +142,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
     async fn select_ai_off_passthrough_candidates(
         &self,
         category_key: &str,
-        max_items: u32,
+        max_items: NonZeroU32,
     ) -> Result<Vec<PublishCandidateRow>, StorageError> {
         sqlx::query_as::<_, PublishCandidateRow>(
             r#"
@@ -167,7 +169,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
             "#,
         )
         .bind(category_key)
-        .bind(i64::from(max_items))
+        .bind(i64::from(max_items.get()))
         .fetch_all(&self.pool)
         .await
         .map_err(StorageError::from)

@@ -1,10 +1,17 @@
 mod common;
 
+use std::num::NonZeroU32;
+
 use rss_ai_news_storage::{PublishItemRepository, SqlitePublishItemRepo};
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
 
 use common::{insert_rule, make_test_pool};
+
+const LIMIT_10: NonZeroU32 = match NonZeroU32::new(10) {
+    Some(v) => v,
+    None => unreachable!(),
+};
 
 #[tokio::test]
 async fn select_ai_path_returns_only_ready_for_publish_with_keep_and_min_score() {
@@ -16,7 +23,7 @@ async fn select_ai_path_returns_only_ready_for_publish_with_keep_and_min_score()
     seed_ai_article(&pool, "ai", "persisted", "persisted", 99, 1).await;
 
     let rows = repo
-        .select_ai_path_candidates("ai", 50, 10)
+        .select_ai_path_candidates("ai", 50, LIMIT_10)
         .await
         .expect("selection should succeed");
 
@@ -36,7 +43,7 @@ async fn select_ai_path_orders_by_score_desc_then_created_at_desc() {
     set_article_created_at(&pool, newer, OffsetDateTime::now_utc()).await;
 
     let ids = repo
-        .select_ai_path_candidates("ai", 0, 10)
+        .select_ai_path_candidates("ai", 0, LIMIT_10)
         .await
         .expect("selection should succeed")
         .into_iter()
@@ -54,7 +61,7 @@ async fn select_ai_path_filters_by_category_key() {
     seed_ai_article(&pool, "ml", "ml-cat", "ready_for_publish", 95, 1).await;
 
     let rows = repo
-        .select_ai_path_candidates("ai", 0, 10)
+        .select_ai_path_candidates("ai", 0, LIMIT_10)
         .await
         .expect("selection should succeed");
 
@@ -70,7 +77,7 @@ async fn select_ai_off_passthrough_returns_persisted_articles_without_any_ai_row
     let article = seed_passthrough_article(&pool, "ai", "direct", "persisted").await;
 
     let rows = repo
-        .select_ai_off_passthrough_candidates("ai", 10)
+        .select_ai_off_passthrough_candidates("ai", LIMIT_10)
         .await
         .expect("selection should succeed");
 
@@ -93,7 +100,7 @@ async fn select_ai_off_passthrough_excludes_articles_with_filtered_or_permanent_
     insert_ai_row(&pool, failed, "permanent_failed", None, 1).await;
 
     let rows = repo
-        .select_ai_off_passthrough_candidates("ai", 10)
+        .select_ai_off_passthrough_candidates("ai", LIMIT_10)
         .await
         .expect("selection should succeed");
 

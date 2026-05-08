@@ -1,5 +1,7 @@
 //! Publish-stage DTOs.
 
+use std::num::NonZeroU32;
+
 use time::OffsetDateTime;
 
 use crate::Score0To100;
@@ -12,7 +14,7 @@ pub struct PublishRequest {
     pub target_timezone: String,
     pub render_version_id: i64,
     pub selection_policy_version_id: i64,
-    pub max_items: u32,
+    pub max_items: NonZeroU32,
     pub min_importance_score: Score0To100,
     pub include_unscored: bool,
 }

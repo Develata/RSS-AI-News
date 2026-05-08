@@ -36,7 +36,7 @@ fn load_example_configs_end_to_end() {
     assert_eq!(config.config_sha256.len(), 64);
     assert!(effective.ai_enabled);
     assert!(!effective.include_unscored);
-    assert_eq!(effective.max_items_per_report, 30);
+    assert_eq!(effective.max_items_per_report.get(), 30);
     assert_eq!(effective.min_importance_score, 30);
     assert_eq!(effective.model, "gpt-4o-mini");
     assert_eq!(effective.max_input_chars, 10000);

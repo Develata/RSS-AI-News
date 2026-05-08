@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use rss_ai_news_domain::state::FeedKind;
 use serde::Deserialize;
 
@@ -26,7 +28,7 @@ pub struct AiOverride {
 
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct PublishOverride {
-    pub max_items_per_report: Option<u32>,
+    pub max_items_per_report: Option<NonZeroU32>,
     pub min_importance_score: Option<u8>,
     pub include_unscored: Option<bool>,
 }
@@ -116,5 +118,31 @@ mod tests {
         assert!(config.publish_override.is_some());
         assert_eq!(config.sources.len(), 2);
         assert_eq!(config.sources[1].feed_kind, FeedKind::RssHub);
+    }
+
+    #[test]
+    fn rejects_zero_max_items_per_report() {
+        // max_items_per_report = 0 must fail at toml deserialization (NonZeroU32 contract).
+        // See docs/design/config-schema.md §234.
+        let content = r#"
+schema_version = "1"
+
+[category]
+key = "ai"
+display_name = "AI"
+priority = 10
+
+[category.publish_override]
+max_items_per_report = 0
+"#;
+        let err = toml::from_str::<CategoryConfig>(content)
+            .expect_err("max_items_per_report = 0 must be rejected");
+        assert!(
+            err.to_string().to_lowercase().contains("zero")
+                || err.to_string().contains("nonzero")
+                || err.to_string().contains("non-zero")
+                || err.to_string().contains("invalid value"),
+            "unexpected error message: {err}"
+        );
     }
 }

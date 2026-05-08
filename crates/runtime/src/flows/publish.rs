@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use rss_ai_news_domain::Score0To100;
@@ -31,7 +32,7 @@ pub struct PublishInitOptions {
 #[derive(Debug, Clone)]
 pub struct PublishFreezeOptions {
     pub category_key: String,
-    pub max_items: u32,
+    pub max_items: NonZeroU32,
     pub min_importance_score: Score0To100,
     pub include_unscored: bool,
     pub ai_enabled: bool,

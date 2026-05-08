@@ -1,13 +1,18 @@
+use std::num::NonZeroU32;
+
 use crate::{CategoryConfig, LoadedConfig};
 
-pub const DEFAULT_MAX_ITEMS_PER_REPORT: u32 = 30;
+pub const DEFAULT_MAX_ITEMS_PER_REPORT: NonZeroU32 = match NonZeroU32::new(30) {
+    Some(v) => v,
+    None => panic!("default max_items_per_report must be non-zero"),
+};
 pub const DEFAULT_MIN_IMPORTANCE_SCORE: u8 = 30;
 
 pub struct EffectiveConfig<'a> {
     pub category: &'a CategoryConfig,
     pub ai_enabled: bool,
     pub include_unscored: bool,
-    pub max_items_per_report: u32,
+    pub max_items_per_report: NonZeroU32,
     pub min_importance_score: u8,
     pub model: String,
     pub max_input_chars: u32,

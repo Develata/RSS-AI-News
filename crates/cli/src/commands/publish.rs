@@ -138,28 +138,22 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
     let mut remote_target = None;
 
     if matches!(state.as_str(), "pending") {
+        let effective = loaded
+            .effective_for_category(&category.category.key)
+            .ok_or_else(|| {
+                CliError::Runtime(RuntimeError::Config(format!(
+                    "category {} not found in loaded config",
+                    category.category.key
+                )))
+            })?;
         let freeze = flow
             .freeze(PublishFreezeOptions {
                 category_key: category.category.key.clone(),
-                max_items: category
-                    .publish_override
-                    .as_ref()
-                    .and_then(|override_| override_.max_items_per_report)
-                    .unwrap_or(20),
-                min_importance_score: Score0To100::try_new(
-                    category
-                        .publish_override
-                        .as_ref()
-                        .and_then(|override_| override_.min_importance_score)
-                        .unwrap_or(50),
-                )
-                .map_err(|err| CliError::Runtime(RuntimeError::Config(err.to_string())))?,
-                include_unscored: category
-                    .publish_override
-                    .as_ref()
-                    .and_then(|override_| override_.include_unscored)
-                    .unwrap_or(loaded.app.publish.include_unscored),
-                ai_enabled: loaded.app.ai.enabled,
+                max_items: effective.max_items_per_report,
+                min_importance_score: Score0To100::try_new(effective.min_importance_score)
+                    .map_err(|err| CliError::Runtime(RuntimeError::Config(err.to_string())))?,
+                include_unscored: effective.include_unscored,
+                ai_enabled: effective.ai_enabled,
                 excerpt_max_chars: 240,
             })
             .await;

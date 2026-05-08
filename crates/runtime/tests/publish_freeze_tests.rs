@@ -1,5 +1,6 @@
 mod common;
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -169,7 +170,7 @@ fn init_opts(render_version: i64, selection_policy_version: i64) -> PublishInitO
 fn freeze_opts(ai_enabled: bool, include_unscored: bool) -> PublishFreezeOptions {
     PublishFreezeOptions {
         category_key: "ai".to_string(),
-        max_items: 10,
+        max_items: NonZeroU32::new(10).unwrap(),
         min_importance_score: Score0To100::try_new(50).unwrap(),
         include_unscored,
         ai_enabled,
