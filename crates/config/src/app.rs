@@ -1,5 +1,6 @@
-use std::path::PathBuf;
+use std::{num::NonZeroU32, path::PathBuf};
 
+use rss_ai_news_domain::Score0To100;
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -68,6 +69,16 @@ pub struct PublishConfig {
     pub github_path_prefix: String,
     pub local_output_dir: PathBuf,
     pub include_unscored: bool,
+    /// Global default for `[publish] max_items_per_report`. Categories may
+    /// override per-field via `[category.publish_override]`. NonZeroU32 makes
+    /// `0` (which would silently mean SQL `LIMIT 0`) a toml deserialization
+    /// error. See `docs/design/config-schema.md` §4.5 / §234.
+    pub max_items_per_report: NonZeroU32,
+    /// Global default for `[publish] min_importance_score`. AI path: articles
+    /// with score < this are filtered before report selection. AI-off direct
+    /// path: not applied (see §4.5). Score0To100 enforces the 0-100 invariant
+    /// at toml deserialization. See `docs/design/config-schema.md` §357-358.
+    pub min_importance_score: Score0To100,
 }
 
 #[derive(Clone, Debug, Deserialize)]

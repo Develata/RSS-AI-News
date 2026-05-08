@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use rss_ai_news_config::{
@@ -5,6 +6,7 @@ use rss_ai_news_config::{
     DatabaseDriver, DedupConfig, EnvConfig, ExtractorConfig, HttpConfig, LeaseConfig, LoadedConfig,
     ObservabilityConfig, PublishConfig, RetentionPolicy, RetryConfig,
 };
+use rss_ai_news_domain::Score0To100;
 use rss_ai_news_observability::health::{
     CheckOutcome, HealthCheck, config_check::ConfigCheck, db_check::DatabaseConnectivityCheck,
     disk_check::DiskSpaceCheck, github_check::GitHubPingCheck,
@@ -171,6 +173,8 @@ fn app_config() -> AppConfig {
             github_path_prefix: "archive".to_string(),
             local_output_dir: "output".into(),
             include_unscored: false,
+            max_items_per_report: NonZeroU32::new(30).expect("test default non-zero"),
+            min_importance_score: Score0To100::try_new(30).expect("test default in range"),
         },
         dedup: DedupConfig {
             enable_link_dedup: true,

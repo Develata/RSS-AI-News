@@ -2479,6 +2479,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rss-ai-news-config",
+ "rss-ai-news-domain",
  "serde",
  "serde_json",
  "sqlx",

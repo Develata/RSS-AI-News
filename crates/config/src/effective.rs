@@ -1,19 +1,15 @@
 use std::num::NonZeroU32;
 
-use crate::{CategoryConfig, LoadedConfig};
+use rss_ai_news_domain::Score0To100;
 
-pub const DEFAULT_MAX_ITEMS_PER_REPORT: NonZeroU32 = match NonZeroU32::new(30) {
-    Some(v) => v,
-    None => panic!("default max_items_per_report must be non-zero"),
-};
-pub const DEFAULT_MIN_IMPORTANCE_SCORE: u8 = 30;
+use crate::{CategoryConfig, LoadedConfig};
 
 pub struct EffectiveConfig<'a> {
     pub category: &'a CategoryConfig,
     pub ai_enabled: bool,
     pub include_unscored: bool,
     pub max_items_per_report: NonZeroU32,
-    pub min_importance_score: u8,
+    pub min_importance_score: Score0To100,
     pub model: String,
     pub max_input_chars: u32,
     /// Empty when the category does not provide a prompt; runtime decides fallback behavior.
@@ -29,8 +25,10 @@ impl LoadedConfig {
         let ai_override = category.ai_override.as_ref();
         let publish_override = category.publish_override.as_ref();
 
-        // app.toml has no global max_items_per_report or min_importance_score. The W3
-        // config layer uses conservative defaults when a category omits these fields.
+        // Per docs/design/config-schema.md §4.5 (lines 221-225), effective values are
+        // computed as `category.publish_override.X.unwrap_or(app.publish.X)`. The
+        // global defaults live in [publish] section of app.toml; per-category overrides
+        // are field-level (a missing override field inherits the global value).
         Some(EffectiveConfig {
             category,
             ai_enabled: self.app.ai.enabled,
@@ -39,10 +37,11 @@ impl LoadedConfig {
                 .unwrap_or(self.app.publish.include_unscored),
             max_items_per_report: publish_override
                 .and_then(|override_| override_.max_items_per_report)
-                .unwrap_or(DEFAULT_MAX_ITEMS_PER_REPORT),
+                .unwrap_or(self.app.publish.max_items_per_report),
             min_importance_score: publish_override
                 .and_then(|override_| override_.min_importance_score)
-                .unwrap_or(DEFAULT_MIN_IMPORTANCE_SCORE),
+                .and_then(|raw| Score0To100::try_new(raw).ok())
+                .unwrap_or(self.app.publish.min_importance_score),
             model: ai_override
                 .and_then(|override_| override_.model.as_ref())
                 .filter(|model| !model.trim().is_empty())
@@ -60,6 +59,10 @@ impl LoadedConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
+    use rss_ai_news_domain::Score0To100;
+
     use crate::{
         app::{
             AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, DatabaseConfig, DatabaseDriver,
@@ -76,6 +79,26 @@ mod tests {
         include_unscored: bool,
         category_override: Option<bool>,
         model: Option<&str>,
+    ) -> LoadedConfig {
+        loaded_with_publish_globals(
+            include_unscored,
+            category_override,
+            model,
+            30,
+            30,
+            None,
+            None,
+        )
+    }
+
+    fn loaded_with_publish_globals(
+        include_unscored: bool,
+        category_override: Option<bool>,
+        model: Option<&str>,
+        global_max_items: u32,
+        global_min_score: u8,
+        override_max_items: Option<u32>,
+        override_min_score: Option<u8>,
     ) -> LoadedConfig {
         LoadedConfig {
             env: EnvConfig::default(),
@@ -115,6 +138,10 @@ mod tests {
                     github_path_prefix: "archive".to_string(),
                     local_output_dir: "output".into(),
                     include_unscored,
+                    max_items_per_report: NonZeroU32::new(global_max_items)
+                        .expect("test: global_max_items must be non-zero"),
+                    min_importance_score: Score0To100::try_new(global_min_score)
+                        .expect("test: global_min_score must be 0..=100"),
                 },
                 dedup: DedupConfig {
                     enable_link_dedup: true,
@@ -165,8 +192,9 @@ mod tests {
                     model: model.map(str::to_string),
                 }),
                 publish_override: Some(PublishOverride {
-                    max_items_per_report: None,
-                    min_importance_score: None,
+                    max_items_per_report: override_max_items
+                        .map(|v| NonZeroU32::new(v).expect("test: override_max_items non-zero")),
+                    min_importance_score: override_min_score,
                     include_unscored: category_override,
                 }),
                 sources: vec![],
@@ -236,5 +264,48 @@ mod tests {
 
         assert!(!effective.ai_enabled);
         assert!(effective.include_unscored);
+    }
+
+    #[test]
+    fn max_items_inherits_global_when_override_absent() {
+        // Per docs/design/config-schema.md §4.5 (lines 221-222):
+        // effective.max_items_per_report =
+        //   category.publish_override.max_items_per_report.unwrap_or(publish.max_items_per_report)
+        let config = loaded_with_publish_globals(false, None, None, 30, 30, None, None);
+        let effective = config.effective_for_category("ai").unwrap();
+        assert_eq!(effective.max_items_per_report.get(), 30);
+    }
+
+    #[test]
+    fn max_items_override_takes_precedence_over_global() {
+        let config = loaded_with_publish_globals(false, None, None, 30, 30, Some(7), None);
+        let effective = config.effective_for_category("ai").unwrap();
+        assert_eq!(effective.max_items_per_report.get(), 7);
+    }
+
+    #[test]
+    fn min_score_inherits_global_when_override_absent() {
+        // Default global is 30 per the W0 freeze contract; with no override,
+        // effective must equal global. Regression guard for the F4 audit
+        // finding that ai_run.rs once hardcoded `unwrap_or(50)`.
+        let config = loaded_with_publish_globals(false, None, None, 30, 30, None, None);
+        let effective = config.effective_for_category("ai").unwrap();
+        assert_eq!(effective.min_importance_score.get(), 30);
+    }
+
+    #[test]
+    fn min_score_override_takes_precedence_over_global() {
+        let config = loaded_with_publish_globals(false, None, None, 30, 30, None, Some(75));
+        let effective = config.effective_for_category("ai").unwrap();
+        assert_eq!(effective.min_importance_score.get(), 75);
+    }
+
+    #[test]
+    fn min_score_override_zero_is_explicit_no_floor_not_default() {
+        // Per config-schema.md §4.5: `min_importance_score = 0` is "explicit
+        // no floor" and must NOT be reinterpreted as "use global default".
+        let config = loaded_with_publish_globals(false, None, None, 30, 30, None, Some(0));
+        let effective = config.effective_for_category("ai").unwrap();
+        assert_eq!(effective.min_importance_score.get(), 0);
     }
 }

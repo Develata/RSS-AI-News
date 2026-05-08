@@ -4,7 +4,7 @@ use std::{
 };
 
 use rss_ai_news_config::{self as config, CategoryConfig};
-use rss_ai_news_runtime::{AiRunFlow, AiRunOptions};
+use rss_ai_news_runtime::{AiRunFlow, AiRunOptions, RuntimeError};
 use serde::Serialize;
 
 use crate::{
@@ -96,11 +96,20 @@ pub async fn run(cli: &Cli, args: &AiRunArgs) -> Result<AiRunCommandSummary, Cli
         .as_ref()
         .and_then(|override_| override_.prompt_template.clone())
         .unwrap_or_else(|| "Summarize the following article.".to_string());
-    let min_importance_score = category
-        .publish_override
-        .as_ref()
-        .and_then(|override_| override_.min_importance_score)
-        .unwrap_or(50) as i32;
+    // Threshold inheritance must match the publish stage exactly: F4 audit
+    // found that an ad-hoc `unwrap_or(50)` here diverged from the global
+    // default (30) used by `effective_for_category`. Routing through a single
+    // truth source guarantees AI filtering and publish selection see the
+    // same `min_importance_score`. See docs/design/config-schema.md §4.5.
+    let effective = loaded
+        .effective_for_category(&category.category.key)
+        .ok_or_else(|| {
+            CliError::Runtime(RuntimeError::Config(format!(
+                "category {} not found in loaded config",
+                category.category.key
+            )))
+        })?;
+    let min_importance_score = i32::from(effective.min_importance_score.get());
     let max_input_chars = category
         .ai_override
         .as_ref()

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,6 +12,7 @@ use rss_ai_news_config::{
     DatabaseConfig, DatabaseDriver, DedupConfig, ExtractorConfig, HttpConfig, LeaseConfig,
     ObservabilityConfig, PublishConfig, RetentionPolicy, RetryConfig, SourceConfig,
 };
+use rss_ai_news_domain::Score0To100;
 use rss_ai_news_domain::dto::extract::ArticleFetchTask;
 use rss_ai_news_domain::dto::publish::RenderedReport;
 use rss_ai_news_domain::state::FeedKind;
@@ -121,6 +123,8 @@ pub fn app_config(retention_policy: RetentionPolicy, concurrent_feeds: u32) -> A
             github_path_prefix: "archive".to_string(),
             local_output_dir: "output".into(),
             include_unscored: false,
+            max_items_per_report: NonZeroU32::new(30).expect("test default non-zero"),
+            min_importance_score: Score0To100::try_new(30).expect("test default in range"),
         },
         dedup: DedupConfig {
             enable_link_dedup: true,

@@ -34,6 +34,8 @@ github_branch = "main"
 github_path_prefix = "archive"
 local_output_dir = "output"
 include_unscored = false
+max_items_per_report = 30
+min_importance_score = 30
 
 [dedup]
 enable_link_dedup = true

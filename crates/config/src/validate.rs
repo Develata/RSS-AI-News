@@ -94,11 +94,14 @@ fn fail_if_needed(report: DiagnosticReport) -> Result<(), ConfigError> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use super::*;
     use crate::{
         app::*,
         category::{CategoryMeta, SourceConfig},
     };
+    use rss_ai_news_domain::Score0To100;
     use rss_ai_news_domain::state::FeedKind;
 
     fn app(ai_enabled: bool) -> AppConfig {
@@ -138,6 +141,8 @@ mod tests {
                 github_path_prefix: "archive".to_string(),
                 local_output_dir: "output".into(),
                 include_unscored: false,
+                max_items_per_report: NonZeroU32::new(30).expect("test default non-zero"),
+                min_importance_score: Score0To100::try_new(30).expect("test default in range"),
             },
             dedup: DedupConfig {
                 enable_link_dedup: true,

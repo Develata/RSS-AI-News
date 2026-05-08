@@ -23,3 +23,4 @@ rss-ai-news-config.workspace = true
 tokio.workspace = true
 wiremock = "0.6"
 tempfile.workspace = true
+rss-ai-news-domain.workspace = true

@@ -1,7 +1,6 @@
 use std::io::{self, Write};
 
 use rss_ai_news_config::{self as config, CategoryConfig};
-use rss_ai_news_domain::Score0To100;
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishFreezeStatus, PublishInitOptions, PublishInitOutcome,
     PublishRemoteOptions, PublishRemoteStatus, PublishRenderOptions, PublishRenderStatus,
@@ -150,8 +149,7 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
             .freeze(PublishFreezeOptions {
                 category_key: category.category.key.clone(),
                 max_items: effective.max_items_per_report,
-                min_importance_score: Score0To100::try_new(effective.min_importance_score)
-                    .map_err(|err| CliError::Runtime(RuntimeError::Config(err.to_string())))?,
+                min_importance_score: effective.min_importance_score,
                 include_unscored: effective.include_unscored,
                 ai_enabled: effective.ai_enabled,
                 excerpt_max_chars: 240,
