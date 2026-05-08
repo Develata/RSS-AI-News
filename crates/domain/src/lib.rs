@@ -8,6 +8,8 @@ pub mod error;
 pub mod link_normalizer;
 pub mod model;
 pub mod score;
+pub mod secret;
 pub mod state;
 
 pub use score::{Score0To100, ScoreOutOfRange};
+pub use secret::SecretString;

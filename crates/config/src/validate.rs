@@ -200,7 +200,7 @@ mod tests {
 
     fn env_with_ai() -> EnvConfig {
         EnvConfig {
-            openai_api_key: Some("sk-test".to_string()),
+            openai_api_key: Some(rss_ai_news_domain::SecretString::new("sk-test")),
             openai_base_url: Some("https://api.example.test/v1".to_string()),
             ..EnvConfig::default()
         }

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use rss_ai_news_ai::{AiClient, AiClientConfig, AiError, AiResponse, AiTask, OpenAiCompatClient};
 use rss_ai_news_config::{self as config, LoadedConfig};
+use rss_ai_news_domain::SecretString;
 use rss_ai_news_extractor::{ContentStrategy, ReqwestHtmlFetcher};
 use rss_ai_news_feed::ReqwestFeedFetcher;
 use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, LocalFsTarget, PublishTarget};
@@ -43,12 +44,18 @@ pub async fn build_run_context(
         && loaded
             .env
             .openai_api_key
-            .as_deref()
+            .as_ref()
+            .map(SecretString::expose_secret)
             .is_some_and(|value| !value.trim().is_empty())
     {
         Arc::new(OpenAiCompatClient::new(AiClientConfig {
             api_base: loaded.env.openai_base_url.clone().unwrap_or_default(),
-            api_key: loaded.env.openai_api_key.clone().unwrap_or_default(),
+            api_key: loaded
+                .env
+                .openai_api_key
+                .as_ref()
+                .map(|secret| secret.expose_secret().to_owned())
+                .unwrap_or_default(),
             request_timeout: Duration::from_secs(app.ai.request_timeout_seconds),
         })?)
     } else {
@@ -63,11 +70,17 @@ pub async fn build_run_context(
             && loaded
                 .env
                 .github_token
-                .as_deref()
+                .as_ref()
+                .map(SecretString::expose_secret)
                 .is_some_and(|value| !value.trim().is_empty())
         {
             Some(Arc::new(GitHubTarget::new(GitHubTargetConfig {
-                token: loaded.env.github_token.clone().unwrap_or_default(),
+                token: loaded
+                    .env
+                    .github_token
+                    .as_ref()
+                    .map(|secret| secret.expose_secret().to_owned())
+                    .unwrap_or_default(),
                 owner: app.publish.github_owner.clone(),
                 repo: app.publish.github_repo.clone(),
                 branch: app.publish.github_branch.clone(),

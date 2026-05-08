@@ -37,7 +37,11 @@ pub(super) fn collect_env_checks(
     env: &EnvConfig,
 ) {
     if app.ai.enabled {
-        if is_blank(env.openai_api_key.as_deref()) {
+        if is_blank(
+            env.openai_api_key
+                .as_ref()
+                .map(rss_ai_news_domain::SecretString::expose_secret),
+        ) {
             report.push(Diagnostic::new(
                 ".env",
                 "OPENAI_API_KEY",
@@ -85,7 +89,13 @@ pub(super) fn collect_publish_checks(
     if flags.local_only || config.app.publish.github_owner.trim().is_empty() {
         return;
     }
-    if is_blank(config.env.github_token.as_deref()) {
+    if is_blank(
+        config
+            .env
+            .github_token
+            .as_ref()
+            .map(rss_ai_news_domain::SecretString::expose_secret),
+    ) {
         report.push(Diagnostic::new(
             ".env",
             "GITHUB_TOKEN",
