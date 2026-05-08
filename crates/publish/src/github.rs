@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::{Component, Path};
 use std::sync::Arc;
 
@@ -10,7 +11,11 @@ use serde_json::{Value, json};
 use crate::error::PublishError;
 use crate::target::{PublishTarget, PublishedArtifact};
 
-#[derive(Debug, Clone)]
+/// GitHub remote-target configuration. The `token` field carries a personal
+/// access token; `Debug` is implemented manually to redact it (`***`) so that
+/// `tracing::error!("…{cfg:?}")` or panic messages cannot leak credentials.
+/// See the W0 codex 二审 Issue 4 follow-up (F4-2).
+#[derive(Clone)]
 pub struct GitHubTargetConfig {
     pub token: String,
     pub owner: String,
@@ -18,6 +23,19 @@ pub struct GitHubTargetConfig {
     pub branch: String,
     pub path_prefix: String,
     pub commit_message_prefix: String,
+}
+
+impl fmt::Debug for GitHubTargetConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitHubTargetConfig")
+            .field("token", &"***")
+            .field("owner", &self.owner)
+            .field("repo", &self.repo)
+            .field("branch", &self.branch)
+            .field("path_prefix", &self.path_prefix)
+            .field("commit_message_prefix", &self.commit_message_prefix)
+            .finish()
+    }
 }
 
 pub struct GitHubTarget {
@@ -275,3 +293,32 @@ pub mod classify {
 }
 
 pub use classify::classify_octocrab_error;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_token_to_prevent_log_leakage() {
+        // Regression guard for the F4-2 finding: GitHubTargetConfig once
+        // `#[derive(Debug)]`'d, which would print the raw PAT in any tracing
+        // event or panic message that formatted the struct.
+        let secret = "ghp-extremely-secret-personal-access-token-1234567890";
+        let cfg = GitHubTargetConfig {
+            token: secret.to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            branch: "main".to_string(),
+            path_prefix: "archive".to_string(),
+            commit_message_prefix: "rss-ai-news".to_string(),
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(
+            !rendered.contains(secret),
+            "Debug must not leak GitHub token: {rendered}"
+        );
+        assert!(rendered.contains("***"));
+        assert!(rendered.contains("owner"));
+        assert!(rendered.contains("repo"));
+    }
+}
