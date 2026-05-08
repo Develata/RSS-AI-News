@@ -1,6 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use rss_ai_news_config::CategoryConfig;
+pub use rss_ai_news_domain::state::ReindexTarget;
 use rss_ai_news_domain::{
     link_normalizer::normalize_link, model::FeedSource, state::FeedSourceStatus,
 };
@@ -12,13 +13,6 @@ use time::OffsetDateTime;
 use crate::context::RunContext;
 use crate::error::RuntimeError;
 use crate::events::RunEventEmitter;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReindexTarget {
-    LinkHash,
-    ContentHash,
-    Categories,
-}
 
 #[derive(Debug, Clone)]
 pub struct ReindexOptions {

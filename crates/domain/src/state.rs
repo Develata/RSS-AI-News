@@ -149,6 +149,44 @@ pub enum RuleVersionStatus {
     Superseded,
 }
 
+/// Reindex job state machine. See `docs/design/state-machine.md` §6.2
+/// (reindex_job state set) + `storage-schema.md` §4.10 (`reindex_jobs.state`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum ReindexJobState {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Aborted,
+}
+
+/// Reindex target — what the job rewrites. See `state-machine.md` §6.1 +
+/// `storage-schema.md` §4.10 (`reindex_jobs.target`) + `cli-semantics.md`
+/// §4.8 (`reindex --target`).
+///
+/// String form is **kebab-case** (`link-hash` / `content-hash` /
+/// `categories`) — the canonical wire/DB form documented in storage-schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "kebab-case")]
+#[sqlx(type_name = "text", rename_all = "kebab-case")]
+pub enum ReindexTarget {
+    LinkHash,
+    ContentHash,
+    Categories,
+}
+
+impl fmt::Display for ReindexTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| format!("{self:?}"));
+        f.write_str(&s)
+    }
+}
+
 impl fmt::Display for FeedEntryState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = serde_json::to_value(self)
@@ -299,6 +337,33 @@ mod tests {
             (RuleVersionStatus::Active, "active"),
             (RuleVersionStatus::Superseded, "superseded"),
         ]);
+    }
+
+    #[test]
+    fn reindex_job_state_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (ReindexJobState::Pending, "pending"),
+            (ReindexJobState::Running, "running"),
+            (ReindexJobState::Completed, "completed"),
+            (ReindexJobState::Failed, "failed"),
+            (ReindexJobState::Aborted, "aborted"),
+        ]);
+    }
+
+    #[test]
+    fn reindex_target_round_trip_all_variants() {
+        assert_all_round_trip(&[
+            (ReindexTarget::LinkHash, "link-hash"),
+            (ReindexTarget::ContentHash, "content-hash"),
+            (ReindexTarget::Categories, "categories"),
+        ]);
+    }
+
+    #[test]
+    fn reindex_target_display_matches_kebab_case() {
+        assert_eq!(ReindexTarget::LinkHash.to_string(), "link-hash");
+        assert_eq!(ReindexTarget::ContentHash.to_string(), "content-hash");
+        assert_eq!(ReindexTarget::Categories.to_string(), "categories");
     }
 
     #[test]

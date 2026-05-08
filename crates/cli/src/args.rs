@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use rss_ai_news_config::CliOverrides;
+use rss_ai_news_domain::state::ReindexTarget as DomainReindexTarget;
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "rss-ai-news", version, about = "Rust 版 RSS-AI-News CLI")]
@@ -182,6 +183,16 @@ pub enum ReindexTarget {
     LinkHash,
     ContentHash,
     Categories,
+}
+
+impl From<ReindexTarget> for DomainReindexTarget {
+    fn from(value: ReindexTarget) -> Self {
+        match value {
+            ReindexTarget::LinkHash => Self::LinkHash,
+            ReindexTarget::ContentHash => Self::ContentHash,
+            ReindexTarget::Categories => Self::Categories,
+        }
+    }
 }
 
 #[derive(Args, Debug, Clone)]

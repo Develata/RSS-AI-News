@@ -1,11 +1,11 @@
 use std::io::{self, Write};
 
 use rss_ai_news_config::{self as config, CategoryConfig};
-use rss_ai_news_runtime::{ReindexFlow, ReindexOptions, ReindexTarget as RuntimeReindexTarget};
+use rss_ai_news_runtime::{ReindexFlow, ReindexOptions, ReindexTarget};
 use serde::Serialize;
 
 use crate::{
-    args::{Cli, ReindexArgs, ReindexTarget},
+    args::{Cli, ReindexArgs},
     commands::backfill::sha256_hex,
     context_factory::build_run_context,
     error::CliError,
@@ -42,16 +42,8 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
     let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let (_pool, ctx) = build_run_context("reindex", &loaded).await?;
-    let target = match args.target {
-        ReindexTarget::LinkHash => RuntimeReindexTarget::LinkHash,
-        ReindexTarget::ContentHash => RuntimeReindexTarget::ContentHash,
-        ReindexTarget::Categories => RuntimeReindexTarget::Categories,
-    };
-    let target_str = match args.target {
-        ReindexTarget::LinkHash => "link-hash",
-        ReindexTarget::ContentHash => "content-hash",
-        ReindexTarget::Categories => "categories",
-    };
+    let target: ReindexTarget = args.target.into();
+    let target_str = target.to_string();
     let tag = format!(
         "reindex-{}-{}",
         target_str,
@@ -69,7 +61,7 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
         .await?;
 
     Ok(ReindexCommandSummary {
-        target: target_str.to_string(),
+        target: target_str,
         new_rule_version_id: summary.new_rule_version_id,
         scanned: summary.scanned,
         updated: summary.updated,

@@ -10,6 +10,7 @@ pub mod feed_source;
 pub mod publish_item;
 pub mod publish_record;
 pub mod raw_artifact;
+pub mod reindex_job;
 pub mod rule_version;
 pub mod run_event;
 
@@ -20,5 +21,6 @@ pub use feed_source::FeedSource;
 pub use publish_item::PublishItem;
 pub use publish_record::PublishRecord;
 pub use raw_artifact::RawArtifact;
+pub use reindex_job::ReindexJob;
 pub use rule_version::RuleVersion;
 pub use run_event::RunEvent;
