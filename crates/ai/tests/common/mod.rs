@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use rss_ai_news_ai::{AiClientConfig, AiTask, OpenAiCompatClient};
+use rss_ai_news_domain::SecretString;
 
 pub fn test_client(api_base: String) -> OpenAiCompatClient {
     OpenAiCompatClient::new(AiClientConfig {
         api_base,
-        api_key: "sk-test".to_string(),
+        api_key: SecretString::from("sk-test"),
         request_timeout: Duration::from_secs(2),
     })
     .expect("test client config must be valid")
@@ -14,7 +15,7 @@ pub fn test_client(api_base: String) -> OpenAiCompatClient {
 pub fn test_client_with_timeout(api_base: String, request_timeout: Duration) -> OpenAiCompatClient {
     OpenAiCompatClient::new(AiClientConfig {
         api_base,
-        api_key: "sk-test".to_string(),
+        api_key: SecretString::from("sk-test"),
         request_timeout,
     })
     .expect("test client config must be valid")

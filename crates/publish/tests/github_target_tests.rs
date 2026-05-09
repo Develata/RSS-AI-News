@@ -158,7 +158,7 @@ async fn rejects_invalid_relative_path_without_http_request() {
 fn target(server: &MockServer) -> GitHubTarget {
     GitHubTarget::with_base_uri(
         GitHubTargetConfig {
-            token: "token".to_string(),
+            token: rss_ai_news_domain::SecretString::from("token"),
             owner: "owner".to_string(),
             repo: "repo".to_string(),
             branch: "main".to_string(),

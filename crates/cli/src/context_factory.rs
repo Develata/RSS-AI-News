@@ -48,14 +48,17 @@ pub async fn build_run_context(
             .map(SecretString::expose_secret)
             .is_some_and(|value| !value.trim().is_empty())
     {
+        // Pass the SecretString through end-to-end (W2-A2). The branch
+        // condition above already verified `openai_api_key` is `Some(_)`
+        // and non-empty after trim, so cloning the original is sound.
+        let api_key = loaded
+            .env
+            .openai_api_key
+            .clone()
+            .unwrap_or_else(|| SecretString::from(""));
         Arc::new(OpenAiCompatClient::new(AiClientConfig {
             api_base: loaded.env.openai_base_url.clone().unwrap_or_default(),
-            api_key: loaded
-                .env
-                .openai_api_key
-                .as_ref()
-                .map(|secret| secret.expose_secret().to_owned())
-                .unwrap_or_default(),
+            api_key,
             request_timeout: Duration::from_secs(app.ai.request_timeout_seconds),
         })?)
     } else {
@@ -74,13 +77,16 @@ pub async fn build_run_context(
                 .map(SecretString::expose_secret)
                 .is_some_and(|value| !value.trim().is_empty())
         {
+            // Same pattern as the AI api_key above: the surrounding `if`
+            // already ensured `github_token` is `Some(_)` and non-empty,
+            // so we forward the SecretString unchanged (W2-A2).
+            let token = loaded
+                .env
+                .github_token
+                .clone()
+                .unwrap_or_else(|| SecretString::from(""));
             Some(Arc::new(GitHubTarget::new(GitHubTargetConfig {
-                token: loaded
-                    .env
-                    .github_token
-                    .as_ref()
-                    .map(|secret| secret.expose_secret().to_owned())
-                    .unwrap_or_default(),
+                token,
                 owner: app.publish.github_owner.clone(),
                 repo: app.publish.github_repo.clone(),
                 branch: app.publish.github_branch.clone(),

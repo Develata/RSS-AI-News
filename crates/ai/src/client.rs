@@ -5,7 +5,7 @@ use std::{
 
 use async_openai::{Client, config::OpenAIConfig};
 use async_trait::async_trait;
-use rss_ai_news_domain::dto::ai::AiTask;
+use rss_ai_news_domain::{SecretString, dto::ai::AiTask};
 use serde::Deserialize;
 use serde_json::json;
 use url::Url;
@@ -38,28 +38,22 @@ pub trait AiClient: Send + Sync {
     async fn invoke(&self, task: &AiTask) -> Result<AiResponse, AiError>;
 }
 
-#[derive(Clone)]
+/// AI client configuration. `api_key` is wrapped in [`SecretString`] so the
+/// raw value is redacted by the type's own `Debug` / `Display` /
+/// `Serialize` impls; callers should only `expose_secret()` at the actual
+/// HTTP authentication boundary.
+#[derive(Clone, Debug)]
 pub struct AiClientConfig {
     pub api_base: String,
-    pub api_key: String,
+    pub api_key: SecretString,
     pub request_timeout: Duration,
-}
-
-impl fmt::Debug for AiClientConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AiClientConfig")
-            .field("api_base", &self.api_base)
-            .field("api_key", &"<redacted>")
-            .field("request_timeout", &self.request_timeout)
-            .finish()
-    }
 }
 
 #[derive(Clone)]
 pub struct OpenAiCompatClient {
     inner: Client<OpenAIConfig>,
     http_client: reqwest::Client,
-    api_key: String,
+    api_key: SecretString,
     chat_completions_url: Url,
     request_timeout: Duration,
 }
@@ -68,7 +62,7 @@ impl fmt::Debug for OpenAiCompatClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpenAiCompatClient")
             .field("inner", &"<async_openai::Client>")
-            .field("api_key", &"<redacted>")
+            .field("api_key", &self.api_key)
             .field("chat_completions_url", &self.chat_completions_url)
             .field("request_timeout", &self.request_timeout)
             .finish()
@@ -77,7 +71,7 @@ impl fmt::Debug for OpenAiCompatClient {
 
 impl OpenAiCompatClient {
     pub fn new(cfg: AiClientConfig) -> Result<Self, AiError> {
-        if cfg.api_key.trim().is_empty() {
+        if cfg.api_key.expose_secret().trim().is_empty() {
             return Err(AiError::InvalidConfig(
                 "api_key must not be empty".to_string(),
             ));
@@ -91,7 +85,7 @@ impl OpenAiCompatClient {
 
         let openai_config = OpenAIConfig::new()
             .with_api_base(cfg.api_base)
-            .with_api_key(cfg.api_key.clone());
+            .with_api_key(cfg.api_key.expose_secret().to_owned());
         let inner = Client::with_config(openai_config).with_http_client(http_client.clone());
 
         Ok(Self {
@@ -147,7 +141,7 @@ impl AiClient for OpenAiCompatClient {
         let response = self
             .http_client
             .post(self.chat_completions_url.clone())
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.api_key.expose_secret())
             .json(&request_body)
             .send()
             .await
@@ -282,3 +276,48 @@ fn chat_completions_url(api_base: &str) -> Result<Url, AiError> {
 fn millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ai_client_config_debug_redacts_api_key() {
+        // W2-A2 regression guard: AiClientConfig once held api_key as a
+        // raw String with a manual Debug impl that printed "<redacted>";
+        // SecretString now provides redaction at the type level so the
+        // derived Debug suffices and downstream typo-fixes can't reintroduce
+        // a leak.
+        let secret = "sk-extremely-secret-token-1234567890";
+        let cfg = AiClientConfig {
+            api_base: "https://example.test/v1".to_string(),
+            api_key: SecretString::from(secret),
+            request_timeout: Duration::from_secs(5),
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(
+            !rendered.contains(secret),
+            "Debug must not leak api_key: {rendered}"
+        );
+        assert!(rendered.contains("***"));
+        assert!(rendered.contains("https://example.test"));
+    }
+
+    #[test]
+    fn open_ai_compat_client_debug_redacts_api_key() {
+        let secret = "sk-extremely-secret-token-1234567890";
+        let client = OpenAiCompatClient::new(AiClientConfig {
+            api_base: "https://example.test/v1".to_string(),
+            api_key: SecretString::from(secret),
+            request_timeout: Duration::from_secs(5),
+        })
+        .expect("build client");
+        let rendered = format!("{client:?}");
+        assert!(
+            !rendered.contains(secret),
+            "Debug must not leak api_key: {rendered}"
+        );
+        assert!(rendered.contains("***"));
+    }
+}
+

@@ -1,41 +1,29 @@
-use std::fmt;
 use std::path::{Component, Path};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use octocrab::Octocrab;
-use rss_ai_news_domain::dto::publish::RenderedReport;
+use rss_ai_news_domain::{SecretString, dto::publish::RenderedReport};
 use serde_json::{Value, json};
 
 use crate::error::PublishError;
 use crate::target::{PublishTarget, PublishedArtifact};
 
-/// GitHub remote-target configuration. The `token` field carries a personal
-/// access token; `Debug` is implemented manually to redact it (`***`) so that
-/// `tracing::error!("…{cfg:?}")` or panic messages cannot leak credentials.
-/// See the W0 codex 二审 Issue 4 follow-up (F4-2).
-#[derive(Clone)]
+/// GitHub remote-target configuration. The `token` field is a
+/// [`SecretString`] so its raw value is redacted by the type's own
+/// `Debug` / `Display` / `Serialize` impls — `tracing::error!("…{cfg:?}")`
+/// or panic messages cannot leak credentials. The token is only exposed
+/// at the actual `Octocrab::personal_token` boundary (W2-A2 follow-up to
+/// the F4-2 manual-Debug fix).
+#[derive(Clone, Debug)]
 pub struct GitHubTargetConfig {
-    pub token: String,
+    pub token: SecretString,
     pub owner: String,
     pub repo: String,
     pub branch: String,
     pub path_prefix: String,
     pub commit_message_prefix: String,
-}
-
-impl fmt::Debug for GitHubTargetConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GitHubTargetConfig")
-            .field("token", &"***")
-            .field("owner", &self.owner)
-            .field("repo", &self.repo)
-            .field("branch", &self.branch)
-            .field("path_prefix", &self.path_prefix)
-            .field("commit_message_prefix", &self.commit_message_prefix)
-            .finish()
-    }
 }
 
 pub struct GitHubTarget {
@@ -46,7 +34,9 @@ pub struct GitHubTarget {
 impl GitHubTarget {
     pub fn new(cfg: GitHubTargetConfig) -> Result<Self, PublishError> {
         let client = Octocrab::builder()
-            .personal_token(cfg.token.clone())
+            .personal_token(secrecy::SecretString::from(
+                cfg.token.expose_secret().to_owned(),
+            ))
             .build()
             .map_err(|error| PublishError::GitHubAuthFailed(format!("octocrab build: {error}")))?;
         Ok(Self {
@@ -57,7 +47,9 @@ impl GitHubTarget {
 
     pub fn with_base_uri(cfg: GitHubTargetConfig, base_uri: &str) -> Result<Self, PublishError> {
         let client = Octocrab::builder()
-            .personal_token(cfg.token.clone())
+            .personal_token(secrecy::SecretString::from(
+                cfg.token.expose_secret().to_owned(),
+            ))
             .base_uri(base_uri)
             .map_err(|error| PublishError::GitHubAuthFailed(format!("octocrab base_uri: {error}")))?
             .build()
@@ -300,12 +292,16 @@ mod tests {
 
     #[test]
     fn debug_redacts_token_to_prevent_log_leakage() {
-        // Regression guard for the F4-2 finding: GitHubTargetConfig once
-        // `#[derive(Debug)]`'d, which would print the raw PAT in any tracing
-        // event or panic message that formatted the struct.
+        // Regression guard for F4-2 (manual Debug redact) and W2-A2
+        // (token typed as SecretString end-to-end). SecretString's own
+        // Debug impl prints `SecretString("***")`, so the derived Debug
+        // on GitHubTargetConfig already redacts the PAT — without
+        // SecretString this struct used to be `#[derive(Debug)]` over a
+        // raw `String`, leaking the token into tracing events / panic
+        // messages.
         let secret = "ghp-extremely-secret-personal-access-token-1234567890";
         let cfg = GitHubTargetConfig {
-            token: secret.to_string(),
+            token: SecretString::from(secret),
             owner: "owner".to_string(),
             repo: "repo".to_string(),
             branch: "main".to_string(),
