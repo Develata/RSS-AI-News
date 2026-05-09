@@ -29,7 +29,7 @@ pub async fn run() -> ExitCode {
 
     let mut writer = OutputWriter::new(OutputFormat::from(cli.output_format));
     match dispatch(cli, &mut writer).await {
-        Ok(()) => ExitCode::Success,
+        Ok(exit) => exit,
         Err(error) => {
             let exit = error.exit_code();
             let _ = writer.emit_failure(error.command_name(), &error);

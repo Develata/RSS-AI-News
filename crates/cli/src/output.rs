@@ -31,9 +31,23 @@ impl From<args::OutputFormat> for OutputFormat {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RenderedError {
+    pub kind: String,
+    pub message: String,
+}
+
 pub trait CommandSummary: Serialize {
     fn status(&self) -> &'static str {
         "success"
+    }
+
+    /// Errors to surface in the JSON envelope's `errors` array. Default is
+    /// empty; commands that aggregate stage-level failures (e.g. `run`)
+    /// override this so JSON consumers see the failure list alongside the
+    /// summary.
+    fn errors(&self) -> Vec<RenderedError> {
+        Vec::new()
     }
 
     fn render_pretty(&self, writer: &mut dyn Write) -> io::Result<()>;
@@ -66,7 +80,7 @@ impl OutputWriter {
                     "command": command,
                     "status": summary.status(),
                     "summary": summary,
-                    "errors": [],
+                    "errors": summary.errors(),
                 });
                 serde_json::to_writer(&mut handle, &envelope)?;
                 writeln!(handle)

@@ -249,7 +249,7 @@ fn reindex_summary() -> ReindexCommandSummary {
 
 fn run_summary() -> RunCommandSummary {
     RunCommandSummary {
-        ingest: rss_ai_news_cli::commands::ingest::IngestCommandSummary {
+        ingest: Some(rss_ai_news_cli::commands::ingest::IngestCommandSummary {
             sources_attempted: 1,
             sources_succeeded: 1,
             sources_not_modified: 0,
@@ -260,9 +260,10 @@ fn run_summary() -> RunCommandSummary {
             articles_fallback: 0,
             fetch_failed: 0,
             duration_seconds: 1.0,
-        },
-        ai_run: ai_summary(),
+        }),
+        ai_run: Some(ai_summary()),
         publish: Some(publish_summary()),
+        stage_failures: Vec::new(),
         overall_duration_seconds: 2.0,
     }
 }

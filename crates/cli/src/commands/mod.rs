@@ -1,6 +1,7 @@
 use crate::{
     args::{Cli, Command, MigrateAction},
     error::CliError,
+    exit_code::ExitCode,
     output::OutputWriter,
 };
 
@@ -16,7 +17,7 @@ pub mod replay;
 pub mod run;
 pub mod validate_config;
 
-pub async fn dispatch(cli: Cli, writer: &mut OutputWriter) -> Result<(), CliError> {
+pub async fn dispatch(cli: Cli, writer: &mut OutputWriter) -> Result<ExitCode, CliError> {
     match &cli.command {
         Command::ValidateConfig => {
             let summary = validate_config::run(&cli).await?;
@@ -83,10 +84,19 @@ pub async fn dispatch(cli: Cli, writer: &mut OutputWriter) -> Result<(), CliErro
                     .map_err(CliError::Io)?;
             }
         },
+        // `run` is the only command that aggregates stage-level failures
+        // into the summary itself (per cli-semantics §4.11). It always
+        // emits the success summary (which carries `stage_failures` /
+        // `errors` / `status="fail"` so JSON consumers see the full
+        // picture in one envelope), then derives the exit code from the
+        // most severe stage failure. Returning the derived ExitCode lets
+        // `lib::run` propagate non-zero exits without triggering a second
+        // `emit_failure` envelope.
         Command::Run(args) => {
             let summary = run::run(&cli, args).await?;
             writer.emit_success("run", &summary).map_err(CliError::Io)?;
+            return Ok(summary.derive_exit_code());
         }
     }
-    Ok(())
+    Ok(ExitCode::Success)
 }
