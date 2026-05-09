@@ -2539,6 +2539,7 @@ dependencies = [
  "rss-ai-news-domain",
  "rss-ai-news-extractor",
  "rss-ai-news-feed",
+ "rss-ai-news-observability",
  "rss-ai-news-publish",
  "rss-ai-news-report",
  "rss-ai-news-storage",

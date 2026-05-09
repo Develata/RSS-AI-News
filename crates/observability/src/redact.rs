@@ -45,3 +45,47 @@ pub fn redact_json_secrets(value: &mut Value) {
         _ => {}
     }
 }
+
+/// One-stop redaction for `run_events.context_json` payloads (per
+/// error-and-observability §4.2). Combines:
+///
+/// 1. [`redact_json_secrets`] — replaces values whose **key** matches
+///    `*_token` / `*_key` / `*_secret` / `*_password` with `"***"`.
+/// 2. A recursive sweep over every remaining string **value**, applying
+///    [`redact_authorization_header`] and [`redact_url_userinfo`] so a
+///    secret embedded in free-form text (HTTP request dumps, error
+///    messages quoting an Authorization header, URLs carrying
+///    user:password userinfo) is also masked.
+///
+/// The two stages are necessary together: key-based redaction misses
+/// secrets that callers stuffed into a generic "message" / "details"
+/// string, and the string-level regexes miss bare values held under a
+/// `*_token` key with no surrounding context.
+pub fn redact_event_context(value: &mut Value) {
+    redact_json_secrets(value);
+    redact_strings_in_place(value);
+}
+
+fn redact_strings_in_place(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            let after_authz = redact_authorization_header(text);
+            let after_url = redact_url_userinfo(after_authz.as_ref());
+            let final_str = after_url.into_owned();
+            if final_str != *text {
+                *text = final_str;
+            }
+        }
+        Value::Object(map) => {
+            for (_, child) in map {
+                redact_strings_in_place(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_strings_in_place(item);
+            }
+        }
+        _ => {}
+    }
+}
