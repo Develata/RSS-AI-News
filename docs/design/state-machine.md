@@ -378,7 +378,7 @@ run_events 只写 [error-and-observability §4.3](./error-and-observability.md) 
 
 ### 6.1 定位
 
-reindex 是规则升级触发的批量重算操作（`link-hash` / `content-hash` / `categories`），由 [storage-schema §4.10 `reindex_jobs`](./storage-schema.md#410-reindex_jobs) 表持久化 job 元数据与 checkpoint。
+reindex 是规则升级触发的批量重算操作（`link_hash` / `content_hash` / `categories`），由 [storage-schema §4.10 `reindex_jobs`](./storage-schema.md#410-reindex_jobs) 表持久化 job 元数据与 checkpoint。
 
 reindex_job **不属于真相源对象状态机**：它不修改任何 `feed_entries.state` / `articles.state` / `article_ai_results.state` / `publish_records.state`。它只更新数据行的 `*_rule_version_id` 外键，并控制 `rule_versions.status` 的两阶段激活时序。因此 §7.2 跨状态机不变量 I1–I8 不受 reindex 直接影响。
 

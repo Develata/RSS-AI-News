@@ -166,11 +166,12 @@ pub enum ReindexJobState {
 /// `storage-schema.md` §4.10 (`reindex_jobs.target`) + `cli-semantics.md`
 /// §4.8 (`reindex --target`).
 ///
-/// String form is **kebab-case** (`link-hash` / `content-hash` /
-/// `categories`) — the canonical wire/DB form documented in storage-schema.
+/// String form is **snake_case** (`link_hash` / `content_hash` /
+/// `categories`) per `internal-dto-contracts.md` §8 — uniform with all other
+/// domain enums across serde, sqlx, run_events, and CLI input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[serde(rename_all = "kebab-case")]
-#[sqlx(type_name = "text", rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum ReindexTarget {
     LinkHash,
     ContentHash,
@@ -353,16 +354,16 @@ mod tests {
     #[test]
     fn reindex_target_round_trip_all_variants() {
         assert_all_round_trip(&[
-            (ReindexTarget::LinkHash, "link-hash"),
-            (ReindexTarget::ContentHash, "content-hash"),
+            (ReindexTarget::LinkHash, "link_hash"),
+            (ReindexTarget::ContentHash, "content_hash"),
             (ReindexTarget::Categories, "categories"),
         ]);
     }
 
     #[test]
-    fn reindex_target_display_matches_kebab_case() {
-        assert_eq!(ReindexTarget::LinkHash.to_string(), "link-hash");
-        assert_eq!(ReindexTarget::ContentHash.to_string(), "content-hash");
+    fn reindex_target_display_matches_snake_case() {
+        assert_eq!(ReindexTarget::LinkHash.to_string(), "link_hash");
+        assert_eq!(ReindexTarget::ContentHash.to_string(), "content_hash");
         assert_eq!(ReindexTarget::Categories.to_string(), "categories");
     }
 

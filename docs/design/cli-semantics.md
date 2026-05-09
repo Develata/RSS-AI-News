@@ -278,13 +278,13 @@ WHERE pr.state IN ('published_remote', 'published_local')
 
 ### 4.8 `reindex`
 
-**用途**：规则升级触发的批量重算（`link-hash` / `content-hash` / `categories`）。运行模型见 [state-machine §6](./state-machine.md#6-reindex_job-独立状态轮)，持久化 schema 见 [storage-schema §4.10](./storage-schema.md#410-reindex_jobs)。
+**用途**：规则升级触发的批量重算（`link_hash` / `content_hash` / `categories`）。运行模型见 [state-machine §6](./state-machine.md#6-reindex_job-独立状态轮)，持久化 schema 见 [storage-schema §4.10](./storage-schema.md#410-reindex_jobs)。
 
 **参数**：
 
 | 参数 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `--target` | enum | 必填 | `link-hash` / `content-hash` / `categories` / `all`（顺序执行三类，逐类提交独立 job）|
+| `--target` | enum | 必填 | `link_hash` / `content_hash` / `categories` / `all`（顺序执行三类，逐类提交独立 job）|
 | `--batch-size` | u32 | 100 | 每批 commit 行数；不受 `runtime.max_batches_per_run` 控制 |
 | `--dry-run` | bool | false | 仅统计将更新行数与待写入 rule_versions 元数据；不 INSERT `rule_versions`、不 INSERT `reindex_jobs`、不更新任何数据行 |
 | `--abort` | string | - | 取消指定 job_id（`reindex_jobs.id`），状态推进到 `aborted`；保留已更新批次（active rule 保护数据语义正确）|
@@ -307,14 +307,14 @@ WHERE pr.state IN ('published_remote', 'published_local')
 
 **与其它命令的并发约束**：
 
-- 同 target 的 reindex_job 互斥（partial unique index）；不同 target 可并发（`link-hash` 与 `categories` 同时 reindex 不冲突）
+- 同 target 的 reindex_job 互斥（partial unique index）；不同 target 可并发（`link_hash` 与 `categories` 同时 reindex 不冲突）
 - ingest / ai-run / publish / extract 与 reindex **不互斥**：所有读规则的命令通过 `active_rule(kind)` resolver 取规则，reindex 期间始终读到旧 active rule（详见 [state-machine §6.4](./state-machine.md#64-active-rule-resolver)）
 - `migrate run` 与 `running` reindex_job 互斥：migrate 启动前必须无 running reindex（doctor 应验证）；规则升级走 reindex，schema 升级走 migrate，二者职责边界明确
 
 **进度输出**：
 
 ```text
-Reindex started: target=link-hash job_id=42 rule_version_id=17
+Reindex started: target=link_hash job_id=42 rule_version_id=17
   [batch 1/?] processed 100 rows, last_id=10042 (12.3 rows/s)
   [batch 2/?] processed 200 rows, last_id=10142 (15.1 rows/s)
   ...

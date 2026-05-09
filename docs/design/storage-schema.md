@@ -444,7 +444,7 @@ reindex 作业元数据与 checkpoint 持久化表。详见 [state-machine §6](
 | 列名 | 类型 | 约束 | 说明 |
 |---|---|---|---|
 | `id` | `INTEGER` | PRIMARY KEY | - |
-| `target` | `TEXT` | NOT NULL | `link-hash` / `content-hash` / `categories` |
+| `target` | `TEXT` | NOT NULL | `link_hash` / `content_hash` / `categories`（snake_case，与 [internal-dto-contracts §8](./internal-dto-contracts.md#8-命名约定pascalcase-与-snake_case) 全枚举命名约束一致）|
 | `rule_version_id` | `INTEGER` | NOT NULL | 指向新 `rule_versions` 行（status=`pending` 直到 reindex 完成）|
 | `last_processed_id` | `INTEGER` | NULL | 当前批次 checkpoint；NULL = 尚未开始扫描 |
 | `total_estimated` | `INTEGER` | NULL | 预计总行数；NULL = 不可估计 |

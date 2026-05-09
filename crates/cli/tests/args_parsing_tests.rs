@@ -164,7 +164,7 @@ async fn args_parsing_parses_rebuild_report_with_publish_id() {
 #[tokio::test]
 async fn args_parsing_parses_reindex_with_target_link_hash() {
     let cli =
-        Cli::try_parse_from(["rss-ai-news", "reindex", "--target", "link-hash"]).expect("parse");
+        Cli::try_parse_from(["rss-ai-news", "reindex", "--target", "link_hash"]).expect("parse");
     match cli.command {
         Command::Reindex(args) => {
             assert_eq!(args.target, ReindexTarget::LinkHash);

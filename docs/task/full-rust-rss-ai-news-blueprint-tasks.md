@@ -376,8 +376,8 @@
 
 #### 三类 target 实现
 
-- [ ] `storage`: `link-hash` 重算（扫描 `feed_entries` + `articles`，重算 `link_hash` 派生字段，注意 `feed_entries.link_hash` 参与三层去重，去重含义随 reindex 迁移到新 active）
-- [ ] `storage`: `content-hash` 重算（扫描 `articles`，重算 `content_hash`）
+- [ ] `storage`: `link_hash` 重算（扫描 `feed_entries` + `articles`，重算 `link_hash` 派生字段，注意 `feed_entries.link_hash` 参与三层去重，去重含义随 reindex 迁移到新 active）
+- [ ] `storage`: `content_hash` 重算（扫描 `articles`，重算 `content_hash`）
 - [ ] `storage`: `categories` 重算（扫描 `articles`，重算分类映射 `category_key`）
 
 #### 两阶段激活

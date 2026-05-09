@@ -179,6 +179,7 @@ pub struct ReindexArgs {
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
 pub enum ReindexTarget {
     LinkHash,
     ContentHash,

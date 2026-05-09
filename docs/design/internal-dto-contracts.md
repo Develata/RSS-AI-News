@@ -377,6 +377,8 @@ PublishState       = Pending | SnapshotFrozen | Rendered | StoredLocal
 
 为何不允许 kebab-case：CLI 子命令名（如 `ai-run`、`rebuild-report`、`validate-config`）使用 kebab-case，但这是命令树层面的命名，与枚举值序列化无关。枚举值若使用 kebab-case 会与配置 TOML 的键名风格冲突。
 
+**适用范围**：本约束覆盖 `domain` crate 的全部枚举，无例外。包括 `ReindexTarget`（`link_hash` / `content_hash` / `categories`）— 其 serde、sqlx、CLI `--target` 入参（通过 `#[value(rename_all = "snake_case")]`）以及 `reindex_jobs.target` DB 列值四处取值集合保持一致，全栈无需任何 kebab↔snake 映射。
+
 ## 9. DTO 版本责任
 
 DTO 结构变更是 crate 间协议变更。变更规则：
