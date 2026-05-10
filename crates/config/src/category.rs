@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-use rss_ai_news_domain::state::FeedKind;
+use rss_ai_news_domain::{Score0To100, state::FeedKind};
 use serde::Deserialize;
 
 #[derive(Clone, Debug)]
@@ -29,7 +29,11 @@ pub struct AiOverride {
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct PublishOverride {
     pub max_items_per_report: Option<NonZeroU32>,
-    pub min_importance_score: Option<u8>,
+    /// Per docs/design/config-schema.md §8 line 378:
+    /// `Option<Score0To100>` — `None` 继承全局，`Some(0)` 显式无下限。
+    /// 使用 `Score0To100` 而非裸 `u8`，让 TOML 反序列化阶段直接拒绝越界
+    /// 值（W2-B-1：旧实现把 `try_new` 失败折叠为继承默认，掩盖配置错误）。
+    pub min_importance_score: Option<Score0To100>,
     pub include_unscored: Option<bool>,
 }
 
@@ -118,6 +122,62 @@ mod tests {
         assert!(config.publish_override.is_some());
         assert_eq!(config.sources.len(), 2);
         assert_eq!(config.sources[1].feed_kind, FeedKind::RssHub);
+    }
+
+    #[test]
+    fn rejects_min_importance_score_above_100() {
+        // W2-B-1 regression guard: out-of-range `min_importance_score` must
+        // fail at TOML deserialization (Score0To100 contract), not be
+        // silently folded into the global default by `effective_for_category`.
+        // See docs/design/config-schema.md §8 line 378.
+        let content = r#"
+schema_version = "1"
+
+[category]
+key = "ai"
+display_name = "AI"
+priority = 10
+
+[category.publish_override]
+min_importance_score = 200
+"#;
+        let err = toml::from_str::<CategoryConfig>(content)
+            .expect_err("min_importance_score = 200 must be rejected");
+        let lowered = err.to_string().to_lowercase();
+        assert!(
+            lowered.contains("0") && lowered.contains("100")
+                || lowered.contains("range")
+                || lowered.contains("invalid"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_min_importance_score_zero_as_explicit_no_floor() {
+        // §4.5: `0` is "explicit no floor", not "use default" — must round-trip.
+        let content = r#"
+schema_version = "1"
+
+[category]
+key = "ai"
+display_name = "AI"
+priority = 10
+
+[category.publish_override]
+min_importance_score = 0
+"#;
+        let config: CategoryConfig =
+            toml::from_str(content).expect("min_importance_score = 0 must parse");
+        let override_ = config
+            .publish_override
+            .expect("publish_override should be present");
+        assert_eq!(
+            override_
+                .min_importance_score
+                .expect("Some(0), not None")
+                .get(),
+            0
+        );
     }
 
     #[test]

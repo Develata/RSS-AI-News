@@ -38,9 +38,15 @@ impl LoadedConfig {
             max_items_per_report: publish_override
                 .and_then(|override_| override_.max_items_per_report)
                 .unwrap_or(self.app.publish.max_items_per_report),
+            // W2-B-1: PublishOverride.min_importance_score is now
+            // Option<Score0To100> (see crates/config/src/category.rs +
+            // docs/design/config-schema.md §8 line 378). Out-of-range TOML
+            // values are rejected at deserialization, so this fold is a
+            // straight `unwrap_or(global_default)` — the previous
+            // `Score0To100::try_new(...).ok()` step (which silently masked
+            // invalid configs into the default) is gone.
             min_importance_score: publish_override
                 .and_then(|override_| override_.min_importance_score)
-                .and_then(|raw| Score0To100::try_new(raw).ok())
                 .unwrap_or(self.app.publish.min_importance_score),
             model: ai_override
                 .and_then(|override_| override_.model.as_ref())
@@ -100,6 +106,10 @@ mod tests {
         override_max_items: Option<u32>,
         override_min_score: Option<u8>,
     ) -> LoadedConfig {
+        let override_min_score = override_min_score.map(|v| {
+            Score0To100::try_new(v)
+                .expect("test: override_min_score must be 0..=100 (now strongly typed)")
+        });
         LoadedConfig {
             env: EnvConfig::default(),
             app: AppConfig {
