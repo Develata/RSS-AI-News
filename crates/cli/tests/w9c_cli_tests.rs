@@ -264,6 +264,7 @@ fn run_summary() -> RunCommandSummary {
         ai_run: Some(ai_summary()),
         publish: Some(publish_summary()),
         stage_failures: Vec::new(),
+        ai_run_skip_reason: None,
         overall_duration_seconds: 2.0,
     }
 }

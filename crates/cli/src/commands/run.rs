@@ -6,12 +6,21 @@
 //! because there are no new articles to process). The overall exit code
 //! reflects the most severe stage outcome; failures are surfaced to the
 //! user via the run summary, not silently dropped.
+//!
+//! §4.11 lines 362-368 carve-out: when `app.ai.enabled = false`, `run`
+//! must **proactively skip** `ai-run` (emit one INFO log line, do NOT
+//! return exit 78) and proceed straight to `publish` per the
+//! `(ai=false, include_unscored)` truth table. This differs from the
+//! standalone `ai-run` invocation which intentionally fails with exit 78
+//! because the user explicitly requested an action that contradicts the
+//! current configuration.
 
 use std::{
     io::{self, Write},
     time::Instant,
 };
 
+use rss_ai_news_config as config;
 use serde::Serialize;
 
 use crate::{
@@ -21,6 +30,10 @@ use crate::{
     exit_code::ExitCode,
     output::{CommandSummary, RenderedError},
 };
+
+/// Reason an ai-run stage was skipped (rather than executed-and-failed).
+/// Currently the only producer is the §4.11 `ai.enabled=false` branch.
+pub const AI_RUN_SKIP_REASON_DISABLED: &str = "ai.enabled=false";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StageFailure {
@@ -36,6 +49,13 @@ pub struct RunCommandSummary {
     pub ai_run: Option<ai_run::AiRunCommandSummary>,
     pub publish: Option<publish::PublishCommandSummary>,
     pub stage_failures: Vec<StageFailure>,
+    /// `Some(reason)` iff the ai-run stage was deliberately skipped per
+    /// §4.11 (e.g. `ai.enabled=false`). Distinguishes the "skipped" branch
+    /// from the "executed and failed" branch — both surface as
+    /// `ai_run = None`, but only the latter pushes a `StageFailure`.
+    /// `None` means the stage either ran (regardless of outcome) or was
+    /// not reached because an earlier stage short-circuited.
+    pub ai_run_skip_reason: Option<&'static str>,
     pub overall_duration_seconds: f64,
 }
 
@@ -89,13 +109,16 @@ impl CommandSummary for RunCommandSummary {
             )?,
             None => writeln!(writer, "  Ingest:                  failed")?,
         }
-        match &self.ai_run {
-            Some(ai_run) => writeln!(
+        match (&self.ai_run, self.ai_run_skip_reason) {
+            (Some(ai_run), _) => writeln!(
                 writer,
                 "  AI claimed:              {}",
                 ai_run.process_claimed
             )?,
-            None => writeln!(writer, "  AI:                      skipped or failed")?,
+            (None, Some(reason)) => {
+                writeln!(writer, "  AI:                      skipped ({reason})")?
+            }
+            (None, None) => writeln!(writer, "  AI:                      failed")?,
         }
         match &self.publish {
             Some(publish) => writeln!(
@@ -139,6 +162,16 @@ fn record_stage_failure(
 
 pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliError> {
     let started = Instant::now();
+
+    // §4.11 lines 362-368 require consulting effective `ai.enabled` BEFORE
+    // dispatching the ai-run stage, so we load the config once at the top
+    // of the orchestrator. Each stage still owns its own load (we don't
+    // thread the result through), but a single extra load is cheap and
+    // keeps stage implementations agnostic of the carve-out.
+    let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())
+        .map_err(CliError::Config)?;
+    let ai_enabled = loaded.app.ai.enabled;
+
     let ingest_args = IngestArgs {
         batch_size: args.ingest_batch_size.unwrap_or(50),
         ..IngestArgs::default()
@@ -154,6 +187,7 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
     };
 
     let mut stage_failures: Vec<StageFailure> = Vec::new();
+    let mut ai_run_skip_reason: Option<&'static str> = None;
 
     let ingest_summary = match ingest::run(cli, &ingest_args).await {
         Ok(summary) => Some(summary),
@@ -170,11 +204,25 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
     let (ai_run_summary, publish_summary) = if ingest_summary.is_none() {
         (None, None)
     } else {
-        let ai_run_summary = match ai_run::run(cli, &ai_args).await {
-            Ok(summary) => Some(summary),
-            Err(err) => {
-                record_stage_failure(&mut stage_failures, "ai-run", &err);
-                None
+        let ai_run_summary = if !ai_enabled {
+            // §4.11 lines 362-368 — direct-pass-through: skip ai-run,
+            // emit one INFO line, do NOT push a StageFailure (the
+            // standalone `ai-run` exit-78 contract does not apply when
+            // the stage is implicitly orchestrated by `run`).
+            tracing::info!(
+                stage = "ai-run",
+                reason = AI_RUN_SKIP_REASON_DISABLED,
+                "AI disabled (ai.enabled=false), skipping ai-run"
+            );
+            ai_run_skip_reason = Some(AI_RUN_SKIP_REASON_DISABLED);
+            None
+        } else {
+            match ai_run::run(cli, &ai_args).await {
+                Ok(summary) => Some(summary),
+                Err(err) => {
+                    record_stage_failure(&mut stage_failures, "ai-run", &err);
+                    None
+                }
             }
         };
         let publish_summary = match publish::run(cli, &publish_args).await {
@@ -192,6 +240,7 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
         ai_run: ai_run_summary,
         publish: publish_summary,
         stage_failures,
+        ai_run_skip_reason,
         overall_duration_seconds: started.elapsed().as_secs_f64(),
     })
 }
@@ -215,6 +264,7 @@ mod tests {
             ai_run: None,
             publish: None,
             stage_failures: Vec::new(),
+            ai_run_skip_reason: None,
             overall_duration_seconds: 0.0,
         }
     }
@@ -246,6 +296,51 @@ mod tests {
             .stage_failures
             .push(failure("publish", "config", 78));
         assert_eq!(summary.derive_exit_code().as_i32(), 78);
+    }
+
+    #[test]
+    fn ai_run_skipped_via_disabled_carve_out_is_not_a_failure() {
+        // §4.11 lines 362-368: when run skips ai-run because
+        // ai.enabled=false, the summary must report "success" overall and
+        // exit 0 — the carve-out specifically rejects exit 78 here.
+        let mut summary = empty_summary();
+        summary.ai_run_skip_reason = Some(AI_RUN_SKIP_REASON_DISABLED);
+        assert_eq!(summary.status(), "success");
+        assert!(summary.errors().is_empty());
+        assert_eq!(summary.derive_exit_code().as_i32(), 0);
+    }
+
+    #[test]
+    fn ai_run_skipped_renders_distinct_pretty_line_from_failed() {
+        // The pretty output must visibly distinguish "skipped" from
+        // "failed" so operators can tell whether an action is required
+        // (config mismatch) or whether the carve-out fired (expected).
+        let mut skipped = empty_summary();
+        skipped.ai_run_skip_reason = Some(AI_RUN_SKIP_REASON_DISABLED);
+        let mut buf = Vec::new();
+        skipped.render_pretty(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("skipped (ai.enabled=false)"),
+            "pretty output missing skip reason: {text}"
+        );
+
+        let failed = empty_summary();
+        let mut buf = Vec::new();
+        failed.render_pretty(&mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("AI:                      failed"),
+            "pretty output missing failed line: {text}"
+        );
+    }
+
+    #[test]
+    fn ai_run_skip_reason_serializes_in_json() {
+        let mut summary = empty_summary();
+        summary.ai_run_skip_reason = Some(AI_RUN_SKIP_REASON_DISABLED);
+        let value = serde_json::to_value(&summary).expect("serialize summary");
+        assert_eq!(value["ai_run_skip_reason"], "ai.enabled=false");
     }
 
     #[test]
