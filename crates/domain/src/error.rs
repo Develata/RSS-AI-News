@@ -14,7 +14,7 @@
 /// **Out of scope** — must NOT be required to impl this trait:
 /// - Pure construction-validation errors that signal API misuse rather than
 ///   external failure (e.g. `score::ScoreOutOfRange`,
-///   `dto::publish::PublishCandidateError`). These are wrapped by upstream
+///   `dto::publish::AiBindingError`). These are wrapped by upstream
 ///   capability errors before classification (see
 ///   `crates/report/src/error.rs::ReportError::InvalidCandidate` for a
 ///   concrete example) and never themselves drive retry decisions.

@@ -47,7 +47,7 @@ impl PublishCandidate {
         source_display_name: String,
         category_key: String,
         published_at: Option<OffsetDateTime>,
-    ) -> Result<Self, PublishCandidateError> {
+    ) -> Result<Self, AiBindingError> {
         validate_ai_binding(article_ai_result_id, importance_score)?;
 
         Ok(Self {
@@ -91,7 +91,7 @@ impl FrozenPublishItem {
         frozen_score: Option<Score0To100>,
         frozen_canonical_link: String,
         frozen_source_display_name: String,
-    ) -> Result<Self, PublishCandidateError> {
+    ) -> Result<Self, AiBindingError> {
         validate_ai_binding(article_ai_result_id, frozen_score)?;
 
         Ok(Self {
@@ -108,8 +108,15 @@ impl FrozenPublishItem {
     }
 }
 
+/// 校验 `PublishCandidate` / `FrozenPublishItem` 上 AI 元数据捆绑一致性的
+/// 构造期错误（F8-4 W4-4，原名 `PublishCandidateError`）。
+///
+/// 现名突出 *what is being validated*（AI binding：`article_ai_result_id`
+/// 与 `importance_score` 必须同时 `Some` 或同时 `None`）而非 *what kind of
+/// object*。这是构造期 invariant 校验，不参与 retry / failure-state 分发，
+/// 详见 `domain::error::ClassifiedError` 文档"Out of scope"段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum PublishCandidateError {
+pub enum AiBindingError {
     #[error("article_ai_result_id and score must be both Some or both None")]
     MismatchedAiBinding,
 }
@@ -117,10 +124,10 @@ pub enum PublishCandidateError {
 fn validate_ai_binding(
     article_ai_result_id: Option<i64>,
     score: Option<Score0To100>,
-) -> Result<(), PublishCandidateError> {
+) -> Result<(), AiBindingError> {
     match (article_ai_result_id, score) {
         (Some(_), Some(_)) | (None, None) => Ok(()),
-        (Some(_), None) | (None, Some(_)) => Err(PublishCandidateError::MismatchedAiBinding),
+        (Some(_), None) | (None, Some(_)) => Err(AiBindingError::MismatchedAiBinding),
     }
 }
 
@@ -202,7 +209,7 @@ mod tests {
         );
         assert!(matches!(
             missing_score,
-            Err(PublishCandidateError::MismatchedAiBinding)
+            Err(AiBindingError::MismatchedAiBinding)
         ));
 
         let missing_ai_result = PublishCandidate::try_new(
@@ -219,7 +226,7 @@ mod tests {
         );
         assert!(matches!(
             missing_ai_result,
-            Err(PublishCandidateError::MismatchedAiBinding)
+            Err(AiBindingError::MismatchedAiBinding)
         ));
     }
 
@@ -271,7 +278,7 @@ mod tests {
         );
         assert!(matches!(
             missing_score,
-            Err(PublishCandidateError::MismatchedAiBinding)
+            Err(AiBindingError::MismatchedAiBinding)
         ));
 
         let missing_ai_result = FrozenPublishItem::try_new(
@@ -287,7 +294,7 @@ mod tests {
         );
         assert!(matches!(
             missing_ai_result,
-            Err(PublishCandidateError::MismatchedAiBinding)
+            Err(AiBindingError::MismatchedAiBinding)
         ));
     }
 }

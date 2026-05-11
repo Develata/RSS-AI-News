@@ -1,4 +1,4 @@
-use rss_ai_news_domain::dto::publish::PublishCandidateError;
+use rss_ai_news_domain::dto::publish::AiBindingError;
 use rss_ai_news_domain::error::ClassifiedError;
 use thiserror::Error;
 
@@ -7,7 +7,7 @@ pub enum ReportError {
     #[error("snapshot empty: no candidates matched selection")]
     SnapshotEmpty,
     #[error("invalid candidate row: {0}")]
-    InvalidCandidate(#[from] PublishCandidateError),
+    InvalidCandidate(#[from] AiBindingError),
     #[error("invalid score: {0}")]
     InvalidScore(String),
     #[error("invalid tags json: {0}")]
