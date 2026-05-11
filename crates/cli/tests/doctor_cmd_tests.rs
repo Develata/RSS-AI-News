@@ -147,7 +147,6 @@ fn cli_for(config_dir: &Path, deep: bool, output_format: OutputFormat) -> Cli {
         dry_run: false,
         category: None,
         timezone: None,
-        max_batches: None,
         command: Command::Doctor(DoctorArgs { deep }),
     }
 }

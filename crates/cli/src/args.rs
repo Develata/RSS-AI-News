@@ -36,19 +36,25 @@ pub struct Cli {
     #[arg(long = "timezone")]
     pub timezone: Option<String>,
 
-    /// 全局 `--max-batches`：覆盖 `runtime.max_batches_per_run`。
-    /// 仅对 `ingest` / `ai-run` / `run` 有意义；其他命令忽略。
-    /// `0` = 不限（仅由 lease + 宿主超时兜底）。
-    /// 详见 docs/design/config-schema.md §8 line 405、§4.4 line 196。
-    #[arg(long = "max-batches", global = true)]
-    pub max_batches: Option<u32>,
-
     #[command(subcommand)]
     pub command: Command,
 }
 
 impl Cli {
+    /// 把 CLI 参数折叠为 `CliOverrides`。
+    ///
+    /// `--max-batches` 仅在 [`IngestArgs`] / [`AiRunArgs`] / [`RunArgs`] 三个
+    /// 子命令暴露（cli-semantics.md §4.1 / §4.2 / §4.11；config-schema.md
+    /// §8 line 405），其余子命令的 overrides 该字段固定为 `None`。F7-1
+    /// 修复：此前以 `global = true` 形式挂在 [`Cli`] 上，导致 `publish`、
+    /// `doctor` 等子命令 `--help` 也显示该标志（W3-2 surface drift）。
     pub fn to_cli_overrides(&self) -> CliOverrides {
+        let max_batches = match &self.command {
+            Command::Ingest(args) => args.max_batches,
+            Command::AiRun(args) => args.max_batches,
+            Command::Run(args) => args.max_batches,
+            _ => None,
+        };
         CliOverrides {
             db_path: self.db_path.clone(),
             log_level: Some(self.log_level.clone()),
@@ -56,7 +62,7 @@ impl Cli {
             timezone: self.timezone.clone(),
             category_filter: self.category.clone(),
             dry_run: self.dry_run,
-            max_batches: self.max_batches,
+            max_batches,
         }
     }
 }
@@ -105,6 +111,12 @@ pub struct IngestArgs {
     pub skip_fetch: bool,
     #[arg(long = "batch-size", default_value_t = 50)]
     pub batch_size: u32,
+    /// 覆盖 `runtime.max_batches_per_run`。`0` = 不限（仅由 lease + 宿主
+    /// 超时兜底）。F7-1 修复：从 [`Cli`] 全局 flag 改为子命令本地
+    /// （cli-semantics.md §4.1 line 62 + config-schema.md §8 line 405 早已
+    /// 规定"仅 ingest/ai-run/run"，clap `global = true` 与该约束相悖）。
+    #[arg(long = "max-batches")]
+    pub max_batches: Option<u32>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -113,6 +125,10 @@ pub struct AiRunArgs {
     pub batch_size: u32,
     #[arg(long)]
     pub model: Option<String>,
+    /// 覆盖 `runtime.max_batches_per_run`。语义与 [`IngestArgs::max_batches`]
+    /// 一致；cli-semantics.md §4.2 line 97。
+    #[arg(long = "max-batches")]
+    pub max_batches: Option<u32>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -275,4 +291,9 @@ pub struct RunArgs {
     pub ai_batch_size: Option<u32>,
     #[arg(long = "publish-date")]
     pub publish_date: Option<String>,
+    /// 覆盖 `runtime.max_batches_per_run`，内部 ingest / ai-run 阶段
+    /// 沿用同一生效值；cli-semantics.md §4.11 line 358。
+    /// publish 阶段不消费该值。
+    #[arg(long = "max-batches")]
+    pub max_batches: Option<u32>,
 }

@@ -259,15 +259,18 @@ async fn args_parsing_help_lists_all_top_level_subcommands() {
 }
 
 // === F5-6 W2-A-3 / W2-B-5: 补 CLI 标志（max-batches / reindex target=all / abort）===
+// F7-1 W3-2 修复：--max-batches 不再以 global=true 挂在 Cli 上，而是各
+// 子命令本地定义。下列测试在子命令侧 args 上验证。
 
 #[tokio::test]
 async fn args_parsing_max_batches_accepted_on_ingest_subcommand() {
     // cli-semantics §4.1 line 62: ingest 接受 --max-batches。
-    // 通过 global=true 由顶层 Cli 持有，子命令位置一样可用。
     let cli =
         Cli::try_parse_from(["rss-ai-news", "ingest", "--max-batches", "3"]).expect("parse");
-    assert_eq!(cli.max_batches, Some(3));
-    assert!(matches!(cli.command, Command::Ingest(_)));
+    match cli.command {
+        Command::Ingest(args) => assert_eq!(args.max_batches, Some(3)),
+        other => panic!("unexpected command: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -275,8 +278,10 @@ async fn args_parsing_max_batches_accepted_on_ai_run_subcommand() {
     // cli-semantics §4.2 line 97: ai-run 接受 --max-batches。
     let cli =
         Cli::try_parse_from(["rss-ai-news", "ai-run", "--max-batches", "7"]).expect("parse");
-    assert_eq!(cli.max_batches, Some(7));
-    assert!(matches!(cli.command, Command::AiRun(_)));
+    match cli.command {
+        Command::AiRun(args) => assert_eq!(args.max_batches, Some(7)),
+        other => panic!("unexpected command: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -284,8 +289,10 @@ async fn args_parsing_max_batches_accepted_on_run_subcommand() {
     // cli-semantics §4.11 line 358: run 自身接受 --max-batches，
     // 内部 ingest/ai-run 阶段沿用同一生效值（无 --ingest-max-batches）。
     let cli = Cli::try_parse_from(["rss-ai-news", "run", "--max-batches", "5"]).expect("parse");
-    assert_eq!(cli.max_batches, Some(5));
-    assert!(matches!(cli.command, Command::Run(_)));
+    match cli.command {
+        Command::Run(args) => assert_eq!(args.max_batches, Some(5)),
+        other => panic!("unexpected command: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -294,7 +301,29 @@ async fn args_parsing_max_batches_zero_means_unlimited() {
     // 折叠为缺省。
     let cli =
         Cli::try_parse_from(["rss-ai-news", "ingest", "--max-batches", "0"]).expect("parse");
-    assert_eq!(cli.max_batches, Some(0));
+    match cli.command {
+        Command::Ingest(args) => assert_eq!(args.max_batches, Some(0)),
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn args_parsing_max_batches_rejected_on_unsupporting_subcommand() {
+    // F7-1 W3-2: --max-batches 不再是全局 flag，publish / doctor / reindex
+    // 等子命令的 --help 不再显示该标志，传入应被 clap 拒绝。
+    // 这是 surface 收敛的关键守护：避免静默忽略。
+    let err = Cli::try_parse_from(["rss-ai-news", "publish", "--max-batches", "3"])
+        .expect_err("publish does not accept --max-batches");
+    assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    assert_eq!(err.exit_code(), 2);
+
+    let err = Cli::try_parse_from(["rss-ai-news", "doctor", "--max-batches", "3"])
+        .expect_err("doctor does not accept --max-batches");
+    assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+
+    let err = Cli::try_parse_from(["rss-ai-news", "validate-config", "--max-batches", "3"])
+        .expect_err("validate-config does not accept --max-batches");
+    assert_eq!(err.kind(), ErrorKind::UnknownArgument);
 }
 
 #[tokio::test]
@@ -414,16 +443,43 @@ async fn args_parsing_backfill_version_override_fields_default_to_none() {
 }
 
 #[tokio::test]
-async fn args_parsing_max_batches_flows_into_cli_overrides() {
-    // §8 line 405: --max-batches 应通过 CliOverrides 落到
-    // app.runtime.max_batches_per_run。
-    let cli = Cli::try_parse_from([
-        "rss-ai-news",
-        "--max-batches",
-        "4",
-        "validate-config",
-    ])
-    .expect("parse");
+async fn args_parsing_max_batches_flows_into_cli_overrides_from_ingest() {
+    // config-schema §8 line 405: --max-batches 应通过 CliOverrides 落到
+    // app.runtime.max_batches_per_run。F7-1 W3-2 之后，该标志只在
+    // ingest / ai-run / run 子命令暴露；Cli::to_cli_overrides 通过 match
+    // command variant 从对应子命令 args 提取。
+    let cli = Cli::try_parse_from(["rss-ai-news", "ingest", "--max-batches", "4"])
+        .expect("parse");
     let overrides = cli.to_cli_overrides();
     assert_eq!(overrides.max_batches, Some(4));
+}
+
+#[tokio::test]
+async fn args_parsing_max_batches_flows_into_cli_overrides_from_ai_run() {
+    let cli = Cli::try_parse_from(["rss-ai-news", "ai-run", "--max-batches", "6"])
+        .expect("parse");
+    let overrides = cli.to_cli_overrides();
+    assert_eq!(overrides.max_batches, Some(6));
+}
+
+#[tokio::test]
+async fn args_parsing_max_batches_flows_into_cli_overrides_from_run() {
+    let cli = Cli::try_parse_from(["rss-ai-news", "run", "--max-batches", "2"])
+        .expect("parse");
+    let overrides = cli.to_cli_overrides();
+    assert_eq!(overrides.max_batches, Some(2));
+}
+
+#[tokio::test]
+async fn args_parsing_max_batches_in_overrides_is_none_for_unsupporting_subcommand() {
+    // F7-1 W3-2: 非 ingest/ai-run/run 子命令的 CliOverrides.max_batches
+    // 固定为 None；这保证 config 层不会被错误的 override 注入。
+    let cli =
+        Cli::try_parse_from(["rss-ai-news", "validate-config"]).expect("parse");
+    let overrides = cli.to_cli_overrides();
+    assert_eq!(overrides.max_batches, None);
+
+    let cli = Cli::try_parse_from(["rss-ai-news", "publish"]).expect("parse");
+    let overrides = cli.to_cli_overrides();
+    assert_eq!(overrides.max_batches, None);
 }

@@ -155,7 +155,6 @@ mod tests {
             dry_run: false,
             category: None,
             timezone: None,
-            max_batches: None,
             command: Command::Reindex(args.clone()),
         }
     }

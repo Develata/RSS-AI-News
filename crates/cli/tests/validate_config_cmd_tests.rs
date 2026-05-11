@@ -60,7 +60,6 @@ fn cli_for(config_dir: &Path) -> Cli {
         dry_run: false,
         category: None,
         timezone: None,
-        max_batches: None,
         command: Command::ValidateConfig,
     }
 }

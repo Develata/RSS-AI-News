@@ -172,13 +172,18 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
         .map_err(CliError::Config)?;
     let ai_enabled = loaded.app.ai.enabled;
 
+    // F7-1: 把 RunArgs::max_batches 沿用到内部两个阶段，cli-semantics.md
+    // §4.11 line 358 规定 run 内部 ingest/ai-run 共用同一生效值（不引入
+    // --ingest-max-batches / --ai-run-max-batches 复合参数）。
     let ingest_args = IngestArgs {
         batch_size: args.ingest_batch_size.unwrap_or(50),
+        max_batches: args.max_batches,
         ..IngestArgs::default()
     };
     let ai_args = AiRunArgs {
         batch_size: args.ai_batch_size.unwrap_or(20),
         model: None,
+        max_batches: args.max_batches,
     };
     let publish_args = PublishArgs {
         date: args.publish_date.clone(),
