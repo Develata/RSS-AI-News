@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rss_ai_news_report::{RenderConfig, ReportError, rebuild_markdown, render_markdown};
 use rss_ai_news_storage::{
@@ -64,8 +65,13 @@ async fn rebuild_returns_error_when_publish_record_missing() {
 
 async fn make_pool() -> (PathBuf, SqlitePool) {
     let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
+    // F8-3 W4-3: PID + nanos + counter 三层叠加避免跨进程残留文件碰撞。
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!(
-        "rss-ai-news-report-rebuild-{}-{counter}",
+        "rss-ai-news-report-rebuild-{}-{nanos}-{counter}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();

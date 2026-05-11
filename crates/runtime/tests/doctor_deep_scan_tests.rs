@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rss_ai_news_runtime::doctor::deep_scan::{InvariantId, run};
 use rss_ai_news_storage::{build_sqlite_pool, run_migrations};
@@ -79,8 +80,13 @@ async fn i6_violation_successful_publish_record_with_unpublished_article() {
 
 async fn make_pool() -> SqlitePool {
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // F8-3 W4-3: 加纳秒抗 PID 跨进程复用 + 残留文件碰撞。
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!(
-        "rss-ai-news-runtime-doctor-{}-{id}",
+        "rss-ai-news-runtime-doctor-{}-{nanos}-{id}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("temp dir");

@@ -3,6 +3,7 @@
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicUsize, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use rss_ai_news_storage::{StorageError, build_sqlite_pool, classify_sqlite_error, run_migrations};
@@ -13,8 +14,13 @@ static TEST_DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub async fn make_test_pool_with_connections(max_connections: u32) -> (PathBuf, SqlitePool) {
     let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
+    // F8-3 W4-3: PID + nanos + counter 三层叠加避免跨进程残留文件碰撞。
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!(
-        "rss-ai-news-storage-w4b-{}-{counter}",
+        "rss-ai-news-storage-w4b-{}-{nanos}-{counter}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("temp dir should be created");

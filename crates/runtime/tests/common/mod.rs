@@ -4,6 +4,7 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use rss_ai_news_ai::{AiClient, AiError, AiResponse, AiTask};
@@ -30,11 +31,22 @@ use time::OffsetDateTime;
 
 static TEST_DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-pub async fn make_test_pool_with_connections(max_connections: u32) -> (PathBuf, SqlitePool) {
+/// F8-3 W4-3：在 PID + atomic counter 之上再叠纳秒时间戳，避免 OS PID 复用
+/// + 残留 SQLite 文件导致跨进程偶发 UNIQUE 冲突。三层叠加（pid / nanos /
+/// counter）任何一层独立就足以唯一；并发同 100ns 窗口的概率近 0。
+fn unique_path_suffix() -> String {
     let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{nanos}-{counter}", std::process::id())
+}
+
+pub async fn make_test_pool_with_connections(max_connections: u32) -> (PathBuf, SqlitePool) {
     let dir = std::env::temp_dir().join(format!(
-        "rss-ai-news-runtime-w5b-{}-{counter}",
-        std::process::id()
+        "rss-ai-news-runtime-w5b-{}",
+        unique_path_suffix()
     ));
     std::fs::create_dir_all(&dir).expect("temp dir should be created");
     let db_path = dir.join("test.sqlite");
@@ -172,9 +184,8 @@ pub fn full_context(
     feed_fetcher: Arc<dyn FeedFetcher>,
 ) -> RunContext {
     let dir = std::env::temp_dir().join(format!(
-        "rss-ai-news-runtime-publish-output-{}-{}",
-        std::process::id(),
-        TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
+        "rss-ai-news-runtime-publish-output-{}",
+        unique_path_suffix()
     ));
     std::fs::create_dir_all(&dir).expect("publish output dir should be created");
     full_context_with_publish_target(
