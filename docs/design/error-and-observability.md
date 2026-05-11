@@ -267,6 +267,21 @@ run(run_id)
 
 **fail-close**：若 redaction 过滤器本身出错（如正则编译失败），直接跳过该条事件而非输出原值。
 
+#### 日志 / artifact 不变量（F7-2 W3-4 防御纵深）
+
+类型层（`SecretString::Debug = "***"`，外加 `AiClientConfig` / `GitHubTargetConfig` 的自定义 `Debug` 回归测试守护）+ 持久化层（F5-3 `redact_event_context` 在写 `run_events.context_json` 前过滤）已经把当前已知的两条流出路径堵住。**以下不变量是面向未来扩展的纵深防御**，避免未来的修改在不察觉的情况下绕过这两道防线：
+
+| 不变量 | 说明 |
+|---|---|
+| 禁止 `tracing::*!(... .expose_secret() ...)` | 即使先 `let k = x.expose_secret()` 再 `tracing::info!("... {k} ...")` 也禁止；类型层 redact 一旦被 `expose_secret()` 拿走原值，tracing 宏会原样输出 |
+| 禁止 `println! / eprintln!` 任何 `.expose_secret()` | 同上，且这些宏不经 redaction 过滤 |
+| 禁止 `tracing::*!("... {req:?}")` 第三方 Request / Response 类型 | `reqwest::Request` / `octocrab` 内部类型的 `Debug` 可能含 `Authorization` header。如需调试 header，先手动剔除 `Authorization` / `Cookie` 等字段 |
+| `ArtifactWriter::write_inline` 仅接受响应体或已 sanitize 的内容 | 当前三处生产调用（`feed_payload` / `html_payload` / `ai_raw_response`）全部是响应体，不含我方 secret。若未来扩展到写入请求体，必须先剥离 `Authorization` 等头部 |
+
+**PR-time 守护**：`crates/observability/tests/secret_log_guard_tests.rs` 扫描所有 `crates/*/src/**/*.rs`，禁止任何**同行**同时出现 `tracing::` / `println!` / `eprintln!` 与 `.expose_secret()` 的真实代码行。跨行场景（`let k = ...; trace!("{k}")`) 靠 code review 把关。
+
+**当前暴露面快照**：仓库内 `.expose_secret()` 调用分布于三类**严格的边界**——配置加载 / env 注入路径（`config/env.rs`、`config/validate/checks.rs`、`cli/context_factory.rs`）、`doctor` 命令的检查路径，以及 SDK builder 提交点（`reqwest::bearer_auth` / `octocrab::personal_token` / OpenAI client `.with_api_key`）。**没有任何一处流入 `tracing::*!` / `println!` / `eprintln!` 宏**——上述 PR-time 守护测试是该不变量的回归保护。`ArtifactConfig.file_storage_dir` 配置项当前未被任何代码使用，artifact 仅写 SQLite `raw_artifact` 表。
+
 ### 4.3 `run_events` 持久化
 
 不是日志的替代品，而是日志流中"值得持久化到数据库"的业务事件子集。

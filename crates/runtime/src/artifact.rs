@@ -3,6 +3,25 @@ use rss_ai_news_storage::{NewRawArtifact, RawArtifactRepository, StorageError};
 use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 
+/// Artifact writer：把已经 sanitize 的字节负载落到 `raw_artifact` 表
+/// （inline 路径）。
+///
+/// **W3-4 / F7-2 不变量**（详见 docs/design/error-and-observability.md §4.2
+/// "日志/artifact 不变量"）：
+///
+/// - `write_inline` 的 `body` 参数**只能是响应体或已 sanitize 的内容**，
+///   不得是 HTTP 请求体或任何含 `Authorization` / `Cookie` 等头部的原始
+///   字节流。
+/// - 当前三处生产调用均符合该约束：
+///   - `flows/ingest.rs` 写 `feed_payload`（feed XML response body）
+///   - `flows/extract.rs` 写 `html_payload`（article HTML response body）
+///   - `flows/ai_run.rs` 写 `ai_raw_response`（LLM JSON response body）
+/// - 若未来扩展写入请求体（如调试场景下保留 outgoing request 用于
+///   replay），调用方必须先剥离 secret-bearing headers。
+///
+/// `ArtifactConfig.file_storage_dir` 配置项当前未被任何代码消费——artifact
+/// 全部走 SQLite，不落盘。该字段保留为未来 large-payload 外置存储的接入点；
+/// 接入时需同步遵守上述不变量。
 pub struct ArtifactWriter<'a> {
     pub config: &'a ArtifactConfig,
     pub repo: &'a dyn RawArtifactRepository,
@@ -18,6 +37,8 @@ impl<'a> ArtifactWriter<'a> {
         }
     }
 
+    /// 写入 inline artifact。详见 [`ArtifactWriter`] 文档中关于 W3-4 / F7-2
+    /// 不变量的说明：`body` 必须是已 sanitize 的内容。
     pub async fn write_inline(
         &self,
         kind: &str,
