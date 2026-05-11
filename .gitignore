@@ -3,6 +3,7 @@
 
 # Claude Code 本机运行时状态（settings.local.json / scheduled_tasks.lock 等）
 .claude/
+.claude_tmp/
 
 # IDE / 编辑器
 .vscode/
