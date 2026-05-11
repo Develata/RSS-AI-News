@@ -366,6 +366,53 @@ async fn args_parsing_reindex_without_target_or_abort_is_rejected() {
     assert_eq!(err.exit_code(), 2);
 }
 
+// === F5-7 W2-A-6: BackfillArgs 版本 override 字段 ===
+
+#[tokio::test]
+async fn args_parsing_backfill_accepts_version_override_fields() {
+    // cli-semantics §4.6 + state-machine §4.4: backfill ai 创建新版本任务行。
+    // 用户应能命名版本（reproducibility）、切换 model（A/B 实验）。
+    let cli = Cli::try_parse_from([
+        "rss-ai-news",
+        "backfill",
+        "--target",
+        "ai",
+        "--prompt-version-tag",
+        "exp-2026-05",
+        "--prompt-version-description",
+        "rerun after prompt v2 tweak",
+        "--model",
+        "gpt-4o",
+    ])
+    .expect("parse");
+    match cli.command {
+        Command::Backfill(args) => {
+            assert!(matches!(args.target, BackfillTarget::Ai));
+            assert_eq!(args.prompt_version_tag.as_deref(), Some("exp-2026-05"));
+            assert_eq!(
+                args.prompt_version_description.as_deref(),
+                Some("rerun after prompt v2 tweak"),
+            );
+            assert_eq!(args.model.as_deref(), Some("gpt-4o"));
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn args_parsing_backfill_version_override_fields_default_to_none() {
+    // 缺省时全部为 None；命令体内回落到生成 tag / config model。
+    let cli = Cli::try_parse_from(["rss-ai-news", "backfill", "--target", "ai"]).expect("parse");
+    match cli.command {
+        Command::Backfill(args) => {
+            assert!(args.prompt_version_tag.is_none());
+            assert!(args.prompt_version_description.is_none());
+            assert!(args.model.is_none());
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn args_parsing_max_batches_flows_into_cli_overrides() {
     // §8 line 405: --max-batches 应通过 CliOverrides 落到

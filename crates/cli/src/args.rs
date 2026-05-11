@@ -150,6 +150,18 @@ pub enum ReplayKind {
     Ai,
 }
 
+/// 参数语义见 docs/design/cli-semantics.md §4.6 + state-machine.md §4.4。
+///
+/// `--target ai` 分支会创建新一行 `article_ai_results`（带新版本元数据），
+/// 不覆盖旧行。下列 3 个 override 字段让"多 model / 多版本并存"
+/// （state-machine §4.4 line 262）可被 CLI 明确控制：
+///   - `--prompt-version-tag` 让用户命名版本（用于实验对照、idempotent
+///     重跑）；缺省时回落到 `backfill-<unix-ts>`，非确定性
+///   - `--prompt-version-description` 让审计/事后追溯能看到这次重跑的动机
+///   - `--model` 允许在 backfill 时切换模型（A/B 对照、新模型重跑历史）
+///
+/// 三者均不适用于 `--target extract`，相应分支忽略（不报错，保持
+/// CLI 表面对齐 §4.6 文档表格的"参数与 target 解耦"风格）。
 #[derive(Args, Debug, Clone)]
 pub struct BackfillArgs {
     #[arg(long, value_enum)]
@@ -160,6 +172,18 @@ pub struct BackfillArgs {
     pub date_to: Option<String>,
     #[arg(long = "batch-size", default_value_t = 50)]
     pub batch_size: u32,
+    /// 显式指定 backfill 创建的新 prompt_version tag。缺省时回落为
+    /// `backfill-<unix-ts>`（非确定性）。仅 `--target ai` 生效。
+    #[arg(long = "prompt-version-tag")]
+    pub prompt_version_tag: Option<String>,
+    /// 该 prompt_version 行的描述。缺省 `"manual backfill via CLI"`。
+    /// 仅 `--target ai` 生效。
+    #[arg(long = "prompt-version-description")]
+    pub prompt_version_description: Option<String>,
+    /// 覆盖 backfill 使用的 model id。缺省读 `app.toml [ai] model`。
+    /// 仅 `--target ai` 生效。
+    #[arg(long = "model")]
+    pub model: Option<String>,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]

@@ -231,6 +231,8 @@ fn backfill_summary() -> BackfillCommandSummary {
         feed_entries_examined: 0,
         feed_entries_reset: 0,
         new_prompt_version_id: Some(9),
+        new_prompt_version_tag: Some("backfill-1700000000".to_string()),
+        model_id: Some("gpt-4o-mini".to_string()),
         articles_scanned: 3,
         ai_tasks_inserted: 3,
         ai_tasks_conflict: 0,
