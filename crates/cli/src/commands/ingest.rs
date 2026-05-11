@@ -84,6 +84,11 @@ pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, C
             .run(ExtractOptions {
                 batch_size: args.batch_size,
                 max_attempts: ctx.app.retry.feed_entry_max_attempts,
+                // F6-3: 从 app.runtime.max_batches_per_run 取生效值。
+                // `--max-batches` 已经由 CliOverrides::apply_to_app
+                // 覆盖到该字段（F5-6），所以此处只是把 CLI > config > 默认
+                // 三层解析的结果直传到 flow。
+                max_batches: ctx.app.runtime.max_batches_per_run,
             })
             .await
     };

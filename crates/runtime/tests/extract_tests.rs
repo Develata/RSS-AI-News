@@ -94,6 +94,7 @@ async fn extract_persists_new_article_on_success() {
         .run(ExtractOptions {
             batch_size: 1,
             max_attempts: 5,
+            max_batches: 0,
         })
         .await;
     let row: (String, Option<i64>) =
@@ -148,6 +149,7 @@ async fn extract_dedup_skipped_when_content_hash_matches_existing_article() {
         .run(ExtractOptions {
             batch_size: 1,
             max_attempts: 5,
+            max_batches: 0,
         })
         .await;
     let row: (String, Option<i64>, Option<String>) =
@@ -190,6 +192,7 @@ async fn extract_falls_back_to_summary_when_strategy_chain_fails() {
         .run(ExtractOptions {
             batch_size: 1,
             max_attempts: 5,
+            max_batches: 0,
         })
         .await;
     let row: (String, Option<i64>) =
@@ -225,6 +228,7 @@ async fn extract_marks_failed_when_strategy_and_fallback_both_fail() {
         .run(ExtractOptions {
             batch_size: 1,
             max_attempts: 5,
+            max_batches: 0,
         })
         .await;
     let state: String = sqlx::query_scalar("SELECT state FROM feed_entries WHERE id = ?")
@@ -259,6 +263,7 @@ async fn extract_releases_retryable_on_5xx() {
         .run(ExtractOptions {
             batch_size: 1,
             max_attempts: 5,
+            max_batches: 0,
         })
         .await;
     let row: (String, i64, Option<String>) = sqlx::query_as(
@@ -290,6 +295,7 @@ async fn extract_marks_failed_on_4xx() {
         .run(ExtractOptions {
             batch_size: 1,
             max_attempts: 5,
+            max_batches: 0,
         })
         .await;
     let row: (String, Option<String>) =
@@ -320,6 +326,7 @@ async fn extract_writes_html_artifact_before_strategy() {
         .run(ExtractOptions {
             batch_size: 1,
             max_attempts: 5,
+            max_batches: 0,
         })
         .await;
     let artifact_count: i64 = sqlx::query_scalar(
@@ -423,6 +430,88 @@ fn parse_failed_strategy() -> Arc<dyn ContentStrategy> {
             })
         }),
     })
+}
+
+// === F6-3 N3: max_batches enforcement (W2 DeepSeek 复审) ===
+
+#[tokio::test]
+async fn max_batches_caps_loop_and_reports_reached_flag() {
+    // 3 个 pending entry，batch_size=1, max_batches=2 ⇒ 应处理 2 行、
+    // 第 3 行保留为 pending，summary.max_batches_reached=true。
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let e1 = seed_pending_fetch_entry(&pool, source_id, "uid-a", "hash-a", None).await;
+    let e2 = seed_pending_fetch_entry(&pool, source_id, "uid-b", "hash-b", None).await;
+    let _e3 = seed_pending_fetch_entry(&pool, source_id, "uid-c", "hash-c", None).await;
+
+    let flow = flow(
+        pool.clone(),
+        responses([
+            (e1, Ok(raw(e1, b"<html>a</html>"))),
+            (e2, Ok(raw(e2, b"<html>b</html>"))),
+            // e3 不放 response，避免被处理时 mock 报错；反正不应被 claim
+        ]),
+        vec![parse_failed_strategy()],
+    );
+
+    let summary = flow
+        .run(ExtractOptions {
+            batch_size: 1,
+            max_attempts: 1,
+            max_batches: 2,
+        })
+        .await;
+
+    assert_eq!(summary.batches_executed, 2);
+    assert_eq!(summary.claimed, 2);
+    assert!(summary.max_batches_reached, "should hit cap with 3 pending");
+
+    let pending_left: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM feed_entries WHERE state = 'pending_fetch'")
+            .fetch_one(&pool)
+            .await
+            .expect("count pending");
+    assert_eq!(pending_left, 1, "third entry must remain pending");
+}
+
+#[tokio::test]
+async fn max_batches_zero_means_unlimited_until_queue_drained() {
+    // 3 个 pending entry，batch_size=1, max_batches=0 ⇒ 全部处理完、
+    // max_batches_reached=false（自然耗尽）。
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let e1 = seed_pending_fetch_entry(&pool, source_id, "uid-a", "hash-a", None).await;
+    let e2 = seed_pending_fetch_entry(&pool, source_id, "uid-b", "hash-b", None).await;
+    let e3 = seed_pending_fetch_entry(&pool, source_id, "uid-c", "hash-c", None).await;
+
+    let flow = flow(
+        pool.clone(),
+        responses([
+            (e1, Ok(raw(e1, b"<html>a</html>"))),
+            (e2, Ok(raw(e2, b"<html>b</html>"))),
+            (e3, Ok(raw(e3, b"<html>c</html>"))),
+        ]),
+        vec![parse_failed_strategy()],
+    );
+
+    let summary = flow
+        .run(ExtractOptions {
+            batch_size: 1,
+            max_attempts: 1,
+            max_batches: 0,
+        })
+        .await;
+
+    assert_eq!(summary.claimed, 3);
+    assert_eq!(summary.batches_executed, 3);
+    assert!(!summary.max_batches_reached);
+
+    let pending_left: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM feed_entries WHERE state = 'pending_fetch'")
+            .fetch_one(&pool)
+            .await
+            .expect("count pending");
+    assert_eq!(pending_left, 0);
 }
 
 fn new_article(content_hash: &str, entry_id: i64, rule_id: i64) -> NewArticle {

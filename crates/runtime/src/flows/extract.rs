@@ -22,6 +22,10 @@ use crate::events::RunEventEmitter;
 pub struct ExtractOptions {
     pub batch_size: u32,
     pub max_attempts: u32,
+    /// 单次 run 内部 claim 循环上限。`0` = 不限（仅由 lease + 宿主超时兜底）。
+    /// 由 CLI 从 `app.runtime.max_batches_per_run` 传入（F6-3）。
+    /// 详见 docs/design/config-schema.md §4.4。
+    pub max_batches: u32,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -32,6 +36,13 @@ pub struct ExtractSummary {
     pub dedup_skipped: u32,
     pub retryable_failed: u32,
     pub permanent_failed: u32,
+    /// 实际执行的批次数（F6-3）。命中 `max_batches` 上限时等于上限值；
+    /// 队列耗尽时小于上限。供 observability / 测试可见。
+    pub batches_executed: u32,
+    /// `true` 表示循环因 `max_batches` 上限退出（仍有 pending 行）；
+    /// `false` 表示自然耗尽（claim 返回空批次）。配合一条 INFO 日志
+    /// （cli-semantics §4.4 line 198）让运维知晓本次 run 是否需要后续调度兜底。
+    pub max_batches_reached: bool,
     pub per_entry: Vec<ExtractEntryOutcome>,
 }
 
@@ -78,67 +89,118 @@ impl ExtractFlow {
             )
             .await;
 
-        let now = OffsetDateTime::now_utc();
         let owner = build_owner_id();
-        let request = ClaimRequest {
-            owner: owner.clone(),
-            now,
-            lease_expires_at: lease_expires_at(
-                now,
-                Duration::seconds(self.ctx.app.lease.fetch_duration_seconds as i64),
-            ),
-            batch_size: opts.batch_size.max(1),
-            max_attempts: opts
-                .max_attempts
-                .max(self.ctx.app.retry.feed_entry_max_attempts),
+        let mut summary = ExtractSummary::default();
+        // F6-3: 0 表示不限，仅由 lease + 宿主超时兜底（config-schema §4.4 line 196）。
+        // 内部用 Option<u32> 表达"无上限"；命中上限时主动 break + 写 INFO。
+        let cap: Option<u32> = if opts.max_batches == 0 {
+            None
+        } else {
+            Some(opts.max_batches)
         };
-        let claimed = match self.ctx.feed_entry_repo.claim_pending_fetch(&request).await {
-            Ok(claimed) => claimed,
-            Err(error) => {
-                tracing::error!("failed to claim extract entries: {error}");
-                emitter
-                    .emit(
-                        "run_completed",
-                        "info",
-                        None,
-                        None,
-                        "extract run completed",
-                        Some(json!({ "claimed": 0, "claim_error": error.error_kind() })),
-                    )
-                    .await;
-                return ExtractSummary::default();
+
+        loop {
+            if cap.is_some_and(|c| summary.batches_executed >= c) {
+                summary.max_batches_reached = true;
+                tracing::info!(
+                    stage = "extract",
+                    batch_size = opts.batch_size,
+                    max_batches = opts.max_batches,
+                    batches_executed = summary.batches_executed,
+                    "max_batches_per_run reached; remaining pending entries will be picked up by next run"
+                );
+                break;
             }
-        };
 
-        let mut summary = ExtractSummary {
-            claimed: claimed.len() as u32,
-            ..ExtractSummary::default()
-        };
-        let semaphore = Arc::new(Semaphore::new(
-            self.ctx.app.http.concurrent_fetches.max(1) as usize
-        ));
-        let mut join_set = JoinSet::new();
-
-        for entry in claimed {
-            let ctx = Arc::clone(&self.ctx);
-            let owner = owner.clone();
-            let semaphore = Arc::clone(&semaphore);
-            join_set.spawn(async move {
-                let _permit = semaphore
-                    .acquire_owned()
-                    .await
-                    .expect("semaphore should not be closed");
-                Self::process_entry(ctx, owner, entry).await
-            });
-        }
-
-        while let Some(result) = join_set.join_next().await {
-            match result {
-                Ok(outcome) => summary.per_entry.push(outcome),
+            let now = OffsetDateTime::now_utc();
+            let request = ClaimRequest {
+                owner: owner.clone(),
+                now,
+                lease_expires_at: lease_expires_at(
+                    now,
+                    Duration::seconds(self.ctx.app.lease.fetch_duration_seconds as i64),
+                ),
+                batch_size: opts.batch_size.max(1),
+                max_attempts: opts
+                    .max_attempts
+                    .max(self.ctx.app.retry.feed_entry_max_attempts),
+            };
+            let claimed = match self.ctx.feed_entry_repo.claim_pending_fetch(&request).await {
+                Ok(claimed) => claimed,
                 Err(error) => {
-                    tracing::error!("extract entry task panicked or was cancelled: {error}");
-                    summary.permanent_failed += 1;
+                    tracing::error!("failed to claim extract entries: {error}");
+                    emitter
+                        .emit(
+                            "run_completed",
+                            "info",
+                            None,
+                            None,
+                            "extract run completed",
+                            Some(json!({
+                                "claimed": summary.claimed,
+                                "claim_error": error.error_kind(),
+                                "batches_executed": summary.batches_executed,
+                            })),
+                        )
+                        .await;
+                    return summary;
                 }
+            };
+
+            // 自然耗尽：本批次 claim 到空集，pending 队列已无可处理项。
+            if claimed.is_empty() {
+                break;
+            }
+
+            summary.claimed += claimed.len() as u32;
+            summary.batches_executed += 1;
+            let per_entry_len_before = summary.per_entry.len();
+
+            let semaphore = Arc::new(Semaphore::new(
+                self.ctx.app.http.concurrent_fetches.max(1) as usize,
+            ));
+            let mut join_set = JoinSet::new();
+
+            for entry in claimed {
+                let ctx = Arc::clone(&self.ctx);
+                let owner = owner.clone();
+                let semaphore = Arc::clone(&semaphore);
+                join_set.spawn(async move {
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .expect("semaphore should not be closed");
+                    Self::process_entry(ctx, owner, entry).await
+                });
+            }
+
+            while let Some(result) = join_set.join_next().await {
+                match result {
+                    Ok(outcome) => summary.per_entry.push(outcome),
+                    Err(error) => {
+                        tracing::error!("extract entry task panicked or was cancelled: {error}");
+                        summary.permanent_failed += 1;
+                    }
+                }
+            }
+
+            // F6-3: 本批次产生了 retryable 失败 ⇒ 这些行已经回到 pending_fetch
+            // 且 lease 释放，下一次 claim 会立即把它们捞回来形成 retry-loop。
+            // 此处主动终止，留待下一次 run 重试（符合
+            // `extract_releases_retryable_on_5xx` 测试以及"重试跨 run 而非
+            // 同 run"的语义）。
+            let batch_retryable = summary.per_entry[per_entry_len_before..]
+                .iter()
+                .filter(|o| matches!(o.status, ExtractEntryStatus::RetryableFailed))
+                .count();
+            if batch_retryable > 0 {
+                tracing::info!(
+                    stage = "extract",
+                    batches_executed = summary.batches_executed,
+                    batch_retryable,
+                    "retryable failures in batch; deferring re-claim to next run"
+                );
+                break;
             }
         }
 
@@ -157,6 +219,8 @@ impl ExtractFlow {
                     "dedup_skipped": summary.dedup_skipped,
                     "retryable_failed": summary.retryable_failed,
                     "permanent_failed": summary.permanent_failed,
+                    "batches_executed": summary.batches_executed,
+                    "max_batches_reached": summary.max_batches_reached,
                 })),
             )
             .await;

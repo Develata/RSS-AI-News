@@ -245,6 +245,7 @@ fn opts() -> AiRunOptions {
         max_tokens: 128,
         temperature: 0.0,
         min_importance_score: Score0To100::try_new(30).expect("0..=100"),
+        max_batches: 0,
         category_key: "ai".to_string(),
         prompt_version: 1,
         output_schema_version: 1,

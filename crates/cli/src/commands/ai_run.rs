@@ -130,6 +130,9 @@ pub async fn run(cli: &Cli, args: &AiRunArgs) -> Result<AiRunCommandSummary, Cli
             max_tokens: loaded.app.ai.max_tokens,
             temperature: loaded.app.ai.temperature,
             min_importance_score,
+            // F6-3: 从 app.runtime.max_batches_per_run 取生效值（CLI > config > 默认）。
+            // 仅约束 process 阶段 claim 循环；task_gen 是 one-shot sweep。
+            max_batches: loaded.app.runtime.max_batches_per_run,
             category_key: category.category.key.clone(),
             prompt_version,
             output_schema_version,

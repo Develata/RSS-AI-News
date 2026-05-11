@@ -33,6 +33,11 @@ pub struct AiRunOptions {
     /// 退化为 `i32`，与 publish / config 两侧保持类型契约一致（F6-1）。
     /// 调用 storage 层时按需 `.get() as i32`（SQL 绑定边界）。
     pub min_importance_score: Score0To100,
+    /// 单次 run 内部 claim 循环上限。`0` = 不限。由 CLI 从
+    /// `app.runtime.max_batches_per_run` 传入（F6-3）。仅约束 process 阶段
+    /// 的 claim 循环；task_gen 阶段是 one-shot insert-pending sweep，不受
+    /// 此上限控制。详见 docs/design/config-schema.md §4.4。
+    pub max_batches: u32,
     pub category_key: String,
     /// stub：本轮固定 1。
     pub prompt_version: i64,
@@ -61,6 +66,11 @@ pub struct AiProcessSummary {
     pub filtered: u32,
     pub retryable_failed: u32,
     pub permanent_failed: u32,
+    /// 实际执行的批次数（F6-3）。命中 `max_batches` 时等于上限；否则小于上限。
+    pub batches_executed: u32,
+    /// `true` 表示循环因 `max_batches` 上限退出（仍有 pending 任务）；
+    /// `false` 表示自然耗尽（claim 返回空批次）。
+    pub max_batches_reached: bool,
     pub per_task: Vec<AiTaskOutcome>,
 }
 
@@ -210,74 +220,120 @@ impl AiRunFlow {
             )
             .await;
 
-        let now = OffsetDateTime::now_utc();
         let owner = build_owner_id();
-        let claimed = match self
-            .ctx
-            .ai_result_repo
-            .claim_pending(&ClaimRequest {
-                owner: owner.clone(),
-                now,
-                lease_expires_at: lease_expires_at(
-                    now,
-                    Duration::seconds(self.ctx.app.lease.ai_duration_seconds as i64),
-                ),
-                batch_size: opts.process_batch_size.max(1),
-                max_attempts: opts.max_attempts,
-            })
-            .await
-        {
-            Ok(claimed) => claimed,
-            Err(error) => {
-                tracing::error!("failed to claim AI tasks: {error}");
-                emitter
-                    .emit(
-                        "run_completed",
-                        "info",
-                        None,
-                        None,
-                        "ai process run completed",
-                        Some(json!({
-                            "phase": "process",
-                            "claimed": 0,
-                            "claim_error": error.error_kind(),
-                        })),
-                    )
-                    .await;
-                return AiProcessSummary::default();
+        let mut summary = AiProcessSummary::default();
+        // F6-3: 0 = 不限。Option<u32> 表达"无上限"，命中上限主动 break + INFO。
+        let cap: Option<u32> = if opts.max_batches == 0 {
+            None
+        } else {
+            Some(opts.max_batches)
+        };
+
+        loop {
+            if cap.is_some_and(|c| summary.batches_executed >= c) {
+                summary.max_batches_reached = true;
+                tracing::info!(
+                    stage = "ai_run",
+                    phase = "process",
+                    batch_size = opts.process_batch_size,
+                    max_batches = opts.max_batches,
+                    batches_executed = summary.batches_executed,
+                    "max_batches_per_run reached; remaining pending AI tasks will be picked up by next run"
+                );
+                break;
             }
-        };
 
-        let mut summary = AiProcessSummary {
-            claimed: claimed.len() as u32,
-            ..AiProcessSummary::default()
-        };
-        let semaphore = Arc::new(Semaphore::new(
-            self.ctx.app.http.concurrent_fetches.max(1) as usize
-        ));
-        let mut join_set = JoinSet::new();
-
-        for task in claimed {
-            let ctx = Arc::clone(&self.ctx);
-            let owner = owner.clone();
-            let opts = opts.clone();
-            let semaphore = Arc::clone(&semaphore);
-            join_set.spawn(async move {
-                let _permit = semaphore
-                    .acquire_owned()
-                    .await
-                    .expect("semaphore should not be closed");
-                process_one(ctx, owner, task, opts).await
-            });
-        }
-
-        while let Some(result) = join_set.join_next().await {
-            match result {
-                Ok(outcome) => summary.per_task.push(outcome),
+            let now = OffsetDateTime::now_utc();
+            let claimed = match self
+                .ctx
+                .ai_result_repo
+                .claim_pending(&ClaimRequest {
+                    owner: owner.clone(),
+                    now,
+                    lease_expires_at: lease_expires_at(
+                        now,
+                        Duration::seconds(self.ctx.app.lease.ai_duration_seconds as i64),
+                    ),
+                    batch_size: opts.process_batch_size.max(1),
+                    max_attempts: opts.max_attempts,
+                })
+                .await
+            {
+                Ok(claimed) => claimed,
                 Err(error) => {
-                    tracing::error!("AI task panicked or was cancelled: {error}");
-                    summary.permanent_failed += 1;
+                    tracing::error!("failed to claim AI tasks: {error}");
+                    emitter
+                        .emit(
+                            "run_completed",
+                            "info",
+                            None,
+                            None,
+                            "ai process run completed",
+                            Some(json!({
+                                "phase": "process",
+                                "claimed": summary.claimed,
+                                "claim_error": error.error_kind(),
+                                "batches_executed": summary.batches_executed,
+                            })),
+                        )
+                        .await;
+                    return summary;
                 }
+            };
+
+            if claimed.is_empty() {
+                break;
+            }
+
+            summary.claimed += claimed.len() as u32;
+            summary.batches_executed += 1;
+            let per_task_len_before = summary.per_task.len();
+
+            let semaphore = Arc::new(Semaphore::new(
+                self.ctx.app.http.concurrent_fetches.max(1) as usize,
+            ));
+            let mut join_set = JoinSet::new();
+
+            for task in claimed {
+                let ctx = Arc::clone(&self.ctx);
+                let owner = owner.clone();
+                let opts = opts.clone();
+                let semaphore = Arc::clone(&semaphore);
+                join_set.spawn(async move {
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .expect("semaphore should not be closed");
+                    process_one(ctx, owner, task, opts).await
+                });
+            }
+
+            while let Some(result) = join_set.join_next().await {
+                match result {
+                    Ok(outcome) => summary.per_task.push(outcome),
+                    Err(error) => {
+                        tracing::error!("AI task panicked or was cancelled: {error}");
+                        summary.permanent_failed += 1;
+                    }
+                }
+            }
+
+            // F6-3: 同 ExtractFlow 路径，本批次产生 retryable 失败 ⇒ 这些
+            // 任务已回到 pending 且 lease 释放，下次 claim 会立即捞回形成
+            // retry-loop。主动终止，留待下一次 run 重试。
+            let batch_retryable = summary.per_task[per_task_len_before..]
+                .iter()
+                .filter(|o| matches!(o.status, AiTaskStatus::RetryableFailed))
+                .count();
+            if batch_retryable > 0 {
+                tracing::info!(
+                    stage = "ai_run",
+                    phase = "process",
+                    batches_executed = summary.batches_executed,
+                    batch_retryable,
+                    "retryable failures in batch; deferring re-claim to next run"
+                );
+                break;
             }
         }
 
@@ -296,6 +352,8 @@ impl AiRunFlow {
                     "filtered": summary.filtered,
                     "retryable_failed": summary.retryable_failed,
                     "permanent_failed": summary.permanent_failed,
+                    "batches_executed": summary.batches_executed,
+                    "max_batches_reached": summary.max_batches_reached,
                 })),
             )
             .await;
@@ -708,6 +766,7 @@ mod tests {
             max_tokens: 0,
             temperature: 0.0,
             min_importance_score: Score0To100::try_new(50).unwrap(),
+            max_batches: 0,
             category_key: "x".to_string(),
             prompt_version: 1,
             output_schema_version: 1,
