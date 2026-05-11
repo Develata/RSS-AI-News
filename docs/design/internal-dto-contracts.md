@@ -288,17 +288,34 @@ BackfillRequest
 ├── date_range: Option<(String, String)>
 ├── batch_size: u32
 ├── dry_run: bool
-├── prompt_version_id: Option<i64>      # target=Ai：覆盖 prompt 版本（默认使用当前活跃版本）
-├── output_schema_version_id: Option<i64> # target=Ai：覆盖输出 schema 版本
-├── model_id: Option<String>            # target=Ai：覆盖模型
-├── extractor_version_id: Option<i64>   # target=Extract：覆盖提取器版本
 ```
 
-版本字段语义：
+**版本字段位置**：AI 版本元数据（`new_prompt_version_tag` / `_sha256` /
+`_description` / `model_id` / `output_schema_version`）不在本 DTO 上声明，
+而由 `runtime::flows::backfill::BackfillAiOptions` 承载，作为 CLI 命令体
+向 runtime 派发的二级载体。原因见下。
 
-- 留空 → 使用 `app.toml` 配置的当前活跃版本；运行时自动 bump 版本号写入 `rule_versions` 表
-- 指定具体 id → 使用历史版本（用于复现某次历史结果），不再 bump，只复用已有版本行
-- `target=Ai` 只消费 AI 相关版本字段，`target=Extract` 只消费 extractor 版本字段；错配的字段组合应在 `cli` 层拒绝
+**版本字段语义（F5-7 重新约定）**：
+
+- backfill **总是** 通过 `rule_versions` 表 INSERT 新行（bump 版本号），不
+  支持复用历史版本行。理由：[state-machine §4.4](./state-machine.md#44-多-model--多版本并存)
+  承诺"`backfill` 命令会为历史文章生成新版本任务行；不覆盖旧行"，
+  与早期 W0 草案中的"传入 id 即复用历史版本"语义冲突；以 state-machine
+  为准
+- 用户通过 CLI flag 命名新版本：
+  - `--prompt-version-tag <string>` → 新 `rule_versions` 行的 `tag`
+    （缺省回落 `backfill-<unix-ts>`，非确定性）
+  - `--prompt-version-description <string>` → 新行 `description`
+    （缺省 `"manual backfill via CLI"`）
+  - `--model <string>` → 覆盖 `[ai] model`（缺省读 `app.toml`）
+- `target=Extract` 当前不接受版本字段（W3 后续接入 extractor 版本管理）
+- 错配的字段组合（如 `--target extract --prompt-version-tag X`）在 CLI 层
+  忽略而非拒绝，保持 §4.6 文档表格"参数与 target 解耦"的风格
+
+**为何拆 DTO？**：F5-7 复审（W2 DeepSeek 复审 N2）发现，把"is/tag/description/sha256"
+这一组实现细节钉进 W0 DTO 会让真相源跨层漂移（DTO 与 runtime option 字段
+集长期不一致）。结论：以 `BackfillAiOptions` 为唯一真相源；本 DTO 只载入
+CLI 表面的 5 个公共字段（§4.6 文档可见者）。
 
 ## 6.4 受约束 newtype（值域）
 
