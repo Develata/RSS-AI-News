@@ -6,6 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rss_ai_news_ai::{AiClient, AiError, AiResponse, AiTask, TokenUsage};
 use rss_ai_news_config::RetentionPolicy;
+use rss_ai_news_domain::Score0To100;
 use rss_ai_news_domain::dto::feed::FeedFetchRequest;
 use rss_ai_news_feed::fetcher::RawFeedFetch;
 use rss_ai_news_feed::{FeedError, FeedFetcher};
@@ -243,7 +244,7 @@ fn opts() -> AiRunOptions {
         max_input_chars: 1024,
         max_tokens: 128,
         temperature: 0.0,
-        min_importance_score: 30,
+        min_importance_score: Score0To100::try_new(30).expect("0..=100"),
         category_key: "ai".to_string(),
         prompt_version: 1,
         output_schema_version: 1,

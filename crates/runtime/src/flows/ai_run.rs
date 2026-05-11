@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use rss_ai_news_ai::{AiError, AiResponse, AiTask, ParsedResponse, parse_response};
+use rss_ai_news_domain::Score0To100;
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_storage::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ClaimRequest, ClaimedAiResult, NewAiResult,
@@ -27,7 +28,11 @@ pub struct AiRunOptions {
     pub max_input_chars: u32,
     pub max_tokens: u32,
     pub temperature: f32,
-    pub min_importance_score: i32,
+    /// 0..=100 的发布门槛。type-level invariant 在反序列化 / CLI 解析时已被
+    /// `Score0To100` 锁死（F5-4），ai-run 路径同样使用 newtype 而不在中途
+    /// 退化为 `i32`，与 publish / config 两侧保持类型契约一致（F6-1）。
+    /// 调用 storage 层时按需 `.get() as i32`（SQL 绑定边界）。
+    pub min_importance_score: Score0To100,
     pub category_key: String,
     /// stub：本轮固定 1。
     pub prompt_version: i64,
@@ -430,7 +435,7 @@ async fn process_one(
             &owner,
             outcome,
             claimed.article_id,
-            opts.min_importance_score,
+            i32::from(opts.min_importance_score.get()),
             OffsetDateTime::now_utc(),
         )
         .await;
@@ -681,5 +686,33 @@ fn ai_task_status_str(status: &AiTaskStatus) -> &'static str {
         AiTaskStatus::Filtered => "filtered",
         AiTaskStatus::RetryableFailed => "retryable_failed",
         AiTaskStatus::PermanentFailed => "permanent_failed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ai_run_options_min_importance_score_is_strong_typed() {
+        // F6-1: AiRunOptions.min_importance_score 必须是 Score0To100，
+        // 与 publish (PublishFreezeOptions) / config (PublishConfig) 三方对齐。
+        // 该测试防止后续改回 i32 的回归 —— 类型 mismatch 会让编译失败。
+        let opts = AiRunOptions {
+            task_gen_batch_size: 1,
+            process_batch_size: 1,
+            max_attempts: 1,
+            prompt_template: String::new(),
+            model_id: String::new(),
+            max_input_chars: 0,
+            max_tokens: 0,
+            temperature: 0.0,
+            min_importance_score: Score0To100::try_new(50).unwrap(),
+            category_key: "x".to_string(),
+            prompt_version: 1,
+            output_schema_version: 1,
+        };
+        // newtype 提供 type-safe 0..=100 不变量；该断言只是文档化运行时值。
+        assert_eq!(opts.min_importance_score.get(), 50);
     }
 }

@@ -109,7 +109,10 @@ pub async fn run(cli: &Cli, args: &AiRunArgs) -> Result<AiRunCommandSummary, Cli
                 category.category.key
             )))
         })?;
-    let min_importance_score = i32::from(effective.min_importance_score.get());
+    // F6-1: `Score0To100` 直接传给 `AiRunOptions`，与 publish 路径
+    // (`PublishFreezeOptions.min_importance_score`) 类型契约对齐；
+    // 不在 CLI 层提前 `.get() as i32` 失去 newtype 不变量。
+    let min_importance_score = effective.min_importance_score;
     let max_input_chars = category
         .ai_override
         .as_ref()
