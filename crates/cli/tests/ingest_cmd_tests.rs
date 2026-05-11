@@ -111,6 +111,7 @@ fn cli_for(config_dir: &Path, args: IngestArgs) -> Cli {
         dry_run: false,
         category: None,
         timezone: None,
+        max_batches: None,
         command: Command::Ingest(args),
     }
 }

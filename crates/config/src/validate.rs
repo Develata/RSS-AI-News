@@ -165,6 +165,7 @@ mod tests {
                 ai_max_attempts: 1,
                 publish_max_attempts: 1,
             },
+            runtime: RuntimeConfig::default(),
             artifact: ArtifactConfig {
                 retention_policy: RetentionPolicy::OnFailure,
                 sample_rate: 0.1,

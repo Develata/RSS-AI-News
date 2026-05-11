@@ -167,8 +167,10 @@ async fn args_parsing_parses_reindex_with_target_link_hash() {
         Cli::try_parse_from(["rss-ai-news", "reindex", "--target", "link_hash"]).expect("parse");
     match cli.command {
         Command::Reindex(args) => {
-            assert_eq!(args.target, ReindexTarget::LinkHash);
+            assert_eq!(args.target, Some(ReindexTarget::LinkHash));
             assert_eq!(args.batch_size, 100);
+            assert!(args.abort.is_none());
+            assert!(!args.dry_run);
         }
         other => panic!("unexpected command: {other:?}"),
     }
@@ -254,4 +256,127 @@ async fn args_parsing_help_lists_all_top_level_subcommands() {
     ] {
         assert!(help.contains(name), "help should contain {name}");
     }
+}
+
+// === F5-6 W2-A-3 / W2-B-5: 补 CLI 标志（max-batches / reindex target=all / abort）===
+
+#[tokio::test]
+async fn args_parsing_max_batches_accepted_on_ingest_subcommand() {
+    // cli-semantics §4.1 line 62: ingest 接受 --max-batches。
+    // 通过 global=true 由顶层 Cli 持有，子命令位置一样可用。
+    let cli =
+        Cli::try_parse_from(["rss-ai-news", "ingest", "--max-batches", "3"]).expect("parse");
+    assert_eq!(cli.max_batches, Some(3));
+    assert!(matches!(cli.command, Command::Ingest(_)));
+}
+
+#[tokio::test]
+async fn args_parsing_max_batches_accepted_on_ai_run_subcommand() {
+    // cli-semantics §4.2 line 97: ai-run 接受 --max-batches。
+    let cli =
+        Cli::try_parse_from(["rss-ai-news", "ai-run", "--max-batches", "7"]).expect("parse");
+    assert_eq!(cli.max_batches, Some(7));
+    assert!(matches!(cli.command, Command::AiRun(_)));
+}
+
+#[tokio::test]
+async fn args_parsing_max_batches_accepted_on_run_subcommand() {
+    // cli-semantics §4.11 line 358: run 自身接受 --max-batches，
+    // 内部 ingest/ai-run 阶段沿用同一生效值（无 --ingest-max-batches）。
+    let cli = Cli::try_parse_from(["rss-ai-news", "run", "--max-batches", "5"]).expect("parse");
+    assert_eq!(cli.max_batches, Some(5));
+    assert!(matches!(cli.command, Command::Run(_)));
+}
+
+#[tokio::test]
+async fn args_parsing_max_batches_zero_means_unlimited() {
+    // config-schema §4.4 line 196: 0 = 不限。clap 应正常接受 0，不
+    // 折叠为缺省。
+    let cli =
+        Cli::try_parse_from(["rss-ai-news", "ingest", "--max-batches", "0"]).expect("parse");
+    assert_eq!(cli.max_batches, Some(0));
+}
+
+#[tokio::test]
+async fn args_parsing_reindex_target_all_parses() {
+    // cli-semantics §4.8 line 287: --target=all 是合法值（顺序执行三类）。
+    let cli =
+        Cli::try_parse_from(["rss-ai-news", "reindex", "--target", "all"]).expect("parse");
+    match cli.command {
+        Command::Reindex(args) => {
+            assert_eq!(args.target, Some(ReindexTarget::All));
+            assert!(args.abort.is_none());
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn args_parsing_reindex_target_all_expands_to_three_domain_targets_in_order() {
+    // §4.8 line 297: target='all' 时按顺序生成三个独立 job
+    // (link_hash → content_hash → categories)。
+    use rss_ai_news_domain::state::ReindexTarget as DomainTarget;
+    let expanded = ReindexTarget::All.expand();
+    assert_eq!(
+        expanded,
+        vec![
+            DomainTarget::LinkHash,
+            DomainTarget::ContentHash,
+            DomainTarget::Categories,
+        ],
+    );
+}
+
+#[tokio::test]
+async fn args_parsing_reindex_abort_parses_without_target() {
+    // §4.8 line 290: --abort <job_id>，与 --target 互斥（用户应可省略 --target）。
+    let cli = Cli::try_parse_from(["rss-ai-news", "reindex", "--abort", "job-42"])
+        .expect("parse");
+    match cli.command {
+        Command::Reindex(args) => {
+            assert_eq!(args.abort.as_deref(), Some("job-42"));
+            assert!(args.target.is_none());
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn args_parsing_reindex_abort_and_target_are_mutually_exclusive() {
+    // §4.8 line 290 + clap conflicts_with：同时提供应 parse 失败 (exit 2)。
+    let err = Cli::try_parse_from([
+        "rss-ai-news",
+        "reindex",
+        "--target",
+        "link_hash",
+        "--abort",
+        "x",
+    ])
+    .expect_err("conflict");
+    assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    assert_eq!(err.exit_code(), 2);
+}
+
+#[tokio::test]
+async fn args_parsing_reindex_without_target_or_abort_is_rejected() {
+    // §4.8 line 287: --target 必填（除非 --abort）。
+    // clap required_unless_present 应直接 reject。
+    let err = Cli::try_parse_from(["rss-ai-news", "reindex"]).expect_err("missing target");
+    assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    assert_eq!(err.exit_code(), 2);
+}
+
+#[tokio::test]
+async fn args_parsing_max_batches_flows_into_cli_overrides() {
+    // §8 line 405: --max-batches 应通过 CliOverrides 落到
+    // app.runtime.max_batches_per_run。
+    let cli = Cli::try_parse_from([
+        "rss-ai-news",
+        "--max-batches",
+        "4",
+        "validate-config",
+    ])
+    .expect("parse");
+    let overrides = cli.to_cli_overrides();
+    assert_eq!(overrides.max_batches, Some(4));
 }

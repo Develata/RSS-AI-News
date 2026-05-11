@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rss_ai_news_config::{
     AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, CategoryConfig, DatabaseConfig,
     DatabaseDriver, DedupConfig, EnvConfig, ExtractorConfig, HttpConfig, LeaseConfig, LoadedConfig,
-    ObservabilityConfig, PublishConfig, RetentionPolicy, RetryConfig,
+    ObservabilityConfig, PublishConfig, RetentionPolicy, RetryConfig, RuntimeConfig,
 };
 use rss_ai_news_domain::Score0To100;
 use rss_ai_news_observability::health::{
@@ -197,6 +197,7 @@ fn app_config() -> AppConfig {
             ai_max_attempts: 1,
             publish_max_attempts: 1,
         },
+        runtime: RuntimeConfig::default(),
         artifact: ArtifactConfig {
             retention_policy: RetentionPolicy::Off,
             sample_rate: 1.0,

@@ -5,7 +5,7 @@ use rss_ai_news_cli::{
         migrate::MigrateCommandSummary,
         publish::{PublishCommandSummary, PublishStageOutcome},
         rebuild_report::RebuildReportCommandSummary,
-        reindex::ReindexCommandSummary,
+        reindex::{ReindexCommandSummary, ReindexTargetOutcome},
         replay::ReplayCommandSummary,
         run::RunCommandSummary,
     },
@@ -83,7 +83,10 @@ fn reindex_summary_pretty_renders() {
 
 #[test]
 fn reindex_summary_serializes_archived_count() {
-    assert_eq!(json_value(&reindex_summary(), "archived"), 1);
+    // F5-6: ReindexCommandSummary 改为 `per_target: Vec<...>` 以支持
+    // `--target=all`（§4.8 line 297）。`archived` 字段下钻到第 0 项。
+    let value = serde_json::to_value(reindex_summary()).expect("serialize");
+    assert_eq!(value["per_target"][0]["archived"].as_i64(), Some(1));
 }
 
 #[test]
@@ -236,14 +239,16 @@ fn backfill_summary() -> BackfillCommandSummary {
 
 fn reindex_summary() -> ReindexCommandSummary {
     ReindexCommandSummary {
-        target: "categories".to_string(),
-        new_rule_version_id: 11,
-        scanned: 2,
-        updated: 2,
-        unchanged: 0,
-        conflict_skipped: 0,
-        archived: 1,
-        errors: 0,
+        per_target: vec![ReindexTargetOutcome {
+            target: "categories".to_string(),
+            new_rule_version_id: 11,
+            scanned: 2,
+            updated: 2,
+            unchanged: 0,
+            conflict_skipped: 0,
+            archived: 1,
+            errors: 0,
+        }],
     }
 }
 

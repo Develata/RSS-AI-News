@@ -73,7 +73,7 @@ mod tests {
         app::{
             AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, DatabaseConfig, DatabaseDriver,
             DedupConfig, ExtractorConfig, HttpConfig, LeaseConfig, ObservabilityConfig,
-            PublishConfig, RetentionPolicy, RetryConfig,
+            PublishConfig, RetentionPolicy, RetryConfig, RuntimeConfig,
         },
         category::{AiOverride, CategoryConfig, CategoryMeta, PublishOverride},
         env::EnvConfig,
@@ -174,6 +174,7 @@ mod tests {
                     ai_max_attempts: 1,
                     publish_max_attempts: 1,
                 },
+                runtime: RuntimeConfig::default(),
                 artifact: ArtifactConfig {
                     retention_policy: RetentionPolicy::OnFailure,
                     sample_rate: 0.1,

@@ -36,6 +36,13 @@ pub struct Cli {
     #[arg(long = "timezone")]
     pub timezone: Option<String>,
 
+    /// 全局 `--max-batches`：覆盖 `runtime.max_batches_per_run`。
+    /// 仅对 `ingest` / `ai-run` / `run` 有意义；其他命令忽略。
+    /// `0` = 不限（仅由 lease + 宿主超时兜底）。
+    /// 详见 docs/design/config-schema.md §8 line 405、§4.4 line 196。
+    #[arg(long = "max-batches", global = true)]
+    pub max_batches: Option<u32>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -49,6 +56,7 @@ impl Cli {
             timezone: self.timezone.clone(),
             category_filter: self.category.clone(),
             dry_run: self.dry_run,
+            max_batches: self.max_batches,
         }
     }
 }
@@ -170,28 +178,55 @@ pub struct RebuildReportArgs {
     pub output: Option<PathBuf>,
 }
 
+/// cli-semantics §4.8 lines 285-290:
+///   `--target` 必填（除非 `--abort`），值 ∈ {link_hash, content_hash, categories, all}
+///   `--abort <job_id>`：取消指定 job；与 `--target` 互斥
+///
+/// clap 表达：
+///   - `target` 与 `abort` 通过 `conflicts_with` 互斥
+///   - 用户必须二选一：clap `required_unless_present` 在二者间形成 XOR
 #[derive(Args, Debug, Clone)]
 pub struct ReindexArgs {
-    #[arg(long, value_enum)]
-    pub target: ReindexTarget,
+    /// 重算目标（`--abort` 模式下省略）。
+    #[arg(long, value_enum, required_unless_present = "abort", conflicts_with = "abort")]
+    pub target: Option<ReindexTarget>,
     #[arg(long = "batch-size", default_value_t = 100)]
     pub batch_size: u32,
+    /// 取消指定 `reindex_jobs.id`，状态推进到 `aborted`。详见
+    /// cli-semantics §4.8 line 290。
+    #[arg(long = "abort", conflicts_with = "target")]
+    pub abort: Option<String>,
+    /// 仅统计将更新行数与待写入 rule_versions 元数据；不写任何表。
+    /// 详见 cli-semantics §4.8 line 289。
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
 }
 
+/// CLI 层 reindex 目标。`All` 触发顺序执行 link_hash / content_hash /
+/// categories 三个独立 job（cli-semantics §4.8 line 297）。
+/// 其余三个值对应 [`DomainReindexTarget`] 一一映射。
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 #[value(rename_all = "snake_case")]
 pub enum ReindexTarget {
     LinkHash,
     ContentHash,
     Categories,
+    All,
 }
 
-impl From<ReindexTarget> for DomainReindexTarget {
-    fn from(value: ReindexTarget) -> Self {
-        match value {
-            ReindexTarget::LinkHash => Self::LinkHash,
-            ReindexTarget::ContentHash => Self::ContentHash,
-            ReindexTarget::Categories => Self::Categories,
+impl ReindexTarget {
+    /// 把 CLI 选项展开为底层 domain target 序列。`All` 展开为
+    /// `[LinkHash, ContentHash, Categories]`（顺序由 §4.8 line 297 规定）。
+    pub fn expand(self) -> Vec<DomainReindexTarget> {
+        match self {
+            Self::LinkHash => vec![DomainReindexTarget::LinkHash],
+            Self::ContentHash => vec![DomainReindexTarget::ContentHash],
+            Self::Categories => vec![DomainReindexTarget::Categories],
+            Self::All => vec![
+                DomainReindexTarget::LinkHash,
+                DomainReindexTarget::ContentHash,
+                DomainReindexTarget::Categories,
+            ],
         }
     }
 }
