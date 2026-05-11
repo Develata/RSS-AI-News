@@ -59,7 +59,7 @@ rss-ai-news
 | `--source` | string | 全部 | 只处理指定源（`category_key:source_key`）|
 | `--skip-fetch` | bool | false | 跳过正文抓取（只发现 + 去重）|
 | `--batch-size` | u32 | 50 | 每批抓取任务数 |
-| `--max-batches` | u32 | `runtime.max_batches_per_run`（默认 10）| 单次 run 内部批次循环上限；`0` = 不限。详见 [config-schema §4.4](./config-schema.md#44-runtime-字段语义) |
+| `--max-batches` | u32 | `runtime.max_batches_per_run`（默认 10）| `extract` 阶段 claim 循环上限（不约束 fetch 阶段，后者由 `concurrent_feeds` + 宿主超时兜底）；`0` = 不限。详见 [config-schema §4.4](./config-schema.md#44-runtime-字段语义) |
 
 **行为**：
 
@@ -94,7 +94,7 @@ Ingest completed:
 | 参数 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `--batch-size` | u32 | 20 | 每批处理数 |
-| `--max-batches` | u32 | `runtime.max_batches_per_run`（默认 10）| 单次 run 内部批次循环上限；`0` = 不限。详见 [config-schema §4.4](./config-schema.md#44-runtime-字段语义) |
+| `--max-batches` | u32 | `runtime.max_batches_per_run`（默认 10）| `process` 阶段 claim 循环上限（不约束 `task_gen` one-shot 扫描）；`0` = 不限。详见 [config-schema §4.4](./config-schema.md#44-runtime-字段语义) |
 | `--model` | string | `app.toml` 中的值 | 覆盖模型 |
 
 **行为**：

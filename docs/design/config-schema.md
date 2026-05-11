@@ -130,7 +130,7 @@ publish_max_attempts = 5
 
 # === 单次 run 工作量边界 ===
 [runtime]
-max_batches_per_run = 10                 # ingest / ai-run 内部批次循环上限；0 = 不限（仅由 lease/宿主超时兜底）
+max_batches_per_run = 10                 # extract claim 循环 / ai-run process 阶段 claim 循环上限；0 = 不限（仅由 lease/宿主超时兜底）
 
 # === Raw Artifact ===
 [artifact]
