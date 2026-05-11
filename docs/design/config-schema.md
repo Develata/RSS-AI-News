@@ -193,7 +193,18 @@ metrics_bind = "127.0.0.1:9090"
 
 | 字段 | 作用阶段 | 单位 | 默认值 | 说明 |
 |---|---|---|---|---|
-| `max_batches_per_run` | ingest / ai-run 内部批次循环 | 批次数 | `10` | 单次 run 内部循环最多处理多少批；与 `--batch-size` 相乘得到本次运行的处理上限（如 `batch_size=50 × max_batches_per_run=10` = 500 条/run）。`0` 表示不限，仅由 lease 过期 + 宿主超时兜底。CLI `--max-batches` 可覆盖 |
+| `max_batches_per_run` | extract claim 循环 / ai-run process 阶段 claim 循环 | 批次数 | `10` | 单次 run 内部 claim 循环最多处理多少批；与 `--batch-size` 相乘得到本次运行的处理上限（如 `batch_size=50 × max_batches_per_run=10` = 500 条/run）。`0` 表示不限，仅由 lease 过期 + 宿主超时兜底。CLI `--max-batches` 可覆盖 |
+
+**作用域精确边界**（F8-2 W4-2）：`max_batches_per_run` 仅约束以下两个 claim 循环：
+
+- **extract claim 循环**：`ExtractFlow::run` 对 `feed_entries.state='pending_fetch'` 行的 claim → 处理 → release 循环（一批 = 一次 `claim_pending_fetch` 调用）
+- **ai-run process 阶段 claim 循环**：`AiRunFlow::process_ai_tasks` 对 `article_ai_results.state='pending'` 行的 claim → 调 AI → release 循环
+
+**不在作用域内的阶段**：
+
+- **ingest 内部 fetch 阶段**：`IngestFlow` 的 source 遍历（`FeedFlow::run`）由 active sources 列表天然约束（典型 < 100 源），不属于"分批 claim 循环"语义；规模超过千级时由 `[http].concurrent_feeds` + 宿主超时兜底
+- **ai-run task_gen 阶段**：one-shot `list_persisted_for_ai_task_gen` 扫描后插入 pending 任务（不是 claim 循环），仅受 `--batch-size` 限制扫描页大小
+- **publish 全部阶段**：见下文"与 `publish` 命令的关系"
 
 **触达上限的退出语义**：达到 `max_batches_per_run` 后，runtime 退出本阶段循环并返回 exit code 0（视为本次配额完成，不是错误），同时写一行 INFO 日志：
 
