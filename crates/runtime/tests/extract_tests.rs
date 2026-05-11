@@ -278,6 +278,11 @@ async fn extract_releases_retryable_on_5xx() {
     assert_eq!(row.0, "pending_fetch");
     assert_eq!(row.1, 1);
     assert_eq!(row.2, Some("http_5xx".to_string()));
+    // F8-1 W4-1: retryable 失败时退出原因必须是 retryable_deferred，
+    // 不能与 max_batches_reached 复用同一信号。max_batches=0 表示无上限，
+    // 此处 retryable_deferred=true / max_batches_reached=false。
+    assert!(summary.retryable_deferred);
+    assert!(!summary.max_batches_reached);
 }
 
 #[tokio::test]
@@ -465,6 +470,9 @@ async fn max_batches_caps_loop_and_reports_reached_flag() {
     assert_eq!(summary.batches_executed, 2);
     assert_eq!(summary.claimed, 2);
     assert!(summary.max_batches_reached, "should hit cap with 3 pending");
+    // F8-1 W4-1: cap-hit 路径必须 retryable_deferred=false（与 retryable
+    // 退出路径互斥）。parse_failed_strategy → PermanentFailed，不会触发 defer。
+    assert!(!summary.retryable_deferred);
 
     let pending_left: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM feed_entries WHERE state = 'pending_fetch'")
@@ -505,6 +513,9 @@ async fn max_batches_zero_means_unlimited_until_queue_drained() {
     assert_eq!(summary.claimed, 3);
     assert_eq!(summary.batches_executed, 3);
     assert!(!summary.max_batches_reached);
+    // F8-1 W4-1: 自然耗尽路径（claim 返回空）必须 retryable_deferred=false。
+    // 与 cap-hit / retryable-defer 路径形成三态判别。
+    assert!(!summary.retryable_deferred);
 
     let pending_left: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM feed_entries WHERE state = 'pending_fetch'")

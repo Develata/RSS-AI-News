@@ -40,9 +40,17 @@ pub struct ExtractSummary {
     /// 队列耗尽时小于上限。供 observability / 测试可见。
     pub batches_executed: u32,
     /// `true` 表示循环因 `max_batches` 上限退出（仍有 pending 行）；
-    /// `false` 表示自然耗尽（claim 返回空批次）。配合一条 INFO 日志
-    /// （cli-semantics §4.4 line 198）让运维知晓本次 run 是否需要后续调度兜底。
+    /// `false` 表示自然耗尽（claim 返回空批次）或因 retryable 失败 defer。
+    /// 配合一条 INFO 日志（cli-semantics §4.4 line 198）让运维知晓本次 run
+    /// 是否需要后续调度兜底。`max_batches_reached` 与 `retryable_deferred`
+    /// 互斥（同一 run 内最多有一个为 `true`）。
     pub max_batches_reached: bool,
+    /// `true` 表示循环因本批次出现 RetryableFailed 主动 defer 到下次 run
+    /// （F6-3 retryable-bail 路径；W4-1）。`false` 表示既未 defer 也未命中
+    /// 上限——配合 `max_batches_reached` 三值组合可区分三种退出路径：
+    /// `(cap_hit, retryable, queue_exhausted)` → `(T, F)`, `(F, T)`, `(F, F)`。
+    /// 让 observability 消费者无须靠 `batches_executed < cap` 隐式推断。
+    pub retryable_deferred: bool,
     pub per_entry: Vec<ExtractEntryOutcome>,
 }
 
@@ -194,6 +202,7 @@ impl ExtractFlow {
                 .filter(|o| matches!(o.status, ExtractEntryStatus::RetryableFailed))
                 .count();
             if batch_retryable > 0 {
+                summary.retryable_deferred = true;
                 tracing::info!(
                     stage = "extract",
                     batches_executed = summary.batches_executed,
@@ -221,6 +230,7 @@ impl ExtractFlow {
                     "permanent_failed": summary.permanent_failed,
                     "batches_executed": summary.batches_executed,
                     "max_batches_reached": summary.max_batches_reached,
+                    "retryable_deferred": summary.retryable_deferred,
                 })),
             )
             .await;

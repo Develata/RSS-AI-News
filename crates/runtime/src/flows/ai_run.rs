@@ -69,8 +69,14 @@ pub struct AiProcessSummary {
     /// 实际执行的批次数（F6-3）。命中 `max_batches` 时等于上限；否则小于上限。
     pub batches_executed: u32,
     /// `true` 表示循环因 `max_batches` 上限退出（仍有 pending 任务）；
-    /// `false` 表示自然耗尽（claim 返回空批次）。
+    /// `false` 表示自然耗尽（claim 返回空批次）或因 retryable 失败 defer。
+    /// 与 `retryable_deferred` 互斥（同一 run 内最多一个为 `true`）。
     pub max_batches_reached: bool,
+    /// `true` 表示循环因本批次出现 RetryableFailed 主动 defer 到下次 run
+    /// （F6-3 retryable-bail 路径；W4-1）。三值组合 `(max_batches_reached,
+    /// retryable_deferred)` = `(T, F)` / `(F, T)` / `(F, F)` 区分 cap-hit /
+    /// retryable-deferred / queue-exhausted 三种退出路径。
+    pub retryable_deferred: bool,
     pub per_task: Vec<AiTaskOutcome>,
 }
 
@@ -326,6 +332,7 @@ impl AiRunFlow {
                 .filter(|o| matches!(o.status, AiTaskStatus::RetryableFailed))
                 .count();
             if batch_retryable > 0 {
+                summary.retryable_deferred = true;
                 tracing::info!(
                     stage = "ai_run",
                     phase = "process",
@@ -354,6 +361,7 @@ impl AiRunFlow {
                     "permanent_failed": summary.permanent_failed,
                     "batches_executed": summary.batches_executed,
                     "max_batches_reached": summary.max_batches_reached,
+                    "retryable_deferred": summary.retryable_deferred,
                 })),
             )
             .await;
