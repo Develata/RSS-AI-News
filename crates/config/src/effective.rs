@@ -81,6 +81,13 @@ mod tests {
         overrides::CliOverrides,
     };
 
+    /// F7-3 W3-5：把 `u8` 转 `Score0To100` 的样板抽出来。让 test 调用方
+    /// 写 `score(75)` 而非 `Score0To100::try_new(75).expect(...)`，同时若
+    /// 误写 `>100` 的常量，panic 发生在该调用点（locality of error）。
+    fn score(v: u8) -> Score0To100 {
+        Score0To100::try_new(v).expect("test fixture: value must be 0..=100")
+    }
+
     fn loaded(
         include_unscored: bool,
         category_override: Option<bool>,
@@ -97,6 +104,12 @@ mod tests {
         )
     }
 
+    /// F7-3 W3-5 修复：`override_min_score` 参数从 `Option<u8>` 收紧为
+    /// `Option<Score0To100>`，避免历史上"测试传 200 → 在本函数内 expect
+    /// panic"的低位错误信号。强类型把"必须 0..=100"的约束推回到调用方
+    /// 调用 [`score`] 的位置。生产路径 [`PublishOverride::min_importance_score`]
+    /// 早在 F5-4 已经升为 `Option<Score0To100>`（详见 config-schema §8
+    /// line 378），本函数的签名漂移是 F5-4 的遗留。
     fn loaded_with_publish_globals(
         include_unscored: bool,
         category_override: Option<bool>,
@@ -104,12 +117,8 @@ mod tests {
         global_max_items: u32,
         global_min_score: u8,
         override_max_items: Option<u32>,
-        override_min_score: Option<u8>,
+        override_min_score: Option<Score0To100>,
     ) -> LoadedConfig {
-        let override_min_score = override_min_score.map(|v| {
-            Score0To100::try_new(v)
-                .expect("test: override_min_score must be 0..=100 (now strongly typed)")
-        });
         LoadedConfig {
             env: EnvConfig::default(),
             app: AppConfig {
@@ -306,7 +315,8 @@ mod tests {
 
     #[test]
     fn min_score_override_takes_precedence_over_global() {
-        let config = loaded_with_publish_globals(false, None, None, 30, 30, None, Some(75));
+        let config =
+            loaded_with_publish_globals(false, None, None, 30, 30, None, Some(score(75)));
         let effective = config.effective_for_category("ai").unwrap();
         assert_eq!(effective.min_importance_score.get(), 75);
     }
@@ -315,7 +325,8 @@ mod tests {
     fn min_score_override_zero_is_explicit_no_floor_not_default() {
         // Per config-schema.md §4.5: `min_importance_score = 0` is "explicit
         // no floor" and must NOT be reinterpreted as "use global default".
-        let config = loaded_with_publish_globals(false, None, None, 30, 30, None, Some(0));
+        let config =
+            loaded_with_publish_globals(false, None, None, 30, 30, None, Some(score(0)));
         let effective = config.effective_for_category("ai").unwrap();
         assert_eq!(effective.min_importance_score.get(), 0);
     }
