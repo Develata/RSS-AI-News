@@ -68,7 +68,7 @@ reclaim 的具体状态行为按表分别规定：
 
 每条失败路径携带两项独立信息：
 
-1. **`last_error_kind`**（存 DB 列）：具体错误变体的 snake_case 名，取自 [error-and-observability §2.3](./error-and-observability.md) 每个错误表的 `error_kind` 列（例如 `http_timeout` / `output_parse` / `github_auth`）。值空间**完全由错误枚举决定**，不含抽象分类
+1. **`last_error_kind`**（存 DB 列）：具体错误变体的 snake_case 名，取自 [error-and-observability §2.3](./error-and-observability.md) 每个错误表的 `error_kind` 列（例如 `http_timeout` / `invalid_json` / `github_auth_failed`）。值空间**完全由错误枚举决定**，不含抽象分类
 2. **retry class**（仅内存判定，**不入库**）：由错误类型本身的 `ClassifiedError::is_retryable()` 方法返回，取值 `Retryable` / `Permanent` / `Fatal`
 
 **重要**：retry class 绝不从 `last_error_kind` 字符串反推。每次失败时 `runtime` 直接调用错误类型的 `is_retryable()`；`last_error_kind` 只做可观测性用途（查询、聚合、报警）。
@@ -321,7 +321,7 @@ reclaim 行为见 §2.3：publish_records 的 reclaim 仅清 lease 字段、不�
 | 起始 | 目标 | 触发者 | 前置条件 | 副作用 | 失败分支 |
 |---|---|---|---|---|---|
 | (insert) | `pending` | `runtime::publish::init` | `idempotency_key` 未冲突 | INSERT；不需要 claim（首次写入即所有权确立）| UNIQUE 冲突 → 视恢复策略 |
-| `pending` | `snapshot_frozen` | `runtime::publish::freeze` | 前置 claim 成功 + 选稿返回非空集合 | 批量 INSERT `publish_items`，事务提交，UPDATE state | claim 冲突 → 本轮跳过；空集合 → `failed` (`SnapshotEmpty`) |
+| `pending` | `snapshot_frozen` | `runtime::publish::freeze` | 前置 claim 成功 + 选稿返回非空集合 | 批量 INSERT `publish_items`，事务提交，UPDATE state | claim 冲突 → 本轮跳过；空集合 → `failed` (`ReportError::SnapshotEmpty`) |
 | `snapshot_frozen` | `rendered` | `runtime::publish::render` | 前置 claim 成功 + 渲染成功 | UPDATE state，无其他持久副作用 | claim 冲突 → 本轮跳过；渲染错误 → `failed` |
 | `rendered` | `stored_local` | `runtime::publish::local_store` | 前置 claim 成功 + 写文件成功 + `publish_records.remote_target` 非空（远端模式）| 写 `local_path`, `local_stored_at`，UPDATE state | IO 失败 → 保持 `rendered`，计入 retry |
 | `rendered` | `published_local` | 同上 | 前置 claim 成功 + 写文件成功 + `publish_records.remote_target` 为空（`--local-only` 模式）| 同上；下游同步更新 `articles.state='published'` | IO 失败 → 保持 `rendered`，计入 retry |
@@ -354,9 +354,9 @@ reclaim 行为见 §2.3：publish_records 的 reclaim 仅清 lease 字段、不�
 
 | 失败点 | 错误变体 | is_retryable | 处理 |
 |---|---|---|---|
-| 选稿空集 | `PublishError::SnapshotEmpty` | false | `failed` |
+| 选稿空集 | `ReportError::SnapshotEmpty` | false | `failed` |
 | 渲染异常 | `ReportError::*`（变体集由 report crate 内部定义，permanent）| false | `failed` |
-| 本地 IO 失败 | `PublishError::LocalIoError` | false | 写 `last_error*`，保持 `rendered` 等下一轮重试（retry 属性在 runtime 层按 `LocalIoError` 的原始 `io::ErrorKind` 判定，WouldBlock / Interrupted 才可重试）|
+| 本地 IO 失败 | `PublishError::LocalIoError` | false | 写 `last_error*`，保持 `rendered` 等下一轮重试（retry 属性在 runtime 层按 `LocalIoError` 的原始 `io::ErrorKind` 判定，`WouldBlock` / `Interrupted` / `TimedOut` 才可重试）|
 | GitHub 4xx auth | `PublishError::GitHubAuthFailed` | false | `failed` + critical |
 | GitHub 4xx 其它 | `PublishError::GitHubApiError { status: 4xx }` | false | `failed` |
 | GitHub 5xx | `PublishError::GitHubApiError { status: 5xx }` | true | 保持 `stored_local` 重试 |
