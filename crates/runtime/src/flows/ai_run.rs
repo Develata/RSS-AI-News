@@ -39,9 +39,13 @@ pub struct AiRunOptions {
     /// 此上限控制。详见 docs/design/config-schema.md §4.4。
     pub max_batches: u32,
     pub category_key: String,
-    /// stub：本轮固定 1。
+    /// `rule_versions` 表中 `kind='prompt'` 的当前活跃版本号。CLI 在调用前通过
+    /// `rule_version_repo.get_or_create("prompt", ...)` 解析，写入
+    /// `article_ai_results.prompt_version`（详见 storage-schema §4.6 幂等四元组）。
     pub prompt_version: i64,
-    /// stub：本轮固定 1。
+    /// `rule_versions` 表中 `kind='ai_output_schema'` 的当前活跃版本号。CLI
+    /// 在调用前通过 `rule_version_repo.get_or_create("ai_output_schema", ...)`
+    /// 解析，写入 `article_ai_results.output_schema_version`。
     pub output_schema_version: i64,
 }
 
