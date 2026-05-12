@@ -46,3 +46,21 @@ fn render_does_not_break_utf8_at_boundary() {
 
     assert_eq!(rendered, "中a文b混…");
 }
+
+#[test]
+fn render_does_not_re_substitute_placeholders_inside_replaced_content() {
+    // 若 title 自身含 `{body_text}` 字面文本，单次遍历不应把它当作占位符二次替换。
+    let rendered = render_prompt(
+        "T={title}; B={body_text}",
+        &PromptInput {
+            title: "{body_text}",
+            body_text: "BODY",
+            category_key: "",
+        },
+        &PromptRenderConfig {
+            max_input_chars: 100,
+        },
+    );
+
+    assert_eq!(rendered, "T={body_text}; B=BODY");
+}

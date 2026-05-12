@@ -10,11 +10,27 @@ pub struct PromptRenderConfig {
 
 pub fn render_prompt(template: &str, input: &PromptInput<'_>, cfg: &PromptRenderConfig) -> String {
     let body_text = truncate_chars(input.body_text, cfg.max_input_chars);
-
-    template
-        .replace("{title}", input.title)
-        .replace("{body_text}", &body_text)
-        .replace("{category_key}", input.category_key)
+    let mut output = String::with_capacity(template.len() + body_text.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        output.push_str(&rest[..start]);
+        let after = &rest[start..];
+        if let Some(stripped) = after.strip_prefix("{title}") {
+            output.push_str(input.title);
+            rest = stripped;
+        } else if let Some(stripped) = after.strip_prefix("{body_text}") {
+            output.push_str(&body_text);
+            rest = stripped;
+        } else if let Some(stripped) = after.strip_prefix("{category_key}") {
+            output.push_str(input.category_key);
+            rest = stripped;
+        } else {
+            output.push('{');
+            rest = &after[1..];
+        }
+    }
+    output.push_str(rest);
+    output
 }
 
 fn truncate_chars(input: &str, max_chars: usize) -> String {
