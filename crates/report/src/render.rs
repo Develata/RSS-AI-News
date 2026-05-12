@@ -50,6 +50,9 @@ pub fn render_markdown(
             "- 链接：<{0}>\n\n",
             escape_markdown_angle_url(&item.frozen_canonical_link)
         ));
+        // F13-1: frozen_summary 故意不走 escape_markdown_text——AI 输出本身
+        // 期望保留 Markdown 表达力（**bold** / *italic* / 代码块等）。其他
+        // 用户/上游字段（title / source / canonical_link）已在上方 escape。
         out.push_str(&item.frozen_summary);
         out.push_str("\n\n---\n\n");
     }

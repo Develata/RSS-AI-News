@@ -116,6 +116,22 @@ trait ClassifiedError {
 `ReportError::SnapshotEmpty`（详见 `crates/report/src/error.rs`），由 runtime
 层 `RuntimeError::Report(ReportError)` 透传——非 PublishError 成员。
 
+#### `ReportError`
+
+| 变体 | retryable | error_kind |
+|---|---|---|
+| `SnapshotEmpty` | false | `snapshot_empty` |
+| `InvalidCandidate(#[from] AiBindingError)` | false | `candidate_invalid` |
+| `InvalidScore(String)` | false | `score_invalid` |
+| `InvalidTagsJson(String)` | false | `tags_json_invalid` |
+| `RenderFailed(String)` | false | `render_failed` |
+
+注：`AiBindingError` 是 `domain::dto::publish` 下的构造期 invariant 错误
+（详见 `internal-dto-contracts.md` 附录 + `state-machine.md` §5），不参与
+retry / failure-state 分发，由 `ReportError::InvalidCandidate` 包装后才进入
+classified-error 链路；详见 `crates/domain/src/error.rs::ClassifiedError`
+文档 "Out of scope" 段。
+
 #### `ConfigError`
 
 | 变体 | retryable | error_kind |
