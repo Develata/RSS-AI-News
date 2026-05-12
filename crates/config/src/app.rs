@@ -194,7 +194,9 @@ mod tests {
         // 删掉 [runtime] 段，模拟旧配置
         let stripped: String = content
             .lines()
-            .filter(|line| !line.starts_with("[runtime]") && !line.starts_with("max_batches_per_run"))
+            .filter(|line| {
+                !line.starts_with("[runtime]") && !line.starts_with("max_batches_per_run")
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let config: AppConfig =

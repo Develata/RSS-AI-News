@@ -315,8 +315,7 @@ mod tests {
 
     #[test]
     fn min_score_override_takes_precedence_over_global() {
-        let config =
-            loaded_with_publish_globals(false, None, None, 30, 30, None, Some(score(75)));
+        let config = loaded_with_publish_globals(false, None, None, 30, 30, None, Some(score(75)));
         let effective = config.effective_for_category("ai").unwrap();
         assert_eq!(effective.min_importance_score.get(), 75);
     }
@@ -325,8 +324,7 @@ mod tests {
     fn min_score_override_zero_is_explicit_no_floor_not_default() {
         // Per config-schema.md §4.5: `min_importance_score = 0` is "explicit
         // no floor" and must NOT be reinterpreted as "use global default".
-        let config =
-            loaded_with_publish_globals(false, None, None, 30, 30, None, Some(score(0)));
+        let config = loaded_with_publish_globals(false, None, None, 30, 30, None, Some(score(0)));
         let effective = config.effective_for_category("ai").unwrap();
         assert_eq!(effective.min_importance_score.get(), 0);
     }

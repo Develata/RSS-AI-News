@@ -165,7 +165,7 @@ impl ExtractFlow {
             let per_entry_len_before = summary.per_entry.len();
 
             let semaphore = Arc::new(Semaphore::new(
-                self.ctx.app.http.concurrent_fetches.max(1) as usize,
+                self.ctx.app.http.concurrent_fetches.max(1) as usize
             ));
             let mut join_set = JoinSet::new();
 

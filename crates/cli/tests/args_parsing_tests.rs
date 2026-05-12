@@ -265,8 +265,7 @@ async fn args_parsing_help_lists_all_top_level_subcommands() {
 #[tokio::test]
 async fn args_parsing_max_batches_accepted_on_ingest_subcommand() {
     // cli-semantics §4.1 line 62: ingest 接受 --max-batches。
-    let cli =
-        Cli::try_parse_from(["rss-ai-news", "ingest", "--max-batches", "3"]).expect("parse");
+    let cli = Cli::try_parse_from(["rss-ai-news", "ingest", "--max-batches", "3"]).expect("parse");
     match cli.command {
         Command::Ingest(args) => assert_eq!(args.max_batches, Some(3)),
         other => panic!("unexpected command: {other:?}"),
@@ -276,8 +275,7 @@ async fn args_parsing_max_batches_accepted_on_ingest_subcommand() {
 #[tokio::test]
 async fn args_parsing_max_batches_accepted_on_ai_run_subcommand() {
     // cli-semantics §4.2 line 97: ai-run 接受 --max-batches。
-    let cli =
-        Cli::try_parse_from(["rss-ai-news", "ai-run", "--max-batches", "7"]).expect("parse");
+    let cli = Cli::try_parse_from(["rss-ai-news", "ai-run", "--max-batches", "7"]).expect("parse");
     match cli.command {
         Command::AiRun(args) => assert_eq!(args.max_batches, Some(7)),
         other => panic!("unexpected command: {other:?}"),
@@ -299,8 +297,7 @@ async fn args_parsing_max_batches_accepted_on_run_subcommand() {
 async fn args_parsing_max_batches_zero_means_unlimited() {
     // config-schema §4.4 line 196: 0 = 不限。clap 应正常接受 0，不
     // 折叠为缺省。
-    let cli =
-        Cli::try_parse_from(["rss-ai-news", "ingest", "--max-batches", "0"]).expect("parse");
+    let cli = Cli::try_parse_from(["rss-ai-news", "ingest", "--max-batches", "0"]).expect("parse");
     match cli.command {
         Command::Ingest(args) => assert_eq!(args.max_batches, Some(0)),
         other => panic!("unexpected command: {other:?}"),
@@ -329,8 +326,7 @@ async fn args_parsing_max_batches_rejected_on_unsupporting_subcommand() {
 #[tokio::test]
 async fn args_parsing_reindex_target_all_parses() {
     // cli-semantics §4.8 line 287: --target=all 是合法值（顺序执行三类）。
-    let cli =
-        Cli::try_parse_from(["rss-ai-news", "reindex", "--target", "all"]).expect("parse");
+    let cli = Cli::try_parse_from(["rss-ai-news", "reindex", "--target", "all"]).expect("parse");
     match cli.command {
         Command::Reindex(args) => {
             assert_eq!(args.target, Some(ReindexTarget::All));
@@ -359,8 +355,7 @@ async fn args_parsing_reindex_target_all_expands_to_three_domain_targets_in_orde
 #[tokio::test]
 async fn args_parsing_reindex_abort_parses_without_target() {
     // §4.8 line 290: --abort <job_id>，与 --target 互斥（用户应可省略 --target）。
-    let cli = Cli::try_parse_from(["rss-ai-news", "reindex", "--abort", "job-42"])
-        .expect("parse");
+    let cli = Cli::try_parse_from(["rss-ai-news", "reindex", "--abort", "job-42"]).expect("parse");
     match cli.command {
         Command::Reindex(args) => {
             assert_eq!(args.abort.as_deref(), Some("job-42"));
@@ -448,24 +443,21 @@ async fn args_parsing_max_batches_flows_into_cli_overrides_from_ingest() {
     // app.runtime.max_batches_per_run。F7-1 W3-2 之后，该标志只在
     // ingest / ai-run / run 子命令暴露；Cli::to_cli_overrides 通过 match
     // command variant 从对应子命令 args 提取。
-    let cli = Cli::try_parse_from(["rss-ai-news", "ingest", "--max-batches", "4"])
-        .expect("parse");
+    let cli = Cli::try_parse_from(["rss-ai-news", "ingest", "--max-batches", "4"]).expect("parse");
     let overrides = cli.to_cli_overrides();
     assert_eq!(overrides.max_batches, Some(4));
 }
 
 #[tokio::test]
 async fn args_parsing_max_batches_flows_into_cli_overrides_from_ai_run() {
-    let cli = Cli::try_parse_from(["rss-ai-news", "ai-run", "--max-batches", "6"])
-        .expect("parse");
+    let cli = Cli::try_parse_from(["rss-ai-news", "ai-run", "--max-batches", "6"]).expect("parse");
     let overrides = cli.to_cli_overrides();
     assert_eq!(overrides.max_batches, Some(6));
 }
 
 #[tokio::test]
 async fn args_parsing_max_batches_flows_into_cli_overrides_from_run() {
-    let cli = Cli::try_parse_from(["rss-ai-news", "run", "--max-batches", "2"])
-        .expect("parse");
+    let cli = Cli::try_parse_from(["rss-ai-news", "run", "--max-batches", "2"]).expect("parse");
     let overrides = cli.to_cli_overrides();
     assert_eq!(overrides.max_batches, Some(2));
 }
@@ -474,8 +466,7 @@ async fn args_parsing_max_batches_flows_into_cli_overrides_from_run() {
 async fn args_parsing_max_batches_in_overrides_is_none_for_unsupporting_subcommand() {
     // F7-1 W3-2: 非 ingest/ai-run/run 子命令的 CliOverrides.max_batches
     // 固定为 None；这保证 config 层不会被错误的 override 注入。
-    let cli =
-        Cli::try_parse_from(["rss-ai-news", "validate-config"]).expect("parse");
+    let cli = Cli::try_parse_from(["rss-ai-news", "validate-config"]).expect("parse");
     let overrides = cli.to_cli_overrides();
     assert_eq!(overrides.max_batches, None);
 

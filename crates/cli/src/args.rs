@@ -228,7 +228,12 @@ pub struct RebuildReportArgs {
 #[derive(Args, Debug, Clone)]
 pub struct ReindexArgs {
     /// 重算目标（`--abort` 模式下省略）。
-    #[arg(long, value_enum, required_unless_present = "abort", conflicts_with = "abort")]
+    #[arg(
+        long,
+        value_enum,
+        required_unless_present = "abort",
+        conflicts_with = "abort"
+    )]
     pub target: Option<ReindexTarget>,
     #[arg(long = "batch-size", default_value_t = 100)]
     pub batch_size: u32,

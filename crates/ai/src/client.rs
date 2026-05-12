@@ -320,4 +320,3 @@ mod tests {
         assert!(rendered.contains("***"));
     }
 }
-

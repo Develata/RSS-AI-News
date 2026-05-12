@@ -48,7 +48,11 @@ impl CommandSummary for ReindexCommandSummary {
         writeln!(writer, "Reindex completed:")?;
         for outcome in &self.per_target {
             writeln!(writer, "  Target:            {}", outcome.target)?;
-            writeln!(writer, "  Rule version:      {}", outcome.new_rule_version_id)?;
+            writeln!(
+                writer,
+                "  Rule version:      {}",
+                outcome.new_rule_version_id
+            )?;
             writeln!(writer, "  Scanned:           {}", outcome.scanned)?;
             writeln!(writer, "  Updated:           {}", outcome.updated)?;
             writeln!(writer, "  Unchanged:         {}", outcome.unchanged)?;
@@ -139,9 +143,7 @@ async fn run_single_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::args::{
-        Cli, Command, LogFormat, OutputFormat, ReindexTarget as CliReindexTarget,
-    };
+    use crate::args::{Cli, Command, LogFormat, OutputFormat, ReindexTarget as CliReindexTarget};
     use crate::exit_code::ExitCode;
     use std::path::PathBuf;
 

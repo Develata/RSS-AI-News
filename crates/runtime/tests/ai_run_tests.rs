@@ -238,8 +238,7 @@ fn opts() -> AiRunOptions {
         task_gen_batch_size: 10,
         process_batch_size: 10,
         max_attempts: 3,
-        prompt_template: "Title: {title}\nCategory: {category_key}\nBody: {body_text}"
-            .to_string(),
+        prompt_template: "Title: {title}\nCategory: {category_key}\nBody: {body_text}".to_string(),
         model_id: "test-model".to_string(),
         max_input_chars: 1024,
         max_tokens: 128,

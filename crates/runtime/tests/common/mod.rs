@@ -44,10 +44,8 @@ fn unique_path_suffix() -> String {
 }
 
 pub async fn make_test_pool_with_connections(max_connections: u32) -> (PathBuf, SqlitePool) {
-    let dir = std::env::temp_dir().join(format!(
-        "rss-ai-news-runtime-w5b-{}",
-        unique_path_suffix()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("rss-ai-news-runtime-w5b-{}", unique_path_suffix()));
     std::fs::create_dir_all(&dir).expect("temp dir should be created");
     let db_path = dir.join("test.sqlite");
     let pool = build_sqlite_pool(&db_path, max_connections, 5_000)

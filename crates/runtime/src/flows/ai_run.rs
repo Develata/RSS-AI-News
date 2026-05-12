@@ -303,7 +303,7 @@ impl AiRunFlow {
             let per_task_len_before = summary.per_task.len();
 
             let semaphore = Arc::new(Semaphore::new(
-                self.ctx.app.http.concurrent_fetches.max(1) as usize,
+                self.ctx.app.http.concurrent_fetches.max(1) as usize
             ));
             let mut join_set = JoinSet::new();
 

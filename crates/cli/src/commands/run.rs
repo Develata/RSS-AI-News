@@ -147,11 +147,7 @@ impl CommandSummary for RunCommandSummary {
     }
 }
 
-fn record_stage_failure(
-    failures: &mut Vec<StageFailure>,
-    stage: &'static str,
-    error: &CliError,
-) {
+fn record_stage_failure(failures: &mut Vec<StageFailure>, stage: &'static str, error: &CliError) {
     failures.push(StageFailure {
         stage,
         error_kind: error.error_kind().to_string(),
@@ -168,8 +164,8 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
     // of the orchestrator. Each stage still owns its own load (we don't
     // thread the result through), but a single extra load is cheap and
     // keeps stage implementations agnostic of the carve-out.
-    let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())
-        .map_err(CliError::Config)?;
+    let loaded =
+        config::load(&cli.config_dir, None, cli.to_cli_overrides()).map_err(CliError::Config)?;
     let ai_enabled = loaded.app.ai.enabled;
 
     // F7-1: 把 RunArgs::max_batches 沿用到内部两个阶段，cli-semantics.md
