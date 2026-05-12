@@ -618,3 +618,34 @@ impl PublishTarget for MockFailingTarget {
         )))
     }
 }
+
+/// 第一次 `publish` 调用返回 retryable `LocalIoError(TimedOut)`，之后委托
+/// 给 inner target 正常落盘。用于验证 release_retryable_failure 不改
+/// `publish_records.state`，下次 claim 可重新捞回并成功。
+pub struct MockOnceRetryableThenInner {
+    attempts: AtomicUsize,
+    inner: Arc<dyn PublishTarget>,
+}
+
+impl MockOnceRetryableThenInner {
+    pub fn new(inner: Arc<dyn PublishTarget>) -> Self {
+        Self {
+            attempts: AtomicUsize::new(0),
+            inner,
+        }
+    }
+}
+
+#[async_trait]
+impl PublishTarget for MockOnceRetryableThenInner {
+    async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        let n = self.attempts.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            return Err(PublishError::LocalIoError(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "mock first attempt timeout",
+            )));
+        }
+        self.inner.publish(report).await
+    }
+}

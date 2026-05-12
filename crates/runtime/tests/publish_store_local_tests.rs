@@ -13,8 +13,8 @@ use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
 use common::{
-    MockFailingTarget, app_config, full_context_with_publish_target, make_test_pool,
-    seed_rendered_publish_record,
+    MockFailingTarget, MockOnceRetryableThenInner, app_config, full_context_with_publish_target,
+    make_test_pool, seed_rendered_publish_record,
 };
 
 #[tokio::test]
@@ -117,6 +117,39 @@ async fn store_local_returns_failed_with_local_io_error_when_target_dir_unwritab
         PublishStoreLocalStatus::Failed { error_kind } if error_kind == "local_io_error"
     ));
     assert_record_state(&pool, record_id, "failed").await;
+}
+
+#[tokio::test]
+async fn store_local_retryable_failure_keeps_rendered_state_and_reclaim_succeeds() {
+    let (_dir, pool) = make_test_pool().await;
+    let rendered_at = fixed_time();
+    let record_id = seed_rendered_publish_record(&pool, None, rendered_at).await;
+    let output_dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(LocalFsTarget::new(output_dir.path().to_path_buf()))
+        as Arc<dyn rss_ai_news_publish::PublishTarget>;
+    let target = Arc::new(MockOnceRetryableThenInner::new(inner));
+    let flow = flow(pool.clone(), target);
+
+    let first = flow.store_local(store_opts(rendered_at)).await;
+    assert!(
+        matches!(
+            first.status,
+            PublishStoreLocalStatus::Failed { ref error_kind } if error_kind == "local_io_error"
+        ),
+        "first attempt must surface retryable LocalIoError as Failed; got: {:?}",
+        first.status
+    );
+    assert_record_state(&pool, record_id, "rendered").await;
+
+    let second = flow.store_local(store_opts(rendered_at)).await;
+    assert_eq!(second.publish_record_id, record_id);
+    assert_eq!(second.status, PublishStoreLocalStatus::PublishedLocal);
+    assert!(
+        Path::new(&second.local_path.expect("local path should be set")).exists(),
+        "second attempt must materialize the local file"
+    );
+    assert_record_state(&pool, record_id, "published_local").await;
+    assert_referenced_articles_state(&pool, record_id, "published").await;
 }
 
 fn flow(pool: SqlitePool, target: Arc<dyn rss_ai_news_publish::PublishTarget>) -> PublishFlow {
