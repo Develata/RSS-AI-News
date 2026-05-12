@@ -20,7 +20,9 @@ impl ClassifiedError for PublishError {
         match self {
             Self::LocalIoError(error) => matches!(
                 error.kind(),
-                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut
             ),
             Self::InvalidPath(_) | Self::GitHubAuthFailed(_) => false,
             Self::GitHubApiError { status, .. } => *status >= 500,

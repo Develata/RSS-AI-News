@@ -106,11 +106,15 @@ trait ClassifiedError {
 
 | 变体 | retryable | error_kind |
 |---|---|---|
-| `GitHubApiError { status, message }` | 5xx true, 4xx false | `github_api` |
+| `LocalIoError(#[from] std::io::Error)` | 运行时按 `io::ErrorKind` 判定（`WouldBlock` / `Interrupted` / `TimedOut` → true，其余 false）| `local_io_error` |
+| `InvalidPath(String)` | false | `invalid_path` |
+| `GitHubAuthFailed(String)` | false | `github_auth_failed` |
+| `GitHubApiError { status, message }` | 5xx true, 4xx false | `github_api_error` |
 | `GitHubRateLimit { reset_at }` | true | `github_rate_limit` |
-| `GitHubAuthFailed` | false | `github_auth` |
-| `LocalIoError` | 运行时按 `io::ErrorKind` 判定（`WouldBlock`/`Interrupted`/`TimedOut` → true，其余 false）| `local_io` |
-| `SnapshotEmpty` | false | `snapshot_empty` |
+
+注：早期版本曾把 `SnapshotEmpty` 列入 `PublishError`，实际它属于
+`ReportError::SnapshotEmpty`（详见 `crates/report/src/error.rs`），由 runtime
+层 `RuntimeError::Report(ReportError)` 透传——非 PublishError 成员。
 
 #### `ConfigError`
 
