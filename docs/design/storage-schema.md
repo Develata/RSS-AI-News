@@ -190,7 +190,7 @@ feed 条目真相源表。承载"发现 → 抓取 → 提取 → 入库"状态�
 | `title` | `TEXT` | NOT NULL | 清洗后标题 |
 | `body_text` | `TEXT` | NOT NULL | 纯文本正文 |
 | `body_html_artifact_id` | `INTEGER` | NULL | 指向 `raw_artifacts`，可空 |
-| `extractor_strategy` | `TEXT` | NOT NULL | `readability` / `rule` / `summary_fallback` |
+| `extractor_strategy` | `TEXT` | NOT NULL | `readability` / `summary_fallback` |
 | `extractor_version` | `INTEGER` | NOT NULL | `rule_versions.id` |
 | `content_quality` | `TEXT` | NOT NULL | `high` / `medium` / `fallback` |
 | `word_count` | `INTEGER` | NOT NULL, DEFAULT 0, CHECK (`word_count >= 0`) | 见下方"类型映射注"|

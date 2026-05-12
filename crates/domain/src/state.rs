@@ -99,7 +99,6 @@ pub enum DedupDecision {
 #[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum ExtractorStrategy {
     Readability,
-    Rule,
     SummaryFallback,
 }
 
@@ -300,7 +299,6 @@ mod tests {
     fn extractor_strategy_round_trip_all_variants() {
         assert_all_round_trip(&[
             (ExtractorStrategy::Readability, "readability"),
-            (ExtractorStrategy::Rule, "rule"),
             (ExtractorStrategy::SummaryFallback, "summary_fallback"),
         ]);
     }

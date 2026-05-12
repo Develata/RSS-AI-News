@@ -656,7 +656,6 @@ async fn release_permanent_failure(
 fn strategy_to_str(strategy: ExtractorStrategy) -> &'static str {
     match strategy {
         ExtractorStrategy::Readability => "readability",
-        ExtractorStrategy::Rule => "rule",
         ExtractorStrategy::SummaryFallback => "summary_fallback",
     }
 }

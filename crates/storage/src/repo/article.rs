@@ -374,7 +374,6 @@ impl TryFrom<ArticleRow> for Article {
 fn parse_strategy(value: &str) -> Result<ExtractorStrategy, StorageError> {
     match value {
         "readability" => Ok(ExtractorStrategy::Readability),
-        "rule" => Ok(ExtractorStrategy::Rule),
         "summary_fallback" => Ok(ExtractorStrategy::SummaryFallback),
         other => Err(StorageError::Corruption(format!(
             "invalid extractor strategy: {other}"

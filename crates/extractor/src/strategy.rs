@@ -102,26 +102,6 @@ impl ContentStrategy for ReadabilityStrategy {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RuleStrategy;
-
-impl ContentStrategy for RuleStrategy {
-    fn strategy(&self) -> ExtractorStrategy {
-        ExtractorStrategy::Rule
-    }
-
-    fn extract(
-        &self,
-        _task: &ArticleFetchTask,
-        _html_bytes: &[u8],
-        _final_url: &str,
-    ) -> Result<ExtractedArticle, ExtractorError> {
-        Err(ExtractorError::ParseFailed {
-            reason: "rule strategy not implemented".to_string(),
-        })
-    }
-}
-
 pub fn summary_fallback(task: &ArticleFetchTask) -> Option<FallbackArticle> {
     let body_text = task.summary_raw.as_ref()?;
     if body_text.trim().is_empty() {

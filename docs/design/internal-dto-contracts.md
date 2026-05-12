@@ -104,7 +104,7 @@ ExtractedArticle
 ├── title: String                       # 清洗后标题
 ├── body_text: String                   # 纯文本正文
 ├── body_html: Option<Vec<u8>>          # 原始 HTML（供 artifact 存储）
-├── extractor_strategy: ExtractorStrategy  # enum { Readability, Rule, SummaryFallback }
+├── extractor_strategy: ExtractorStrategy  # enum { Readability, SummaryFallback }
 ├── content_quality: ContentQuality     # enum { High, Medium, Fallback }
 ├── word_count: u32                     # 持久化对应 articles.word_count（i64 + CHECK ≥ 0），见 storage-schema §4.3 类型映射注
 ├── content_hash: String                # body_text 的 SHA-256
