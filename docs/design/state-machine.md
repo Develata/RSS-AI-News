@@ -278,10 +278,11 @@ reclaim 的具体状态行为按表分别规定：
 | AI 连接失败 | `AiError::ConnectionFailed` | true | 回 `pending` |
 | AI 429 | `AiError::RateLimited { retry_after }` | true | 回 `pending`；下一轮 claim 通过 `governor` 限速推迟 |
 | AI 4xx（非 429）| `AiError::HttpStatus { code: 4xx }` | false | `permanent_failed`，写 `run_events ai_permanent_failed` |
-| JSON 解析失败 | `AiError::OutputParseFailed` | false | `permanent_failed` |
-| 模型返回空 / 不合规 | `AiError::InvalidResponse` | false | `permanent_failed` |
-| 内容过滤 | `AiError::ContentFiltered` | false | `filtered`（不是 permanent_failed），写 `run_events ai_content_filtered` |
-| `keep_decision=0` | 非错误 | — | `filtered` |
+| AI quota 耗尽 | `AiError::QuotaExceeded { message }` | false | `permanent_failed` |
+| JSON 解析失败 / 字段缺失 / 字段值非法 | `AiError::InvalidJson` / `MissingField { field }` / `InvalidFieldValue { field, reason }` | false | `permanent_failed` |
+| 模型返回空（无 choices） | `AiError::EmptyResponse` | false | `permanent_failed` |
+| AI 配置非法 | `AiError::InvalidConfig { .. }` | false | `permanent_failed` |
+| `keep_decision=false` | 非错误（AI 自报不入选）| — | `filtered`（写 `run_events ai_content_filtered`） |
 
 ### 4.6 观测点
 

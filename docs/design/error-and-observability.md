@@ -80,14 +80,16 @@ trait ClassifiedError {
 
 | 变体 | retryable | error_kind |
 |---|---|---|
-| `RateLimited { retry_after }` | true | `rate_limited` |
-| `HttpTimeout` | true | `http_timeout` |
-| `HttpStatus { code }` | 5xx true, 4xx false | `http_4xx` / `http_5xx` |
-| `ConnectionFailed` | true | `connection_failed` |
-| `InvalidResponse { reason }` | false | `invalid_response` |
-| `OutputParseFailed { raw }` | false | `output_parse` |
-| `ContentFiltered` | false | `content_filtered` |
-| `ModelNotFound` | false | `model_not_found` |
+| `HttpTimeout { seconds }` | true | `http_timeout` |
+| `ConnectionFailed(String)` | true | `connection_failed` |
+| `HttpStatus { code, message }` | 5xx true, 4xx false | `http_status` |
+| `RateLimited { message, retry_after_seconds }` | true | `rate_limited` |
+| `QuotaExceeded { message }` | false | `quota_exceeded` |
+| `InvalidJson(String)` | false | `invalid_json` |
+| `MissingField { field }` | false | `missing_field` |
+| `InvalidFieldValue { field, reason }` | false | `invalid_field_value` |
+| `EmptyResponse` | false | `empty_response` |
+| `InvalidConfig(String)` | false | `invalid_config` |
 
 #### `StorageError`
 
