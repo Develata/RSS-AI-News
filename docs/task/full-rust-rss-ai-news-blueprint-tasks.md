@@ -275,8 +275,8 @@
 
 ### T604 replay(html)
 
-- [ ] 保存 HTML artifact 的策略开关
-- [ ] 实现 HTML payload 重放入口
+- [x] 保存 HTML artifact 的策略开关（已实现：`extractor::artifact::ArtifactWriter` + `RetentionPolicy` 五策略；在 strategy chain 前写入，配合 §4.5 `[artifact]` 配置）
+- [~] 实现 HTML payload 重放入口（CLI `replay --target=html` 入口推迟到 W10 doctor / 运维工具一并实现；artifact 捕获侧已闭环）
 
 ## 9. Workstream W7：AI 闭环
 
@@ -304,9 +304,9 @@
 
 ### T704 replay(ai) 与 backfill(ai)
 
-- [ ] 保存 AI raw response artifact
-- [ ] 实现 AI response replay
-- [ ] 实现历史 article 的 AI backfill
+- [x] 保存 AI raw response artifact（已实现：`runtime::flows::ai_run::write_ai_raw_response_artifact`，parse 前独立事务 commit）
+- [~] 实现 AI response replay（CLI `replay --target=ai` 入口推迟到 W10 doctor / 运维工具一并实现；artifact 捕获侧已闭环）
+- [x] 实现历史 article 的 AI backfill（已实现：`runtime::flows::backfill::BackfillFlow::ai` + CLI `backfill --target=ai`，通过 BackfillAiOptions 生成新 prompt_version 后扫描 articles 重新插入 pending）
 
 ## 10. Workstream W8：发布闭环
 
