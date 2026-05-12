@@ -163,7 +163,7 @@ features：`derive`, `env`
 
 - 单 `model_id` 粒度的 RPM / TPM 限制（配置见 [config-schema](./config-schema.md)）
 - 多模型共用 HTTP 客户端但独立限速，通过 `KeyedRateLimiter<String>` 实现
-- 命中限速时 `ai` crate 返回 `AiError::RateLimited { retry_after }`，由 runtime 释放 lease 并在下一个批次重试
+- 命中限速时 `ai` crate 返回 `AiError::RateLimited { message, retry_after_seconds }`，由 runtime 释放 lease 并在下一个批次重试
 
 **不解决**：provider 返回的 429 与本地限速器不同步。`governor` 只做客户端预算，服务端 429 仍需 `async-openai` 的 retry-after header 配合处理。
 
