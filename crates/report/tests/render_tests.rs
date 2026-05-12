@@ -33,6 +33,63 @@ fn render_markdown_uses_category_path_in_relative_path() {
     assert_eq!(report.relative_path, "archive/ai/2026-04-28.md");
 }
 
+#[test]
+fn render_markdown_escapes_markdown_special_chars_in_title_and_source() {
+    let item = FrozenPublishItem::try_new(
+        1,
+        10,
+        Some(100),
+        "# Fake heading * with _markdown_ [chars]".to_string(),
+        "Summary".to_string(),
+        "[]".to_string(),
+        Some(Score0To100::try_new(50).unwrap()),
+        "https://example.com".to_string(),
+        "Source *with* #hash".to_string(),
+    )
+    .unwrap();
+    let report = render_markdown(1, "ai", "2026-04-28", &[item], &config()).unwrap();
+
+    assert!(
+        report
+            .markdown_content
+            .contains("## \\# Fake heading \\* with \\_markdown\\_ \\[chars\\]\n"),
+        "title must escape Markdown control chars; got:\n{}",
+        report.markdown_content
+    );
+    assert!(
+        report
+            .markdown_content
+            .contains("- 来源：Source \\*with\\* \\#hash\n"),
+        "source must escape Markdown control chars; got:\n{}",
+        report.markdown_content
+    );
+}
+
+#[test]
+fn render_markdown_emits_autolink_for_canonical_link_with_parens() {
+    let item = FrozenPublishItem::try_new(
+        1,
+        10,
+        Some(100),
+        "Title".to_string(),
+        "Summary".to_string(),
+        "[]".to_string(),
+        Some(Score0To100::try_new(50).unwrap()),
+        "https://example.com/path(v2)".to_string(),
+        "Source".to_string(),
+    )
+    .unwrap();
+    let report = render_markdown(1, "ai", "2026-04-28", &[item], &config()).unwrap();
+
+    assert!(
+        report
+            .markdown_content
+            .contains("- 链接：<https://example.com/path(v2)>\n"),
+        "URL with parens must be wrapped as autolink not as inline-link target; got:\n{}",
+        report.markdown_content
+    );
+}
+
 fn config() -> RenderConfig {
     RenderConfig {
         category_display_name: "AI".to_string(),
