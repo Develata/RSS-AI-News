@@ -346,7 +346,7 @@ Score0To100(u8)
 ```text
 FeedKind           = Rss | Atom | JsonFeed | RssHub
 DedupDecision      = Fresh | UidDup | LinkDup | HashDup
-ExtractorStrategy  = Readability | Rule | SummaryFallback
+ExtractorStrategy  = Readability | SummaryFallback
 ContentQuality     = High | Medium | Fallback
 ArtifactKind       = FeedPayload | HtmlPayload | AiRawResponse
 BackfillTarget     = Extract | Ai
