@@ -339,8 +339,8 @@
 
 ### T805 rebuild-report
 
-- [ ] 根据 `publish_record_id` 重建 Markdown
-- [ ] 对比原始快照输出
+- [x] 根据 `publish_record_id` 重建 Markdown（已实现：`runtime::flows::rebuild_report::RebuildReportFlow` + CLI `rebuild-report`；`report::rebuild::rebuild_markdown` 严格读 `publish_items.frozen_*` 列重新走 `FrozenPublishItem::try_new` + `render_markdown`）
+- [x] 对比原始快照输出（已实现：`crates/runtime/tests/rebuild_report_tests.rs` 含两个 byte-equal 锁定测试——`rebuild_returns_byte_equal_markdown_to_original_render` 覆盖显式 `generated_at_override` 路径；`rebuild_without_generated_at_override_falls_back_to_record_rendered_at_and_matches_original` (F13-4) 覆盖默认 fallback 行为）
 
 ## 11. Workstream W9：运维与可靠性
 
