@@ -273,15 +273,15 @@ reclaim 的具体状态行为按表分别规定：
 
 | 失败点 | 错误变体（error-and-observability §2.3）| is_retryable | 处理 |
 |---|---|---|---|
-| AI 5xx | `AiError::HttpStatus { code: 5xx }` | true | 回 `pending` |
-| AI 超时 | `AiError::HttpTimeout` | true | 回 `pending` |
-| AI 连接失败 | `AiError::ConnectionFailed` | true | 回 `pending` |
-| AI 429 | `AiError::RateLimited { retry_after }` | true | 回 `pending`；下一轮 claim 通过 `governor` 限速推迟 |
-| AI 4xx（非 429）| `AiError::HttpStatus { code: 4xx }` | false | `permanent_failed`，写 `run_events ai_permanent_failed` |
+| AI 5xx | `AiError::HttpStatus { code: 5xx, message }` | true | 回 `pending` |
+| AI 超时 | `AiError::HttpTimeout { seconds }` | true | 回 `pending` |
+| AI 连接失败 | `AiError::ConnectionFailed(String)` | true | 回 `pending` |
+| AI 429 | `AiError::RateLimited { message, retry_after_seconds }` | true | 回 `pending`；下一轮 claim 通过 `governor` 限速推迟 |
+| AI 4xx（非 429）| `AiError::HttpStatus { code: 4xx, message }` | false | `permanent_failed`，写 `run_events ai_permanent_failed` |
 | AI quota 耗尽 | `AiError::QuotaExceeded { message }` | false | `permanent_failed` |
-| JSON 解析失败 / 字段缺失 / 字段值非法 | `AiError::InvalidJson` / `MissingField { field }` / `InvalidFieldValue { field, reason }` | false | `permanent_failed` |
+| JSON 解析失败 / 字段缺失 / 字段值非法 | `AiError::InvalidJson(String)` / `MissingField { field }` / `InvalidFieldValue { field, reason }` | false | `permanent_failed` |
 | 模型返回空（无 choices） | `AiError::EmptyResponse` | false | `permanent_failed` |
-| AI 配置非法 | `AiError::InvalidConfig { .. }` | false | `permanent_failed` |
+| AI 配置非法 | `AiError::InvalidConfig(String)` | false | `permanent_failed` |
 | `keep_decision=false` | 非错误（AI 自报不入选）| — | `filtered`（写 `run_events ai_content_filtered`） |
 
 ### 4.6 观测点
