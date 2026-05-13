@@ -33,5 +33,5 @@ pub use publish_record::{
     TerminalAdvanceOutcome, TerminalAdvanceStatus,
 };
 pub use raw_artifact::{NewRawArtifact, RawArtifactRepository, SqliteRawArtifactRepo};
-pub use rule_version::{RuleVersionRepository, SqliteRuleVersionRepo};
+pub use rule_version::{RuleVersion, RuleVersionRepository, SqliteRuleVersionRepo};
 pub use run_event::{NewRunEvent, RunEventRepository, SqliteRunEventRepo};

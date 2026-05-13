@@ -61,10 +61,16 @@ impl ReindexFlow {
             )
             .await;
 
+        // F15-2 过渡期：reindex 创建的 rule_versions 行使用 status='pending'
+        // 以规避 F15-1 引入的 partial unique index `uq_rule_versions_kind_active`
+        // 在第二次 reindex 时触发冲突。完整两阶段激活（pending → active +
+        // 旧 active → superseded）将在 F15-7 终止事务里落地；现阶段保持
+        // pending 不影响 reindex 实际数据更新（link_hash / content_hash /
+        // categories 字段已直接写入），只是 rule_versions 状态切换暂缺。
         let rule_id = self
             .ctx
             .rule_version_repo
-            .get_or_create(
+            .insert_pending_rule(
                 "reindex",
                 &opts.new_rule_version_tag,
                 &opts.new_rule_version_description,

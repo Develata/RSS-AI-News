@@ -39,8 +39,12 @@ pub async fn make_test_pool() -> (PathBuf, SqlitePool) {
 }
 
 pub async fn insert_rule(pool: &SqlitePool, kind: &str, tag: &str, sha: &str) -> i64 {
+    // F15-1 引入 partial unique index `uq_rule_versions_kind_active`。fixture
+    // 调用方常重复传同 kind，需要避免触发；用 status='superseded' 写入
+    // 仅服务 fixture 的外键引用语义，不参与 active_rule 真值（后者由
+    // rule_version_active_tests 单独锁定）。
     sqlx::query_scalar::<_, i64>(
-        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256) VALUES (?, ?, 'test rule', ?) RETURNING id",
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status) VALUES (?, ?, 'test rule', ?, 'superseded') RETURNING id",
     )
     .bind(kind)
     .bind(tag)

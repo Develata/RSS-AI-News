@@ -62,11 +62,20 @@ pub async fn make_test_pool() -> (PathBuf, SqlitePool) {
 }
 
 pub async fn insert_config_rule(pool: &SqlitePool) -> i64 {
+    // F15-1 引入了 partial unique index uq_rule_versions_kind_active (kind
+    // WHERE status='active')。测试 fixture 频繁在同 pool 内插入多个用作
+    // 外键引用的 rule_versions 行（render / selection_policy / config），
+    // 这些 fixture 关心的只是"得到一个合法 id"而不是 active 语义。给
+    // kind 加 counter 后缀绕开 partial unique，让 fixture 与 active_rule
+    // 真值语义解耦（active_rule 行为由 storage::rule_version_active_tests
+    // 独立锁定）。
+    let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
     sqlx::query_scalar::<_, i64>(
-        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256) VALUES ('config', ?, 'test config', ?) RETURNING id",
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256) VALUES (?, ?, 'test config', ?) RETURNING id",
     )
-    .bind(format!("cfg-{}", TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)))
-    .bind(format!("sha-{}", TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)))
+    .bind(format!("config_fixture_{counter}"))
+    .bind(format!("cfg-{counter}"))
+    .bind(format!("sha-{counter}"))
     .fetch_one(pool)
     .await
     .expect("config rule should insert")
@@ -342,17 +351,16 @@ pub async fn seed_pending_fetch_entry(
 }
 
 pub async fn seed_extractor_rule_version(pool: &SqlitePool) -> i64 {
+    // 同 insert_config_rule：F15-1 partial unique index 限定同 kind 至多
+    // 一行 status='active'。fixture 给 kind 加 counter 后缀绕开，与
+    // active_rule 真值语义解耦。
+    let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
     sqlx::query_scalar::<_, i64>(
-        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256) VALUES ('extractor', ?, 'test extractor', ?) RETURNING id",
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256) VALUES (?, ?, 'test extractor', ?) RETURNING id",
     )
-    .bind(format!(
-        "extractor-{}",
-        TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ))
-    .bind(format!(
-        "extractor-sha-{}",
-        TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ))
+    .bind(format!("extractor_fixture_{counter}"))
+    .bind(format!("extractor-{counter}"))
+    .bind(format!("extractor-sha-{counter}"))
     .fetch_one(pool)
     .await
     .expect("extractor rule should insert")
@@ -523,17 +531,13 @@ pub async fn seed_persisted_article_for_passthrough(
 }
 
 pub async fn seed_output_schema_rule_version(pool: &SqlitePool) -> i64 {
+    let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
     sqlx::query_scalar::<_, i64>(
-        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256) VALUES ('ai_output_schema', ?, 'test output schema', ?) RETURNING id",
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256) VALUES (?, ?, 'test output schema', ?) RETURNING id",
     )
-    .bind(format!(
-        "schema-{}",
-        TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ))
-    .bind(format!(
-        "schema-sha-{}",
-        TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ))
+    .bind(format!("ai_output_schema_fixture_{counter}"))
+    .bind(format!("schema-{counter}"))
+    .bind(format!("schema-sha-{counter}"))
     .fetch_one(pool)
     .await
     .expect("output schema rule should insert")

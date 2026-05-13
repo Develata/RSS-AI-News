@@ -21,7 +21,7 @@ pub use repo::{
     NewFeedEntry, NewPublishRecord, NewRawArtifact, NewRunEvent, PublishAdvanceExtras,
     PublishCandidateRow, PublishItemRepository, PublishRecord, PublishRecordRepository,
     PublishState, PublishTimestampField, RawArtifactRepository, ReleaseSuccessOutcome,
-    ResetFailedFilter, ResetFailedOutcome, RuleVersionRepository, RunEventRepository,
+    ResetFailedFilter, ResetFailedOutcome, RuleVersion, RuleVersionRepository, RunEventRepository,
     SqliteArticleAiResultRepo, SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo,
     SqlitePublishItemRepo, SqlitePublishRecordRepo, SqliteRawArtifactRepo, SqliteRuleVersionRepo,
     SqliteRunEventRepo, TerminalAdvanceOutcome, TerminalAdvanceStatus, UpdateContentHashOutcome,
