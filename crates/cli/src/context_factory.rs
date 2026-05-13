@@ -11,8 +11,8 @@ use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, LocalFsTarget, Publi
 use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
     SqliteArticleAiResultRepo, SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo,
-    SqlitePublishItemRepo, SqlitePublishRecordRepo, SqliteRawArtifactRepo, SqliteRuleVersionRepo,
-    SqliteRunEventRepo, build_sqlite_pool, run_migrations,
+    SqlitePublishItemRepo, SqlitePublishRecordRepo, SqliteRawArtifactRepo, SqliteReindexJobRepo,
+    SqliteRuleVersionRepo, SqliteRunEventRepo, build_sqlite_pool, run_migrations,
 };
 use sqlx::SqlitePool;
 
@@ -116,6 +116,7 @@ pub async fn build_run_context(
             artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
             event_repo: Arc::new(SqliteRunEventRepo::new(pool.clone())),
             rule_version_repo: Arc::new(SqliteRuleVersionRepo::new(pool.clone())),
+            reindex_job_repo: Arc::new(SqliteReindexJobRepo::new(pool.clone())),
         },
     );
 

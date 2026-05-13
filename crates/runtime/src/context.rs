@@ -7,8 +7,8 @@ use rss_ai_news_feed::FeedFetcher;
 use rss_ai_news_publish::PublishTarget;
 use rss_ai_news_storage::{
     ArticleAiResultRepository, ArticleRepository, FeedEntryRepository, FeedSourceRepository,
-    PublishItemRepository, PublishRecordRepository, RawArtifactRepository, RuleVersionRepository,
-    RunEventRepository,
+    PublishItemRepository, PublishRecordRepository, RawArtifactRepository, ReindexJobRepository,
+    RuleVersionRepository, RunEventRepository,
 };
 use time::OffsetDateTime;
 use ulid::Ulid;
@@ -36,6 +36,7 @@ pub struct RunContext {
     pub artifact_repo: Arc<dyn RawArtifactRepository>,
     pub event_repo: Arc<dyn RunEventRepository>,
     pub rule_version_repo: Arc<dyn RuleVersionRepository>,
+    pub reindex_job_repo: Arc<dyn ReindexJobRepository>,
 }
 
 pub struct RunContextDeps {
@@ -54,6 +55,7 @@ pub struct RunContextDeps {
     pub artifact_repo: Arc<dyn RawArtifactRepository>,
     pub event_repo: Arc<dyn RunEventRepository>,
     pub rule_version_repo: Arc<dyn RuleVersionRepository>,
+    pub reindex_job_repo: Arc<dyn ReindexJobRepository>,
 }
 
 impl RunContext {
@@ -78,6 +80,7 @@ impl RunContext {
             artifact_repo: deps.artifact_repo,
             event_repo: deps.event_repo,
             rule_version_repo: deps.rule_version_repo,
+            reindex_job_repo: deps.reindex_job_repo,
         }
     }
 }

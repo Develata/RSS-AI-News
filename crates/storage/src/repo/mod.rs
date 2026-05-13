@@ -7,6 +7,7 @@ pub mod publish_record;
 mod publish_record_impl;
 mod publish_record_sql;
 pub mod raw_artifact;
+pub mod reindex_job;
 pub mod rule_version;
 pub mod run_event;
 
@@ -33,5 +34,6 @@ pub use publish_record::{
     TerminalAdvanceOutcome, TerminalAdvanceStatus,
 };
 pub use raw_artifact::{NewRawArtifact, RawArtifactRepository, SqliteRawArtifactRepo};
+pub use reindex_job::{ClaimedReindexJob, ReindexJob, ReindexJobRepository, SqliteReindexJobRepo};
 pub use rule_version::{RuleVersion, RuleVersionRepository, SqliteRuleVersionRepo};
 pub use run_event::{NewRunEvent, RunEventRepository, SqliteRunEventRepo};

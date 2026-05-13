@@ -240,7 +240,10 @@ pub fn full_context_with_publish_targets(
             publish_item_repo: Arc::new(SqlitePublishItemRepo::new(pool.clone())),
             artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
             event_repo: Arc::new(SqliteRunEventRepo::new(pool.clone())),
-            rule_version_repo: Arc::new(rss_ai_news_storage::SqliteRuleVersionRepo::new(pool)),
+            rule_version_repo: Arc::new(rss_ai_news_storage::SqliteRuleVersionRepo::new(
+                pool.clone(),
+            )),
+            reindex_job_repo: Arc::new(rss_ai_news_storage::SqliteReindexJobRepo::new(pool)),
         },
     )
 }
