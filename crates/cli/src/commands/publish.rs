@@ -69,23 +69,28 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
     } else {
         "remote"
     };
-    let render_tag = if args.force {
-        format!(
+    // F15-3: --force 显式制造一条新的 render rule_version 行用于 audit
+    // trace；非 force 分支走 active_rule_or_register 读路径。force 行落
+    // 在 partial unique 之外（status='pending'，由 get_or_create CASE
+    // 自动选择，因为同 kind 已有 active 行）。
+    let render_version = if args.force {
+        let force_tag = format!(
             "force-{}-{}-{}",
             category.category.key,
             date,
             OffsetDateTime::now_utc().unix_timestamp()
-        )
+        );
+        ctx.rule_version_repo
+            .get_or_create("render", &force_tag, "force render trace", "v1")
+            .await?
     } else {
-        "default".to_string()
+        ctx.rule_version_repo
+            .active_rule_or_register("render", "default", "default render", "v1")
+            .await?
     };
-    let render_version = ctx
-        .rule_version_repo
-        .get_or_create("render", &render_tag, "default render", "v1")
-        .await?;
     let selection_policy_version = ctx
         .rule_version_repo
-        .get_or_create(
+        .active_rule_or_register(
             "selection_policy",
             "default",
             "default selection policy",

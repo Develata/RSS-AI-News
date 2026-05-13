@@ -73,13 +73,16 @@ pub async fn run(cli: &Cli, args: &AiRunArgs) -> Result<AiRunCommandSummary, Cli
     let started = Instant::now();
     let (_pool, ctx) = build_run_context("ai-run", &loaded).await?;
 
+    // F15-3: 生产读路径走 active_rule_or_register（先读 active，无则 seed
+    // 首版）。直接 get_or_create 会被 partial unique index 误判（同 kind
+    // 仅一行 active），导致 reindex 切换后无法继续 ingest。
     let prompt_version = ctx
         .rule_version_repo
-        .get_or_create("prompt", "default", "default prompt version", "0")
+        .active_rule_or_register("prompt", "default", "default prompt version", "0")
         .await?;
     let output_schema_version = ctx
         .rule_version_repo
-        .get_or_create("ai_output_schema", "v1", "AI v1 schema", "v1")
+        .active_rule_or_register("ai_output_schema", "v1", "AI v1 schema", "v1")
         .await?;
     let model_id = args
         .model

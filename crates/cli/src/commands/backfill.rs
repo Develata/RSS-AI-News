@@ -104,9 +104,10 @@ pub async fn run(cli: &Cli, args: &BackfillArgs) -> Result<BackfillCommandSummar
                 .as_ref()
                 .and_then(|override_| override_.prompt_template.clone())
                 .unwrap_or_else(|| "Summarize the following article.".to_string());
+            // F15-3: 同 ai_run，走 active_rule_or_register 读路径
             let output_schema_version = ctx
                 .rule_version_repo
-                .get_or_create("ai_output_schema", "v1", "AI v1 schema", "v1")
+                .active_rule_or_register("ai_output_schema", "v1", "AI v1 schema", "v1")
                 .await?;
             let options = build_backfill_ai_options(
                 args,

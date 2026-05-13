@@ -62,9 +62,12 @@ pub async fn run(
         })?;
         let _ = parse_date_start(Some(date))?;
         let category = super::ai_run::select_category(cli, &categories)?;
+        // F15-3: rebuild-report 仅用 render_version 重建 idempotency key，
+        // 走 active_rule_or_register 读路径；force 模式由 publish 命令
+        // 单独负责，不在 rebuild-report 复制语义。
         let render_version = ctx
             .rule_version_repo
-            .get_or_create("render", "default", "default render", "v1")
+            .active_rule_or_register("render", "default", "default render", "v1")
             .await?;
         let key = PublishFlow::build_idempotency_key(&category.category.key, date, render_version);
         ctx.publish_record_repo

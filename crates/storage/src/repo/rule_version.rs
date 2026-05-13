@@ -48,6 +48,33 @@ pub trait RuleVersionRepository: Send + Sync {
         description: &str,
         payload_sha256: &str,
     ) -> Result<i64, StorageError>;
+
+    /// 生产代码读取"当前生效规则版本"的统一入口（F15-3）：先用
+    /// [`active_rule`] 查 `status='active'` 的行，若不存在则用
+    /// [`get_or_create`] 以 `default_*` 参数 seed 一个首版（因当前 kind
+    /// 无 active 行，`get_or_create` 的 CASE/EXISTS 自动写 'active'）。
+    ///
+    /// 该方法是 ingest / extract / ai_run / publish / rebuild_report 等
+    /// 消费方拿到 `rule_version_id` 的唯一入口；reindex flow 由
+    /// `insert_pending_rule` 单独负责，不走此 helper。
+    async fn active_rule_or_register(
+        &self,
+        kind: &str,
+        default_version_tag: &str,
+        default_description: &str,
+        default_payload_sha256: &str,
+    ) -> Result<i64, StorageError> {
+        if let Some(active) = self.active_rule(kind).await? {
+            return Ok(active.id);
+        }
+        self.get_or_create(
+            kind,
+            default_version_tag,
+            default_description,
+            default_payload_sha256,
+        )
+        .await
+    }
 }
 
 #[derive(Debug, Clone)]
