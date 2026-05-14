@@ -86,6 +86,21 @@ pub trait ArticleRepository: Send + Sync {
         id: i64,
         new_content_hash: &str,
     ) -> Result<UpdateContentHashOutcome, StorageError>;
+    /// dry-run 等价：复用 [`Self::update_content_hash`] 的判断逻辑但**不**
+    /// 落地任何写。返回值语义与 update_content_hash 完全一致：
+    ///   - `Updated`：`current != new`，且 `new_content_hash` 在 articles
+    ///     表中没有冲突行（实际 run 会 UPDATE 这一行）
+    ///   - `Unchanged`：`current == new`
+    ///   - `Conflict`：`current` 行已被删除，或 `new_content_hash` 已被其他
+    ///     行占用（partial unique 会拒）
+    ///
+    /// 仅供 `reindex --dry-run` 使用，让 dry-run 数字可信（cli-semantics
+    /// §4.8 line 325 的 "Would update N rows" 含 conflict 区分）。
+    async fn peek_content_hash_outcome(
+        &self,
+        id: i64,
+        new_content_hash: &str,
+    ) -> Result<UpdateContentHashOutcome, StorageError>;
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +265,36 @@ impl ArticleRepository for SqliteArticleRepo {
         id: i64,
         new_content_hash: &str,
     ) -> Result<UpdateContentHashOutcome, StorageError> {
+        match self.peek_content_hash_outcome(id, new_content_hash).await? {
+            UpdateContentHashOutcome::Unchanged => Ok(UpdateContentHashOutcome::Unchanged),
+            UpdateContentHashOutcome::Conflict => Ok(UpdateContentHashOutcome::Conflict),
+            UpdateContentHashOutcome::Updated => {
+                let result = sqlx::query(
+                    r#"
+                    UPDATE articles
+                    SET content_hash = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    "#,
+                )
+                .bind(new_content_hash)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(StorageError::from)?;
+                if result.rows_affected() == 1 {
+                    Ok(UpdateContentHashOutcome::Updated)
+                } else {
+                    Ok(UpdateContentHashOutcome::Conflict)
+                }
+            }
+        }
+    }
+
+    async fn peek_content_hash_outcome(
+        &self,
+        id: i64,
+        new_content_hash: &str,
+    ) -> Result<UpdateContentHashOutcome, StorageError> {
         let current =
             sqlx::query_scalar::<_, String>("SELECT content_hash FROM articles WHERE id = ?")
                 .bind(id)
@@ -276,23 +321,7 @@ impl ArticleRepository for SqliteArticleRepo {
             return Ok(UpdateContentHashOutcome::Conflict);
         }
 
-        let result = sqlx::query(
-            r#"
-            UPDATE articles
-            SET content_hash = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            "#,
-        )
-        .bind(new_content_hash)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(StorageError::from)?;
-        if result.rows_affected() == 1 {
-            Ok(UpdateContentHashOutcome::Updated)
-        } else {
-            Ok(UpdateContentHashOutcome::Conflict)
-        }
+        Ok(UpdateContentHashOutcome::Updated)
     }
 }
 

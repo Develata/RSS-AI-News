@@ -5,7 +5,7 @@ use rss_ai_news_cli::{
         migrate::MigrateCommandSummary,
         publish::{PublishCommandSummary, PublishStageOutcome},
         rebuild_report::RebuildReportCommandSummary,
-        reindex::{ReindexCommandSummary, ReindexTargetOutcome},
+        reindex::{ReindexCommandSummary, ReindexMode, ReindexTargetOutcome},
         replay::ReplayCommandSummary,
         run::RunCommandSummary,
     },
@@ -241,9 +241,12 @@ fn backfill_summary() -> BackfillCommandSummary {
 
 fn reindex_summary() -> ReindexCommandSummary {
     ReindexCommandSummary {
+        mode: ReindexMode::Run,
+        abort: None,
         per_target: vec![ReindexTargetOutcome {
             target: "categories".to_string(),
             new_rule_version_id: 11,
+            reindex_job_id: 7,
             scanned: 2,
             updated: 2,
             unchanged: 0,

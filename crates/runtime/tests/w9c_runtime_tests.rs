@@ -10,6 +10,7 @@ use rss_ai_news_runtime::{
     BackfillAiOptions, BackfillExtractOptions, BackfillFlow, ReindexFlow, ReindexOptions,
     ReindexTarget,
 };
+use rss_ai_news_storage::ReindexJobRepository;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
@@ -411,6 +412,209 @@ async fn reindex_demotes_previous_active_rule_version_on_second_run() {
     .await
     .unwrap();
     assert_eq!(active_count, 1);
+}
+
+// --- F15-10 W9-F4: abort 与 dry-run 端到端 -------------------------------
+
+#[tokio::test]
+async fn abort_running_job_transitions_to_aborted_and_preserves_data() {
+    // running 状态下 abort → aborted；reindex_jobs 行的 last_processed_id /
+    // attempt_count / started_at 保留（abort 不回滚已落地的批次），lease
+    // 被清空。rule_versions 行**保留 pending**（与 cli-semantics §4.8 line
+    // 306 一致：失败/取消不自动清理 pending rule_versions）。
+    let (_dir, pool) = common::make_test_pool().await;
+    // 先用 start_reindex_tx + claim_by_id 构造 running job
+    let repo = rss_ai_news_storage::SqliteReindexJobRepo::new(pool.clone());
+    let outcome = repo
+        .start_reindex_tx(
+            "reindex",
+            "tag-abort-1",
+            "desc",
+            "sha-abort-1",
+            "link_hash",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let rule_id = outcome.rule_version_id;
+    let job_id = outcome.job_id;
+    repo.claim_by_id(
+        job_id,
+        "worker-x",
+        OffsetDateTime::now_utc(),
+        OffsetDateTime::now_utc() + Duration::seconds(600),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let abort_outcome = reindex(&pool)
+        .abort(job_id, "manual cli abort")
+        .await
+        .unwrap();
+    assert!(abort_outcome.aborted, "running → aborted 必须成功");
+    assert_eq!(abort_outcome.target.as_deref(), Some("link_hash"));
+    assert_eq!(abort_outcome.previous_state.as_deref(), Some("running"));
+
+    let (state, aborted_reason, lease_owner, finished_at): (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<OffsetDateTime>,
+    ) = sqlx::query_as(
+        "SELECT state, aborted_reason, lease_owner, finished_at FROM reindex_jobs WHERE id = ?",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "aborted");
+    assert_eq!(aborted_reason.as_deref(), Some("manual cli abort"));
+    assert!(lease_owner.is_none(), "abort 必须清 lease_owner");
+    assert!(finished_at.is_some());
+
+    // rule_versions 保持 pending（cli-semantics §4.8 line 306）。
+    let rule_status: String = sqlx::query_scalar("SELECT status FROM rule_versions WHERE id = ?")
+        .bind(rule_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rule_status, "pending");
+}
+
+#[tokio::test]
+async fn abort_already_terminal_job_is_idempotent_noop() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let repo = rss_ai_news_storage::SqliteReindexJobRepo::new(pool.clone());
+    let outcome = repo
+        .start_reindex_tx(
+            "reindex",
+            "tag-abort-2",
+            "desc",
+            "sha-abort-2",
+            "link_hash",
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let job_id = outcome.job_id;
+    repo.complete_without_claim(job_id, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+
+    let abort_outcome = reindex(&pool).abort(job_id, "noop test").await.unwrap();
+    assert!(
+        !abort_outcome.aborted,
+        "terminal 状态 abort 不算成功 → aborted=false"
+    );
+    assert_eq!(abort_outcome.previous_state.as_deref(), Some("completed"));
+}
+
+#[tokio::test]
+async fn abort_missing_job_returns_not_found_outcome() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let abort_outcome = reindex(&pool).abort(99_999, "ghost").await.unwrap();
+    assert!(!abort_outcome.aborted);
+    assert!(abort_outcome.target.is_none());
+    assert!(abort_outcome.previous_state.is_none());
+}
+
+#[tokio::test]
+async fn dry_run_link_hash_matches_real_run_numbers_and_writes_nothing() {
+    // F15-10 dry-run 高保真：scanned/updated/unchanged/errors 与真实 run 一致；
+    // 且不写 rule_versions、reindex_jobs，也不改 feed_entries.link_hash。
+    let (_dir, pool) = common::make_test_pool().await;
+    let source = common::insert_source(
+        &pool,
+        common::insert_config_rule(&pool).await,
+        "dryrun-lh",
+        "https://example.com/feed.xml",
+    )
+    .await;
+    let entry_id =
+        common::seed_pending_fetch_entry(&pool, source, "dryrun-lh", "wrong", None).await;
+    let initial_link_hash: String =
+        sqlx::query_scalar("SELECT link_hash FROM feed_entries WHERE id = ?")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let dry = reindex(&pool)
+        .dry_run(reindex_opts(ReindexTarget::LinkHash, 10))
+        .await
+        .unwrap();
+    assert_eq!(dry.scanned, 1);
+    assert_eq!(dry.updated, 1, "wrong → 正确 link_hash 是 would-update");
+    assert_eq!(dry.unchanged, 0);
+    assert_eq!(dry.new_rule_version_id, 0, "dry-run 不写 rule_versions");
+    assert_eq!(dry.reindex_job_id, 0, "dry-run 不写 reindex_jobs");
+
+    let reindex_jobs_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM reindex_jobs WHERE target = 'link_hash'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(reindex_jobs_count, 0, "dry-run 不应创建 reindex_jobs 行");
+
+    let post_link_hash: String =
+        sqlx::query_scalar("SELECT link_hash FROM feed_entries WHERE id = ?")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        post_link_hash, initial_link_hash,
+        "dry-run 必须保持 feed_entries 行不变"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_content_hash_distinguishes_unchanged_updated_conflict() {
+    // F15-10 dry-run conflict_skipped 必须真实反映 EXISTS 冲突——
+    // 用 peek_content_hash_outcome 复用真实 update 的判定逻辑。
+    let (_dir, pool) = common::make_test_pool().await;
+    let body = "same body";
+    let hash = sha256_hex(body.as_bytes());
+    // (a) hash == new_hash → unchanged
+    common::seed_persisted_article(&pool, &hash, "A", body).await;
+    // (b) 另一行 body 相同但 content_hash 错的 → would conflict（同 body 已被 A 占用）
+    common::seed_persisted_article(&pool, "wrong-hash", "B", body).await;
+
+    let dry = reindex(&pool)
+        .dry_run(reindex_opts(ReindexTarget::ContentHash, 10))
+        .await
+        .unwrap();
+    assert_eq!(dry.scanned, 2);
+    assert_eq!(dry.unchanged, 1);
+    assert_eq!(dry.conflict_skipped, 1);
+    assert_eq!(dry.updated, 0);
+}
+
+#[tokio::test]
+async fn dry_run_categories_counts_would_archive_without_writing() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let cfg = common::insert_config_rule(&pool).await;
+    common::insert_source(&pool, cfg, "obsolete", "https://example.com/old.xml").await;
+
+    let dry = reindex(&pool)
+        .dry_run(reindex_opts(ReindexTarget::Categories, 10))
+        .await
+        .unwrap();
+    assert!(
+        dry.archived >= 1,
+        "obsolete source 应当被计为 would-archive"
+    );
+    assert_eq!(dry.reindex_job_id, 0);
+    assert_eq!(dry.new_rule_version_id, 0);
+
+    // 确认 feed_sources.status 没有被改成 archived。
+    let archived_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM feed_sources WHERE status='archived'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(archived_count, 0, "dry-run 不应当真去 archive");
 }
 
 fn backfill(pool: &SqlitePool) -> BackfillFlow {

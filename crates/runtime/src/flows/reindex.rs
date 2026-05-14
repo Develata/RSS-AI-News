@@ -29,7 +29,10 @@ pub struct ReindexSummary {
     pub new_rule_version_id: i64,
     /// F15-7：每次 reindex 由 `start_reindex_tx` 同事务创建的 reindex_jobs
     /// 行 id。CLI 通过该字段把 job_id 暴露给用户（`reindex --abort <job_id>`
-    /// 寻址用）；F15-9 finish TX 也会用此 id 推进跨表激活。
+    /// 寻址用）；F15-9 finish TX 用此 id 推进跨表激活。
+    ///
+    /// **dry-run** 模式下不创建 rule_versions / reindex_jobs；此时
+    /// `new_rule_version_id = 0` 且 `reindex_job_id = 0`。
     pub reindex_job_id: i64,
     pub scanned: u32,
     pub updated: u32,
@@ -39,6 +42,23 @@ pub struct ReindexSummary {
     pub errors: u32,
 }
 
+/// [`ReindexFlow::abort`] 返回值。`aborted=true` 表示 storage 真把状态从
+/// `pending`/`running` 推到 `aborted`；`aborted=false` 表示 job 已处于
+/// terminal 状态（completed/failed/aborted）或不存在，不算错误——CLI 据此
+/// 给出 "no active job to abort" 的 user-friendly 反馈。
+#[derive(Debug, Clone)]
+pub struct ReindexAbortOutcome {
+    pub job_id: i64,
+    pub aborted: bool,
+    /// 仅当 `aborted=true` 且 job 存在时填入 job 的 target；CLI 用于在
+    /// pretty 输出里打回执（"Aborted job 42 (target=link_hash)"）。
+    pub target: Option<String>,
+    /// abort 之前的 state：`pending` / `running`（aborted=true 时）；或
+    /// `completed`/`failed`/`aborted`（aborted=false 时）；job 不存在时为
+    /// `None`。
+    pub previous_state: Option<String>,
+}
+
 pub struct ReindexFlow {
     ctx: Arc<RunContext>,
 }
@@ -46,6 +66,263 @@ pub struct ReindexFlow {
 impl ReindexFlow {
     pub fn new(ctx: Arc<RunContext>) -> Self {
         Self { ctx }
+    }
+
+    /// 取消指定 `reindex_jobs.id`：把 `pending`/`running` 推到 `aborted`，
+    /// 清 lease，写 `aborted_reason` + `finished_at`。cli-semantics §4.8
+    /// line 290。
+    ///
+    /// 设计要点：
+    ///   - **保留已更新批次**：abort 不回滚 advance_checkpoint 已落地的
+    ///     last_processed_id，也不回滚 reindex 阶段已 UPDATE 的数据行；
+    ///     active rule 仍是旧版（rule_versions pending 行保持 pending）
+    ///     提供"读路径不受 reindex 影响"的语义保证
+    ///   - **不持 lease 也可 abort**：abort 是用户主动操作，无需校验
+    ///     lease_owner；与 reclaim_expired_leases 共存（lease 过期回到
+    ///     pending 后仍可 abort）
+    ///   - **幂等**：job 已 terminal 时返回 `aborted=false` 不算错误
+    pub async fn abort(
+        &self,
+        job_id: i64,
+        reason: &str,
+    ) -> Result<ReindexAbortOutcome, RuntimeError> {
+        let emitter = RunEventEmitter {
+            run_id: &self.ctx.run_id,
+            stage: "reindex",
+            repo: self.ctx.event_repo.as_ref(),
+        };
+
+        let previous = self.ctx.reindex_job_repo.find_by_id(job_id).await?;
+        let Some(job) = previous else {
+            emitter
+                .emit(
+                    "run_completed",
+                    "warn",
+                    Some("reindex_job"),
+                    Some(job_id),
+                    "reindex --abort: job not found",
+                    Some(json!({ "reindex_job_id": job_id, "reason": reason })),
+                )
+                .await;
+            return Ok(ReindexAbortOutcome {
+                job_id,
+                aborted: false,
+                target: None,
+                previous_state: None,
+            });
+        };
+
+        let finished_at = OffsetDateTime::now_utc();
+        let aborted = self
+            .ctx
+            .reindex_job_repo
+            .abort(job_id, reason, finished_at)
+            .await?;
+
+        let (severity, message) = if aborted {
+            ("info", "reindex --abort: job aborted")
+        } else {
+            ("warn", "reindex --abort: job already in terminal state")
+        };
+        emitter
+            .emit(
+                "run_completed",
+                severity,
+                Some("reindex_job"),
+                Some(job_id),
+                message,
+                Some(json!({
+                    "reindex_job_id": job_id,
+                    "target": job.target,
+                    "previous_state": job.state,
+                    "reason": reason,
+                })),
+            )
+            .await;
+
+        Ok(ReindexAbortOutcome {
+            job_id,
+            aborted,
+            target: Some(job.target),
+            previous_state: Some(job.state),
+        })
+    }
+
+    /// `reindex --dry-run` 真路径（cli-semantics §4.8 line 289 / 325）：
+    /// 不调任何写 API——
+    ///   - **不**调 `start_reindex_tx`（rule_versions / reindex_jobs 都不写）
+    ///   - **不**调 `claim_by_id` / `advance_checkpoint` / `finish_reindex_tx`
+    ///   - **不**调 `update_link_hash` / `update_content_hash` / `upsert` /
+    ///     `mark_archived`
+    ///
+    /// 仅扫描候选行 + 内存等价计算，复用与 [`Self::run`] 完全一致的判别
+    /// 逻辑（normalize_link / sha256 / configured 集合差集），所以 dry-run
+    /// 与真实 run 的 scanned/updated/unchanged/conflict_skipped/archived/
+    /// errors 数字应当一致——这是 doc §4.8 line 325 "Would update N rows"
+    /// 可信度的基础。
+    ///
+    /// 返回值中 `new_rule_version_id = 0` 且 `reindex_job_id = 0` 标记
+    /// dry-run；CLI 借此识别并跳过 job_id 行的 pretty 输出。
+    pub async fn dry_run(&self, opts: ReindexOptions) -> Result<ReindexSummary, RuntimeError> {
+        let emitter = RunEventEmitter {
+            run_id: &self.ctx.run_id,
+            stage: "reindex",
+            repo: self.ctx.event_repo.as_ref(),
+        };
+        let target_str = opts.target.to_string();
+        emitter
+            .emit(
+                "run_started",
+                "info",
+                None,
+                None,
+                "reindex dry-run started",
+                Some(json!({
+                    "target": target_str,
+                    "dry_run": true,
+                    "rule_version_tag": opts.new_rule_version_tag,
+                })),
+            )
+            .await;
+
+        let mut summary = ReindexSummary::default();
+        match opts.target {
+            ReindexTarget::LinkHash => {
+                self.dry_run_link_hash(opts.batch_size, &mut summary)
+                    .await?
+            }
+            ReindexTarget::ContentHash => {
+                self.dry_run_content_hash(opts.batch_size, &mut summary)
+                    .await?
+            }
+            ReindexTarget::Categories => {
+                self.dry_run_categories(&opts.categories, &mut summary)
+                    .await?
+            }
+        }
+
+        emitter
+            .emit(
+                "run_completed",
+                "info",
+                None,
+                None,
+                "reindex dry-run completed",
+                Some(json!({
+                    "target": target_str,
+                    "dry_run": true,
+                    "scanned": summary.scanned,
+                    "would_update": summary.updated,
+                    "unchanged": summary.unchanged,
+                    "conflict_skipped": summary.conflict_skipped,
+                    "archived": summary.archived,
+                    "errors": summary.errors,
+                })),
+            )
+            .await;
+        Ok(summary)
+    }
+
+    async fn dry_run_link_hash(
+        &self,
+        batch_size: u32,
+        summary: &mut ReindexSummary,
+    ) -> Result<(), RuntimeError> {
+        let mut after_id = 0i64;
+        loop {
+            let rows = self
+                .ctx
+                .feed_entry_repo
+                .list_for_link_hash_reindex(after_id, batch_size.max(1))
+                .await?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                after_id = row.id;
+                summary.scanned += 1;
+                match normalize_link(&row.normalized_link) {
+                    Ok(normalized) => {
+                        if normalized.link_hash == row.link_hash {
+                            summary.unchanged += 1;
+                        } else {
+                            summary.updated += 1;
+                        }
+                    }
+                    Err(_) => summary.errors += 1,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn dry_run_content_hash(
+        &self,
+        batch_size: u32,
+        summary: &mut ReindexSummary,
+    ) -> Result<(), RuntimeError> {
+        let mut after_id = 0i64;
+        loop {
+            let rows = self
+                .ctx
+                .article_repo
+                .list_for_content_hash_reindex(after_id, batch_size.max(1))
+                .await?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                after_id = row.id;
+                summary.scanned += 1;
+                let new_hash = sha256_hex(row.body_text.as_bytes());
+                if new_hash == row.content_hash {
+                    summary.unchanged += 1;
+                    continue;
+                }
+                match self
+                    .ctx
+                    .article_repo
+                    .peek_content_hash_outcome(row.id, &new_hash)
+                    .await?
+                {
+                    UpdateContentHashOutcome::Updated => summary.updated += 1,
+                    UpdateContentHashOutcome::Conflict => summary.conflict_skipped += 1,
+                    UpdateContentHashOutcome::Unchanged => summary.unchanged += 1,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn dry_run_categories(
+        &self,
+        categories: &[CategoryConfig],
+        summary: &mut ReindexSummary,
+    ) -> Result<(), RuntimeError> {
+        // Categories dry-run：与 reindex_categories 共享 configured 集合差
+        // 集逻辑，但 scanned 仍按 reindex_categories 实际行为递增——
+        // configured 中每个 source 计 scanned+updated 一次（真实 run 中
+        // upsert 一律视为 updated，即便底层无变化）。
+        let existing = self.ctx.feed_source_repo.list_all().await?;
+        let mut configured = HashSet::new();
+        for category in categories {
+            for source in &category.sources {
+                configured.insert((category.category.key.clone(), source.key.clone()));
+                summary.scanned += 1;
+                summary.updated += 1;
+            }
+        }
+        for source in existing {
+            if !configured.contains(&(source.category_key.clone(), source.source_key.clone()))
+                && matches!(
+                    source.status,
+                    FeedSourceStatus::Active | FeedSourceStatus::Paused
+                )
+            {
+                summary.archived += 1;
+            }
+        }
+        Ok(())
     }
 
     pub async fn run(&self, opts: ReindexOptions) -> Result<ReindexSummary, RuntimeError> {

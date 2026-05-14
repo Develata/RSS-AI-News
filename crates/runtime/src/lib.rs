@@ -18,6 +18,6 @@ pub use flows::{
     PublishInitOptions, PublishInitOutcome, PublishRemoteOptions, PublishRemoteOutcome,
     PublishRemoteStatus, PublishRenderOptions, PublishRenderOutcome, PublishRenderStatus,
     PublishStoreLocalOptions, PublishStoreLocalOutcome, PublishStoreLocalStatus, RebuildReportFlow,
-    RebuildReportOptions, ReindexFlow, ReindexOptions, ReindexSummary, ReindexTarget,
-    TaskGenSummary,
+    RebuildReportOptions, ReindexAbortOutcome, ReindexFlow, ReindexOptions, ReindexSummary,
+    ReindexTarget, TaskGenSummary,
 };

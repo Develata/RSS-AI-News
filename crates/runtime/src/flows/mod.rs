@@ -27,4 +27,6 @@ pub use publish::{
     PublishStoreLocalOptions, PublishStoreLocalOutcome, PublishStoreLocalStatus,
 };
 pub use rebuild_report::{RebuildReportFlow, RebuildReportOptions};
-pub use reindex::{ReindexFlow, ReindexOptions, ReindexSummary, ReindexTarget};
+pub use reindex::{
+    ReindexAbortOutcome, ReindexFlow, ReindexOptions, ReindexSummary, ReindexTarget,
+};
