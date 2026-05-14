@@ -27,6 +27,10 @@ pub struct ReindexOptions {
 #[derive(Debug, Clone, Default)]
 pub struct ReindexSummary {
     pub new_rule_version_id: i64,
+    /// F15-7：每次 reindex 由 `start_reindex_tx` 同事务创建的 reindex_jobs
+    /// 行 id。CLI 通过该字段把 job_id 暴露给用户（`reindex --abort <job_id>`
+    /// 寻址用）；F15-9 finish TX 也会用此 id 推进跨表激活。
+    pub reindex_job_id: i64,
     pub scanned: u32,
     pub updated: u32,
     pub unchanged: u32,
@@ -61,25 +65,34 @@ impl ReindexFlow {
             )
             .await;
 
-        // F15-2 过渡期：reindex 创建的 rule_versions 行使用 status='pending'
-        // 以规避 F15-1 引入的 partial unique index `uq_rule_versions_kind_active`
-        // 在第二次 reindex 时触发冲突。完整两阶段激活（pending → active +
-        // 旧 active → superseded）将在 F15-7 终止事务里落地；现阶段保持
-        // pending 不影响 reindex 实际数据更新（link_hash / content_hash /
-        // categories 字段已直接写入），只是 rule_versions 状态切换暂缺。
-        let rule_id = self
+        // F15-7 W9-F4: 跨表 start TX —— rule_versions(status='pending') +
+        // reindex_jobs(state='pending') 同事务写入；任一冲突整段回滚，
+        // 避免 rule_versions 留"孤儿 pending"行或同 target 启动两条活动 job。
+        // rule_versions 的 status='pending' 在 F15-9 finish TX 接入后会被
+        // 推进到 'active'（旧 active → 'superseded'）；reindex_jobs 的
+        // 'pending' → 'completed' 在本提交里临时由 `complete_without_claim`
+        // 闭环，F15-8 引入 claim+checkpoint、F15-9 引入跨表 finish TX
+        // 后该路径会被替换。
+        let started_at = OffsetDateTime::now_utc();
+        let target_str = opts.target.to_string();
+        let start = self
             .ctx
-            .rule_version_repo
-            .insert_pending_rule(
+            .reindex_job_repo
+            .start_reindex_tx(
                 "reindex",
                 &opts.new_rule_version_tag,
                 &opts.new_rule_version_description,
                 &opts.new_rule_version_sha256,
+                &target_str,
+                started_at,
             )
             .await?;
+        let rule_id = start.rule_version_id;
+        let job_id = start.job_id;
 
         let mut summary = ReindexSummary {
             new_rule_version_id: rule_id,
+            reindex_job_id: job_id,
             ..ReindexSummary::default()
         };
         match opts.target {
@@ -97,6 +110,16 @@ impl ReindexFlow {
             }
         }
 
+        // F15-7 过渡：成功路径把 reindex_jobs 行直接推到 completed，避免
+        // 下一次同 target reindex 被 partial unique `uq_reindex_jobs_target_active`
+        // 拒绝。失败路径（提前 `?` 返）下 job 留在 pending，需用户
+        // `reindex --abort` 清理（F15-10）。F15-9 finish TX 接入后这段
+        // 会被 claim_pending + advance_to_completed 的跨表事务替换。
+        self.ctx
+            .reindex_job_repo
+            .complete_without_claim(job_id, OffsetDateTime::now_utc())
+            .await?;
+
         emitter
             .emit(
                 "run_completed",
@@ -105,6 +128,8 @@ impl ReindexFlow {
                 None,
                 "reindex completed",
                 Some(json!({
+                    "reindex_job_id": summary.reindex_job_id,
+                    "rule_version_id": summary.new_rule_version_id,
                     "scanned": summary.scanned,
                     "updated": summary.updated,
                     "unchanged": summary.unchanged,

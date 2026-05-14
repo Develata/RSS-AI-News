@@ -4,6 +4,9 @@
 //! 状态轮：见 [state-machine §6](../../../../docs/design/state-machine.md#6-reindex_job-独立状态轮)。
 //!
 //! 本模块提供 reindex_job 的原子原语：
+//!   - `start_reindex_tx` —— **单事务**两 INSERT：rule_versions(status='pending')
+//!     + reindex_jobs(state='pending')。失败整段回滚，避免 rule_versions 留
+//!     "孤儿 pending" 行（F15-7 W9-F4）
 //!   - `insert_pending` —— (无) → `pending`（partial unique 拒绝同 target 重复未完成 job）
 //!   - `claim_pending` —— `pending` → `running`（写 lease + started_at + attempt_count += 1）
 //!   - `advance_checkpoint` —— `running` → `running`（写 last_processed_id）
@@ -52,12 +55,67 @@ pub struct ClaimedReindexJob {
     pub attempt_count: i64,
 }
 
+/// [`ReindexJobRepository::start_reindex_tx`] 返回值：跨表 TX 同时新建的
+/// `rule_versions` 与 `reindex_jobs` 行 id。F15-9 finish TX 用 `job_id`
+/// 寻址 reindex_jobs 行，用 `rule_version_id` 推进 rule_versions 状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartReindexTxOutcome {
+    pub rule_version_id: i64,
+    pub job_id: i64,
+}
+
 #[async_trait]
 pub trait ReindexJobRepository: Send + Sync {
+    /// reindex 启动入口（F15-7 W9-F4）。**单事务**串联两条 INSERT：
+    ///
+    /// 1. `rule_versions(kind, version_tag, description, payload_sha256,
+    ///    status='pending')` → `rule_version_id`
+    /// 2. `reindex_jobs(target, rule_version_id, state='pending',
+    ///    attempt_count=0)` → `job_id`
+    ///
+    /// 任何一步失败整段回滚：
+    ///   - rule_versions UNIQUE `(kind, version_tag)` 冲突 → 回滚，无新 job
+    ///   - reindex_jobs partial unique `uq_reindex_jobs_target_active` 冲突
+    ///     （同 target 已有 pending/running job）→ 回滚，rule_versions 行
+    ///     也不写入（避免"孤儿 pending"）
+    ///
+    /// 两条 INSERT 的 UNIQUE 违例都通过 [`classify_sqlite_error`] 映射为
+    /// [`StorageError::Conflict { table, key }`]，调用方靠 `table` 字段
+    /// 区分是 rule_versions tag 重复还是 target 已被占用。
+    async fn start_reindex_tx(
+        &self,
+        rule_kind: &str,
+        rule_version_tag: &str,
+        rule_description: &str,
+        rule_payload_sha256: &str,
+        target: &str,
+        now: OffsetDateTime,
+    ) -> Result<StartReindexTxOutcome, StorageError>;
+
+    /// **F15-7 过渡原语**：在 F15-8（claim + lease + checkpoint）与 F15-9
+    /// （跨表 finish TX）接入前，允许 reindex flow 在 INSERT 完成后直接把
+    /// 当前 job 推到 `completed`，避免下一次同 target reindex 被 partial
+    /// unique 拒绝。**不**校验 `lease_owner`，仅要求 `state='pending'`。
+    ///
+    /// 语义边界：
+    ///   - 仅给 reindex flow 内部使用，不应出现在 worker/lease 路径
+    ///   - F15-9 把 finish TX 接入后，该方法会被 [`Self::advance_to_completed`]
+    ///     + rule_versions pending → active 翻转的跨表事务替换
+    ///   - 单测可继续用此方法构造确定性终态
+    async fn complete_without_claim(
+        &self,
+        id: i64,
+        finished_at: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+
     /// `(无) → pending`。`partial unique` 索引 `uq_reindex_jobs_target_active`
     /// 保证同 target 同时只能有一个 `pending`/`running` job；冲突返回
     /// [`StorageError::Conflict`]（classify_sqlite_error 把 UNIQUE 违例映射为
     /// Conflict）。
+    ///
+    /// 注：reindex flow 入口应使用 [`Self::start_reindex_tx`] 把 rule_versions
+    /// 与 reindex_jobs 两条 INSERT 包到同事务；本方法仅在已有 rule_version_id
+    /// 的脚本/迁移/测试场景下使用。
     async fn insert_pending(
         &self,
         target: &str,
@@ -154,6 +212,94 @@ const SELECT_REINDEX_JOB_COLUMNS: &str = r#"
 
 #[async_trait]
 impl ReindexJobRepository for SqliteReindexJobRepo {
+    async fn start_reindex_tx(
+        &self,
+        rule_kind: &str,
+        rule_version_tag: &str,
+        rule_description: &str,
+        rule_payload_sha256: &str,
+        target: &str,
+        now: OffsetDateTime,
+    ) -> Result<StartReindexTxOutcome, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+
+        let rule_version_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status)
+            VALUES (?, ?, ?, ?, 'pending')
+            RETURNING id
+            "#,
+        )
+        .bind(rule_kind)
+        .bind(rule_version_tag)
+        .bind(rule_description)
+        .bind(rule_payload_sha256)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| {
+            classify_sqlite_error(
+                error,
+                "rule_versions",
+                format!("{rule_kind}/{rule_version_tag}"),
+            )
+        })?;
+
+        let job_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            INSERT INTO reindex_jobs (
+                target, rule_version_id, state, attempt_count,
+                created_at, updated_at
+            )
+            VALUES (?, ?, 'pending', 0, ?, ?)
+            RETURNING id
+            "#,
+        )
+        .bind(target)
+        .bind(rule_version_id)
+        .bind(now)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| {
+            classify_sqlite_error(
+                error,
+                "reindex_jobs",
+                format!("target={target}/rule_version_id={rule_version_id}"),
+            )
+        })?;
+
+        tx.commit().await.map_err(StorageError::from)?;
+        Ok(StartReindexTxOutcome {
+            rule_version_id,
+            job_id,
+        })
+    }
+
+    async fn complete_without_claim(
+        &self,
+        id: i64,
+        finished_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE reindex_jobs
+            SET state = 'completed',
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                finished_at = ?,
+                updated_at = ?
+            WHERE id = ? AND state = 'pending'
+            "#,
+        )
+        .bind(finished_at)
+        .bind(finished_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(result.rows_affected() == 1)
+    }
+
     async fn insert_pending(
         &self,
         target: &str,

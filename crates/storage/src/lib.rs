@@ -25,5 +25,6 @@ pub use repo::{
     RuleVersion, RuleVersionRepository, RunEventRepository, SqliteArticleAiResultRepo,
     SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo, SqlitePublishItemRepo,
     SqlitePublishRecordRepo, SqliteRawArtifactRepo, SqliteReindexJobRepo, SqliteRuleVersionRepo,
-    SqliteRunEventRepo, TerminalAdvanceOutcome, TerminalAdvanceStatus, UpdateContentHashOutcome,
+    SqliteRunEventRepo, StartReindexTxOutcome, TerminalAdvanceOutcome, TerminalAdvanceStatus,
+    UpdateContentHashOutcome,
 };
