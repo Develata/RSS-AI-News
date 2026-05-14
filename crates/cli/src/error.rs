@@ -26,6 +26,16 @@ pub enum CliError {
     /// <job_id>` 需要可解析的整数；非法输入归为 UserError。
     #[error("reindex --abort expects a positive integer job id, got: {raw}")]
     ReindexAbortInvalidJobId { raw: String },
+    /// cli-semantics §4.8 line 312：`migrate run` 与 `running` reindex_job
+    /// 互斥——规则升级走 reindex、schema 升级走 migrate，二者职责边界明确。
+    /// migrate run 启动时若存在 `pending`/`running` 状态的 reindex_jobs 则
+    /// 拒绝执行；用户应当先等 reindex 完成或 `reindex --abort <id>`。
+    /// 归为 RuntimeError → exit 1（操作前提不满足，非参数错）。
+    #[error(
+        "migrate run blocked: {count} reindex job(s) still active — \
+         abort them with `reindex --abort <id>` first; ids: {job_ids:?}"
+    )]
+    MigrateBlockedByRunningReindex { job_ids: Vec<i64>, count: usize },
     /// cli-semantics §4.8 line 287: `--target` 在非 `--abort` 模式下必填。
     /// clap 通过 `required_unless_present` 保证；这是兜底，正常分支不会触发。
     #[error("reindex requires --target unless --abort is given")]
@@ -50,6 +60,7 @@ impl CliError {
             Self::IngestSourceFilterNotImplemented => "ingest_source_not_implemented",
             Self::ReindexAbortInvalidJobId { .. } => "reindex_abort_invalid_job_id",
             Self::ReindexTargetRequired => "reindex_target_required",
+            Self::MigrateBlockedByRunningReindex { .. } => "migrate_blocked_by_running_reindex",
             Self::ReplayArtifactNotFound { .. } => "replay_artifact_not_found",
             Self::PublishRecordNotFound { .. } => "publish_record_not_found",
             Self::PublishConflict { .. } => "publish_conflict",
@@ -71,6 +82,7 @@ impl CliError {
             | Self::DoctorFailed
             | Self::DryRunNotImplemented
             | Self::IngestSourceFilterNotImplemented
+            | Self::MigrateBlockedByRunningReindex { .. }
             | Self::ReplayArtifactNotFound { .. }
             | Self::PublishRecordNotFound { .. }
             | Self::PublishConflict { .. } => ExitCode::RuntimeError,
@@ -94,6 +106,10 @@ impl CliError {
             Self::ReindexTargetRequired => {
                 "reindex requires --target unless --abort is given".to_string()
             }
+            Self::MigrateBlockedByRunningReindex { job_ids, count } => format!(
+                "migrate run blocked: {count} reindex job(s) still active — \
+                 abort them with `reindex --abort <id>` first; ids: {job_ids:?}"
+            ),
             Self::ReplayArtifactNotFound { kind, key } => {
                 format!("replay artifact not found: {kind}/{key}")
             }
@@ -111,6 +127,7 @@ impl CliError {
             Self::DoctorFailed => "doctor",
             Self::DryRunNotImplemented | Self::IngestSourceFilterNotImplemented => "ingest",
             Self::ReindexAbortInvalidJobId { .. } | Self::ReindexTargetRequired => "reindex",
+            Self::MigrateBlockedByRunningReindex { .. } => "migrate",
             Self::ReplayArtifactNotFound { .. } => "replay",
             Self::PublishRecordNotFound { .. } | Self::PublishConflict { .. } => "publish",
             _ => "unknown",
