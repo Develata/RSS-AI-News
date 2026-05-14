@@ -35,8 +35,8 @@ pub use publish_record::{
 };
 pub use raw_artifact::{NewRawArtifact, RawArtifactRepository, SqliteRawArtifactRepo};
 pub use reindex_job::{
-    ClaimedReindexJob, ReindexJob, ReindexJobRepository, SqliteReindexJobRepo,
-    StartReindexTxOutcome,
+    ClaimedReindexJob, FinishReindexTxOutcome, ReindexJob, ReindexJobRepository,
+    SqliteReindexJobRepo, StartReindexTxOutcome,
 };
 pub use rule_version::{RuleVersion, RuleVersionRepository, SqliteRuleVersionRepo};
 pub use run_event::{NewRunEvent, RunEventRepository, SqliteRunEventRepo};

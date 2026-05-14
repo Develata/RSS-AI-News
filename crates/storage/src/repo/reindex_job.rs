@@ -7,12 +7,15 @@
 //!   - `start_reindex_tx` —— **单事务**两 INSERT：rule_versions(status='pending')
 //!     + reindex_jobs(state='pending')。失败整段回滚，避免 rule_versions 留
 //!     "孤儿 pending" 行（F15-7 W9-F4）
+//!   - `finish_reindex_tx` —— **单事务**跨表 finalize：reindex_jobs `running` →
+//!     `completed` + 旧 active 行 → `superseded` + pending 行 → `active`。先
+//!     demote 后 promote 避开 partial unique `uq_rule_versions_kind_active`；
+//!     lease guard 失败整段回滚（F15-9 W9-F4）
 //!   - `insert_pending` —— (无) → `pending`（partial unique 拒绝同 target 重复未完成 job）
 //!   - `claim_pending` —— `pending` → `running`（写 lease + started_at + attempt_count += 1）
 //!   - `advance_checkpoint` —— `running` → `running`（写 last_processed_id）
-//!   - `advance_to_completed` —— `running` → `completed`（**仅**改 reindex_jobs；rule_versions
-//!     `pending → active` + 旧 active → `superseded` 的跨表事务由 F15-9 reindex finish
-//!     flow 内组合，避免把跨 repo TX 耦合到 storage 层）
+//!   - `advance_to_completed` —— `running` → `completed`（**仅**改 reindex_jobs；F15-9
+//!     finish TX 接入后留作中间原语 / 单测 fixture，生产路径走 `finish_reindex_tx`）
 //!   - `mark_failed` —— `running` → `failed`
 //!   - `abort` —— `pending` / `running` → `aborted`（用户主动）
 //!   - `reclaim_expired_leases` —— `running` → `pending`（lease 过期，清 lease，保留
@@ -64,6 +67,20 @@ pub struct StartReindexTxOutcome {
     pub job_id: i64,
 }
 
+/// [`ReindexJobRepository::finish_reindex_tx`] 返回值。
+///
+/// - `job_completed = false` 表示 reindex_jobs 行的 lease guard 失败
+///   （`state != 'running'` 或 `lease_owner` 不匹配，通常因 lease 被 reclaim）；
+///   此时整段事务回滚，rule_versions 状态 **不会**被推进。调用方应当根据
+///   该字段决定是否 warn 并放弃后续步骤——不要把这视为错误。
+/// - `demoted_rule_version_id` 是被推到 `superseded` 的旧 active 行 id；
+///   首次 reindex（该 kind 下尚无 active 行）时为 `None`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinishReindexTxOutcome {
+    pub job_completed: bool,
+    pub demoted_rule_version_id: Option<i64>,
+}
+
 #[async_trait]
 pub trait ReindexJobRepository: Send + Sync {
     /// reindex 启动入口（F15-7 W9-F4）。**单事务**串联两条 INSERT：
@@ -99,14 +116,45 @@ pub trait ReindexJobRepository: Send + Sync {
     ///
     /// 语义边界：
     ///   - 仅给 reindex flow 内部使用，不应出现在 worker/lease 路径
-    ///   - F15-9 把 finish TX 接入后，该方法会被 [`Self::advance_to_completed`]
-    ///     + rule_versions pending → active 翻转的跨表事务替换
-    ///   - 单测可继续用此方法构造确定性终态
+    ///   - F15-9 把 finish TX 接入后，该方法保留作单测 fixture / 中间原语，
+    ///     生产路径改走 [`Self::finish_reindex_tx`]
     async fn complete_without_claim(
         &self,
         id: i64,
         finished_at: OffsetDateTime,
     ) -> Result<bool, StorageError>;
+
+    /// reindex 终止入口（F15-9 W9-F4）。**单事务**串联三步 UPDATE：
+    ///
+    /// 1. `reindex_jobs`: `running` → `completed`，带 lease guard
+    ///    （`state='running' AND lease_owner=:owner`）。`rows_affected==0`
+    ///    （lease 被 reclaim 或外部状态变更）→ 整段回滚，返回
+    ///    [`FinishReindexTxOutcome::job_completed`] = `false`，rule_versions
+    ///    **保持原状**。
+    /// 2. `rule_versions`: 把 `kind=:rule_kind AND status='active' AND id != :rule_version_id`
+    ///    的行 demote 到 `'superseded'` 并写 `retired_at`。最多一行
+    ///    （partial unique 保证）；首次 reindex 时 0 行，记入 outcome 的
+    ///    `demoted_rule_version_id = None`。
+    /// 3. `rule_versions`: 把 `id=:rule_version_id AND kind=:rule_kind AND
+    ///    status='pending'` 的行 promote 到 `'active'`。`rows_affected != 1`
+    ///    视为协议违例（rule_version_id 不是该 kind 的 pending 行）→ 整段
+    ///    回滚并返回 [`StorageError`]。
+    ///
+    /// **顺序**：先 demote 后 promote。partial unique
+    /// `uq_rule_versions_kind_active`(kind WHERE status='active') 在每条
+    /// statement 后立即检查；反向顺序会在 promote 时与旧 active 行冲突。
+    ///
+    /// 该方法不修改 `lease_owner` / `lease_expires_at` 之外的 reindex_jobs
+    /// 字段（与 [`Self::advance_to_completed`] 行为一致），把 lease 清空
+    /// 并写 `finished_at`。
+    async fn finish_reindex_tx(
+        &self,
+        job_id: i64,
+        owner: &str,
+        rule_version_id: i64,
+        rule_kind: &str,
+        finished_at: OffsetDateTime,
+    ) -> Result<FinishReindexTxOutcome, StorageError>;
 
     /// `(无) → pending`。`partial unique` 索引 `uq_reindex_jobs_target_active`
     /// 保证同 target 同时只能有一个 `pending`/`running` job；冲突返回
@@ -316,6 +364,92 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected() == 1)
+    }
+
+    async fn finish_reindex_tx(
+        &self,
+        job_id: i64,
+        owner: &str,
+        rule_version_id: i64,
+        rule_kind: &str,
+        finished_at: OffsetDateTime,
+    ) -> Result<FinishReindexTxOutcome, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+
+        // 1) reindex_jobs running → completed（带 lease guard）。
+        let job_update = sqlx::query(
+            r#"
+            UPDATE reindex_jobs
+            SET state = 'completed',
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                finished_at = ?,
+                updated_at = ?
+            WHERE id = ? AND state = 'running' AND lease_owner = ?
+            "#,
+        )
+        .bind(finished_at)
+        .bind(finished_at)
+        .bind(job_id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+        if job_update.rows_affected() == 0 {
+            // lease guard 失败：放弃整段事务，rule_versions 保持原状。
+            tx.rollback().await.map_err(StorageError::from)?;
+            return Ok(FinishReindexTxOutcome {
+                job_completed: false,
+                demoted_rule_version_id: None,
+            });
+        }
+
+        // 2) 旧 active demote 到 superseded。partial unique 保证最多一行；
+        //    首次 reindex 时无旧 active，返回 None。
+        let demoted_rule_version_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            UPDATE rule_versions
+            SET status = 'superseded',
+                retired_at = ?
+            WHERE kind = ? AND status = 'active' AND id != ?
+            RETURNING id
+            "#,
+        )
+        .bind(finished_at)
+        .bind(rule_kind)
+        .bind(rule_version_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+
+        // 3) pending → active（partial unique 此刻已无 active 行）。
+        //    rows_affected != 1 视为协议违例：rule_version_id 不是该 kind
+        //    的 pending 行（可能被外部状态破坏），整段回滚并报错。
+        let promote = sqlx::query(
+            r#"
+            UPDATE rule_versions
+            SET status = 'active'
+            WHERE id = ? AND kind = ? AND status = 'pending'
+            "#,
+        )
+        .bind(rule_version_id)
+        .bind(rule_kind)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+        if promote.rows_affected() != 1 {
+            tx.rollback().await.map_err(StorageError::from)?;
+            return Err(StorageError::Conflict {
+                table: "rule_versions".to_string(),
+                key: format!("id={rule_version_id}/kind={rule_kind} 非 pending 状态"),
+            });
+        }
+
+        tx.commit().await.map_err(StorageError::from)?;
+        Ok(FinishReindexTxOutcome {
+            job_completed: true,
+            demoted_rule_version_id,
+        })
     }
 
     async fn insert_pending(

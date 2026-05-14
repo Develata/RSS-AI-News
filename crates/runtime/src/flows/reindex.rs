@@ -123,25 +123,44 @@ impl ReindexFlow {
             .run_inner(&opts, job_id, &owner, rule_id, after_id_start, &mut summary)
             .await;
 
-        // F15-8 W9-F3 finalize：成功 → advance_to_completed（带 lease guard）；
-        // 失败 → mark_failed（同样带 lease guard）。两条路径都是 reindex_jobs
-        // 单表 UPDATE；F15-9 把 advance_to_completed 升级为跨表 finish TX
-        // （+ rule_versions pending → active + 旧 active → superseded）。
+        // F15-9 W9-F4 finalize：成功 → finish_reindex_tx（跨表事务，单事务内
+        // 推进 reindex_jobs running → completed + 旧 active rule_versions →
+        // superseded + pending rule_versions → active）；失败 → mark_failed
+        // （reindex_jobs 单表 UPDATE，rule_versions 保持 pending 由管理员决定
+        // 是否清理）。两条路径都带 lease guard，guard 失败 → warn 不 Err。
         let finished_at = OffsetDateTime::now_utc();
         match &inner_result {
             Ok(()) => {
-                let updated = self
+                let outcome = self
                     .ctx
                     .reindex_job_repo
-                    .advance_to_completed(job_id, &owner, finished_at)
+                    .finish_reindex_tx(job_id, &owner, rule_id, "reindex", finished_at)
                     .await?;
-                if !updated {
+                if !outcome.job_completed {
+                    // lease guard 失败：整段事务回滚，rule_versions 保持 pending；
+                    // 数据写已发生且幂等，正确性不依赖本次 finalize。
                     tracing::warn!(
                         stage = "reindex",
                         target = %target_str,
                         job_id,
+                        rule_version_id = rule_id,
                         owner = %owner,
-                        "advance_to_completed 未更新行（lease 可能已过期或被 reclaim）"
+                        "finish_reindex_tx lease guard 失败（可能已被 reclaim）；\
+                         rule_versions 仍为 pending，需由管理员介入"
+                    );
+                } else {
+                    tracing::info!(
+                        stage = "reindex",
+                        target = %target_str,
+                        job_id,
+                        rule_version_id = rule_id,
+                        demoted_rule_version_id = outcome.demoted_rule_version_id,
+                        "reindex finalize：rule_versions pending → active{}",
+                        if outcome.demoted_rule_version_id.is_some() {
+                            " + 旧 active → superseded"
+                        } else {
+                            "（首版，无 demote）"
+                        }
                     );
                 }
             }

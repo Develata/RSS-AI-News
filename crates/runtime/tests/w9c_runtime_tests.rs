@@ -346,6 +346,73 @@ async fn reindex_categories_finalizes_reindex_jobs_row_without_checkpoint() {
     );
 }
 
+// --- F15-9 W9-F4: 跨表 finish TX 端到端语义 -------------------------------
+
+#[tokio::test]
+async fn reindex_promotes_rule_version_to_active_on_completion() {
+    // 首版 reindex（该 kind 下无 active 行）：start_reindex_tx 写 pending →
+    // finish_reindex_tx 推到 active，retired_at 仍为 NULL。
+    let (_dir, pool) = common::make_test_pool().await;
+    let summary = reindex(&pool)
+        .run(reindex_opts(ReindexTarget::Categories, 10))
+        .await
+        .unwrap();
+
+    let (status, retired_at): (String, Option<OffsetDateTime>) =
+        sqlx::query_as("SELECT status, retired_at FROM rule_versions WHERE id = ?")
+            .bind(summary.new_rule_version_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        status, "active",
+        "首版 reindex 完成后 rule_versions 应推到 active"
+    );
+    assert!(retired_at.is_none(), "active 行 retired_at 必须为 NULL");
+}
+
+#[tokio::test]
+async fn reindex_demotes_previous_active_rule_version_on_second_run() {
+    // 第二次 reindex 完成时：第一次的 rule_versions 行从 active 降到
+    // superseded 并写 retired_at；新行进 active。partial unique
+    // `uq_rule_versions_kind_active` 不冲突的前提是 demote 在 promote 之前。
+    let (_dir, pool) = common::make_test_pool().await;
+    let first = reindex(&pool)
+        .run(reindex_opts(ReindexTarget::Categories, 10))
+        .await
+        .unwrap();
+    let second = reindex(&pool)
+        .run(reindex_opts(ReindexTarget::Categories, 10))
+        .await
+        .unwrap();
+    assert_ne!(first.new_rule_version_id, second.new_rule_version_id);
+
+    let (first_status, first_retired): (String, Option<OffsetDateTime>) =
+        sqlx::query_as("SELECT status, retired_at FROM rule_versions WHERE id = ?")
+            .bind(first.new_rule_version_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(first_status, "superseded", "上一版应被 demote");
+    assert!(first_retired.is_some(), "demote 同步写 retired_at");
+
+    let second_status: String = sqlx::query_scalar("SELECT status FROM rule_versions WHERE id = ?")
+        .bind(second.new_rule_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(second_status, "active", "新一版应被 promote");
+
+    // 同 kind 同时刻只有一行 active（partial unique 保证）。
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rule_versions WHERE kind='reindex' AND status='active'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active_count, 1);
+}
+
 fn backfill(pool: &SqlitePool) -> BackfillFlow {
     BackfillFlow::new(Arc::new(common::full_context(
         "backfill",
