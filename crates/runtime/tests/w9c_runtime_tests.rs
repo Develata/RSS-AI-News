@@ -282,6 +282,70 @@ async fn reindex_categories_second_run_archives_nothing() {
     assert_eq!(summary.archived, 0);
 }
 
+// --- F15-8 W9-F3: lease-driven reindex_jobs 行为锁定 -----------------------
+
+#[tokio::test]
+async fn reindex_link_hash_finalizes_reindex_jobs_row() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let source = common::insert_source(
+        &pool,
+        common::insert_config_rule(&pool).await,
+        "lh-final",
+        "https://example.com/feed.xml",
+    )
+    .await;
+    let entry_id = common::seed_pending_fetch_entry(&pool, source, "lh-final", "wrong", None).await;
+
+    let summary = reindex(&pool)
+        .run(reindex_opts(ReindexTarget::LinkHash, 10))
+        .await
+        .unwrap();
+    assert_eq!(summary.updated, 1);
+    assert!(summary.reindex_job_id > 0);
+
+    let row = sqlx::query_as::<_, (String, i64, Option<i64>, Option<String>, Option<String>)>(
+        "SELECT state, attempt_count, last_processed_id, lease_owner, finished_at
+         FROM reindex_jobs WHERE id = ?",
+    )
+    .bind(summary.reindex_job_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (state, attempt_count, last_processed_id, lease_owner, finished_at) = row;
+    assert_eq!(state, "completed");
+    assert_eq!(attempt_count, 1, "claim_by_id 应当只加 1");
+    assert_eq!(
+        last_processed_id,
+        Some(entry_id),
+        "advance_checkpoint 应把 last_processed_id 推到末行 id"
+    );
+    assert!(lease_owner.is_none(), "终态应清 lease_owner");
+    assert!(finished_at.is_some(), "finished_at 必须落地");
+}
+
+#[tokio::test]
+async fn reindex_categories_finalizes_reindex_jobs_row_without_checkpoint() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let summary = reindex(&pool)
+        .run(reindex_opts(ReindexTarget::Categories, 10))
+        .await
+        .unwrap();
+    assert!(summary.updated > 0);
+    assert!(summary.reindex_job_id > 0);
+
+    let (state, last_processed_id): (String, Option<i64>) =
+        sqlx::query_as("SELECT state, last_processed_id FROM reindex_jobs WHERE id = ?")
+            .bind(summary.reindex_job_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "completed");
+    assert!(
+        last_processed_id.is_none(),
+        "Categories 无 after_id 分页，不应写 last_processed_id"
+    );
+}
+
 fn backfill(pool: &SqlitePool) -> BackfillFlow {
     BackfillFlow::new(Arc::new(common::full_context(
         "backfill",

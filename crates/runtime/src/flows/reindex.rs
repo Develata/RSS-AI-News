@@ -5,10 +5,10 @@ pub use rss_ai_news_domain::state::ReindexTarget;
 use rss_ai_news_domain::{
     link_normalizer::normalize_link, model::FeedSource, state::FeedSourceStatus,
 };
-use rss_ai_news_storage::UpdateContentHashOutcome;
+use rss_ai_news_storage::{UpdateContentHashOutcome, build_owner_id, lease_expires_at};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 
 use crate::context::RunContext;
 use crate::error::RuntimeError;
@@ -69,10 +69,7 @@ impl ReindexFlow {
         // reindex_jobs(state='pending') 同事务写入；任一冲突整段回滚，
         // 避免 rule_versions 留"孤儿 pending"行或同 target 启动两条活动 job。
         // rule_versions 的 status='pending' 在 F15-9 finish TX 接入后会被
-        // 推进到 'active'（旧 active → 'superseded'）；reindex_jobs 的
-        // 'pending' → 'completed' 在本提交里临时由 `complete_without_claim`
-        // 闭环，F15-8 引入 claim+checkpoint、F15-9 引入跨表 finish TX
-        // 后该路径会被替换。
+        // 推进到 'active'（旧 active → 'superseded'）。
         let started_at = OffsetDateTime::now_utc();
         let target_str = opts.target.to_string();
         let start = self
@@ -90,35 +87,91 @@ impl ReindexFlow {
         let rule_id = start.rule_version_id;
         let job_id = start.job_id;
 
+        // F15-8 W9-F3: 按 id 寻址 claim 自己刚 INSERT 的 pending job——
+        // 不能走 claim_pending 的 `(created_at ASC, id ASC)` 扫描，否则在
+        // 库里残留旧 pending 时会拿错 job。claim_by_id 把 pending → running，
+        // 写 lease（lease_owner / lease_expires_at）+ started_at(COALESCE) +
+        // attempt_count += 1。lease 时长复用 `lease.ai_duration_seconds`
+        // （reindex 工作负载与 AI 接近：长批处理 + 大量 I/O；独立的
+        // `reindex_duration_seconds` 字段留给后续 config schema 演进）。
+        let owner = build_owner_id();
+        let claim_now = OffsetDateTime::now_utc();
+        let claim_lease = lease_expires_at(
+            claim_now,
+            Duration::seconds(self.ctx.app.lease.ai_duration_seconds as i64),
+        );
+        let claimed = self
+            .ctx
+            .reindex_job_repo
+            .claim_by_id(job_id, &owner, claim_now, claim_lease)
+            .await?
+            .ok_or_else(|| {
+                RuntimeError::Config(format!(
+                    "reindex_job#{job_id} claim_by_id 未命中：start_reindex_tx 刚创建的 \
+                     pending job 应当立即可 claim（owner={owner}）"
+                ))
+            })?;
+
         let mut summary = ReindexSummary {
             new_rule_version_id: rule_id,
             reindex_job_id: job_id,
             ..ReindexSummary::default()
         };
-        match opts.target {
-            ReindexTarget::LinkHash => {
-                self.reindex_link_hash(opts.batch_size, &mut summary)
-                    .await?
-            }
-            ReindexTarget::ContentHash => {
-                self.reindex_content_hash(opts.batch_size, &mut summary)
+
+        let after_id_start = claimed.last_processed_id.unwrap_or(0);
+        let inner_result = self
+            .run_inner(&opts, job_id, &owner, rule_id, after_id_start, &mut summary)
+            .await;
+
+        // F15-8 W9-F3 finalize：成功 → advance_to_completed（带 lease guard）；
+        // 失败 → mark_failed（同样带 lease guard）。两条路径都是 reindex_jobs
+        // 单表 UPDATE；F15-9 把 advance_to_completed 升级为跨表 finish TX
+        // （+ rule_versions pending → active + 旧 active → superseded）。
+        let finished_at = OffsetDateTime::now_utc();
+        match &inner_result {
+            Ok(()) => {
+                let updated = self
+                    .ctx
+                    .reindex_job_repo
+                    .advance_to_completed(job_id, &owner, finished_at)
                     .await?;
+                if !updated {
+                    tracing::warn!(
+                        stage = "reindex",
+                        target = %target_str,
+                        job_id,
+                        owner = %owner,
+                        "advance_to_completed 未更新行（lease 可能已过期或被 reclaim）"
+                    );
+                }
             }
-            ReindexTarget::Categories => {
-                self.reindex_categories(opts.categories, rule_id, &mut summary)
-                    .await?;
+            Err(error) => {
+                let error_repr = format!("{error}");
+                match self
+                    .ctx
+                    .reindex_job_repo
+                    .mark_failed(job_id, &owner, &error_repr, finished_at)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => tracing::warn!(
+                        stage = "reindex",
+                        target = %target_str,
+                        job_id,
+                        owner = %owner,
+                        "mark_failed 未更新行（lease 可能已过期或被 reclaim）"
+                    ),
+                    Err(persist_err) => tracing::error!(
+                        stage = "reindex",
+                        target = %target_str,
+                        job_id,
+                        owner = %owner,
+                        ?persist_err,
+                        "mark_failed 写入失败；保留原始 reindex 错误向上抛"
+                    ),
+                }
             }
         }
-
-        // F15-7 过渡：成功路径把 reindex_jobs 行直接推到 completed，避免
-        // 下一次同 target reindex 被 partial unique `uq_reindex_jobs_target_active`
-        // 拒绝。失败路径（提前 `?` 返）下 job 留在 pending，需用户
-        // `reindex --abort` 清理（F15-10）。F15-9 finish TX 接入后这段
-        // 会被 claim_pending + advance_to_completed 的跨表事务替换。
-        self.ctx
-            .reindex_job_repo
-            .complete_without_claim(job_id, OffsetDateTime::now_utc())
-            .await?;
 
         emitter
             .emit(
@@ -139,15 +192,47 @@ impl ReindexFlow {
                 })),
             )
             .await;
+        inner_result?;
         Ok(summary)
+    }
+
+    /// 三类 target 的内部循环统一入口；外层 [`Self::run`] 负责 lease finalize。
+    async fn run_inner(
+        &self,
+        opts: &ReindexOptions,
+        job_id: i64,
+        owner: &str,
+        rule_id: i64,
+        after_id_start: i64,
+        summary: &mut ReindexSummary,
+    ) -> Result<(), RuntimeError> {
+        match opts.target {
+            ReindexTarget::LinkHash => {
+                self.reindex_link_hash(opts.batch_size, job_id, owner, after_id_start, summary)
+                    .await
+            }
+            ReindexTarget::ContentHash => {
+                self.reindex_content_hash(opts.batch_size, job_id, owner, after_id_start, summary)
+                    .await
+            }
+            ReindexTarget::Categories => {
+                // Categories 是一次性遍历配置（无 after_id 分页 / 无 checkpoint
+                // 意义）；lease 由外层 run() finalize。
+                self.reindex_categories(opts.categories.clone(), rule_id, summary)
+                    .await
+            }
+        }
     }
 
     async fn reindex_link_hash(
         &self,
         batch_size: u32,
+        job_id: i64,
+        owner: &str,
+        after_id_start: i64,
         summary: &mut ReindexSummary,
     ) -> Result<(), RuntimeError> {
-        let mut after_id = 0;
+        let mut after_id = after_id_start;
         loop {
             let rows = self
                 .ctx
@@ -180,6 +265,7 @@ impl ReindexFlow {
                     summary.errors += 1;
                 }
             }
+            self.checkpoint(job_id, owner, after_id).await?;
         }
         Ok(())
     }
@@ -187,9 +273,12 @@ impl ReindexFlow {
     async fn reindex_content_hash(
         &self,
         batch_size: u32,
+        job_id: i64,
+        owner: &str,
+        after_id_start: i64,
         summary: &mut ReindexSummary,
     ) -> Result<(), RuntimeError> {
-        let mut after_id = 0;
+        let mut after_id = after_id_start;
         loop {
             let rows = self
                 .ctx
@@ -218,6 +307,35 @@ impl ReindexFlow {
                     UpdateContentHashOutcome::Unchanged => summary.unchanged += 1,
                 }
             }
+            self.checkpoint(job_id, owner, after_id).await?;
+        }
+        Ok(())
+    }
+
+    /// 把 `last_processed_id` 推进到 SQLite（reindex_jobs.advance_checkpoint）。
+    /// guard 失败（`lease_owner != owner` 或 `state != 'running'`）只发 warn
+    /// 不返 Err——若 lease 真的被 reclaim，reindex flow 的写已经发生且幂等，
+    /// 数据正确性不依赖本次 checkpoint；F15-11 reclaim 后台 + F15-12 crash
+    /// recovery 测试会进一步覆盖这条路径。
+    async fn checkpoint(
+        &self,
+        job_id: i64,
+        owner: &str,
+        last_processed_id: i64,
+    ) -> Result<(), RuntimeError> {
+        let updated = self
+            .ctx
+            .reindex_job_repo
+            .advance_checkpoint(job_id, owner, last_processed_id, OffsetDateTime::now_utc())
+            .await?;
+        if !updated {
+            tracing::warn!(
+                stage = "reindex",
+                job_id,
+                owner = %owner,
+                last_processed_id,
+                "advance_checkpoint guard 失败：state≠'running' 或 lease_owner 不匹配（可能被 reclaim）"
+            );
         }
         Ok(())
     }

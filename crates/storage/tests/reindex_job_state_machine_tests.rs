@@ -219,6 +219,172 @@ async fn claim_pending_orders_by_created_at_then_id() {
 }
 
 // ---------------------------------------------------------------------------
+// claim_by_id（F15-8 W9-F3）
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn claim_by_id_targets_specific_pending_even_when_older_exists() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let rule_id = seed_rule_version(&pool, "v1").await;
+    let _older = repo
+        .insert_pending("articles", rule_id, ts(0))
+        .await
+        .expect("older job");
+    let target_job = repo
+        .insert_pending("feed_entries", rule_id, ts(5))
+        .await
+        .expect("self job");
+
+    // 关键反例：claim_pending 会按 (created_at ASC, id ASC) 取 _older；
+    // reindex flow 必须能精确 claim 自己刚 INSERT 的那个 job。
+    let claimed = repo
+        .claim_by_id(target_job, "worker-self", ts(10), ts(70))
+        .await
+        .expect("claim_by_id ok")
+        .expect("targeted row should claim");
+
+    assert_eq!(claimed.id, target_job);
+    assert_eq!(claimed.target, "feed_entries");
+    assert_eq!(claimed.attempt_count, 1);
+
+    // 旁证：older 仍是 pending、未被改动。
+    let older_row = repo
+        .find_active_by_target("articles")
+        .await
+        .unwrap()
+        .expect("older pending still around");
+    assert_eq!(older_row.state, "pending");
+    assert!(older_row.lease_owner.is_none());
+}
+
+#[tokio::test]
+async fn claim_by_id_writes_lease_started_at_and_increments_attempts() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let rule_id = seed_rule_version(&pool, "v1").await;
+    let job_id = repo
+        .insert_pending("articles", rule_id, ts(0))
+        .await
+        .expect("insert");
+
+    let claimed = repo
+        .claim_by_id(job_id, "worker-a", ts(5), ts(65))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.attempt_count, 1);
+
+    let row = repo.find_by_id(job_id).await.unwrap().unwrap();
+    assert_eq!(row.state, "running");
+    assert_eq!(row.lease_owner.as_deref(), Some("worker-a"));
+    assert_eq!(row.lease_expires_at, Some(ts(65)));
+    assert_eq!(row.started_at, Some(ts(5)));
+    assert_eq!(row.attempt_count, 1);
+}
+
+#[tokio::test]
+async fn claim_by_id_preserves_started_at_through_reclaim_cycle() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let rule_id = seed_rule_version(&pool, "v1").await;
+    let job_id = repo
+        .insert_pending("articles", rule_id, ts(0))
+        .await
+        .expect("insert");
+
+    repo.claim_by_id(job_id, "worker-a", ts(10), ts(20))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // lease 过期 → reclaim → 再 claim_by_id
+    let reclaimed = repo.reclaim_expired_leases(ts(30)).await.unwrap();
+    assert_eq!(reclaimed, 1);
+
+    let again = repo
+        .claim_by_id(job_id, "worker-b", ts(40), ts(100))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.attempt_count, 2);
+
+    let row = repo.find_by_id(job_id).await.unwrap().unwrap();
+    assert_eq!(
+        row.started_at,
+        Some(ts(10)),
+        "COALESCE(started_at, :now) 必须保留首次 claim 时间"
+    );
+    assert_eq!(row.lease_owner.as_deref(), Some("worker-b"));
+}
+
+#[tokio::test]
+async fn claim_by_id_rejects_when_already_running_with_valid_lease() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let rule_id = seed_rule_version(&pool, "v1").await;
+    let job_id = repo
+        .insert_pending("articles", rule_id, ts(0))
+        .await
+        .expect("insert");
+
+    repo.claim_by_id(job_id, "worker-a", ts(5), ts(100))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let second = repo
+        .claim_by_id(job_id, "worker-b", ts(10), ts(110))
+        .await
+        .unwrap();
+    assert!(second.is_none(), "lease 仍有效时不应被另一个 worker 抢走");
+    let row = repo.find_by_id(job_id).await.unwrap().unwrap();
+    assert_eq!(
+        row.lease_owner.as_deref(),
+        Some("worker-a"),
+        "原 lease 不变"
+    );
+}
+
+#[tokio::test]
+async fn claim_by_id_returns_none_for_missing_id() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let result = repo
+        .claim_by_id(9_999_999, "worker-a", ts(5), ts(65))
+        .await
+        .unwrap();
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn claim_by_id_returns_none_for_terminal_state() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let rule_id = seed_rule_version(&pool, "v1").await;
+    let job_id = repo
+        .insert_pending("articles", rule_id, ts(0))
+        .await
+        .expect("insert");
+
+    repo.claim_by_id(job_id, "worker-a", ts(5), ts(65))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        repo.advance_to_completed(job_id, "worker-a", ts(10))
+            .await
+            .unwrap()
+    );
+
+    let result = repo
+        .claim_by_id(job_id, "worker-b", ts(20), ts(80))
+        .await
+        .unwrap();
+    assert!(result.is_none(), "完成态 job 不可重新 claim");
+}
+
+// ---------------------------------------------------------------------------
 // advance_checkpoint
 // ---------------------------------------------------------------------------
 

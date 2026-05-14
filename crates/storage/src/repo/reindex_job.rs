@@ -134,6 +134,24 @@ pub trait ReindexJobRepository: Send + Sync {
         lease_expires_at: OffsetDateTime,
     ) -> Result<Option<ClaimedReindexJob>, StorageError>;
 
+    /// `pending → running`，但**按 id 寻址**。reindex flow 在
+    /// [`Self::start_reindex_tx`] 之后已经持有 `job_id`，应该直接 claim 自己
+    /// 刚创建的 job，而非走 [`Self::claim_pending`] 的 `(created_at ASC,
+    /// id ASC)` 扫描（后者在并发或残留 pending 的情况下会拿错 job）。
+    ///
+    /// 与 `claim_pending` 共享 lease 语义：
+    ///   - `started_at = COALESCE(started_at, :now)` 保留首次 claim 时间
+    ///   - `attempt_count += 1`
+    ///   - 仅在 `state='pending'` **且** (`lease_expires_at IS NULL` 或 已过期)
+    ///     时成功；否则返 `None`（job 已 running 或 lease 仍有效，**不**报错）
+    async fn claim_by_id(
+        &self,
+        id: i64,
+        owner: &str,
+        now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
+    ) -> Result<Option<ClaimedReindexJob>, StorageError>;
+
     /// `running → running`（checkpoint 提交）。`WHERE state='running' AND
     /// lease_owner = :owner` 双 guard 防止 lease 被 reclaim 后原 worker 还
     /// 在写。返回是否真的更新了一行。
@@ -360,6 +378,39 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         .bind(lease_expires_at)
         .bind(now)
         .bind(now)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StorageError::from)
+    }
+
+    async fn claim_by_id(
+        &self,
+        id: i64,
+        owner: &str,
+        now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
+    ) -> Result<Option<ClaimedReindexJob>, StorageError> {
+        sqlx::query_as::<_, ClaimedReindexJob>(
+            r#"
+            UPDATE reindex_jobs
+            SET state = 'running',
+                lease_owner = ?,
+                lease_expires_at = ?,
+                started_at = COALESCE(started_at, ?),
+                attempt_count = attempt_count + 1,
+                updated_at = ?
+            WHERE id = ?
+              AND state = 'pending'
+              AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+            RETURNING id, target, rule_version_id, last_processed_id, attempt_count
+            "#,
+        )
+        .bind(owner)
+        .bind(lease_expires_at)
+        .bind(now)
+        .bind(now)
+        .bind(id)
         .bind(now)
         .fetch_optional(&self.pool)
         .await
