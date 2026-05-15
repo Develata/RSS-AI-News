@@ -525,8 +525,9 @@ impl ReindexFlow {
             }
             ReindexTarget::Categories => {
                 // Categories 是一次性遍历配置（无 after_id 分页 / 无 checkpoint
-                // 意义）；lease 由外层 run() finalize。
-                self.reindex_categories(opts.categories.clone(), rule_id, summary)
+                // 意义）；F15-fix2 在每次写之前用 `assert_lease` 显式守护，
+                // 防止 abort/reclaim 后旧 worker 继续覆盖 feed_sources。
+                self.reindex_categories(opts.categories.clone(), job_id, owner, rule_id, summary)
                     .await
             }
         }
@@ -621,10 +622,15 @@ impl ReindexFlow {
     }
 
     /// 把 `last_processed_id` 推进到 SQLite（reindex_jobs.advance_checkpoint）。
-    /// guard 失败（`lease_owner != owner` 或 `state != 'running'`）只发 warn
-    /// 不返 Err——若 lease 真的被 reclaim，reindex flow 的写已经发生且幂等，
-    /// 数据正确性不依赖本次 checkpoint；F15-11 reclaim 后台 + F15-12 crash
-    /// recovery 测试会进一步覆盖这条路径。
+    /// guard 失败（`lease_owner != owner` 或 `state != 'running'`）说明
+    /// abort / reclaim 已经发生——本 worker 没资格继续推进。
+    ///
+    /// **F15-fix2**：以前在 guard 失败时只 warn 然后 `Ok(())` 继续下一批；
+    /// 那会让旧 worker 在 lease 已易主后继续写数据、与新 worker 的写入
+    /// 竞争（abort 会立刻释放 `uq_reindex_jobs_target_active`，新 job
+    /// 可同 target 重启）。改为直接返 `RuntimeError::LeaseConflict`，让
+    /// 外层 `run()` 走 Err 分支 → mark_failed（lease 已失会 no-op，符合
+    /// 预期）→ 原始 LeaseConflict 向上抛 → CLI 非零退出。
     async fn checkpoint(
         &self,
         job_id: i64,
@@ -642,15 +648,49 @@ impl ReindexFlow {
                 job_id,
                 owner = %owner,
                 last_processed_id,
-                "advance_checkpoint guard 失败：state≠'running' 或 lease_owner 不匹配（可能被 reclaim）"
+                "advance_checkpoint guard 失败：state≠'running' 或 lease_owner 不匹配；中止本 worker 后续批次写入"
             );
+            return Err(RuntimeError::LeaseConflict {
+                table: "reindex_jobs",
+                id: job_id,
+                expected_owner: owner.to_string(),
+            });
         }
         Ok(())
+    }
+
+    /// `categories` target 没有 after_id 分页，无法借 advance_checkpoint
+    /// 顺带检查 lease。F15-fix2 加入 `assert_lease_held` 调用——在每次
+    /// `upsert` / `mark_archived` **之前**插入只读 guard，把"lease 已失但
+    /// 仍在写"的 race 窗口压到最小。残留窗口（guard 通过 → 写之间）属于
+    /// 已知边界，要彻底关需要 SQLite `BEGIN IMMEDIATE` 包住每一次写。
+    async fn assert_lease(&self, job_id: i64, owner: &str) -> Result<(), RuntimeError> {
+        let held = self
+            .ctx
+            .reindex_job_repo
+            .assert_lease_held(job_id, owner, OffsetDateTime::now_utc())
+            .await?;
+        if held {
+            return Ok(());
+        }
+        tracing::warn!(
+            stage = "reindex",
+            job_id,
+            owner = %owner,
+            "assert_lease_held guard 失败：state≠'running' 或 lease_owner 不匹配；中止本 worker"
+        );
+        Err(RuntimeError::LeaseConflict {
+            table: "reindex_jobs",
+            id: job_id,
+            expected_owner: owner.to_string(),
+        })
     }
 
     async fn reindex_categories(
         &self,
         categories: Vec<CategoryConfig>,
+        job_id: i64,
+        owner: &str,
         rule_id: i64,
         summary: &mut ReindexSummary,
     ) -> Result<(), RuntimeError> {
@@ -661,6 +701,9 @@ impl ReindexFlow {
         for category in categories {
             for source in category.sources {
                 configured.insert((category.category.key.clone(), source.key.clone()));
+                // F15-fix2：写之前先确认 lease 仍在手；abort/reclaim 后
+                // 直接 LeaseConflict 退出，避免覆盖新 job 的 feed_sources。
+                self.assert_lease(job_id, owner).await?;
                 let feed_source = FeedSource {
                     id: 0,
                     category_key: category.category.key.clone(),
@@ -692,10 +735,11 @@ impl ReindexFlow {
         }
 
         for source in existing {
-            if !configured.contains(&(source.category_key, source.source_key))
-                && self.ctx.feed_source_repo.mark_archived(source.id).await?
-            {
-                summary.archived += 1;
+            if !configured.contains(&(source.category_key, source.source_key)) {
+                self.assert_lease(job_id, owner).await?;
+                if self.ctx.feed_source_repo.mark_archived(source.id).await? {
+                    summary.archived += 1;
+                }
             }
         }
         Ok(())

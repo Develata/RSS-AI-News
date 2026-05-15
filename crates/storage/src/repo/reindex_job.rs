@@ -211,6 +211,20 @@ pub trait ReindexJobRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
 
+    /// 仅校验 lease 是否仍由 `owner` 持有；不写 last_processed_id。
+    /// reindex flow 中 `categories` 这种"无 after_id 分页 / 无 checkpoint
+    /// 意义"的 target 用此原语在每次数据写之间插入 guard。返回
+    /// `Ok(true)` ↔ `(state='running' AND lease_owner=owner)` 行存在。
+    ///
+    /// 实现内部把 `updated_at = now` 顺手刷新，让 reclaim 巡检通过 `updated_at`
+    /// 推断"worker 仍在活动"。F15-fix2 加入。
+    async fn assert_lease_held(
+        &self,
+        id: i64,
+        owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+
     /// `running → completed`。**仅**更新 reindex_jobs；跨表激活（rule_versions
     /// `pending → active`）由 F15-9 reindex finish flow 用 sqlx transaction
     /// 与本方法和 RuleVersionRepository 的对应方法组合调用。本方法把
@@ -566,6 +580,28 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
             "#,
         )
         .bind(last_processed_id)
+        .bind(now)
+        .bind(id)
+        .bind(owner)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn assert_lease_held(
+        &self,
+        id: i64,
+        owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE reindex_jobs
+            SET updated_at = ?
+            WHERE id = ? AND state = 'running' AND lease_owner = ?
+            "#,
+        )
         .bind(now)
         .bind(id)
         .bind(owner)

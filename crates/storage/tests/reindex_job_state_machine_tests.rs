@@ -9,6 +9,9 @@
 //!     不重置；空表返回 None；多 pending 时按 (created_at ASC, id ASC) 出队。
 //!   - `advance_checkpoint`：running → running 的 checkpoint；双 guard 拒绝
 //!     wrong owner / non-running。
+//!   - `assert_lease_held`（F15-fix2）：仅 lease guard 查询，不写
+//!     last_processed_id；categories target 等无 checkpoint 语义的写路径
+//!     用它做 per-write 守护。
 //!   - `advance_to_completed`：running → completed；双 guard；写 finished_at、
 //!     清 lease；**不**触跨表激活（那是 F15-9 reindex finish flow 的事）。
 //!   - `mark_failed`：running → failed；双 guard。
@@ -454,6 +457,84 @@ async fn advance_checkpoint_rejects_when_not_running() {
         .expect("checkpoint query ok");
 
     assert!(!updated, "pending 态不应被 checkpoint 推进");
+}
+
+// ---------------------------------------------------------------------------
+// assert_lease_held (F15-fix2)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn assert_lease_held_returns_true_for_owning_worker_in_running_state() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let rule_id = seed_rule_version(&pool, "v1").await;
+    let job_id = repo
+        .insert_pending("articles", rule_id, ts(0))
+        .await
+        .unwrap();
+    repo.claim_pending("worker-a", ts(5), ts(65))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let held = repo
+        .assert_lease_held(job_id, "worker-a", ts(10))
+        .await
+        .expect("assert_lease_held query ok");
+    assert!(held, "running + 自己持有的 lease 必须命中");
+    // updated_at 同步刷新（reclaim 巡检靠它判断 worker 活动）
+    let row = repo.find_by_id(job_id).await.unwrap().unwrap();
+    assert_eq!(row.updated_at, ts(10));
+}
+
+#[tokio::test]
+async fn assert_lease_held_returns_false_for_wrong_owner() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let rule_id = seed_rule_version(&pool, "v1").await;
+    let job_id = repo
+        .insert_pending("articles", rule_id, ts(0))
+        .await
+        .unwrap();
+    repo.claim_pending("worker-a", ts(5), ts(65))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let held = repo
+        .assert_lease_held(job_id, "worker-b", ts(10))
+        .await
+        .expect("assert_lease_held query ok");
+    assert!(!held, "wrong owner 必须返 false");
+}
+
+#[tokio::test]
+async fn assert_lease_held_returns_false_after_abort_or_reclaim() {
+    // abort 把 state→aborted；reclaim 把 state→pending；任一情况下原
+    // worker 的 assert_lease_held 都应该返 false——这正是 reindex flow
+    // 用它当 per-write guard 的依据（categories target 没有 checkpoint
+    // 顺带 guard，要靠这个原语挡住 abort 后旧 worker 的覆盖写）。
+    let (_dir, pool) = make_test_pool().await;
+    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let rule_id = seed_rule_version(&pool, "v1").await;
+    let job_id = repo
+        .insert_pending("articles", rule_id, ts(0))
+        .await
+        .unwrap();
+    repo.claim_pending("worker-a", ts(5), ts(65))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // abort 路径
+    repo.abort(job_id, "test reason", ts(8))
+        .await
+        .expect("abort ok");
+    let held = repo
+        .assert_lease_held(job_id, "worker-a", ts(10))
+        .await
+        .unwrap();
+    assert!(!held, "abort 之后 assert_lease_held 必须返 false");
 }
 
 // ---------------------------------------------------------------------------
