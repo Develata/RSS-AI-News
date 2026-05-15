@@ -25,6 +25,17 @@ pub enum RuntimeError {
     LinkNormalize(String),
     #[error("config: {0}")]
     Config(String),
+    /// 持有的 lease 已失效（被 reclaim 或被外部状态变更覆盖），
+    /// 当前 worker 不再是该行的 owner。docs/design/error-and-observability.md
+    /// §2.1 line 33 规定的层二错误；F15-fix1 起 reindex flow 在 lease guard
+    /// 失败时把它向上抛而不是 silent warn——避免"实际未完成、CLI 报告成功"
+    /// 的假阳性。
+    #[error("lease conflict on {table}#{id}: expected owner '{expected_owner}'")]
+    LeaseConflict {
+        table: &'static str,
+        id: i64,
+        expected_owner: String,
+    },
     #[error("cancelled")]
     Cancelled,
 }
@@ -38,7 +49,10 @@ impl ClassifiedError for RuntimeError {
             Self::Storage(error) => error.is_retryable(),
             Self::Report(error) => error.is_retryable(),
             Self::Publish(error) => error.is_retryable(),
-            Self::LinkNormalize(_) | Self::Config(_) | Self::Cancelled => false,
+            Self::LinkNormalize(_)
+            | Self::Config(_)
+            | Self::LeaseConflict { .. }
+            | Self::Cancelled => false,
         }
     }
 
@@ -52,6 +66,7 @@ impl ClassifiedError for RuntimeError {
             Self::Publish(error) => error.error_kind(),
             Self::LinkNormalize(_) => "link_normalize",
             Self::Config(_) => "runtime_config",
+            Self::LeaseConflict { .. } => "lease_conflict",
             Self::Cancelled => "cancelled",
         }
     }

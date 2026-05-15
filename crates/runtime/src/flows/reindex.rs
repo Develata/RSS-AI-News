@@ -404,8 +404,14 @@ impl ReindexFlow {
         // 推进 reindex_jobs running → completed + 旧 active rule_versions →
         // superseded + pending rule_versions → active）；失败 → mark_failed
         // （reindex_jobs 单表 UPDATE，rule_versions 保持 pending 由管理员决定
-        // 是否清理）。两条路径都带 lease guard，guard 失败 → warn 不 Err。
+        // 是否清理）。
+        //
+        // **F15-fix1**：finish lease guard 失败时不再 silent warn 然后返
+        // `Ok(summary)` —— 那会让 CLI 误报成功而 rule_versions 实际仍 pending。
+        // 改为返 `RuntimeError::LeaseConflict`，让 caller（CLI）以非零退出码
+        // 终止并把责任明确移交给 admin。
         let finished_at = OffsetDateTime::now_utc();
+        let mut lease_lost_on_finalize = false;
         match &inner_result {
             Ok(()) => {
                 let outcome = self
@@ -414,8 +420,6 @@ impl ReindexFlow {
                     .finish_reindex_tx(job_id, &owner, rule_id, "reindex", finished_at)
                     .await?;
                 if !outcome.job_completed {
-                    // lease guard 失败：整段事务回滚，rule_versions 保持 pending；
-                    // 数据写已发生且幂等，正确性不依赖本次 finalize。
                     tracing::warn!(
                         stage = "reindex",
                         target = %target_str,
@@ -423,8 +427,9 @@ impl ReindexFlow {
                         rule_version_id = rule_id,
                         owner = %owner,
                         "finish_reindex_tx lease guard 失败（可能已被 reclaim）；\
-                         rule_versions 仍为 pending，需由管理员介入"
+                         rule_versions 仍为 pending，需 admin 介入；CLI 将以 LeaseConflict 退出"
                     );
+                    lease_lost_on_finalize = true;
                 } else {
                     tracing::info!(
                         stage = "reindex",
@@ -489,6 +494,13 @@ impl ReindexFlow {
             )
             .await;
         inner_result?;
+        if lease_lost_on_finalize {
+            return Err(RuntimeError::LeaseConflict {
+                table: "reindex_jobs",
+                id: job_id,
+                expected_owner: owner.clone(),
+            });
+        }
         Ok(summary)
     }
 
