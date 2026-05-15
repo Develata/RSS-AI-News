@@ -1,0 +1,21 @@
+# F15-15 W9-F6 — swallowed-error 豁免清单
+#
+# 由 .ci/check_swallowed_errors.sh 在 CI 阶段消费。
+# 行格式： <file>:<line>:<reason>
+#   - file 用正斜杠（与 check_swallowed_errors.sh 的路径归一化一致）
+#   - line 数字必须与源码当前行号严格匹配；源码移动后需同步更新
+#   - reason 一句话说明，目的是 review 时能复盘是否仍合理
+#
+# `#` 注释 / 空行允许。
+#
+# 设计契约（docs/design/error-and-observability.md §3.3 末段）：
+# "唯一允许豁免来源：日志写入失败（tracing / log crate 的 sink 自身错误）"
+#
+# 历史豁免（F15-15 落地时盘点的 4 条 pre-existing 违例；每条都已经在 review
+# 中确认是日志/可观测性 sink-fallback 或 error-reporting best-effort 路径，
+# 不是业务主流程吞错；后续若有相关代码 churn，请连同 reason 一起更新）：
+
+crates/observability/src/redact.rs:19:URL parse 失败 → 输入本就不是 URL，无需脱敏；redact 自身的 best-effort 路径属于 §3.3 末段"日志/可观测性写入失败"豁免范围
+crates/ai/src/client.rs:230:AI error envelope JSON 解析失败 → 降级到原始 body 字符串作为 error message；不影响主流程错误传递（classify_http_status 兜底）
+crates/publish/src/github.rs:221:GitHub error body 非 JSON 时降级到原始字符串；本函数只服务 error message 构造，属于 error-reporting best-effort
+crates/observability/tests/tracing_init_file_appender_test.rs:35:测试代码：read_dir 失败时进入下一轮重试（最终断言由 deadline 兜底）
