@@ -89,7 +89,7 @@ async fn upsert_with_lease_guard_writes_when_lease_held() {
 
     let src = sample_source("ai", "main", config_id);
     let outcome = repo
-        .upsert_with_lease_guard(&src, job_id, &owner)
+        .upsert_with_lease_guard(&src, job_id, &owner, OffsetDateTime::now_utc())
         .await
         .expect("upsert ok");
     assert_eq!(outcome, LeaseGuardedWriteOutcome::Applied);
@@ -121,7 +121,7 @@ async fn upsert_with_lease_guard_rolls_back_after_abort() {
 
     let src = sample_source("ai", "main", config_id);
     let outcome = feed_repo
-        .upsert_with_lease_guard(&src, job_id, &owner)
+        .upsert_with_lease_guard(&src, job_id, &owner, OffsetDateTime::now_utc())
         .await
         .expect("upsert returns Ok with LeaseLost");
     assert_eq!(outcome, LeaseGuardedWriteOutcome::LeaseLost);
@@ -144,7 +144,7 @@ async fn upsert_with_lease_guard_rejects_wrong_owner() {
 
     let src = sample_source("ai", "main", config_id);
     let outcome = repo
-        .upsert_with_lease_guard(&src, job_id, "imposter-owner")
+        .upsert_with_lease_guard(&src, job_id, "imposter-owner", OffsetDateTime::now_utc())
         .await
         .expect("upsert returns Ok with LeaseLost");
     assert_eq!(outcome, LeaseGuardedWriteOutcome::LeaseLost);
@@ -160,7 +160,7 @@ async fn mark_archived_with_lease_guard_three_outcomes() {
     let now = OffsetDateTime::now_utc();
 
     // 先用 lease-guarded upsert 写一行 active 行（同时验证 Applied 路径）。
-    repo.upsert_with_lease_guard(&sample_source("ai", "main", config_id), job_id, &owner)
+    repo.upsert_with_lease_guard(&sample_source("ai", "main", config_id), job_id, &owner, now)
         .await
         .expect("upsert ok");
     let row = repo

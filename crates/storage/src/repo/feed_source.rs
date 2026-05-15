@@ -50,11 +50,17 @@ pub trait FeedSourceRepository: Send + Sync {
     /// 与 `upsert` 相比的语义边界：本方法**不**返回 id（runtime 端不需要），
     /// 节省一次 RETURNING；INSERT/UPDATE 冲突仍由 `classify_sqlite_error`
     /// 映射为 `StorageError::Conflict`。
+    ///
+    /// **F15-fix9**：`now` 显式从调用方传入，把 `reindex_jobs.updated_at`
+    /// 刷成"本次写入实际发生的瞬时时间"，与 `assert_lease_held` 的 heartbeat
+    /// 语义对齐——长 categories 循环内每次写都让 reclaim 巡检看到 worker 仍
+    /// 活跃。这与 `src.updated_at`（业务层的 batch 起始时间）解耦。
     async fn upsert_with_lease_guard(
         &self,
         src: &FeedSource,
         job_id: i64,
         owner: &str,
+        now: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError>;
 
     /// F15-fix7：同上，封装 `mark_archived`。`status='archived'` 是终态，
@@ -239,14 +245,15 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         src: &FeedSource,
         job_id: i64,
         owner: &str,
+        now: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
         let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
 
         // 1) lease guard：与 `ReindexJobRepository::assert_lease_held` 同语义
-        //    的 UPDATE——rows_affected 充当谓词，顺手把 updated_at 刷新到 src
-        //    自带的 updated_at（避免在 tx 中多算一次时间，保持与 feed_sources
-        //    写入时间戳一致）。lease 失效（state≠'running' 或 owner 不匹配）
-        //    时 rows_affected == 0，整段回滚 → LeaseLost。
+        //    的 UPDATE——rows_affected 充当谓词，顺手把 reindex_jobs.updated_at
+        //    刷新到调用方传入的 `now`（fix9：与 src.updated_at 解耦，让 reclaim
+        //    巡检的 heartbeat 跟随实际写入瞬时）。lease 失效（state≠'running'
+        //    或 owner 不匹配）时 rows_affected == 0，整段回滚 → LeaseLost。
         let lease = sqlx::query(
             r#"
             UPDATE reindex_jobs
@@ -254,7 +261,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
             WHERE id = ? AND state = 'running' AND lease_owner = ?
             "#,
         )
-        .bind(src.updated_at)
+        .bind(now)
         .bind(job_id)
         .bind(owner)
         .execute(&mut *tx)

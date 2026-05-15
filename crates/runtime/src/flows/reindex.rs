@@ -412,8 +412,17 @@ impl ReindexFlow {
         // `Ok(summary)` —— 那会让 CLI 误报成功而 rule_versions 实际仍 pending。
         // 改为返 `RuntimeError::LeaseConflict`，让 caller（CLI）以非零退出码
         // 终止并把责任明确移交给 admin。
+        // F15-fix5/fix8：先把 finalize 与失败事件持久化跑完，再决定向上传播
+        // 的错误。Err / finalize-lease-lost 两条失败路径都按
+        // `docs/design/error-and-observability.md` §4.3 line 317 的契约 emit
+        // `run_failed`；只有真正成功（inner Ok + finalize 持有 lease）才发
+        // `run_completed`。`mark_failed` 自身写入失败把 `persist_err` 折进
+        // `run_failed.context_json` 而不是吞为日志（避免观测黑洞），但仍以
+        // 原始 inner reindex error 作为返回值——控制面/因果链不变。
         let finished_at = OffsetDateTime::now_utc();
         let mut lease_lost_on_finalize = false;
+        let mut mark_failed_persist_err: Option<String> = None;
+        let mut mark_failed_no_update = false;
         match &inner_result {
             Ok(()) => {
                 let outcome = self
@@ -457,33 +466,69 @@ impl ReindexFlow {
                     .await
                 {
                     Ok(true) => {}
-                    Ok(false) => tracing::warn!(
-                        stage = "reindex",
-                        target = %target_str,
-                        job_id,
-                        owner = %owner,
-                        "mark_failed 未更新行（lease 可能已过期或被 reclaim）"
-                    ),
-                    Err(persist_err) => tracing::error!(
-                        stage = "reindex",
-                        target = %target_str,
-                        job_id,
-                        owner = %owner,
-                        ?persist_err,
-                        "mark_failed 写入失败；保留原始 reindex 错误向上抛"
-                    ),
+                    Ok(false) => {
+                        tracing::warn!(
+                            stage = "reindex",
+                            target = %target_str,
+                            job_id,
+                            owner = %owner,
+                            "mark_failed 未更新行（lease 可能已过期或被 reclaim）"
+                        );
+                        mark_failed_no_update = true;
+                    }
+                    Err(persist_err) => {
+                        tracing::error!(
+                            stage = "reindex",
+                            target = %target_str,
+                            job_id,
+                            owner = %owner,
+                            ?persist_err,
+                            "mark_failed 写入失败；折入 run_failed.context_json 后保留原始 reindex 错误向上抛"
+                        );
+                        mark_failed_persist_err = Some(format!("{persist_err:?}"));
+                    }
                 }
             }
         }
 
-        // F15-fix5：原实现把 `run_completed` info 事件放在 `inner_result?` 和
-        // `lease_lost_on_finalize` 检查之前，于是任何 inner 错误或 finalize lease
-        // 丢失场景下，run_events 表都会先记一行 "completed"，再由 caller 拿到
-        // 一个错误返回——观测面（事件流）与控制面（返回值）语义不一致。
-        // 现改为：先做错误传播；只有真正成功（inner Ok + finalize 持有 lease）
-        // 才发 `run_completed`。失败路径目前刻意不发 `run_failed`（其他 flow
-        // 也无此事件类型），由 stage="reindex" 的 mark_failed 持久化 + 上层 CLI
-        // 的非零退出码承担观测责任。
+        if let Err(error) = &inner_result {
+            emitter
+                .emit(
+                    "run_failed",
+                    "error",
+                    None,
+                    None,
+                    "reindex failed",
+                    Some(json!({
+                        "reindex_job_id": summary.reindex_job_id,
+                        "rule_version_id": summary.new_rule_version_id,
+                        "target": target_str,
+                        "error": format!("{error}"),
+                        "error_kind": rss_ai_news_domain::error::ClassifiedError::error_kind(error),
+                        "mark_failed_no_update": mark_failed_no_update,
+                        "mark_failed_persist_err": mark_failed_persist_err,
+                    })),
+                )
+                .await;
+        } else if lease_lost_on_finalize {
+            emitter
+                .emit(
+                    "run_failed",
+                    "error",
+                    None,
+                    None,
+                    "reindex failed: finalize lease lost",
+                    Some(json!({
+                        "reindex_job_id": summary.reindex_job_id,
+                        "rule_version_id": summary.new_rule_version_id,
+                        "target": target_str,
+                        "error": "finish_reindex_tx lease guard failed",
+                        "error_kind": "lease_conflict",
+                    })),
+                )
+                .await;
+        }
+
         inner_result?;
         if lease_lost_on_finalize {
             return Err(RuntimeError::LeaseConflict {
@@ -722,11 +767,15 @@ impl ReindexFlow {
 
         let existing = self.ctx.feed_source_repo.list_all().await?;
         let mut configured = HashSet::new();
-        let now = OffsetDateTime::now_utc();
 
+        // F15-fix9：循环外不再 cache 一个 `now`。每次写操作都重新取
+        // `OffsetDateTime::now_utc()`，让传入 storage 的 lease guard UPDATE
+        // 写到 `reindex_jobs.updated_at` 的时间戳跟随实际写入瞬时——这条
+        // 列是 reclaim 巡检判断"worker 是否仍活跃"的 heartbeat。
         for category in categories {
             for source in category.sources {
                 configured.insert((category.category.key.clone(), source.key.clone()));
+                let now = OffsetDateTime::now_utc();
                 let feed_source = FeedSource {
                     id: 0,
                     category_key: category.category.key.clone(),
@@ -758,7 +807,7 @@ impl ReindexFlow {
                 match self
                     .ctx
                     .feed_source_repo
-                    .upsert_with_lease_guard(&feed_source, job_id, owner)
+                    .upsert_with_lease_guard(&feed_source, job_id, owner, now)
                     .await?
                 {
                     LeaseGuardedWriteOutcome::Applied => {
@@ -783,6 +832,7 @@ impl ReindexFlow {
 
         for source in existing {
             if !configured.contains(&(source.category_key, source.source_key)) {
+                let now = OffsetDateTime::now_utc();
                 match self
                     .ctx
                     .feed_source_repo
