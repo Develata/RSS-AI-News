@@ -17,9 +17,9 @@ use std::{
 use rss_ai_news_storage::build_sqlite_pool;
 use sqlx::SqlitePool;
 
-const MIGRATION_0001_UP: &str = include_str!("../../../migrations/0001_init.up.sql");
+const MIGRATION_0001_UP: &str = include_str!("../../../migrations/sqlite/0001_init.up.sql");
 const MIGRATION_0002_UP: &str =
-    include_str!("../../../migrations/0002_reindex_jobs_and_rule_status.up.sql");
+    include_str!("../../../migrations/sqlite/0002_reindex_jobs_and_rule_status.up.sql");
 
 static TEST_DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
 

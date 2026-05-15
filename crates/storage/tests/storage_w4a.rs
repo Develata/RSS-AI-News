@@ -373,11 +373,13 @@ async fn config_version_store_trait_impl_round_trip() {
 async fn down_sql_then_up_sql_succeeds() {
     let (_dir, pool) = make_test_pool().await;
 
-    sqlx::raw_sql(include_str!("../../../migrations/0001_init.down.sql"))
-        .execute(&pool)
-        .await
-        .expect("down migration sql should run");
-    sqlx::raw_sql(include_str!("../../../migrations/0001_init.up.sql"))
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/sqlite/0001_init.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("down migration sql should run");
+    sqlx::raw_sql(include_str!("../../../migrations/sqlite/0001_init.up.sql"))
         .execute(&pool)
         .await
         .expect("up migration sql should run after down");
