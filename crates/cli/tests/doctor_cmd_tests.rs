@@ -144,6 +144,7 @@ fn cli_for(config_dir: &Path, deep: bool, output_format: OutputFormat) -> Cli {
         log_level: "info".to_string(),
         log_format: LogFormat::Pretty,
         log_file: String::new(),
+        metrics_bind: String::new(),
         output_format,
         dry_run: false,
         category: None,

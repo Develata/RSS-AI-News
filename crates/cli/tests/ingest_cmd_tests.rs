@@ -108,6 +108,7 @@ fn cli_for(config_dir: &Path, args: IngestArgs) -> Cli {
         log_level: "info".to_string(),
         log_format: LogFormat::Pretty,
         log_file: String::new(),
+        metrics_bind: String::new(),
         output_format: OutputFormat::Pretty,
         dry_run: false,
         category: None,

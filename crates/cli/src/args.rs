@@ -27,6 +27,14 @@ pub struct Cli {
     #[arg(long = "log-file", default_value = "")]
     pub log_file: String,
 
+    /// Prometheus `/metrics` HTTP 端点绑定地址（F15-14 W9-F2）。
+    /// 空串 → 不启动 metrics server；非空（如 `127.0.0.1:9090`）→
+    /// 启动后台 tokio task，挂在该 `SocketAddr` 上提供 `/metrics`。
+    /// 与 `--log-file` 同源限制：CLI startup 早于 config.toml 加载，
+    /// `[observability].metrics_bind` 当前仅能通过本标志生效。
+    #[arg(long = "metrics-bind", default_value = "")]
+    pub metrics_bind: String,
+
     #[arg(
         short = 'o',
         long = "output-format",
