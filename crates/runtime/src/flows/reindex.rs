@@ -5,7 +5,9 @@ pub use rss_ai_news_domain::state::ReindexTarget;
 use rss_ai_news_domain::{
     link_normalizer::normalize_link, model::FeedSource, state::FeedSourceStatus,
 };
-use rss_ai_news_storage::{UpdateContentHashOutcome, build_owner_id, lease_expires_at};
+use rss_ai_news_storage::{
+    LeaseGuardedWriteOutcome, UpdateContentHashOutcome, build_owner_id, lease_expires_at,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
@@ -538,8 +540,8 @@ impl ReindexFlow {
             }
             ReindexTarget::Categories => {
                 // Categories 是一次性遍历配置（无 after_id 分页 / 无 checkpoint
-                // 意义）；F15-fix2 在每次写之前用 `assert_lease` 显式守护，
-                // 防止 abort/reclaim 后旧 worker 继续覆盖 feed_sources。
+                // 意义）；F15-fix7 起 lease 校验与 feed_sources 写在 storage
+                // 层同 sqlx tx 里串联，关闭 fix2 残留的 guard→write TOCTOU 窗口。
                 self.reindex_categories(opts.categories.clone(), job_id, owner, summary)
                     .await
             }
@@ -672,31 +674,20 @@ impl ReindexFlow {
         Ok(())
     }
 
-    /// `categories` target 没有 after_id 分页，无法借 advance_checkpoint
-    /// 顺带检查 lease。F15-fix2 加入 `assert_lease_held` 调用——在每次
-    /// `upsert` / `mark_archived` **之前**插入只读 guard，把"lease 已失但
-    /// 仍在写"的 race 窗口压到最小。残留窗口（guard 通过 → 写之间）属于
-    /// 已知边界，要彻底关需要 SQLite `BEGIN IMMEDIATE` 包住每一次写。
-    async fn assert_lease(&self, job_id: i64, owner: &str) -> Result<(), RuntimeError> {
-        let held = self
-            .ctx
-            .reindex_job_repo
-            .assert_lease_held(job_id, owner, OffsetDateTime::now_utc())
-            .await?;
-        if held {
-            return Ok(());
-        }
+    /// F15-fix7：lease 校验失败统一映射为 `RuntimeError::LeaseConflict`，
+    /// 与 reindex 路径其它 guard 失败的对外语义保持一致。
+    fn lease_lost(job_id: i64, owner: &str) -> RuntimeError {
         tracing::warn!(
             stage = "reindex",
             job_id,
             owner = %owner,
-            "assert_lease_held guard 失败：state≠'running' 或 lease_owner 不匹配；中止本 worker"
+            "lease-guarded write 拒绝：state≠'running' 或 lease_owner 不匹配；中止本 worker"
         );
-        Err(RuntimeError::LeaseConflict {
+        RuntimeError::LeaseConflict {
             table: "reindex_jobs",
             id: job_id,
             expected_owner: owner.to_string(),
-        })
+        }
     }
 
     async fn reindex_categories(
@@ -736,9 +727,6 @@ impl ReindexFlow {
         for category in categories {
             for source in category.sources {
                 configured.insert((category.category.key.clone(), source.key.clone()));
-                // F15-fix2：写之前先确认 lease 仍在手；abort/reclaim 后
-                // 直接 LeaseConflict 退出，避免覆盖新 job 的 feed_sources。
-                self.assert_lease(job_id, owner).await?;
                 let feed_source = FeedSource {
                     id: 0,
                     category_key: category.category.key.clone(),
@@ -763,17 +751,51 @@ impl ReindexFlow {
                     created_at: now,
                     updated_at: now,
                 };
-                self.ctx.feed_source_repo.upsert(&feed_source).await?;
-                summary.scanned += 1;
-                summary.updated += 1;
+                // F15-fix7：lease 校验 + upsert 在 storage 层同事务执行，
+                // 关闭 fix2 残留的 guard→write TOCTOU 窗口。lease 已失则
+                // 整段事务 rollback，feed_sources 行不被覆盖，直接 LeaseConflict
+                // 退出走 outer run() 的 mark_failed 路径。
+                match self
+                    .ctx
+                    .feed_source_repo
+                    .upsert_with_lease_guard(&feed_source, job_id, owner)
+                    .await?
+                {
+                    LeaseGuardedWriteOutcome::Applied => {
+                        summary.scanned += 1;
+                        summary.updated += 1;
+                    }
+                    LeaseGuardedWriteOutcome::NoOp => {
+                        // upsert 路径在 lease 在手时永远会改一行（INSERT 或
+                        // UPDATE），NoOp 状态不可达；进入此分支说明 storage
+                        // 实现破坏了语义契约，留 unreachable! 兜底。
+                        unreachable!(
+                            "upsert_with_lease_guard 返回 NoOp 违反契约：feed_sources \
+                             upsert 在 lease 在手时必然写一行"
+                        );
+                    }
+                    LeaseGuardedWriteOutcome::LeaseLost => {
+                        return Err(Self::lease_lost(job_id, owner));
+                    }
+                }
             }
         }
 
         for source in existing {
             if !configured.contains(&(source.category_key, source.source_key)) {
-                self.assert_lease(job_id, owner).await?;
-                if self.ctx.feed_source_repo.mark_archived(source.id).await? {
-                    summary.archived += 1;
+                match self
+                    .ctx
+                    .feed_source_repo
+                    .mark_archived_with_lease_guard(source.id, job_id, owner, now)
+                    .await?
+                {
+                    LeaseGuardedWriteOutcome::Applied => summary.archived += 1,
+                    // NoOp：行已是 archived。沿用 fix2 之前 `mark_archived`
+                    // 返 `false` 的语义，不递增 summary.archived。
+                    LeaseGuardedWriteOutcome::NoOp => {}
+                    LeaseGuardedWriteOutcome::LeaseLost => {
+                        return Err(Self::lease_lost(job_id, owner));
+                    }
                 }
             }
         }

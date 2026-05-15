@@ -8,6 +8,26 @@ use time::OffsetDateTime;
 
 use crate::{StorageError, classify_sqlite_error};
 
+/// F15-fix7：reindex `categories` target 写 `feed_sources` 时的 lease-guarded
+/// 写入结果。`upsert_with_lease_guard` / `mark_archived_with_lease_guard`
+/// 把"check reindex_jobs lease"与"写 feed_sources"放进同一事务，彻底关闭
+/// fix2 残留的 guard→write TOCTOU 窗口（assert_lease_held 通过后到 upsert
+/// 之间仍有可被 reclaim/abort 的间隙）。
+///
+/// 三态语义：
+///   - `Applied`：lease 在手，feed_sources 行被真实 INSERT/UPDATE 一行
+///   - `NoOp`：lease 在手，但 feed_sources 自带 WHERE 子句过滤掉了这次写
+///     （仅 `mark_archived_with_lease_guard` 可能命中——目标行已经是 archived）
+///   - `LeaseLost`：reindex_jobs 中 `(id, state='running', lease_owner)` 行
+///     不存在；事务回滚，feed_sources 不被修改。调用方应当向上抛
+///     `RuntimeError::LeaseConflict` 让 CLI 非零退出
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseGuardedWriteOutcome {
+    Applied,
+    NoOp,
+    LeaseLost,
+}
+
 #[async_trait]
 pub trait FeedSourceRepository: Send + Sync {
     async fn upsert(&self, src: &FeedSource) -> Result<i64, StorageError>;
@@ -20,6 +40,33 @@ pub trait FeedSourceRepository: Send + Sync {
     async fn list_by_category(&self, category_key: &str) -> Result<Vec<FeedSource>, StorageError>;
     async fn list_all(&self) -> Result<Vec<FeedSource>, StorageError>;
     async fn mark_archived(&self, id: i64) -> Result<bool, StorageError>;
+
+    /// F15-fix7：reindex `categories` target 专用——把 lease 校验
+    /// （reindex_jobs WHERE id=:job_id AND state='running' AND lease_owner=:owner）
+    /// 与 feed_sources 的 upsert 包在同一 sqlx transaction 里，彻底关闭
+    /// fix2 残留的 TOCTOU 窗口。lease 校验失败时整段事务回滚，feed_sources
+    /// 不被修改，返 `LeaseLost`——调用方上抛 `RuntimeError::LeaseConflict`。
+    ///
+    /// 与 `upsert` 相比的语义边界：本方法**不**返回 id（runtime 端不需要），
+    /// 节省一次 RETURNING；INSERT/UPDATE 冲突仍由 `classify_sqlite_error`
+    /// 映射为 `StorageError::Conflict`。
+    async fn upsert_with_lease_guard(
+        &self,
+        src: &FeedSource,
+        job_id: i64,
+        owner: &str,
+    ) -> Result<LeaseGuardedWriteOutcome, StorageError>;
+
+    /// F15-fix7：同上，封装 `mark_archived`。`status='archived'` 是终态，
+    /// 已是 archived 的行返 `NoOp`（与原 `mark_archived` 返 `false` 等价），
+    /// 让 runtime 把 `summary.archived` 仅在 `Applied` 时递增。
+    async fn mark_archived_with_lease_guard(
+        &self,
+        id: i64,
+        job_id: i64,
+        owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<LeaseGuardedWriteOutcome, StorageError>;
     async fn update_after_fetch_success(
         &self,
         id: i64,
@@ -185,6 +232,145 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         .map_err(StorageError::from)?;
 
         Ok(result.rows_affected() == 1)
+    }
+
+    async fn upsert_with_lease_guard(
+        &self,
+        src: &FeedSource,
+        job_id: i64,
+        owner: &str,
+    ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+
+        // 1) lease guard：与 `ReindexJobRepository::assert_lease_held` 同语义
+        //    的 UPDATE——rows_affected 充当谓词，顺手把 updated_at 刷新到 src
+        //    自带的 updated_at（避免在 tx 中多算一次时间，保持与 feed_sources
+        //    写入时间戳一致）。lease 失效（state≠'running' 或 owner 不匹配）
+        //    时 rows_affected == 0，整段回滚 → LeaseLost。
+        let lease = sqlx::query(
+            r#"
+            UPDATE reindex_jobs
+            SET updated_at = ?
+            WHERE id = ? AND state = 'running' AND lease_owner = ?
+            "#,
+        )
+        .bind(src.updated_at)
+        .bind(job_id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+        if lease.rows_affected() != 1 {
+            tx.rollback().await.map_err(StorageError::from)?;
+            return Ok(LeaseGuardedWriteOutcome::LeaseLost);
+        }
+
+        // 2) feed_sources upsert（与 `upsert` 完全相同的 SQL；不复用是因为
+        //    那一版直接走 self.pool，本路径要在 tx 上执行）。INSERT/UPDATE
+        //    冲突保留 classify_sqlite_error 映射；本方法不返回 id。
+        sqlx::query(
+            r#"
+            INSERT INTO feed_sources (
+                category_key, source_key, display_name, feed_url, feed_kind, status,
+                priority, etag, last_modified, last_fetched_at, last_success_at,
+                consecutive_failures, last_error, last_error_kind, config_version,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(category_key, source_key) DO UPDATE SET
+                display_name = excluded.display_name,
+                feed_url = excluded.feed_url,
+                feed_kind = excluded.feed_kind,
+                status = excluded.status,
+                priority = excluded.priority,
+                etag = excluded.etag,
+                last_modified = excluded.last_modified,
+                last_fetched_at = excluded.last_fetched_at,
+                last_success_at = excluded.last_success_at,
+                consecutive_failures = excluded.consecutive_failures,
+                last_error = excluded.last_error,
+                last_error_kind = excluded.last_error_kind,
+                config_version = excluded.config_version,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&src.category_key)
+        .bind(&src.source_key)
+        .bind(&src.display_name)
+        .bind(&src.feed_url)
+        .bind(feed_kind_to_str(src.feed_kind))
+        .bind(feed_source_status_to_str(src.status))
+        .bind(src.priority)
+        .bind(&src.etag)
+        .bind(&src.last_modified)
+        .bind(src.last_fetched_at)
+        .bind(src.last_success_at)
+        .bind(src.consecutive_failures)
+        .bind(&src.last_error)
+        .bind(&src.last_error_kind)
+        .bind(src.config_version)
+        .bind(src.created_at)
+        .bind(src.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            classify_sqlite_error(
+                error,
+                "feed_sources",
+                format!("{}/{}", src.category_key, src.source_key),
+            )
+        })?;
+
+        tx.commit().await.map_err(StorageError::from)?;
+        Ok(LeaseGuardedWriteOutcome::Applied)
+    }
+
+    async fn mark_archived_with_lease_guard(
+        &self,
+        id: i64,
+        job_id: i64,
+        owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+
+        let lease = sqlx::query(
+            r#"
+            UPDATE reindex_jobs
+            SET updated_at = ?
+            WHERE id = ? AND state = 'running' AND lease_owner = ?
+            "#,
+        )
+        .bind(now)
+        .bind(job_id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+        if lease.rows_affected() != 1 {
+            tx.rollback().await.map_err(StorageError::from)?;
+            return Ok(LeaseGuardedWriteOutcome::LeaseLost);
+        }
+
+        let archived = sqlx::query(
+            r#"
+            UPDATE feed_sources
+            SET status = 'archived', updated_at = ?
+            WHERE id = ? AND status <> 'archived'
+            "#,
+        )
+        .bind(now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+
+        tx.commit().await.map_err(StorageError::from)?;
+        if archived.rows_affected() == 1 {
+            Ok(LeaseGuardedWriteOutcome::Applied)
+        } else {
+            Ok(LeaseGuardedWriteOutcome::NoOp)
+        }
     }
 
     async fn update_after_fetch_success(

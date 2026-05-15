@@ -23,7 +23,7 @@ pub use feed_entry::{
     ClaimedFeedEntry, FeedEntry, FeedEntryRepository, LinkHashReindexCandidate, NewFeedEntry,
     ResetFailedFilter, ResetFailedOutcome, SqliteFeedEntryRepo,
 };
-pub use feed_source::{FeedSourceRepository, SqliteFeedSourceRepo};
+pub use feed_source::{FeedSourceRepository, LeaseGuardedWriteOutcome, SqliteFeedSourceRepo};
 pub use publish_item::{
     FreezeSnapshotItem, FreezeSnapshotOutcome, FreezeSnapshotStatus, PublishCandidateRow,
     PublishItemRepository, SqlitePublishItemRepo,
