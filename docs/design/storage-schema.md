@@ -688,9 +688,9 @@ RETURNING id, article_id, prompt_version, output_schema_version, model_id;
 
 ### 7.1 目录与命名
 
-- 所有 migration 位于 `migrations/`
+- migration 按方言分目录：`migrations/sqlite/` 与 `migrations/postgres/`（W11 多方言适配落地后；详见 [storage-multi-dialect §6.3](./storage-multi-dialect.md)）
 - 命名 `NNNN_short_name.up.sql` 与 `NNNN_short_name.down.sql`
-- NNNN 从 `0001` 起递增
+- NNNN 从 `0001` 起递增；**两方言共享同一编号空间**——同编号下两边 schema 语义对等，CI 校验配对
 
 ### 7.2 规则
 
