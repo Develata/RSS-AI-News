@@ -283,6 +283,47 @@ async fn reindex_categories_second_run_archives_nothing() {
     assert_eq!(summary.archived, 0);
 }
 
+#[tokio::test]
+async fn reindex_categories_writes_config_kind_id_into_feed_sources_config_version() {
+    // F15-fix3：feed_sources.config_version 必须指向 `kind='config'` 行，
+    // **不**能指向 reindex 自己创建的 `kind='reindex'` 行。
+    let (_dir, pool) = common::make_test_pool().await;
+
+    let summary = reindex(&pool)
+        .run(reindex_opts(ReindexTarget::Categories, 10))
+        .await
+        .unwrap();
+    assert!(summary.updated > 0);
+
+    // 收集所有刚 upsert 的 feed_sources 的 config_version → 反查 kind
+    let kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT rv.kind
+         FROM feed_sources fs
+         JOIN rule_versions rv ON rv.id = fs.config_version
+         ORDER BY fs.id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !kinds.is_empty(),
+        "Categories reindex 应当产出至少一行 feed_sources"
+    );
+    for kind in &kinds {
+        assert_eq!(
+            kind, "config",
+            "feed_sources.config_version 必须指向 kind='config' 行，实际：{kind}"
+        );
+    }
+    // 而 reindex flow 自己创建的 kind='reindex' 行也确实存在（独立审计）
+    let reindex_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM rule_versions WHERE kind = 'reindex'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(reindex_count >= 1);
+}
+
 // --- F15-8 W9-F3: lease-driven reindex_jobs 行为锁定 -----------------------
 
 #[tokio::test]

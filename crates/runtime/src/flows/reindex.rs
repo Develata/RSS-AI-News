@@ -397,7 +397,7 @@ impl ReindexFlow {
 
         let after_id_start = claimed.last_processed_id.unwrap_or(0);
         let inner_result = self
-            .run_inner(&opts, job_id, &owner, rule_id, after_id_start, &mut summary)
+            .run_inner(&opts, job_id, &owner, after_id_start, &mut summary)
             .await;
 
         // F15-9 W9-F4 finalize：成功 → finish_reindex_tx（跨表事务，单事务内
@@ -505,12 +505,16 @@ impl ReindexFlow {
     }
 
     /// 三类 target 的内部循环统一入口；外层 [`Self::run`] 负责 lease finalize。
+    ///
+    /// **F15-fix3**：原 `rule_id` 参数（reindex 自身的 kind='reindex' 行 id）
+    /// 已从签名中移除——categories 现在内部查 `active kind='config'` 行，
+    /// 不需要 reindex rule_id；link_hash / content_hash 本来就不依赖它，
+    /// 仅靠 feed_entries / articles 自身的派生字段重算。
     async fn run_inner(
         &self,
         opts: &ReindexOptions,
         job_id: i64,
         owner: &str,
-        rule_id: i64,
         after_id_start: i64,
         summary: &mut ReindexSummary,
     ) -> Result<(), RuntimeError> {
@@ -527,7 +531,7 @@ impl ReindexFlow {
                 // Categories 是一次性遍历配置（无 after_id 分页 / 无 checkpoint
                 // 意义）；F15-fix2 在每次写之前用 `assert_lease` 显式守护，
                 // 防止 abort/reclaim 后旧 worker 继续覆盖 feed_sources。
-                self.reindex_categories(opts.categories.clone(), job_id, owner, rule_id, summary)
+                self.reindex_categories(opts.categories.clone(), job_id, owner, summary)
                     .await
             }
         }
@@ -691,9 +695,31 @@ impl ReindexFlow {
         categories: Vec<CategoryConfig>,
         job_id: i64,
         owner: &str,
-        rule_id: i64,
         summary: &mut ReindexSummary,
     ) -> Result<(), RuntimeError> {
+        // F15-fix3：feed_sources.config_version 必须指向 `kind='config'` 的
+        // rule_versions 行——FK 只声明在 rule_versions(id) 上，但语义上该列
+        // 与 config TOML 快照对齐。reindex flow 自己创建的是 `kind='reindex'`
+        // 行（作为 reindex 操作的审计 manifest），把它写入 config_version
+        // 会让下游 active_rule_or_register('config') 反查不到对应 row 的
+        // payload_sha256，破坏 ingest/extract/ai/publish 读路径的版本一致性。
+        //
+        // 用 `active_rule_or_register("config", ...)` 拿当前 active config 行；
+        // 生产环境下 config loader 在启动时已经 `get_or_create_config_version_async`
+        // seed 了真正的 config row，本调用走"查现有 active"分支；测试环境
+        // 下若无 active config 行则 seed placeholder（version_tag 显式标
+        // 为 `reindex-categories-bootstrap` 让 admin 一眼看出是回退路径）。
+        let config_version_id = self
+            .ctx
+            .rule_version_repo
+            .active_rule_or_register(
+                "config",
+                "reindex-categories-bootstrap",
+                "auto-registered by reindex categories when no active config rule existed",
+                "reindex-categories-bootstrap",
+            )
+            .await?;
+
         let existing = self.ctx.feed_source_repo.list_all().await?;
         let mut configured = HashSet::new();
         let now = OffsetDateTime::now_utc();
@@ -724,7 +750,7 @@ impl ReindexFlow {
                     consecutive_failures: 0,
                     last_error: None,
                     last_error_kind: None,
-                    config_version: rule_id,
+                    config_version: config_version_id,
                     created_at: now,
                     updated_at: now,
                 };
