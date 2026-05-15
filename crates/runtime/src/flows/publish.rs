@@ -389,7 +389,7 @@ impl PublishFlow {
                 item_count: 0,
             },
             Err(error) => {
-                let _ = self
+                if let Err(persist_err) = self
                     .ctx
                     .publish_record_repo
                     .release_permanent_failure(
@@ -399,7 +399,15 @@ impl PublishFlow {
                         error.error_kind(),
                         now,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        publish_record_id = claimed.id,
+                        phase = "freeze",
+                        ?persist_err,
+                        "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
+                    );
+                }
                 emitter
                     .emit(
                         "publish_failed",
@@ -429,7 +437,7 @@ impl PublishFlow {
         now: OffsetDateTime,
         emitter: &RunEventEmitter<'_>,
     ) {
-        let _ = self
+        if let Err(persist_err) = self
             .ctx
             .publish_record_repo
             .release_permanent_failure(
@@ -439,7 +447,15 @@ impl PublishFlow {
                 error.error_kind(),
                 now,
             )
-            .await;
+            .await
+        {
+            tracing::warn!(
+                publish_record_id,
+                phase = "render",
+                ?persist_err,
+                "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
+            );
+        }
         emitter
             .emit(
                 "publish_failed",
@@ -643,7 +659,7 @@ impl PublishFlow {
         {
             Ok(items) => items,
             Err(error) => {
-                let _ = self
+                if let Err(persist_err) = self
                     .ctx
                     .publish_record_repo
                     .release_permanent_failure(
@@ -653,7 +669,15 @@ impl PublishFlow {
                         error.error_kind(),
                         now,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        publish_record_id = claimed.id,
+                        phase = "store_local.list_items",
+                        ?persist_err,
+                        "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
+                    );
+                }
                 return PublishStoreLocalOutcome {
                     publish_record_id: claimed.id,
                     status: PublishStoreLocalStatus::Failed {
@@ -669,9 +693,8 @@ impl PublishFlow {
         let artifact = match self.ctx.publish_target_local.publish(&report).await {
             Ok(artifact) => artifact,
             Err(error) => {
-                if error.is_retryable() {
-                    let _ = self
-                        .ctx
+                let release_result = if error.is_retryable() {
+                    self.ctx
                         .publish_record_repo
                         .release_retryable_failure(
                             claimed.id,
@@ -680,10 +703,9 @@ impl PublishFlow {
                             error.error_kind(),
                             now,
                         )
-                        .await;
+                        .await
                 } else {
-                    let _ = self
-                        .ctx
+                    self.ctx
                         .publish_record_repo
                         .release_permanent_failure(
                             claimed.id,
@@ -692,7 +714,16 @@ impl PublishFlow {
                             error.error_kind(),
                             now,
                         )
-                        .await;
+                        .await
+                };
+                if let Err(persist_err) = release_result {
+                    tracing::warn!(
+                        publish_record_id = claimed.id,
+                        phase = "store_local.target_publish",
+                        retryable = error.is_retryable(),
+                        ?persist_err,
+                        "release_*_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
+                    );
                 }
                 emitter
                     .emit(
@@ -939,7 +970,7 @@ impl PublishFlow {
         {
             Ok(items) => items,
             Err(error) => {
-                let _ = self
+                if let Err(persist_err) = self
                     .ctx
                     .publish_record_repo
                     .release_permanent_failure(
@@ -949,7 +980,15 @@ impl PublishFlow {
                         error.error_kind(),
                         now,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        publish_record_id = claimed.id,
+                        phase = "publish_remote.list_items",
+                        ?persist_err,
+                        "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
+                    );
+                }
                 emitter
                     .emit(
                         "publish_failed",
@@ -979,9 +1018,8 @@ impl PublishFlow {
         let artifact = match target.publish(&report).await {
             Ok(artifact) => artifact,
             Err(error) => {
-                if error.is_retryable() {
-                    let _ = self
-                        .ctx
+                let release_result = if error.is_retryable() {
+                    self.ctx
                         .publish_record_repo
                         .release_retryable_failure(
                             claimed.id,
@@ -990,10 +1028,9 @@ impl PublishFlow {
                             error.error_kind(),
                             now,
                         )
-                        .await;
+                        .await
                 } else {
-                    let _ = self
-                        .ctx
+                    self.ctx
                         .publish_record_repo
                         .release_permanent_failure(
                             claimed.id,
@@ -1002,7 +1039,16 @@ impl PublishFlow {
                             error.error_kind(),
                             now,
                         )
-                        .await;
+                        .await
+                };
+                if let Err(persist_err) = release_result {
+                    tracing::warn!(
+                        publish_record_id = claimed.id,
+                        phase = "publish_remote.target_publish",
+                        retryable = error.is_retryable(),
+                        ?persist_err,
+                        "release_*_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
+                    );
                 }
                 emitter
                     .emit(
@@ -1114,7 +1160,7 @@ impl PublishFlow {
         now: OffsetDateTime,
         emitter: &RunEventEmitter<'_>,
     ) {
-        let _ = self
+        if let Err(persist_err) = self
             .ctx
             .publish_record_repo
             .release_permanent_failure(
@@ -1124,7 +1170,15 @@ impl PublishFlow {
                 error.error_kind(),
                 now,
             )
-            .await;
+            .await
+        {
+            tracing::warn!(
+                publish_record_id,
+                phase = "publish_remote.report_error",
+                ?persist_err,
+                "release_permanent_failure 持久化失败；保留上游 ReportError 向上抛（F15-fix4）"
+            );
+        }
         emitter
             .emit(
                 "publish_failed",
