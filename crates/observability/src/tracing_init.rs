@@ -39,11 +39,12 @@ pub fn init(opts: InitOptions) -> Option<WorkerGuard> {
 
     let Some((dir, prefix)) = parse_log_file_path(&opts.log_file) else {
         let builder = fmt().with_env_filter(filter).with_writer(io::stderr);
-        if want_json {
-            let _ = builder.json().try_init();
+        let result = if want_json {
+            builder.json().try_init()
         } else {
-            let _ = builder.try_init();
-        }
+            builder.try_init()
+        };
+        warn_on_try_init_err("stderr", result);
         return None;
     };
 
@@ -57,11 +58,12 @@ pub fn init(opts: InitOptions) -> Option<WorkerGuard> {
              falling back to stderr"
         );
         let builder = fmt().with_env_filter(filter).with_writer(io::stderr);
-        if want_json {
-            let _ = builder.json().try_init();
+        let result = if want_json {
+            builder.json().try_init()
         } else {
-            let _ = builder.try_init();
-        }
+            builder.try_init()
+        };
+        warn_on_try_init_err("stderr-fallback", result);
         return None;
     }
 
@@ -71,11 +73,12 @@ pub fn init(opts: InitOptions) -> Option<WorkerGuard> {
         .with_env_filter(filter)
         .with_writer(writer)
         .with_ansi(false);
-    let init_ok = if want_json {
-        builder.json().try_init().is_ok()
+    let result = if want_json {
+        builder.json().try_init()
     } else {
-        builder.try_init().is_ok()
+        builder.try_init()
     };
+    let init_ok = warn_on_try_init_err("file", result);
 
     if init_ok {
         Some(guard)
@@ -85,6 +88,28 @@ pub fn init(opts: InitOptions) -> Option<WorkerGuard> {
         // 任何消息流入。
         drop(guard);
         None
+    }
+}
+
+/// F15-16 W9-F8：把 `try_init` 失败的 silent 丢弃替换为可见 warn。
+///
+/// `try_init()` 唯一可能的失败是"全局 subscriber 已被安装"——
+/// 在生产路径上**应该**只发生一次（CLI startup）；多次 init 通常意味着
+/// 测试 fixture 之间状态共用，或 lib 用法把 init 暴露在了不该重入的位置。
+/// 用 `eprintln!` 而非 `tracing::warn!` 是因为 subscriber 此刻要么还未
+/// 装上（init 抢跑失败）、要么是同一进程的下一轮调用——任一情况下
+/// `tracing::*` 都可能丢失消息，stderr 是当下最稳的兜底。
+///
+/// 该 helper 也是 docs/design/error-and-observability.md §3.3 末段
+/// "唯一允许豁免来源：日志写入失败" 的规范化体现：调用点不再走
+/// `let _ = try_init();`，而是显式把失败外显为 stderr 一行。
+fn warn_on_try_init_err<E: std::fmt::Display>(mode: &str, result: Result<(), E>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("[observability] tracing subscriber init failed (mode={mode}): {error}");
+            false
+        }
     }
 }
 
