@@ -310,6 +310,50 @@ async fn multi_source_concurrent_within_limit() {
     assert!(elapsed < Duration::from_millis(800), "elapsed: {elapsed:?}");
 }
 
+#[tokio::test]
+async fn ingest_bootstrap_writes_config_kind_id_into_feed_sources_config_version() {
+    // F15-fix6：与 F15-fix3 同源——`feed_sources.config_version` 必须指向
+    // `kind='config'` 的 rule_versions 行，**不**得指向硬编码 id=1 的非
+    // config 行。本测试不预插任何 feed_source 与 `insert_config_rule`，
+    // 强制 resolve_source 走 bootstrap：upsert 新 feed_source 时调
+    // `active_rule_or_register("config", ...)` seed 出一行 kind='config'
+    // 的 placeholder（tag='ingest-bootstrap'）；feed_sources.config_version
+    // 反查 rule_versions.kind 必须 == 'config'。
+    //
+    // fetcher 用空 responses → 任何 source_id 都返回 ConnectionFailed，
+    // 但那是 resolve_source 之后才发生；feed_sources 行已先落地。
+    let (_dir, pool) = make_test_pool().await;
+
+    let flow = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&["s-bootstrap"]),
+        HashMap::new(),
+    );
+
+    let _summary = flow.run(IngestOptions::default()).await;
+
+    let kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT rv.kind FROM feed_sources fs
+         JOIN rule_versions rv ON rv.id = fs.config_version
+         ORDER BY fs.id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !kinds.is_empty(),
+        "Ingest bootstrap 应当至少 upsert 一行 feed_sources"
+    );
+    for kind in &kinds {
+        assert_eq!(
+            kind, "config",
+            "feed_sources.config_version 必须指向 kind='config' 行，实际：{kind}"
+        );
+    }
+}
+
 fn flow(
     pool: SqlitePool,
     retention_policy: RetentionPolicy,

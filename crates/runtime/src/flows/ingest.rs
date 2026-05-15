@@ -210,6 +210,27 @@ impl IngestFlow {
         let feed_source = if let Some(existing) = existing {
             existing
         } else {
+            // F15-fix6：与 F15-fix3 同类——`feed_sources.config_version` 必须指
+            // 向 `kind='config'` 的 rule_versions 行。原硬编码 `config_version: 1`
+            // 在测试场景或首次部署下 id=1 可能根本不是 `kind='config'` 行（例如
+            // 测试 fixture 先 INSERT 了 `kind='prompt'`），导致下游 active_rule_*
+            // 反查不到对应 payload。改为 active_rule_or_register("config", ...)：
+            // 生产路径走"读现有 active"，测试/首次部署走"seed placeholder"，
+            // tag 显式标 `ingest-bootstrap` 让 admin 一眼看出是回退路径。
+            //
+            // 注：只在 bootstrap 分支（新建 FeedSource）触发该读路径，存量
+            // FeedSource 复用既有 config_version 不变；对单次 ingest run 通常
+            // 是 0~N 次（N=新增源数），不影响热路径性能。
+            let config_version_id = self
+                .ctx
+                .rule_version_repo
+                .active_rule_or_register(
+                    "config",
+                    "ingest-bootstrap",
+                    "auto-registered by ingest when no active config rule existed",
+                    "ingest-bootstrap",
+                )
+                .await?;
             let now = OffsetDateTime::now_utc();
             let new_source = FeedSource {
                 id: 0,
@@ -227,7 +248,7 @@ impl IngestFlow {
                 consecutive_failures: 0,
                 last_error: None,
                 last_error_kind: None,
-                config_version: 1,
+                config_version: config_version_id,
                 created_at: now,
                 updated_at: now,
             };
