@@ -474,6 +474,23 @@ impl ReindexFlow {
             }
         }
 
+        // F15-fix5：原实现把 `run_completed` info 事件放在 `inner_result?` 和
+        // `lease_lost_on_finalize` 检查之前，于是任何 inner 错误或 finalize lease
+        // 丢失场景下，run_events 表都会先记一行 "completed"，再由 caller 拿到
+        // 一个错误返回——观测面（事件流）与控制面（返回值）语义不一致。
+        // 现改为：先做错误传播；只有真正成功（inner Ok + finalize 持有 lease）
+        // 才发 `run_completed`。失败路径目前刻意不发 `run_failed`（其他 flow
+        // 也无此事件类型），由 stage="reindex" 的 mark_failed 持久化 + 上层 CLI
+        // 的非零退出码承担观测责任。
+        inner_result?;
+        if lease_lost_on_finalize {
+            return Err(RuntimeError::LeaseConflict {
+                table: "reindex_jobs",
+                id: job_id,
+                expected_owner: owner.clone(),
+            });
+        }
+
         emitter
             .emit(
                 "run_completed",
@@ -493,14 +510,6 @@ impl ReindexFlow {
                 })),
             )
             .await;
-        inner_result?;
-        if lease_lost_on_finalize {
-            return Err(RuntimeError::LeaseConflict {
-                table: "reindex_jobs",
-                id: job_id,
-                expected_owner: owner.clone(),
-            });
-        }
         Ok(summary)
     }
 
