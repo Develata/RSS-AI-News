@@ -146,8 +146,8 @@ pub async fn run(cli: &Cli, args: &BackfillArgs) -> Result<BackfillCommandSummar
 ///   - desc   : args.prompt_version_description.unwrap_or("manual backfill via CLI")
 ///   - model  : args.model.unwrap_or(loaded_model)
 ///   - sha256 : 永远从 prompt_template 派生（同一 prompt 内容 → 同一 sha；
-///              在不同 tag 下创建新版本但 sha 一致，保留 W3 后续做内容
-///              指纹对比的能力）
+///     在不同 tag 下创建新版本但 sha 一致，保留 W3 后续做内容
+///     指纹对比的能力）
 pub fn build_backfill_ai_options(
     args: &BackfillArgs,
     loaded_model: &str,

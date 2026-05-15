@@ -4,8 +4,8 @@
 //! 状态轮：见 [state-machine §6](../../../../docs/design/state-machine.md#6-reindex_job-独立状态轮)。
 //!
 //! 本模块提供 reindex_job 的原子原语：
-//!   - `start_reindex_tx` —— **单事务**两 INSERT：rule_versions(status='pending')
-//!     + reindex_jobs(state='pending')。失败整段回滚，避免 rule_versions 留
+//!   - `start_reindex_tx` —— **单事务**两 INSERT：rule_versions(status='pending') +
+//!     reindex_jobs(state='pending')。失败整段回滚，避免 rule_versions 留
 //!     "孤儿 pending" 行（F15-7 W9-F4）
 //!   - `finish_reindex_tx` —— **单事务**跨表 finalize：reindex_jobs `running` →
 //!     `completed` + 旧 active 行 → `superseded` + pending 行 → `active`。先

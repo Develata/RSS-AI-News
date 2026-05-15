@@ -32,7 +32,7 @@ impl<'a> RunEventEmitter<'a> {
         message: &str,
         context: Option<JsonValue>,
     ) {
-        let context_json = context.map(|value| sanitize_and_serialize(value));
+        let context_json = context.map(sanitize_and_serialize);
         let event = NewRunEvent {
             run_id: self.run_id.to_string(),
             trace_id: None,

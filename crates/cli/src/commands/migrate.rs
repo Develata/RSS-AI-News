@@ -91,6 +91,37 @@ pub(crate) async fn assert_no_running_reindex(pool: &sqlx::SqlitePool) -> Result
     })
 }
 
+async fn open_pool(app: &config::AppConfig) -> Result<sqlx::SqlitePool, CliError> {
+    let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
+    build_sqlite_pool(
+        &app.database.sqlite_path,
+        app.database.max_connections,
+        busy_timeout_ms,
+    )
+    .await
+    .map_err(CliError::Storage)
+}
+
+async fn summary(action: &str, pool: &sqlx::SqlitePool) -> Result<MigrateCommandSummary, CliError> {
+    let applied_versions =
+        match sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(pool)
+            .await
+        {
+            Ok(values) => values,
+            Err(sqlx::Error::Database(error)) if error.message().contains("_sqlx_migrations") => {
+                Vec::new()
+            }
+            Err(error) => return Err(rss_ai_news_storage::StorageError::from(error).into()),
+        };
+    let current_version = applied_versions.iter().copied().max();
+    Ok(MigrateCommandSummary {
+        action: action.to_string(),
+        applied_versions,
+        current_version,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,35 +320,4 @@ mod tests {
             other => panic!("expected block, got {other:?}"),
         }
     }
-}
-
-async fn open_pool(app: &config::AppConfig) -> Result<sqlx::SqlitePool, CliError> {
-    let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
-    build_sqlite_pool(
-        &app.database.sqlite_path,
-        app.database.max_connections,
-        busy_timeout_ms,
-    )
-    .await
-    .map_err(CliError::Storage)
-}
-
-async fn summary(action: &str, pool: &sqlx::SqlitePool) -> Result<MigrateCommandSummary, CliError> {
-    let applied_versions =
-        match sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations ORDER BY version")
-            .fetch_all(pool)
-            .await
-        {
-            Ok(values) => values,
-            Err(sqlx::Error::Database(error)) if error.message().contains("_sqlx_migrations") => {
-                Vec::new()
-            }
-            Err(error) => return Err(rss_ai_news_storage::StorageError::from(error).into()),
-        };
-    let current_version = applied_versions.iter().copied().max();
-    Ok(MigrateCommandSummary {
-        action: action.to_string(),
-        applied_versions,
-        current_version,
-    })
 }

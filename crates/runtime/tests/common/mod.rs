@@ -32,7 +32,7 @@ use time::OffsetDateTime;
 static TEST_DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// F8-3 W4-3：在 PID + atomic counter 之上再叠纳秒时间戳，避免 OS PID 复用
-/// + 残留 SQLite 文件导致跨进程偶发 UNIQUE 冲突。三层叠加（pid / nanos /
+/// 叠加残留 SQLite 文件导致跨进程偶发 UNIQUE 冲突。三层叠加（pid / nanos /
 /// counter）任何一层独立就足以唯一；并发同 100ns 窗口的概率近 0。
 fn unique_path_suffix() -> String {
     let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
