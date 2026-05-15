@@ -260,6 +260,7 @@ mod tests {
             db_path: None,
             log_level: "info".to_string(),
             log_format: LogFormat::Pretty,
+            log_file: String::new(),
             output_format: OutputFormat::Pretty,
             dry_run: false,
             category: None,

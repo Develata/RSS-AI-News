@@ -19,6 +19,14 @@ pub struct Cli {
     #[arg(long = "log-format", default_value = "pretty", value_enum)]
     pub log_format: LogFormat,
 
+    /// 日志落盘路径（F15-13 W9-F1）。空串 → 仅 stderr；非空 → 用
+    /// `tracing_appender::rolling::daily` 按 `<prefix>.YYYY-MM-DD` 日轮转。
+    /// 解析规则见 `rss_ai_news_observability::tracing_init::InitOptions::log_file`。
+    /// startup init 在 config.toml 读取之前发生，所以 `[observability].log_file`
+    /// 当前仅能通过本标志生效（与 `--log-level` / `--log-format` 行为对齐）。
+    #[arg(long = "log-file", default_value = "")]
+    pub log_file: String,
+
     #[arg(
         short = 'o',
         long = "output-format",
