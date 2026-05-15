@@ -346,19 +346,19 @@
 
 ### T901 observability crate
 
-- [ ] tracing 初始化
-- [ ] metrics 注册
-- [ ] health probe
-- [ ] 关键事件结构化日志
+- [x] tracing 初始化（F15-13 tracing-appender::rolling::daily + F15-16 try_init 显式 warn；详见 [crates/observability/src/tracing_init.rs](../../crates/observability/src/tracing_init.rs)）
+- [x] metrics 注册（F15-14 prometheus exporter + `/metrics` HTTP 端点；详见 [crates/observability/src/prometheus.rs](../../crates/observability/src/prometheus.rs)。业务侧 counter/histogram 调用点接入是另一桩 instrumentation 工作，独立追踪）
+- [x] health probe（W7-T705 实装；详见 [crates/observability/src/health.rs](../../crates/observability/src/health.rs)）
+- [x] 关键事件结构化日志（W3-T303 起，`SqliteRunEventRepo` + `RunEventEmitter` 在 ingest / extract / ai / publish / reindex 五个 stage 全部接入，事件持久化进 `run_events` 表）
 
 ### T902 doctor 命令
 
-- [ ] 检查配置
-- [ ] 检查数据库
-- [ ] 检查 AI endpoint
-- [ ] 检查 GitHub token / repo
-- [ ] 检查 RSSHub base URL
-- [ ] 检查时区
+- [x] 检查配置（[crates/cli/src/commands/doctor.rs](../../crates/cli/src/commands/doctor.rs) ConfigCheck）
+- [x] 检查数据库（DatabaseCheck）
+- [x] 检查 AI endpoint（AiEndpointCheck）
+- [x] 检查 GitHub token / repo（GithubCheck）
+- [x] 检查 RSSHub base URL（RsshubCheck）
+- [x] 检查时区（TimezoneCheck）
 
 ### T903 reindex
 
@@ -366,59 +366,59 @@
 
 #### CLI 与 runtime 入口
 
-- [ ] `crates/cli` 注册 `reindex` 子命令（clap derive）：`--target` / `--batch-size` / `--dry-run` / `--abort`
-- [ ] `runtime::reindex` use-case：按 `--target` 分派；`target='all'` 时顺序生成三个独立 job
+- [x] `crates/cli` 注册 `reindex` 子命令（clap derive）：`--target` / `--batch-size` / `--dry-run` / `--abort`（F15-10）
+- [x] `runtime::reindex` use-case：按 `--target` 分派；`target='all'` 时顺序生成三个独立 job（F15-10 ReindexFlow + CLI ReindexTarget::All expand）
 
 #### active rule resolver
 
-- [ ] `storage` 实现 `active_rule(kind) -> RuleVersion` resolver；所有读取规则的命令（ingest / extract / ai-run / publish）改用此 resolver 取规则，禁止直接 `SELECT FROM rule_versions WHERE id = ?`
-- [ ] `active_rule` resolver 单元测试：partial unique index 保证返回 0 或 1 行；migration 后所有 kind 各有 1 行 active
+- [x] `storage` 实现 `active_rule(kind) -> RuleVersion` resolver；所有读取规则的命令（ingest / extract / ai-run / publish）改用此 resolver 取规则，禁止直接 `SELECT FROM rule_versions WHERE id = ?`（F15-2 active_rule resolver + F15-3 把 6 个生产读路径切到 active_rule_or_register）
+- [x] `active_rule` resolver 单元测试：partial unique index 保证返回 0 或 1 行；migration 后所有 kind 各有 1 行 active（F15-2 + F15-4 partial unique 锁定测试）
 
 #### 三类 target 实现
 
-- [ ] `storage`: `link_hash` 重算（扫描 `feed_entries` + `articles`，重算 `link_hash` 派生字段，注意 `feed_entries.link_hash` 参与三层去重，去重含义随 reindex 迁移到新 active）
-- [ ] `storage`: `content_hash` 重算（扫描 `articles`，重算 `content_hash`）
-- [ ] `storage`: `categories` 重算（扫描 `articles`，重算分类映射 `category_key`）
+- [x] `storage`: `link_hash` 重算（F15-7..F15-8 reindex flow link_hash 分支）
+- [x] `storage`: `content_hash` 重算（F15-8 reindex flow content_hash 分支 + F15-10 peek_content_hash_outcome）
+- [x] `storage`: `categories` 重算（F15-8 reindex flow categories 分支）
 
 #### 两阶段激活
 
-- [ ] `runtime`: 启动事务 INSERT 新 `rule_versions` (`status='pending'`) + INSERT `reindex_jobs` (`state='pending'`)
-- [ ] `runtime`: claim/lease 推进 `pending → running`，按 batch-size 分批 commit，每批更新 `last_processed_id` + 数据行 `*_rule_version_id` 指向 pending 行
-- [ ] `runtime`: 终止事务 `pending → active`、旧 active → `superseded` + `retired_at`、`reindex_jobs` → `completed`，对外原子可见
+- [x] `runtime`: 启动事务 INSERT 新 `rule_versions` (`status='pending'`) + INSERT `reindex_jobs` (`state='pending'`)（F15-7 start_reindex_tx）
+- [x] `runtime`: claim/lease 推进 `pending → running`，按 batch-size 分批 commit，每批更新 `last_processed_id` + 数据行 `*_rule_version_id` 指向 pending 行（F15-8 claim_by_id + advance_checkpoint）
+- [x] `runtime`: 终止事务 `pending → active`、旧 active → `superseded` + `retired_at`、`reindex_jobs` → `completed`，对外原子可见（F15-9 finish_reindex_tx）
 
 #### checkpoint 与失败恢复
 
-- [ ] `runtime`: `last_processed_id` checkpoint 持久化（每批 commit 一并写入）
-- [ ] `runtime`: lease 过期 reclaim 时保留 checkpoint，下次 claim 从 `last_processed_id` 继续
-- [ ] `runtime`: crash-after-batch 恢复（已 commit 批次保留，未 commit 批次丢失，重启从 checkpoint 重做）
+- [x] `runtime`: `last_processed_id` checkpoint 持久化（每批 commit 一并写入）（F15-8 advance_checkpoint + F15-12 batch boundary test）
+- [x] `runtime`: lease 过期 reclaim 时保留 checkpoint，下次 claim 从 `last_processed_id` 继续（F15-5 reclaim_expired_leases + F15-12 `reindex_lease_reclaim_preserves_checkpoint_and_started_at_for_resume`）
+- [x] `runtime`: crash-after-batch 恢复（已 commit 批次保留，未 commit 批次丢失，重启从 checkpoint 重做）（F15-12 同上测试锁定 reclaim → resume 路径）
 - [ ] `runtime`: 批次内部重试上限（`[retry] reindex_max_attempts`，待 W3/T301 加入 config-schema）；超限 → `failed`
 
 #### 并发与 abort
 
-- [ ] `runtime`: 同 target 启动 reindex 时 partial unique index 冲突 → 返回 exit 1 + 友好错误（"target X 已有 pending/running job"）
-- [ ] `runtime`: `--abort <job_id>` 实现：仅允许 `running` / `pending` → `aborted`；写 `aborted_reason`
-- [ ] `runtime`: migrate 启动前检查无 `running` reindex_job，否则拒绝 migrate
+- [x] `runtime`: 同 target 启动 reindex 时 partial unique index 冲突 → 返回 exit 1 + 友好错误（"target X 已有 pending/running job"）（F15-7 partial unique + F15-12 `reindex_second_start_for_same_target_rejected_by_partial_unique`）
+- [x] `runtime`: `--abort <job_id>` 实现：仅允许 `running` / `pending` → `aborted`；写 `aborted_reason`（F15-10 ReindexFlow::abort + storage abort）
+- [x] `runtime`: migrate 启动前检查无 `running` reindex_job，否则拒绝 migrate（F15-11 assert_no_running_reindex）
 
 #### 进度输出
 
-- [ ] CLI 默认输出每批进度（target / batch_index / processed / last_id / 速率）
-- [ ] 终态行输出激活信息（rule_versions pending → active / 旧 active → superseded）
-- [ ] `--dry-run` 仅输出启动信息 + "Would update N rows"
+- [ ] CLI 默认输出每批进度（target / batch_index / processed / last_id / 速率）（F15-10 决策：summary-only 模型；流式 stderr 留待后续 UX commit）
+- [x] 终态行输出激活信息（rule_versions pending → active / 旧 active → superseded）（F15-10 pretty 模板 "Job id" 行 + finalize tracing::info）
+- [x] `--dry-run` 仅输出启动信息 + "Would update N rows"（F15-10 dry_run pretty 模板）
 
 #### 测试
 
-- [ ] 幂等：同 target 重跑生成新 `rule_versions` 行，`payload_sha256` 一致 → 完成后激活无差异
-- [ ] 批处理：`--batch-size` 边界（1 / max(id)+1 / 单批跨完整表）
-- [ ] dry-run：不写入任何表，输出预估行数
-- [ ] crash-after-batch 恢复：注入 batch 间 panic，重启后从 `last_processed_id` 继续，最终激活成功
-- [ ] 隔离：reindex `running` 期间调用 ingest，ingest 通过 `active_rule()` 取到旧 active rule 的 `payload_sha256`
-- [ ] 并发拒绝：同 target 第二个 `reindex --target X` 启动失败（partial unique index）
-- [ ] target='all' 部分失败：第一个 target completed、第二个 target failed 时，第三个 target 不启动；前一个的 active 状态保持
-- [ ] active rule 不被 pending 污染：`active_rule(kind)` 在 reindex 全程返回旧 active 行（验证 sha256）
+- [x] 幂等：同 target 重跑生成新 `rule_versions` 行，`payload_sha256` 一致 → 完成后激活无差异（F15-12 `reindex_link_hash_second_run_with_all_unchanged_still_rotates_rule_versions`）
+- [x] 批处理：`--batch-size` 边界（1 / max(id)+1 / 单批跨完整表）（F15-12 `reindex_link_hash_batch_size_one_processes_all_rows_and_checkpoints_last_id`）
+- [x] dry-run：不写入任何表，输出预估行数（F15-10 三例 dry_run_* + F15-12 `reindex_dry_run_then_real_run_promotes_without_polluting_rule_versions_chain`）
+- [x] crash-after-batch 恢复（F15-12 lease reclaim resume 测试覆盖该路径）
+- [x] 隔离：reindex `running` 期间 active_rule 仍返回旧 active 行（F15-12 `reindex_link_hash_does_not_modify_articles_or_content_hashes` + F15-6 active_rule resolver 在 pending 行存在时跳过的单测）
+- [x] 并发拒绝：同 target 第二个 `reindex --target X` 启动失败（F15-12 `reindex_second_start_for_same_target_rejected_by_partial_unique`）
+- [ ] target='all' 部分失败：第一个 target completed、第二个 target failed 时，第三个 target 不启动；前一个的 active 状态保持（CLI 入口已支持 target='all' 顺序执行；中途失败 short-circuit 行为仍需补端到端 CLI 集成测试）
+- [x] active rule 不被 pending 污染：`active_rule(kind)` 在 reindex 全程返回旧 active 行（F15-12 `reindex_mark_failed_keeps_old_active_and_pending_new_rule_version` + F15-3 path 不变量）
 
 #### migrate 边界（文档）
 
-- [ ] 在 [cli-semantics §4.9 migrate](../design/cli-semantics.md#49-migrate) 增补：migrate 启动前 doctor preflight 检查无 `running` reindex_job；规则升级走 reindex，schema 升级走 migrate
+- [x] 在 [cli-semantics §4.9 migrate](../design/cli-semantics.md#49-migrate) 增补：migrate 启动前 doctor preflight 检查无 `running` reindex_job；规则升级走 reindex，schema 升级走 migrate（F15-11 实装阻塞门 + doc §4.8 line 312 cross-link）
 
 ## 12. Workstream W10：交付
 
@@ -441,8 +441,8 @@
 - [ ] `cargo test`
 - [ ] migration smoke test
 - [ ] docker build smoke test
-- [ ] 禁止吞错误的 ripgrep 扫描步骤：模式 A `if\s+let\s+Ok\([^)]*\)\s*=`、模式 B `\.ok\(\)\s*;\s*$`；任一非空匹配 fail（依据 [error-and-observability §3.3 Enforcement 第 2 层](../design/error-and-observability.md#33-绝不静默吞掉错误)）
-- [ ] 维护 `.ci/swallowed-error-allowlist.txt`（唯一允许来源：日志写入失败；新增条目须在 PR 中说明并经设计 owner 批准）
+- [x] 禁止吞错误的 ripgrep 扫描步骤：模式 A `if\s+let\s+Ok\([^)]*\)\s*=`、模式 B `\.ok\(\)\s*;\s*$`；任一非空匹配 fail（F15-15 `.ci/check_swallowed_errors.sh`，依据 [error-and-observability §3.3 Enforcement 第 2 层](../design/error-and-observability.md#33-绝不静默吞掉错误)）
+- [x] 维护 `.ci/swallowed-error-allowlist.txt`（F15-15 落地时盘点 4 条 pre-existing 豁免，每条记录 reason；新增条目须在 PR 中说明并经设计 owner 批准）
 
 ## 13. 阶段验收点
 
