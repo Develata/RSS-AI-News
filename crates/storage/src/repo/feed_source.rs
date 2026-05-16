@@ -112,7 +112,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
                 consecutive_failures, last_error, last_error_kind, config_version,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT(category_key, source_key) DO UPDATE SET
                 display_name = excluded.display_name,
                 feed_url = excluded.feed_url,
@@ -194,7 +194,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
                    consecutive_failures, last_error, last_error_kind, config_version,
                    created_at, updated_at
             FROM feed_sources
-            WHERE category_key = ? AND status = 'active'
+            WHERE category_key = $1 AND status = 'active'
             ORDER BY priority ASC, source_key ASC
             "#,
         )
@@ -228,8 +228,8 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         let result = sqlx::query(
             r#"
             UPDATE feed_sources
-            SET status = 'archived', updated_at = ?
-            WHERE id = ? AND status <> 'archived'
+            SET status = 'archived', updated_at = $1
+            WHERE id = $2 AND status <> 'archived'
             "#,
         )
         .bind(OffsetDateTime::now_utc())
@@ -258,8 +258,8 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         let lease = sqlx::query(
             r#"
             UPDATE reindex_jobs
-            SET updated_at = ?
-            WHERE id = ? AND state = 'running' AND lease_owner = ?
+            SET updated_at = $1
+            WHERE id = $2 AND state = 'running' AND lease_owner = $3
             "#,
         )
         .bind(now)
@@ -284,7 +284,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
                 consecutive_failures, last_error, last_error_kind, config_version,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT(category_key, source_key) DO UPDATE SET
                 display_name = excluded.display_name,
                 feed_url = excluded.feed_url,
@@ -345,8 +345,8 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         let lease = sqlx::query(
             r#"
             UPDATE reindex_jobs
-            SET updated_at = ?
-            WHERE id = ? AND state = 'running' AND lease_owner = ?
+            SET updated_at = $1
+            WHERE id = $2 AND state = 'running' AND lease_owner = $3
             "#,
         )
         .bind(now)
@@ -363,8 +363,8 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         let archived = sqlx::query(
             r#"
             UPDATE feed_sources
-            SET status = 'archived', updated_at = ?
-            WHERE id = ? AND status <> 'archived'
+            SET status = 'archived', updated_at = $1
+            WHERE id = $2 AND status <> 'archived'
             "#,
         )
         .bind(now)
@@ -392,15 +392,15 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         let result = sqlx::query(
             r#"
             UPDATE feed_sources
-            SET etag = ?,
-                last_modified = ?,
-                last_fetched_at = ?,
-                last_success_at = ?,
+            SET etag = $1,
+                last_modified = $2,
+                last_fetched_at = $3,
+                last_success_at = $4,
                 consecutive_failures = 0,
                 last_error = NULL,
                 last_error_kind = NULL,
-                updated_at = ?
-            WHERE id = ?
+                updated_at = $5
+            WHERE id = $6
             "#,
         )
         .bind(etag)
@@ -426,12 +426,12 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         let result = sqlx::query(
             r#"
             UPDATE feed_sources
-            SET last_fetched_at = ?,
+            SET last_fetched_at = $1,
                 consecutive_failures = consecutive_failures + 1,
-                last_error = ?,
-                last_error_kind = ?,
-                updated_at = ?
-            WHERE id = ?
+                last_error = $2,
+                last_error_kind = $3,
+                updated_at = $4
+            WHERE id = $5
             "#,
         )
         .bind(fetched_at)
@@ -453,7 +453,7 @@ SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
        consecutive_failures, last_error, last_error_kind, config_version,
        created_at, updated_at
 FROM feed_sources
-WHERE id = ?
+WHERE id = $1
 "#;
 
 const SELECT_FEED_SOURCE_BY_KEYS: &str = r#"
@@ -462,7 +462,7 @@ SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
        consecutive_failures, last_error, last_error_kind, config_version,
        created_at, updated_at
 FROM feed_sources
-WHERE category_key = ? AND source_key = ?
+WHERE category_key = $1 AND source_key = $2
 "#;
 
 #[derive(Debug, FromRow)]

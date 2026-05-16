@@ -76,6 +76,7 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
                   AND (fe.article_id IS NULL
                        OR NOT EXISTS (SELECT 1 FROM articles a WHERE a.id = fe.article_id))
             "#,
+            now_binds: 0,
         },
         Spec {
             id: InvariantId::I2,
@@ -86,6 +87,7 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
                 WHERE a.state = 'ai_pending'
                   AND NOT EXISTS (SELECT 1 FROM article_ai_results aar WHERE aar.article_id = a.id)
             "#,
+            now_binds: 0,
         },
         Spec {
             id: InvariantId::I3,
@@ -99,6 +101,7 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
                     WHERE aar.article_id = a.id AND aar.state = 'succeeded'
                   )
             "#,
+            now_binds: 0,
         },
         Spec {
             id: InvariantId::I4,
@@ -118,6 +121,7 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
                     WHERE aar.article_id = a.id
                   )
             "#,
+            now_binds: 0,
         },
         Spec {
             id: InvariantId::I4APrime,
@@ -134,6 +138,7 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
                       AND aar.keep_decision = 1
                   )
             "#,
+            now_binds: 0,
         },
         Spec {
             id: InvariantId::I4BPrime,
@@ -147,6 +152,7 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
                     WHERE aar.article_id = pi.article_id
                   )
             "#,
+            now_binds: 0,
         },
         Spec {
             id: InvariantId::I5,
@@ -162,6 +168,7 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
                       AND pr.state IN ('published_remote', 'published_local')
                   )
             "#,
+            now_binds: 0,
         },
         Spec {
             id: InvariantId::I6,
@@ -175,6 +182,7 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
                 WHERE pr.state IN ('published_remote', 'published_local')
                   AND a.state <> 'published'
             "#,
+            now_binds: 0,
         },
         Spec {
             id: InvariantId::I8,
@@ -185,8 +193,9 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
                 FROM article_ai_results aar
                 WHERE aar.state = 'running'
                   AND aar.lease_expires_at IS NOT NULL
-                  AND aar.lease_expires_at < ?
+                  AND aar.lease_expires_at < $1
             "#,
+            now_binds: 1,
         },
     ];
 
@@ -201,6 +210,10 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
 struct Spec {
     id: InvariantId,
     select: &'static str,
+    /// 该 spec SQL 中 `$N` 占位符的数量；全部按位置 bind 同一个 `now`。
+    /// 显式声明而非数 SQL 文本中的 `?` —— W11-P1-F 把占位符改成 `$N`
+    /// 后字面量计数法不再可用。
+    now_binds: u8,
 }
 
 async fn run_spec(
@@ -208,18 +221,16 @@ async fn run_spec(
     spec: Spec,
     now: OffsetDateTime,
 ) -> Result<InvariantResult, StorageError> {
-    let placeholders = spec.select.matches('?').count();
-
     let count_sql = format!("SELECT COUNT(*) FROM ({}) AS violations", spec.select);
     let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
-    for _ in 0..placeholders {
+    for _ in 0..spec.now_binds {
         count_q = count_q.bind(now);
     }
     let total_count = count_q.fetch_one(pool).await.map_err(StorageError::from)?;
 
     let select_sql = format!("{} LIMIT 50", spec.select);
     let mut select_q = sqlx::query(&select_sql);
-    for _ in 0..placeholders {
+    for _ in 0..spec.now_binds {
         select_q = select_q.bind(now);
     }
     let rows = select_q.fetch_all(pool).await.map_err(StorageError::from)?;

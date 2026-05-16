@@ -306,7 +306,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         let rule_version_id = sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status)
-            VALUES (?, ?, ?, ?, 'pending')
+            VALUES ($1, $2, $3, $4, 'pending')
             RETURNING id
             "#,
         )
@@ -330,7 +330,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
                 target, rule_version_id, state, attempt_count,
                 created_at, updated_at
             )
-            VALUES (?, ?, 'pending', 0, ?, ?)
+            VALUES ($1, $2, 'pending', 0, $3, $4)
             RETURNING id
             "#,
         )
@@ -366,9 +366,9 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
             SET state = 'completed',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
-                finished_at = ?,
-                updated_at = ?
-            WHERE id = ? AND state = 'pending'
+                finished_at = $1,
+                updated_at = $2
+            WHERE id = $3 AND state = 'pending'
             "#,
         )
         .bind(finished_at)
@@ -397,9 +397,9 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
             SET state = 'completed',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
-                finished_at = ?,
-                updated_at = ?
-            WHERE id = ? AND state = 'running' AND lease_owner = ?
+                finished_at = $1,
+                updated_at = $2
+            WHERE id = $3 AND state = 'running' AND lease_owner = $4
             "#,
         )
         .bind(finished_at)
@@ -424,8 +424,8 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
             r#"
             UPDATE rule_versions
             SET status = 'superseded',
-                retired_at = ?
-            WHERE kind = ? AND status = 'active' AND id != ?
+                retired_at = $1
+            WHERE kind = $2 AND status = 'active' AND id != $3
             RETURNING id
             "#,
         )
@@ -443,7 +443,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
             r#"
             UPDATE rule_versions
             SET status = 'active'
-            WHERE id = ? AND kind = ? AND status = 'pending'
+            WHERE id = $1 AND kind = $2 AND status = 'pending'
             "#,
         )
         .bind(rule_version_id)
@@ -478,7 +478,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
                 target, rule_version_id, state, attempt_count,
                 created_at, updated_at
             )
-            VALUES (?, ?, 'pending', 0, ?, ?)
+            VALUES ($1, $2, 'pending', 0, $3, $4)
             RETURNING id
             "#,
         )
@@ -507,15 +507,15 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
             r#"
             UPDATE reindex_jobs
             SET state = 'running',
-                lease_owner = ?,
-                lease_expires_at = ?,
-                started_at = COALESCE(started_at, ?),
+                lease_owner = $1,
+                lease_expires_at = $2,
+                started_at = COALESCE(started_at, $3),
                 attempt_count = attempt_count + 1,
-                updated_at = ?
+                updated_at = $4
             WHERE id = (
                 SELECT id FROM reindex_jobs
                 WHERE state = 'pending'
-                  AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+                  AND (lease_expires_at IS NULL OR lease_expires_at < $5)
                 ORDER BY created_at ASC, id ASC
                 LIMIT 1
             )
@@ -543,14 +543,14 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
             r#"
             UPDATE reindex_jobs
             SET state = 'running',
-                lease_owner = ?,
-                lease_expires_at = ?,
-                started_at = COALESCE(started_at, ?),
+                lease_owner = $1,
+                lease_expires_at = $2,
+                started_at = COALESCE(started_at, $3),
                 attempt_count = attempt_count + 1,
-                updated_at = ?
-            WHERE id = ?
+                updated_at = $4
+            WHERE id = $5
               AND state = 'pending'
-              AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+              AND (lease_expires_at IS NULL OR lease_expires_at < $6)
             RETURNING id, target, rule_version_id, last_processed_id, attempt_count
             "#,
         )
@@ -575,8 +575,8 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         let result = sqlx::query(
             r#"
             UPDATE reindex_jobs
-            SET last_processed_id = ?, updated_at = ?
-            WHERE id = ? AND state = 'running' AND lease_owner = ?
+            SET last_processed_id = $1, updated_at = $2
+            WHERE id = $3 AND state = 'running' AND lease_owner = $4
             "#,
         )
         .bind(last_processed_id)
@@ -598,8 +598,8 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         let result = sqlx::query(
             r#"
             UPDATE reindex_jobs
-            SET updated_at = ?
-            WHERE id = ? AND state = 'running' AND lease_owner = ?
+            SET updated_at = $1
+            WHERE id = $2 AND state = 'running' AND lease_owner = $3
             "#,
         )
         .bind(now)
@@ -623,9 +623,9 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
             SET state = 'completed',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
-                finished_at = ?,
-                updated_at = ?
-            WHERE id = ? AND state = 'running' AND lease_owner = ?
+                finished_at = $1,
+                updated_at = $2
+            WHERE id = $3 AND state = 'running' AND lease_owner = $4
             "#,
         )
         .bind(finished_at)
@@ -649,12 +649,12 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
             r#"
             UPDATE reindex_jobs
             SET state = 'failed',
-                error = ?,
+                error = $1,
                 lease_owner = NULL,
                 lease_expires_at = NULL,
-                finished_at = ?,
-                updated_at = ?
-            WHERE id = ? AND state = 'running' AND lease_owner = ?
+                finished_at = $2,
+                updated_at = $3
+            WHERE id = $4 AND state = 'running' AND lease_owner = $5
             "#,
         )
         .bind(error)
@@ -678,12 +678,12 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
             r#"
             UPDATE reindex_jobs
             SET state = 'aborted',
-                aborted_reason = ?,
+                aborted_reason = $1,
                 lease_owner = NULL,
                 lease_expires_at = NULL,
-                finished_at = ?,
-                updated_at = ?
-            WHERE id = ? AND state IN ('pending', 'running')
+                finished_at = $2,
+                updated_at = $3
+            WHERE id = $4 AND state IN ('pending', 'running')
             "#,
         )
         .bind(aborted_reason)
@@ -703,10 +703,10 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
             SET state = 'pending',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
-                updated_at = ?
+                updated_at = $1
             WHERE state = 'running'
               AND lease_expires_at IS NOT NULL
-              AND lease_expires_at < ?
+              AND lease_expires_at < $2
             "#,
         )
         .bind(now)
@@ -732,7 +732,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
 
     async fn find_by_id(&self, id: i64) -> Result<Option<ReindexJob>, StorageError> {
         let sql =
-            format!("SELECT {SELECT_REINDEX_JOB_COLUMNS} FROM reindex_jobs WHERE id = ? LIMIT 1");
+            format!("SELECT {SELECT_REINDEX_JOB_COLUMNS} FROM reindex_jobs WHERE id = $1 LIMIT 1");
         sqlx::query_as::<_, ReindexJob>(&sql)
             .bind(id)
             .fetch_optional(&self.pool)
@@ -747,7 +747,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         let sql = format!(
             "SELECT {SELECT_REINDEX_JOB_COLUMNS} \
              FROM reindex_jobs \
-             WHERE target = ? AND state IN ('pending', 'running') \
+             WHERE target = $1 AND state IN ('pending', 'running') \
              LIMIT 1"
         );
         sqlx::query_as::<_, ReindexJob>(&sql)

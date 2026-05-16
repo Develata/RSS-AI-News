@@ -129,7 +129,7 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
             INSERT INTO article_ai_results (
                 article_id, prompt_version, output_schema_version, model_id, state
             )
-            VALUES (?, ?, ?, ?, 'pending')
+            VALUES ($1, $2, $3, $4, 'pending')
             ON CONFLICT(article_id, prompt_version, output_schema_version, model_id) DO NOTHING
             RETURNING id
             "#,
@@ -160,18 +160,18 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
             r#"
             UPDATE article_ai_results
             SET state = 'running',
-                lease_owner = ?,
-                lease_expires_at = ?,
+                lease_owner = $1,
+                lease_expires_at = $2,
                 attempt_count = attempt_count + 1,
-                started_at = COALESCE(started_at, ?),
-                updated_at = ?
+                started_at = COALESCE(started_at, $3),
+                updated_at = $4
             WHERE id IN (
                 SELECT id FROM article_ai_results
                 WHERE state = 'pending'
-                  AND (lease_expires_at IS NULL OR lease_expires_at < ?)
-                  AND attempt_count < ?
+                  AND (lease_expires_at IS NULL OR lease_expires_at < $5)
+                  AND attempt_count < $6
                 ORDER BY id ASC
-                LIMIT ?
+                LIMIT $7
             )
             RETURNING id, article_id, prompt_version, output_schema_version, model_id
             "#,
@@ -204,13 +204,13 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         let result = sqlx::query(
             r#"
             UPDATE article_ai_results
-            SET state = ?, summary = ?, tags_json = ?, importance_score = ?,
-                keep_decision = ?, raw_response_artifact_id = ?, tokens_in = ?,
-                tokens_out = ?, cost_micro_usd = ?, latency_ms = ?,
+            SET state = $1, summary = $2, tags_json = $3, importance_score = $4,
+                keep_decision = $5, raw_response_artifact_id = $6, tokens_in = $7,
+                tokens_out = $8, cost_micro_usd = $9, latency_ms = $10,
                 lease_owner = NULL, lease_expires_at = NULL,
                 last_error = NULL, last_error_kind = NULL,
-                completed_at = ?, updated_at = ?
-            WHERE id = ? AND lease_owner = ?
+                completed_at = $11, updated_at = $12
+            WHERE id = $13 AND lease_owner = $14
             "#,
         )
         .bind(state)
@@ -263,9 +263,9 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
             SET state = 'pending',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
-                updated_at = ?
+                updated_at = $1
             WHERE lease_expires_at IS NOT NULL
-              AND lease_expires_at < ?
+              AND lease_expires_at < $2
               AND state = 'running'
             "#,
         )
@@ -288,7 +288,7 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
             INSERT INTO article_ai_results (
                 article_id, prompt_version, output_schema_version, model_id, state
             )
-            VALUES (?, ?, ?, ?, 'pending')
+            VALUES ($1, $2, $3, $4, 'pending')
             ON CONFLICT(article_id, prompt_version, output_schema_version, model_id) DO NOTHING
             RETURNING id
             "#,
@@ -311,7 +311,7 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         })?;
 
         let Some(ai_result_id) = inserted_id else {
-            let state = sqlx::query_scalar::<_, String>("SELECT state FROM articles WHERE id = ?")
+            let state = sqlx::query_scalar::<_, String>("SELECT state FROM articles WHERE id = $1")
                 .bind(item.article_id)
                 .fetch_optional(&mut *tx)
                 .await
@@ -327,8 +327,8 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         let result = sqlx::query(
             r#"
             UPDATE articles
-            SET state = 'ai_pending', updated_at = ?
-            WHERE id = ? AND state = 'persisted'
+            SET state = 'ai_pending', updated_at = $1
+            WHERE id = $2 AND state = 'persisted'
             "#,
         )
         .bind(now)
@@ -375,13 +375,13 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         let result = sqlx::query(
             r#"
             UPDATE article_ai_results
-            SET state = ?, summary = ?, tags_json = ?, importance_score = ?,
-                keep_decision = ?, raw_response_artifact_id = ?, tokens_in = ?,
-                tokens_out = ?, cost_micro_usd = ?, latency_ms = ?,
+            SET state = $1, summary = $2, tags_json = $3, importance_score = $4,
+                keep_decision = $5, raw_response_artifact_id = $6, tokens_in = $7,
+                tokens_out = $8, cost_micro_usd = $9, latency_ms = $10,
                 lease_owner = NULL, lease_expires_at = NULL,
                 last_error = NULL, last_error_kind = NULL,
-                completed_at = ?, updated_at = ?
-            WHERE id = ? AND lease_owner = ?
+                completed_at = $11, updated_at = $12
+            WHERE id = $13 AND lease_owner = $14
             "#,
         )
         .bind(state)
@@ -411,7 +411,7 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         }
 
         let current_article_state =
-            sqlx::query_scalar::<_, String>("SELECT state FROM articles WHERE id = ?")
+            sqlx::query_scalar::<_, String>("SELECT state FROM articles WHERE id = $1")
                 .bind(article_id)
                 .fetch_optional(&mut *tx)
                 .await
@@ -436,8 +436,8 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
             let result = sqlx::query(
                 r#"
                 UPDATE articles
-                SET state = ?, updated_at = ?
-                WHERE id = ? AND state IN ('ai_pending', 'ai_done')
+                SET state = $1, updated_at = $2
+                WHERE id = $3 AND state IN ('ai_pending', 'ai_done')
                 "#,
             )
             .bind(next_state)
@@ -493,7 +493,7 @@ async fn compute_article_advance(
                 SELECT CASE WHEN EXISTS (
                     SELECT 1
                     FROM article_ai_results
-                    WHERE article_id = ? AND state = 'succeeded' AND id != ?
+                    WHERE article_id = $1 AND state = 'succeeded' AND id != $2
                 ) THEN 1 ELSE 0 END
                 "#,
             )
@@ -525,9 +525,9 @@ async fn release_ai_failure(
     let result = sqlx::query(
         r#"
         UPDATE article_ai_results
-        SET state = ?, lease_owner = NULL, lease_expires_at = NULL,
-            last_error = ?, last_error_kind = ?, updated_at = ?
-        WHERE id = ? AND lease_owner = ?
+        SET state = $1, lease_owner = NULL, lease_expires_at = NULL,
+            last_error = $2, last_error_kind = $3, updated_at = $4
+        WHERE id = $5 AND lease_owner = $6
         "#,
     )
     .bind(state)
