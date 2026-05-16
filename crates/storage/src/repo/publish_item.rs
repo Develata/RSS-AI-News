@@ -108,7 +108,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
                 WHERE state = 'succeeded'
                   AND keep_decision = 1
                   AND importance_score IS NOT NULL
-                  AND importance_score >= ?
+                  AND importance_score >= $1
             )
             SELECT a.id AS article_id,
                    aar.id AS article_ai_result_id,
@@ -126,9 +126,9 @@ impl PublishItemRepository for SqlitePublishItemRepo {
             JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
             JOIN feed_sources fs ON fs.id = fe.source_id
             WHERE a.state = 'ready_for_publish'
-              AND fs.category_key = ?
+              AND fs.category_key = $2
             ORDER BY aar.importance_score DESC, a.created_at DESC, a.id ASC
-            LIMIT ?
+            LIMIT $3
             "#,
         )
         .bind(min_importance_score)
@@ -159,13 +159,13 @@ impl PublishItemRepository for SqlitePublishItemRepo {
             FROM articles a
             JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
             JOIN feed_sources fs ON fs.id = fe.source_id
-            WHERE fs.category_key = ?
+            WHERE fs.category_key = $1
               AND a.state IN ('persisted', 'ready_for_publish')
               AND NOT EXISTS (
                   SELECT 1 FROM article_ai_results aar WHERE aar.article_id = a.id
               )
             ORDER BY a.created_at DESC, a.id ASC
-            LIMIT ?
+            LIMIT $2
             "#,
         )
         .bind(category_key)
@@ -189,8 +189,8 @@ impl PublishItemRepository for SqlitePublishItemRepo {
             let result = sqlx::query(
                 r#"
                 UPDATE articles
-                SET state = 'ready_for_publish', updated_at = ?
-                WHERE id = ? AND state = 'persisted'
+                SET state = 'ready_for_publish', updated_at = $1
+                WHERE id = $2 AND state = 'persisted'
                 "#,
             )
             .bind(now)
@@ -216,7 +216,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
                     frozen_title, frozen_summary, frozen_tags_json, frozen_score,
                     frozen_canonical_link, frozen_source_display_name
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 RETURNING id
                 "#,
             )
@@ -240,13 +240,13 @@ impl PublishItemRepository for SqlitePublishItemRepo {
             r#"
             UPDATE publish_records
             SET state = 'snapshot_frozen',
-                snapshot_frozen_at = ?,
+                snapshot_frozen_at = $1,
                 lease_owner = NULL,
                 lease_expires_at = NULL,
                 last_error = NULL,
                 last_error_kind = NULL,
-                updated_at = ?
-            WHERE id = ? AND lease_owner = ? AND state = 'pending'
+                updated_at = $2
+            WHERE id = $3 AND lease_owner = $4 AND state = 'pending'
             "#,
         )
         .bind(now)
@@ -282,7 +282,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
                    frozen_title, frozen_summary, frozen_tags_json, frozen_score,
                    frozen_canonical_link, frozen_source_display_name, created_at
             FROM publish_items
-            WHERE publish_record_id = ?
+            WHERE publish_record_id = $1
             ORDER BY position ASC, id ASC
             "#,
         )

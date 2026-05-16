@@ -149,7 +149,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
                 source_id, feed_entry_uid, normalized_link, link_hash, title_raw,
                 summary_raw, published_at, discovered_at, state, dedup_decision
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_fetch', 'fresh')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending_fetch', 'fresh')
             ON CONFLICT(source_id, feed_entry_uid) DO NOTHING
             RETURNING id
             "#,
@@ -175,7 +175,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
 
     async fn exists_by_link_hash(&self, link_hash: &str) -> Result<bool, StorageError> {
         let exists = sqlx::query_scalar::<_, i32>(
-            "SELECT CASE WHEN EXISTS(SELECT 1 FROM feed_entries WHERE link_hash = ?) THEN 1 ELSE 0 END",
+            "SELECT CASE WHEN EXISTS(SELECT 1 FROM feed_entries WHERE link_hash = $1) THEN 1 ELSE 0 END",
         )
         .bind(link_hash)
         .fetch_one(&self.pool)
@@ -200,17 +200,17 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
             r#"
             UPDATE feed_entries
             SET state = 'fetching',
-                lease_owner = ?,
-                lease_expires_at = ?,
+                lease_owner = $1,
+                lease_expires_at = $2,
                 attempt_count = attempt_count + 1,
-                updated_at = ?
+                updated_at = $3
             WHERE id IN (
                 SELECT id FROM feed_entries
                 WHERE state = 'pending_fetch'
-                  AND (lease_expires_at IS NULL OR lease_expires_at < ?)
-                  AND attempt_count < ?
+                  AND (lease_expires_at IS NULL OR lease_expires_at < $4)
+                  AND attempt_count < $5
                 ORDER BY discovered_at ASC
-                LIMIT ?
+                LIMIT $6
             )
             RETURNING id, source_id, normalized_link, link_hash, title_raw,
                       discovered_at, attempt_count
@@ -237,10 +237,10 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         let result = sqlx::query(
             r#"
             UPDATE feed_entries
-            SET state = 'persisted', article_id = ?, lease_owner = NULL,
+            SET state = 'persisted', article_id = $1, lease_owner = NULL,
                 lease_expires_at = NULL, last_error = NULL, last_error_kind = NULL,
-                updated_at = ?
-            WHERE id = ? AND lease_owner = ?
+                updated_at = $2
+            WHERE id = $3 AND lease_owner = $4
             "#,
         )
         .bind(article_id)
@@ -284,9 +284,9 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
             SET state = 'pending_fetch',
                 lease_owner = NULL,
                 lease_expires_at = NULL,
-                updated_at = ?
+                updated_at = $1
             WHERE lease_expires_at IS NOT NULL
-              AND lease_expires_at < ?
+              AND lease_expires_at < $2
               AND state IN ('fetching', 'extracting')
             "#,
         )
@@ -310,14 +310,14 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
             r#"
             UPDATE feed_entries
             SET state = 'dedup_skipped',
-                dedup_decision = ?,
-                article_id = ?,
+                dedup_decision = $1,
+                article_id = $2,
                 lease_owner = NULL,
                 lease_expires_at = NULL,
                 last_error = NULL,
                 last_error_kind = NULL,
-                updated_at = ?
-            WHERE id = ? AND lease_owner = ?
+                updated_at = $3
+            WHERE id = $4 AND lease_owner = $5
             "#,
         )
         .bind(decision)
@@ -342,13 +342,13 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
             r#"
             UPDATE feed_entries
             SET state = 'fallback_persisted',
-                article_id = ?,
+                article_id = $1,
                 lease_owner = NULL,
                 lease_expires_at = NULL,
                 last_error = NULL,
                 last_error_kind = NULL,
-                updated_at = ?
-            WHERE id = ? AND lease_owner = ?
+                updated_at = $2
+            WHERE id = $3 AND lease_owner = $4
             "#,
         )
         .bind(article_id)
@@ -369,8 +369,8 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
             r#"
             SELECT COUNT(*)
             FROM feed_entries
-            WHERE (?1 IS NULL OR created_at >= ?1)
-              AND (?2 IS NULL OR created_at < ?2)
+            WHERE ($1 IS NULL OR created_at >= $1)
+              AND ($2 IS NULL OR created_at < $2)
             "#,
         )
         .bind(filter.date_from)
@@ -388,10 +388,10 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
                 last_error_kind = NULL,
                 lease_owner = NULL,
                 lease_expires_at = NULL,
-                updated_at = ?3
+                updated_at = $3
             WHERE state = 'failed'
-              AND (?1 IS NULL OR created_at >= ?1)
-              AND (?2 IS NULL OR created_at < ?2)
+              AND ($1 IS NULL OR created_at >= $1)
+              AND ($2 IS NULL OR created_at < $2)
             "#,
         )
         .bind(filter.date_from)
@@ -416,9 +416,9 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
             r#"
             SELECT id, normalized_link, link_hash
             FROM feed_entries
-            WHERE id > ?
+            WHERE id > $1
             ORDER BY id ASC
-            LIMIT ?
+            LIMIT $2
             "#,
         )
         .bind(after_id)
@@ -432,8 +432,8 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         let result = sqlx::query(
             r#"
             UPDATE feed_entries
-            SET link_hash = ?, updated_at = ?
-            WHERE id = ?
+            SET link_hash = $1, updated_at = $2
+            WHERE id = $3
             "#,
         )
         .bind(new_link_hash)
@@ -458,9 +458,9 @@ async fn release_feed_failure(
     let result = sqlx::query(
         r#"
         UPDATE feed_entries
-        SET state = ?, lease_owner = NULL, lease_expires_at = NULL,
-            last_error = ?, last_error_kind = ?, updated_at = ?
-        WHERE id = ? AND lease_owner = ?
+        SET state = $1, lease_owner = NULL, lease_expires_at = NULL,
+            last_error = $2, last_error_kind = $3, updated_at = $4
+        WHERE id = $5 AND lease_owner = $6
         "#,
     )
     .bind(state)
@@ -481,5 +481,5 @@ SELECT id, source_id, feed_entry_uid, normalized_link, link_hash, title_raw,
        article_id, lease_owner, lease_expires_at, attempt_count, last_error,
        last_error_kind, created_at, updated_at
 FROM feed_entries
-WHERE id = ?
+WHERE id = $1
 "#;

@@ -128,7 +128,7 @@ impl ArticleRepository for SqliteArticleRepo {
                 extractor_strategy, extractor_version, content_quality, word_count,
                 origin_feed_entry_id, state
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'persisted')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'persisted')
             ON CONFLICT(content_hash) DO NOTHING
             RETURNING id
             "#,
@@ -150,11 +150,12 @@ impl ArticleRepository for SqliteArticleRepo {
         let (article_id, newly_created) = if let Some(id) = inserted_id {
             (id, true)
         } else {
-            let id = sqlx::query_scalar::<_, i64>("SELECT id FROM articles WHERE content_hash = ?")
-                .bind(&article.content_hash)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(StorageError::from)?;
+            let id =
+                sqlx::query_scalar::<_, i64>("SELECT id FROM articles WHERE content_hash = $1")
+                    .bind(&article.content_hash)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(StorageError::from)?;
             (id, false)
         };
 
@@ -173,7 +174,7 @@ impl ArticleRepository for SqliteArticleRepo {
                    content_quality, word_count, origin_feed_entry_id, state,
                    created_at, updated_at
             FROM articles
-            WHERE id = ?
+            WHERE id = $1
             "#,
         )
         .bind(id)
@@ -193,9 +194,9 @@ impl ArticleRepository for SqliteArticleRepo {
             r#"
             SELECT id AS article_id, title, body_text, origin_feed_entry_id
             FROM articles
-            WHERE state = 'persisted' AND id > ?
+            WHERE state = 'persisted' AND id > $1
             ORDER BY id ASC
-            LIMIT ?
+            LIMIT $2
             "#,
         )
         .bind(after_id)
@@ -218,11 +219,11 @@ impl ArticleRepository for SqliteArticleRepo {
             SELECT id AS article_id, state
             FROM articles
             WHERE state <> 'retired'
-              AND id > ?1
-              AND (?2 IS NULL OR created_at >= ?2)
-              AND (?3 IS NULL OR created_at < ?3)
+              AND id > $1
+              AND ($2 IS NULL OR created_at >= $2)
+              AND ($3 IS NULL OR created_at < $3)
             ORDER BY id ASC
-            LIMIT ?4
+            LIMIT $4
             "#,
         )
         .bind(after_id)
@@ -248,9 +249,9 @@ impl ArticleRepository for SqliteArticleRepo {
             r#"
             SELECT id, body_text, content_hash
             FROM articles
-            WHERE id > ?
+            WHERE id > $1
             ORDER BY id ASC
-            LIMIT ?
+            LIMIT $2
             "#,
         )
         .bind(after_id)
@@ -272,8 +273,8 @@ impl ArticleRepository for SqliteArticleRepo {
                 let result = sqlx::query(
                     r#"
                     UPDATE articles
-                    SET content_hash = ?, updated_at = ?
-                    WHERE id = ?
+                    SET content_hash = $1, updated_at = $2
+                    WHERE id = $3
                     "#,
                 )
                 .bind(new_content_hash)
@@ -297,7 +298,7 @@ impl ArticleRepository for SqliteArticleRepo {
         new_content_hash: &str,
     ) -> Result<UpdateContentHashOutcome, StorageError> {
         let current =
-            sqlx::query_scalar::<_, String>("SELECT content_hash FROM articles WHERE id = ?")
+            sqlx::query_scalar::<_, String>("SELECT content_hash FROM articles WHERE id = $1")
                 .bind(id)
                 .fetch_optional(&self.pool)
                 .await
@@ -310,7 +311,7 @@ impl ArticleRepository for SqliteArticleRepo {
         }
 
         let conflict = sqlx::query_scalar::<_, i32>(
-            "SELECT CASE WHEN EXISTS(SELECT 1 FROM articles WHERE content_hash = ? AND id <> ?) THEN 1 ELSE 0 END",
+            "SELECT CASE WHEN EXISTS(SELECT 1 FROM articles WHERE content_hash = $1 AND id <> $2) THEN 1 ELSE 0 END",
         )
         .bind(new_content_hash)
         .bind(id)
