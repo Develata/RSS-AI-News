@@ -631,10 +631,10 @@ fn success_outcome_from_response(
         importance_score,
         keep_decision,
         raw_response_artifact_id: raw_artifact_id,
-        tokens_in: usage.map(|usage| clamp_u64_to_i32(usage.tokens_in)),
-        tokens_out: usage.map(|usage| clamp_u64_to_i32(usage.tokens_out)),
+        tokens_in: usage.map(|usage| clamp_u64_to_i64(usage.tokens_in)),
+        tokens_out: usage.map(|usage| clamp_u64_to_i64(usage.tokens_out)),
         cost_micro_usd: usage.and_then(|usage| usage.cost_micro_usd),
-        latency_ms: Some(clamp_u64_to_i32(response.latency_ms)),
+        latency_ms: Some(clamp_u64_to_i64(response.latency_ms)),
     })
 }
 
@@ -749,8 +749,8 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-fn clamp_u64_to_i32(value: u64) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
+fn clamp_u64_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn ai_task_status_str(status: &AiTaskStatus) -> &'static str {

@@ -28,10 +28,10 @@ pub struct AiSuccessOutcome {
     pub importance_score: Option<i32>,
     pub keep_decision: Option<bool>,
     pub raw_response_artifact_id: Option<i64>,
-    pub tokens_in: Option<i32>,
-    pub tokens_out: Option<i32>,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
     pub cost_micro_usd: Option<i64>,
-    pub latency_ms: Option<i32>,
+    pub latency_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
