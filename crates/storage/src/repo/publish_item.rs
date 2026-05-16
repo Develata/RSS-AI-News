@@ -5,7 +5,7 @@ use rss_ai_news_domain::{Score0To100, model::PublishItem};
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::StorageError;
+use crate::{StorageError, StoragePool};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct PublishCandidateRow {
@@ -79,12 +79,23 @@ pub trait PublishItemRepository: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct SqlitePublishItemRepo {
-    pool: SqlitePool,
+    pool: StoragePool,
 }
 
 impl SqlitePublishItemRepo {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool: StoragePool::Sqlite(pool),
+        }
+    }
+
+    fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => Ok(p),
+            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
+                "publish_item_repo postgres path is P3+".into(),
+            )),
+        }
     }
 }
 
@@ -96,6 +107,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
         min_importance_score: i32,
         max_items: NonZeroU32,
     ) -> Result<Vec<PublishCandidateRow>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_as::<_, PublishCandidateRow>(
             r#"
             WITH ranked AS (
@@ -134,7 +146,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
         .bind(min_importance_score)
         .bind(category_key)
         .bind(i64::from(max_items.get()))
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await
         .map_err(StorageError::from)
     }
@@ -144,6 +156,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
         category_key: &str,
         max_items: NonZeroU32,
     ) -> Result<Vec<PublishCandidateRow>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_as::<_, PublishCandidateRow>(
             r#"
             SELECT a.id AS article_id,
@@ -170,7 +183,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
         )
         .bind(category_key)
         .bind(i64::from(max_items.get()))
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await
         .map_err(StorageError::from)
     }
@@ -183,7 +196,8 @@ impl PublishItemRepository for SqlitePublishItemRepo {
         ai_off_promote_article_ids: Vec<i64>,
         now: OffsetDateTime,
     ) -> Result<FreezeSnapshotOutcome, StorageError> {
-        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+        let pool = self.sqlite_pool()?;
+        let mut tx = pool.begin().await.map_err(StorageError::from)?;
 
         for article_id in ai_off_promote_article_ids {
             let result = sqlx::query(
@@ -276,6 +290,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
         &self,
         publish_record_id: i64,
     ) -> Result<Vec<PublishItem>, StorageError> {
+        let pool = self.sqlite_pool()?;
         let rows = sqlx::query_as::<_, PublishItemRow>(
             r#"
             SELECT id, publish_record_id, position, article_id, article_ai_result_id,
@@ -287,7 +302,7 @@ impl PublishItemRepository for SqlitePublishItemRepo {
             "#,
         )
         .bind(publish_record_id)
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await
         .map_err(StorageError::from)?;
 

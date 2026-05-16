@@ -6,7 +6,7 @@ use rss_ai_news_domain::{
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{StorageError, classify_sqlite_error};
+use crate::{StorageError, StoragePool, classify_sqlite_error};
 
 /// F15-fix7：reindex `categories` target 写 `feed_sources` 时的 lease-guarded
 /// 写入结果。`upsert_with_lease_guard` / `mark_archived_with_lease_guard`
@@ -92,18 +92,30 @@ pub trait FeedSourceRepository: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct SqliteFeedSourceRepo {
-    pool: SqlitePool,
+    pool: StoragePool,
 }
 
 impl SqliteFeedSourceRepo {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool: StoragePool::Sqlite(pool),
+        }
+    }
+
+    fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => Ok(p),
+            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
+                "feed_source_repo postgres path is P3+".into(),
+            )),
+        }
     }
 }
 
 #[async_trait]
 impl FeedSourceRepository for SqliteFeedSourceRepo {
     async fn upsert(&self, src: &FeedSource) -> Result<i64, StorageError> {
+        let pool = self.sqlite_pool()?;
         let id = sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO feed_sources (
@@ -148,7 +160,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         .bind(src.config_version)
         .bind(src.created_at)
         .bind(src.updated_at)
-        .fetch_one(&self.pool)
+        .fetch_one(pool)
         .await
         .map_err(|error| {
             classify_sqlite_error(
@@ -162,9 +174,10 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
     }
 
     async fn find_by_id(&self, id: i64) -> Result<Option<FeedSource>, StorageError> {
+        let pool = self.sqlite_pool()?;
         let row = sqlx::query_as::<_, FeedSourceRow>(SELECT_FEED_SOURCE_BY_ID)
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(pool)
             .await
             .map_err(StorageError::from)?;
 
@@ -176,10 +189,11 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         category_key: &str,
         source_key: &str,
     ) -> Result<Option<FeedSource>, StorageError> {
+        let pool = self.sqlite_pool()?;
         let row = sqlx::query_as::<_, FeedSourceRow>(SELECT_FEED_SOURCE_BY_KEYS)
             .bind(category_key)
             .bind(source_key)
-            .fetch_optional(&self.pool)
+            .fetch_optional(pool)
             .await
             .map_err(StorageError::from)?;
 
@@ -187,6 +201,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
     }
 
     async fn list_by_category(&self, category_key: &str) -> Result<Vec<FeedSource>, StorageError> {
+        let pool = self.sqlite_pool()?;
         let rows = sqlx::query_as::<_, FeedSourceRow>(
             r#"
             SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
@@ -199,7 +214,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
             "#,
         )
         .bind(category_key)
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await
         .map_err(StorageError::from)?;
 
@@ -207,6 +222,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
     }
 
     async fn list_all(&self) -> Result<Vec<FeedSource>, StorageError> {
+        let pool = self.sqlite_pool()?;
         let rows = sqlx::query_as::<_, FeedSourceRow>(
             r#"
             SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
@@ -217,7 +233,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
             ORDER BY id ASC
             "#,
         )
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await
         .map_err(StorageError::from)?;
 
@@ -225,6 +241,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
     }
 
     async fn mark_archived(&self, id: i64) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE feed_sources
@@ -234,7 +251,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         )
         .bind(OffsetDateTime::now_utc())
         .bind(id)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
 
@@ -248,7 +265,8 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         owner: &str,
         now: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
-        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+        let pool = self.sqlite_pool()?;
+        let mut tx = pool.begin().await.map_err(StorageError::from)?;
 
         // 1) lease guard：与 `ReindexJobRepository::assert_lease_held` 同语义
         //    的 UPDATE——rows_affected 充当谓词，顺手把 reindex_jobs.updated_at
@@ -340,7 +358,8 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         owner: &str,
         now: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
-        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+        let pool = self.sqlite_pool()?;
+        let mut tx = pool.begin().await.map_err(StorageError::from)?;
 
         let lease = sqlx::query(
             r#"
@@ -389,6 +408,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         fetched_at: OffsetDateTime,
         success_at: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE feed_sources
@@ -409,7 +429,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         .bind(success_at)
         .bind(fetched_at)
         .bind(id)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
 
@@ -423,6 +443,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         error_msg: &str,
         error_kind: &str,
     ) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE feed_sources
@@ -439,7 +460,7 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         .bind(error_kind)
         .bind(fetched_at)
         .bind(id)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
 

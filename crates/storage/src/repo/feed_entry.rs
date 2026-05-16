@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{ClaimRequest, StorageError, classify_sqlite_error};
+use crate::{ClaimRequest, StorageError, StoragePool, classify_sqlite_error};
 
 #[derive(Debug, Clone)]
 pub struct NewFeedEntry {
@@ -131,18 +131,30 @@ pub trait FeedEntryRepository: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct SqliteFeedEntryRepo {
-    pool: SqlitePool,
+    pool: StoragePool,
 }
 
 impl SqliteFeedEntryRepo {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool: StoragePool::Sqlite(pool),
+        }
+    }
+
+    fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => Ok(p),
+            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
+                "feed_entry_repo postgres path is P3+".into(),
+            )),
+        }
     }
 }
 
 #[async_trait]
 impl FeedEntryRepository for SqliteFeedEntryRepo {
     async fn insert_if_new(&self, entry: &NewFeedEntry) -> Result<Option<i64>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO feed_entries (
@@ -162,7 +174,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         .bind(&entry.summary_raw)
         .bind(entry.published_at)
         .bind(entry.discovered_at)
-        .fetch_optional(&self.pool)
+        .fetch_optional(pool)
         .await
         .map_err(|error| {
             classify_sqlite_error(
@@ -174,20 +186,22 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
     }
 
     async fn exists_by_link_hash(&self, link_hash: &str) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let exists = sqlx::query_scalar::<_, i32>(
             "SELECT CASE WHEN EXISTS(SELECT 1 FROM feed_entries WHERE link_hash = $1) THEN 1 ELSE 0 END",
         )
         .bind(link_hash)
-        .fetch_one(&self.pool)
+        .fetch_one(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(exists != 0)
     }
 
     async fn find_by_id(&self, id: i64) -> Result<Option<FeedEntry>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_as::<_, FeedEntry>(SELECT_FEED_ENTRY_BY_ID)
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(pool)
             .await
             .map_err(StorageError::from)
     }
@@ -196,6 +210,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         &self,
         request: &ClaimRequest,
     ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_as::<_, ClaimedFeedEntry>(
             r#"
             UPDATE feed_entries
@@ -222,7 +237,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         .bind(request.now)
         .bind(i64::from(request.max_attempts))
         .bind(i64::from(request.batch_size))
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await
         .map_err(StorageError::from)
     }
@@ -234,6 +249,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         article_id: i64,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE feed_entries
@@ -247,7 +263,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         .bind(now)
         .bind(id)
         .bind(owner)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected() == 1)
@@ -261,7 +277,16 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         kind: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
-        release_feed_failure(&self.pool, id, owner, error, kind, now, "pending_fetch").await
+        release_feed_failure(
+            self.sqlite_pool()?,
+            id,
+            owner,
+            error,
+            kind,
+            now,
+            "pending_fetch",
+        )
+        .await
     }
 
     async fn release_permanent_failure(
@@ -272,12 +297,13 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         kind: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
-        release_feed_failure(&self.pool, id, owner, error, kind, now, "failed").await
+        release_feed_failure(self.sqlite_pool()?, id, owner, error, kind, now, "failed").await
     }
 
     async fn reclaim_expired_leases(&self, now: OffsetDateTime) -> Result<u64, StorageError> {
         // 设计 §5.5 写明 reclaim 不改 state，但 §5.1 只领取 pending_fetch。
         // 这里按 W4b 指令采用方案 A：过期 fetching/extracting 回到 pending_fetch。
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE feed_entries
@@ -292,7 +318,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         )
         .bind(now)
         .bind(now)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected())
@@ -306,6 +332,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         decision: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE feed_entries
@@ -325,7 +352,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         .bind(now)
         .bind(id)
         .bind(owner)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected() == 1)
@@ -338,6 +365,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         article_id: i64,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE feed_entries
@@ -355,7 +383,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         .bind(now)
         .bind(id)
         .bind(owner)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected() == 1)
@@ -365,6 +393,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         &self,
         filter: &ResetFailedFilter,
     ) -> Result<ResetFailedOutcome, StorageError> {
+        let pool = self.sqlite_pool()?;
         let examined = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT COUNT(*)
@@ -375,7 +404,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         )
         .bind(filter.date_from)
         .bind(filter.date_to)
-        .fetch_one(&self.pool)
+        .fetch_one(pool)
         .await
         .map_err(StorageError::from)?;
 
@@ -397,7 +426,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         .bind(filter.date_from)
         .bind(filter.date_to)
         .bind(OffsetDateTime::now_utc())
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
 
@@ -412,6 +441,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         after_id: i64,
         batch_size: u32,
     ) -> Result<Vec<LinkHashReindexCandidate>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_as::<_, LinkHashReindexCandidate>(
             r#"
             SELECT id, normalized_link, link_hash
@@ -423,12 +453,13 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         )
         .bind(after_id)
         .bind(i64::from(batch_size))
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await
         .map_err(StorageError::from)
     }
 
     async fn update_link_hash(&self, id: i64, new_link_hash: &str) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE feed_entries
@@ -439,7 +470,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         .bind(new_link_hash)
         .bind(OffsetDateTime::now_utc())
         .bind(id)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected() == 1)

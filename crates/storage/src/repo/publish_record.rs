@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{ClaimRequest, StorageError};
+use crate::{ClaimRequest, StorageError, StoragePool};
 
 #[derive(Debug, Clone)]
 pub struct NewPublishRecord {
@@ -174,11 +174,22 @@ pub trait PublishRecordRepository: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct SqlitePublishRecordRepo {
-    pub(super) pool: SqlitePool,
+    pub(super) pool: StoragePool,
 }
 
 impl SqlitePublishRecordRepo {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool: StoragePool::Sqlite(pool),
+        }
+    }
+
+    pub(super) fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => Ok(p),
+            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
+                "publish_record_repo postgres path is P3+".into(),
+            )),
+        }
     }
 }

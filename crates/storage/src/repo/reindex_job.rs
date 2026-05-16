@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{StorageError, classify_sqlite_error};
+use crate::{StorageError, StoragePool, classify_sqlite_error};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct ReindexJob {
@@ -275,12 +275,23 @@ pub trait ReindexJobRepository: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct SqliteReindexJobRepo {
-    pool: SqlitePool,
+    pool: StoragePool,
 }
 
 impl SqliteReindexJobRepo {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool: StoragePool::Sqlite(pool),
+        }
+    }
+
+    fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => Ok(p),
+            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
+                "reindex_job_repo postgres path is P3+".into(),
+            )),
+        }
     }
 }
 
@@ -301,7 +312,8 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         target: &str,
         now: OffsetDateTime,
     ) -> Result<StartReindexTxOutcome, StorageError> {
-        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+        let pool = self.sqlite_pool()?;
+        let mut tx = pool.begin().await.map_err(StorageError::from)?;
 
         let rule_version_id = sqlx::query_scalar::<_, i64>(
             r#"
@@ -360,6 +372,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         id: i64,
         finished_at: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE reindex_jobs
@@ -374,7 +387,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         .bind(finished_at)
         .bind(finished_at)
         .bind(id)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected() == 1)
@@ -388,7 +401,8 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         rule_kind: &str,
         finished_at: OffsetDateTime,
     ) -> Result<FinishReindexTxOutcome, StorageError> {
-        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+        let pool = self.sqlite_pool()?;
+        let mut tx = pool.begin().await.map_err(StorageError::from)?;
 
         // 1) reindex_jobs running → completed（带 lease guard）。
         let job_update = sqlx::query(
@@ -472,6 +486,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         rule_version_id: i64,
         now: OffsetDateTime,
     ) -> Result<i64, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO reindex_jobs (
@@ -486,7 +501,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         .bind(rule_version_id)
         .bind(now)
         .bind(now)
-        .fetch_one(&self.pool)
+        .fetch_one(pool)
         .await
         .map_err(|error| {
             classify_sqlite_error(
@@ -503,6 +518,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         now: OffsetDateTime,
         lease_expires_at: OffsetDateTime,
     ) -> Result<Option<ClaimedReindexJob>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_as::<_, ClaimedReindexJob>(
             r#"
             UPDATE reindex_jobs
@@ -527,7 +543,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         .bind(now)
         .bind(now)
         .bind(now)
-        .fetch_optional(&self.pool)
+        .fetch_optional(pool)
         .await
         .map_err(StorageError::from)
     }
@@ -539,6 +555,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         now: OffsetDateTime,
         lease_expires_at: OffsetDateTime,
     ) -> Result<Option<ClaimedReindexJob>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_as::<_, ClaimedReindexJob>(
             r#"
             UPDATE reindex_jobs
@@ -560,7 +577,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         .bind(now)
         .bind(id)
         .bind(now)
-        .fetch_optional(&self.pool)
+        .fetch_optional(pool)
         .await
         .map_err(StorageError::from)
     }
@@ -572,6 +589,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         last_processed_id: i64,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE reindex_jobs
@@ -583,7 +601,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         .bind(now)
         .bind(id)
         .bind(owner)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected() == 1)
@@ -595,6 +613,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         owner: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE reindex_jobs
@@ -605,7 +624,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         .bind(now)
         .bind(id)
         .bind(owner)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected() == 1)
@@ -617,6 +636,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         owner: &str,
         finished_at: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE reindex_jobs
@@ -632,7 +652,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         .bind(finished_at)
         .bind(id)
         .bind(owner)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected() == 1)
@@ -645,6 +665,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         error: &str,
         finished_at: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE reindex_jobs
@@ -662,7 +683,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         .bind(finished_at)
         .bind(id)
         .bind(owner)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected() == 1)
@@ -674,6 +695,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         aborted_reason: &str,
         finished_at: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE reindex_jobs
@@ -690,13 +712,14 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         .bind(finished_at)
         .bind(finished_at)
         .bind(id)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected() == 1)
     }
 
     async fn reclaim_expired_leases(&self, now: OffsetDateTime) -> Result<u64, StorageError> {
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE reindex_jobs
@@ -711,13 +734,14 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         )
         .bind(now)
         .bind(now)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected())
     }
 
     async fn list_running(&self) -> Result<Vec<ReindexJob>, StorageError> {
+        let pool = self.sqlite_pool()?;
         let sql = format!(
             "SELECT {SELECT_REINDEX_JOB_COLUMNS} \
              FROM reindex_jobs \
@@ -725,17 +749,18 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
              ORDER BY id ASC"
         );
         sqlx::query_as::<_, ReindexJob>(&sql)
-            .fetch_all(&self.pool)
+            .fetch_all(pool)
             .await
             .map_err(StorageError::from)
     }
 
     async fn find_by_id(&self, id: i64) -> Result<Option<ReindexJob>, StorageError> {
+        let pool = self.sqlite_pool()?;
         let sql =
             format!("SELECT {SELECT_REINDEX_JOB_COLUMNS} FROM reindex_jobs WHERE id = $1 LIMIT 1");
         sqlx::query_as::<_, ReindexJob>(&sql)
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(pool)
             .await
             .map_err(StorageError::from)
     }
@@ -744,6 +769,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         &self,
         target: &str,
     ) -> Result<Option<ReindexJob>, StorageError> {
+        let pool = self.sqlite_pool()?;
         let sql = format!(
             "SELECT {SELECT_REINDEX_JOB_COLUMNS} \
              FROM reindex_jobs \
@@ -752,7 +778,7 @@ impl ReindexJobRepository for SqliteReindexJobRepo {
         );
         sqlx::query_as::<_, ReindexJob>(&sql)
             .bind(target)
-            .fetch_optional(&self.pool)
+            .fetch_optional(pool)
             .await
             .map_err(StorageError::from)
     }

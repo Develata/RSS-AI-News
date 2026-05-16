@@ -16,6 +16,8 @@ pub enum StorageError {
     Corruption(String),
     #[error("migration failed: {0}")]
     Migration(String),
+    #[error("unsupported storage backend: {0}")]
+    UnsupportedBackend(String),
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
 }
@@ -51,6 +53,7 @@ impl ClassifiedError for StorageError {
             Self::Timeout => "db_timeout",
             Self::Corruption(_) => "corruption",
             Self::Migration(_) => "migration",
+            Self::UnsupportedBackend(_) => "unsupported_backend",
             Self::Sqlx(error) => match error {
                 sqlx::Error::PoolTimedOut => "db_timeout",
                 sqlx::Error::Io(_) => "db_unavailable",

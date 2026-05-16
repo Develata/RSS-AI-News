@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use sqlx::SqlitePool;
 
-use crate::{StorageError, classify_sqlite_error};
+use crate::{StorageError, StoragePool, classify_sqlite_error};
 
 #[derive(Debug, Clone)]
 pub struct NewRunEvent {
@@ -23,18 +23,30 @@ pub trait RunEventRepository: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct SqliteRunEventRepo {
-    pool: SqlitePool,
+    pool: StoragePool,
 }
 
 impl SqliteRunEventRepo {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool: StoragePool::Sqlite(pool),
+        }
+    }
+
+    fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => Ok(p),
+            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
+                "run_event_repo postgres path is P3+".into(),
+            )),
+        }
     }
 }
 
 #[async_trait]
 impl RunEventRepository for SqliteRunEventRepo {
     async fn insert(&self, event: &NewRunEvent) -> Result<i64, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO run_events (
@@ -54,7 +66,7 @@ impl RunEventRepository for SqliteRunEventRepo {
         .bind(event.target_id)
         .bind(&event.message)
         .bind(&event.context_json)
-        .fetch_one(&self.pool)
+        .fetch_one(pool)
         .await
         .map_err(|error| classify_sqlite_error(error, "run_events", &event.run_id))
     }

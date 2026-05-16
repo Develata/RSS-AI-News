@@ -3,7 +3,7 @@ use rss_ai_news_config::{ConfigVersionStore, ConfigVersionStoreError};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
-use crate::{StorageError, classify_sqlite_error};
+use crate::{StorageError, StoragePool, classify_sqlite_error};
 
 /// 单条 `rule_versions` 行的领域投影。所有规则消费方（ingest / extract /
 /// ai_run / publish / rebuild）通过 [`RuleVersionRepository::active_rule`]
@@ -79,23 +79,35 @@ pub trait RuleVersionRepository: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct SqliteRuleVersionRepo {
-    pool: SqlitePool,
+    pool: StoragePool,
 }
 
 impl SqliteRuleVersionRepo {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool: StoragePool::Sqlite(pool),
+        }
+    }
+
+    fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => Ok(p),
+            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
+                "rule_version_repo postgres path is P3+".into(),
+            )),
+        }
     }
 
     pub async fn get_or_create_config_version_async(
         &self,
         sha256: &str,
     ) -> Result<i64, StorageError> {
+        let pool = self.sqlite_pool()?;
         if let Some(id) = sqlx::query_scalar::<_, i64>(
             "SELECT id FROM rule_versions WHERE kind = 'config' AND payload_sha256 = $1 LIMIT 1",
         )
         .bind(sha256)
-        .fetch_optional(&self.pool)
+        .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?
         {
@@ -129,6 +141,7 @@ impl RuleVersionRepository for SqliteRuleVersionRepo {
         description: &str,
         payload_sha256: &str,
     ) -> Result<i64, StorageError> {
+        let pool = self.sqlite_pool()?;
         // F15-1 引入了 partial unique index `uq_rule_versions_kind_active`
         // (kind WHERE status='active')。get_or_create 不感知"是否首版"，因此
         // 用 CASE/EXISTS 子查询自动选 status：当该 kind 已有 active 行则
@@ -157,7 +170,7 @@ impl RuleVersionRepository for SqliteRuleVersionRepo {
         .bind(description)
         .bind(payload_sha256)
         .bind(kind)
-        .fetch_optional(&self.pool)
+        .fetch_optional(pool)
         .await
         .map_err(|error| {
             classify_sqlite_error(error, "rule_versions", format!("{kind}/{version_tag}"))
@@ -172,7 +185,7 @@ impl RuleVersionRepository for SqliteRuleVersionRepo {
         )
         .bind(kind)
         .bind(version_tag)
-        .fetch_one(&self.pool)
+        .fetch_one(pool)
         .await
         .map_err(StorageError::from)
     }
@@ -184,6 +197,7 @@ impl RuleVersionRepository for SqliteRuleVersionRepo {
         description: &str,
         payload_sha256: &str,
     ) -> Result<i64, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status)
@@ -195,7 +209,7 @@ impl RuleVersionRepository for SqliteRuleVersionRepo {
         .bind(version_tag)
         .bind(description)
         .bind(payload_sha256)
-        .fetch_one(&self.pool)
+        .fetch_one(pool)
         .await
         .map_err(|error| {
             classify_sqlite_error(error, "rule_versions", format!("{kind}/{version_tag}"))
@@ -203,6 +217,7 @@ impl RuleVersionRepository for SqliteRuleVersionRepo {
     }
 
     async fn active_rule(&self, kind: &str) -> Result<Option<RuleVersion>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_as::<
             _,
             (
@@ -225,7 +240,7 @@ impl RuleVersionRepository for SqliteRuleVersionRepo {
             "#,
         )
         .bind(kind)
-        .fetch_optional(&self.pool)
+        .fetch_optional(pool)
         .await
         .map_err(StorageError::from)
         .map(|opt| {

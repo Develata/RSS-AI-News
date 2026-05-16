@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{ClaimRequest, StorageError, classify_sqlite_error};
+use crate::{ClaimRequest, StorageError, StoragePool, classify_sqlite_error};
 
 #[derive(Debug, Clone)]
 pub struct NewAiResult {
@@ -112,18 +112,30 @@ pub trait ArticleAiResultRepository: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct SqliteArticleAiResultRepo {
-    pool: SqlitePool,
+    pool: StoragePool,
 }
 
 impl SqliteArticleAiResultRepo {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool: StoragePool::Sqlite(pool),
+        }
+    }
+
+    fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => Ok(p),
+            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
+                "article_ai_result_repo postgres path is P3+".into(),
+            )),
+        }
     }
 }
 
 #[async_trait]
 impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
     async fn insert_pending(&self, item: &NewAiResult) -> Result<Option<i64>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO article_ai_results (
@@ -138,7 +150,7 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         .bind(item.prompt_version)
         .bind(item.output_schema_version)
         .bind(&item.model_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(pool)
         .await
         .map_err(|error| {
             classify_sqlite_error(
@@ -156,6 +168,7 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         &self,
         request: &ClaimRequest,
     ) -> Result<Vec<ClaimedAiResult>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_as::<_, ClaimedAiResult>(
             r#"
             UPDATE article_ai_results
@@ -183,7 +196,7 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         .bind(request.now)
         .bind(i64::from(request.max_attempts))
         .bind(i64::from(request.batch_size))
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await
         .map_err(StorageError::from)
     }
@@ -195,6 +208,7 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         outcome: AiSuccessOutcome,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        let pool = self.sqlite_pool()?;
         let state = if outcome.keep_decision == Some(false) {
             "filtered"
         } else {
@@ -227,7 +241,7 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         .bind(now)
         .bind(id)
         .bind(owner)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected() == 1)
@@ -241,7 +255,7 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         kind: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
-        release_ai_failure(&self.pool, id, owner, error, kind, now, "pending").await
+        release_ai_failure(self.sqlite_pool()?, id, owner, error, kind, now, "pending").await
     }
 
     async fn release_permanent_failure(
@@ -252,11 +266,21 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         kind: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
-        release_ai_failure(&self.pool, id, owner, error, kind, now, "permanent_failed").await
+        release_ai_failure(
+            self.sqlite_pool()?,
+            id,
+            owner,
+            error,
+            kind,
+            now,
+            "permanent_failed",
+        )
+        .await
     }
 
     async fn reclaim_expired_leases(&self, now: OffsetDateTime) -> Result<u64, StorageError> {
         // 同 feed_entries：为保证下一轮 claim 可见，running 过期行回到 pending。
+        let pool = self.sqlite_pool()?;
         let result = sqlx::query(
             r#"
             UPDATE article_ai_results
@@ -271,7 +295,7 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         )
         .bind(now)
         .bind(now)
-        .execute(&self.pool)
+        .execute(pool)
         .await
         .map_err(StorageError::from)?;
         Ok(result.rows_affected())
@@ -282,7 +306,8 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         item: &NewAiResult,
         now: OffsetDateTime,
     ) -> Result<InsertPendingOutcome, StorageError> {
-        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+        let pool = self.sqlite_pool()?;
+        let mut tx = pool.begin().await.map_err(StorageError::from)?;
         let inserted_id = sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO article_ai_results (
@@ -363,9 +388,10 @@ impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
         min_importance_score: i32,
         now: OffsetDateTime,
     ) -> Result<ReleaseSuccessOutcome, StorageError> {
+        let pool = self.sqlite_pool()?;
         let keep_decision = outcome.keep_decision;
         let importance_score = outcome.importance_score;
-        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+        let mut tx = pool.begin().await.map_err(StorageError::from)?;
         let state = if keep_decision == Some(false) {
             "filtered"
         } else {

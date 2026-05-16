@@ -4,7 +4,7 @@ use rss_ai_news_domain::state::{ArticleState, ContentQuality, ExtractorStrategy}
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{StorageError, classify_sqlite_error};
+use crate::{StorageError, StoragePool, classify_sqlite_error};
 
 #[derive(Debug, Clone)]
 pub struct NewArticle {
@@ -105,12 +105,23 @@ pub trait ArticleRepository: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct SqliteArticleRepo {
-    pool: SqlitePool,
+    pool: StoragePool,
 }
 
 impl SqliteArticleRepo {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool: StoragePool::Sqlite(pool),
+        }
+    }
+
+    fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => Ok(p),
+            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
+                "article_repo postgres path is P3+".into(),
+            )),
+        }
     }
 }
 
@@ -120,7 +131,8 @@ impl ArticleRepository for SqliteArticleRepo {
         &self,
         article: &NewArticle,
     ) -> Result<ArticleInsertOutcome, StorageError> {
-        let mut tx = self.pool.begin().await.map_err(StorageError::from)?;
+        let pool = self.sqlite_pool()?;
+        let mut tx = pool.begin().await.map_err(StorageError::from)?;
         let inserted_id = sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO articles (
@@ -167,6 +179,7 @@ impl ArticleRepository for SqliteArticleRepo {
     }
 
     async fn find_by_id(&self, id: i64) -> Result<Option<Article>, StorageError> {
+        let pool = self.sqlite_pool()?;
         let row = sqlx::query_as::<_, ArticleRow>(
             r#"
             SELECT id, content_hash, canonical_link, title, body_text,
@@ -178,7 +191,7 @@ impl ArticleRepository for SqliteArticleRepo {
             "#,
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;
 
@@ -190,6 +203,7 @@ impl ArticleRepository for SqliteArticleRepo {
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_as::<_, ArticleAiTaskCandidateRow>(
             r#"
             SELECT id AS article_id, title, body_text, origin_feed_entry_id
@@ -201,7 +215,7 @@ impl ArticleRepository for SqliteArticleRepo {
         )
         .bind(after_id)
         .bind(i64::from(batch_size))
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await
         .map(|rows| rows.into_iter().map(ArticleAiTaskCandidate::from).collect())
         .map_err(StorageError::from)
@@ -214,6 +228,7 @@ impl ArticleRepository for SqliteArticleRepo {
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<BackfillArticleCandidate>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_as::<_, BackfillArticleCandidateRow>(
             r#"
             SELECT id AS article_id, state
@@ -230,7 +245,7 @@ impl ArticleRepository for SqliteArticleRepo {
         .bind(date_from)
         .bind(date_to)
         .bind(i64::from(batch_size))
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await
         .map(|rows| {
             rows.into_iter()
@@ -245,6 +260,7 @@ impl ArticleRepository for SqliteArticleRepo {
         after_id: i64,
         batch_size: u32,
     ) -> Result<Vec<ContentHashReindexCandidate>, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_as::<_, ContentHashReindexCandidate>(
             r#"
             SELECT id, body_text, content_hash
@@ -256,7 +272,7 @@ impl ArticleRepository for SqliteArticleRepo {
         )
         .bind(after_id)
         .bind(i64::from(batch_size))
-        .fetch_all(&self.pool)
+        .fetch_all(pool)
         .await
         .map_err(StorageError::from)
     }
@@ -270,6 +286,7 @@ impl ArticleRepository for SqliteArticleRepo {
             UpdateContentHashOutcome::Unchanged => Ok(UpdateContentHashOutcome::Unchanged),
             UpdateContentHashOutcome::Conflict => Ok(UpdateContentHashOutcome::Conflict),
             UpdateContentHashOutcome::Updated => {
+                let pool = self.sqlite_pool()?;
                 let result = sqlx::query(
                     r#"
                     UPDATE articles
@@ -280,7 +297,7 @@ impl ArticleRepository for SqliteArticleRepo {
                 .bind(new_content_hash)
                 .bind(OffsetDateTime::now_utc())
                 .bind(id)
-                .execute(&self.pool)
+                .execute(pool)
                 .await
                 .map_err(StorageError::from)?;
                 if result.rows_affected() == 1 {
@@ -297,10 +314,11 @@ impl ArticleRepository for SqliteArticleRepo {
         id: i64,
         new_content_hash: &str,
     ) -> Result<UpdateContentHashOutcome, StorageError> {
+        let pool = self.sqlite_pool()?;
         let current =
             sqlx::query_scalar::<_, String>("SELECT content_hash FROM articles WHERE id = $1")
                 .bind(id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(pool)
                 .await
                 .map_err(StorageError::from)?;
         let Some(current) = current else {
@@ -315,7 +333,7 @@ impl ArticleRepository for SqliteArticleRepo {
         )
         .bind(new_content_hash)
         .bind(id)
-        .fetch_one(&self.pool)
+        .fetch_one(pool)
         .await
         .map_err(StorageError::from)?
             != 0;

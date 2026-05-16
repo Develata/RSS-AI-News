@@ -3,7 +3,7 @@ use rss_ai_news_domain::{model::RawArtifact, state::ArtifactKind};
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{StorageError, classify_sqlite_error};
+use crate::{StorageError, StoragePool, classify_sqlite_error};
 
 #[derive(Debug, Clone)]
 pub struct NewRawArtifact {
@@ -30,18 +30,30 @@ pub trait RawArtifactRepository: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct SqliteRawArtifactRepo {
-    pool: SqlitePool,
+    pool: StoragePool,
 }
 
 impl SqliteRawArtifactRepo {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool: StoragePool::Sqlite(pool),
+        }
+    }
+
+    fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => Ok(p),
+            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
+                "raw_artifact_repo postgres path is P3+".into(),
+            )),
+        }
     }
 }
 
 #[async_trait]
 impl RawArtifactRepository for SqliteRawArtifactRepo {
     async fn upsert_inline(&self, artifact: &NewRawArtifact) -> Result<i64, StorageError> {
+        let pool = self.sqlite_pool()?;
         sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO raw_artifacts (
@@ -69,7 +81,7 @@ impl RawArtifactRepository for SqliteRawArtifactRepo {
         .bind(&artifact.sha256)
         .bind(&artifact.retention_policy)
         .bind(artifact.expires_at)
-        .fetch_one(&self.pool)
+        .fetch_one(pool)
         .await
         .map_err(|error| {
             classify_sqlite_error(
@@ -85,6 +97,7 @@ impl RawArtifactRepository for SqliteRawArtifactRepo {
         kind: &str,
         artifact_key: &str,
     ) -> Result<Option<RawArtifact>, StorageError> {
+        let pool = self.sqlite_pool()?;
         let row = sqlx::query_as::<_, RawArtifactRow>(
             r#"
             SELECT id, kind, artifact_key, content_encoding, storage_kind, inline_body,
@@ -95,7 +108,7 @@ impl RawArtifactRepository for SqliteRawArtifactRepo {
         )
         .bind(kind)
         .bind(artifact_key)
-        .fetch_optional(&self.pool)
+        .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;
 
@@ -103,6 +116,7 @@ impl RawArtifactRepository for SqliteRawArtifactRepo {
     }
 
     async fn find_by_id(&self, id: i64) -> Result<Option<RawArtifact>, StorageError> {
+        let pool = self.sqlite_pool()?;
         let row = sqlx::query_as::<_, RawArtifactRow>(
             r#"
             SELECT id, kind, artifact_key, content_encoding, storage_kind, inline_body,
@@ -112,7 +126,7 @@ impl RawArtifactRepository for SqliteRawArtifactRepo {
             "#,
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;
 
