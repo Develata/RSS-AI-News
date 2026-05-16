@@ -11,7 +11,7 @@ use rss_ai_news_domain::link_normalizer::normalize_link;
 use rss_ai_news_feed::fetcher::RawFeedFetch;
 use rss_ai_news_feed::{FeedError, FeedFetcher};
 use rss_ai_news_runtime::{IngestFlow, IngestOptions, IngestSourceStatus};
-use rss_ai_news_storage::{FeedEntryRepository, NewFeedEntry, SqliteFeedEntryRepo};
+use rss_ai_news_storage::{FeedEntryRepo, FeedEntryRepository, NewFeedEntry};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
@@ -155,7 +155,7 @@ async fn link_hash_dup_skipped_aggregated_event() {
     let config_id = insert_config_rule(&pool).await;
     let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
     let link = normalize_link("https://example.com/rss/1").expect("link should normalize");
-    SqliteFeedEntryRepo::new(pool.clone())
+    FeedEntryRepo::new(pool.clone())
         .insert_if_new(&new_entry(
             source_id,
             "existing-uid",
@@ -197,7 +197,7 @@ async fn uid_dup_skipped_aggregated_event() {
     let config_id = insert_config_rule(&pool).await;
     let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
     let seeded_link = normalize_link("https://example.com/seed").expect("link should normalize");
-    SqliteFeedEntryRepo::new(pool.clone())
+    FeedEntryRepo::new(pool.clone())
         .insert_if_new(&new_entry(
             source_id,
             "rss-1",

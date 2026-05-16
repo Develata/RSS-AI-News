@@ -6,7 +6,7 @@ use crate::{ClaimRequest, StorageError, classify_sqlite_error};
 use super::{
     publish_record::{
         ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord,
-        PublishRecordRepository, PublishState, PublishTimestampField, SqlitePublishRecordRepo,
+        PublishRecordRepo, PublishRecordRepository, PublishState, PublishTimestampField,
         TerminalAdvanceOutcome, TerminalAdvanceStatus,
     },
     publish_record_sql::{
@@ -16,7 +16,7 @@ use super::{
 };
 
 #[async_trait]
-impl PublishRecordRepository for SqlitePublishRecordRepo {
+impl PublishRecordRepository for PublishRecordRepo {
     async fn create_if_new(&self, item: &NewPublishRecord) -> Result<Option<i64>, StorageError> {
         let pool = self.sqlite_pool()?;
         sqlx::query_scalar::<_, i64>(

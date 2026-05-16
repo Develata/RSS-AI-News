@@ -1,13 +1,13 @@
 mod common;
 
-use rss_ai_news_storage::{NewRunEvent, RunEventRepository, SqliteRunEventRepo};
+use rss_ai_news_storage::{NewRunEvent, RunEventRepo, RunEventRepository};
 
 use common::make_test_pool;
 
 #[tokio::test]
 async fn insert_writes_minimal_event() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRunEventRepo::new(pool.clone());
+    let repo = RunEventRepo::new(pool.clone());
 
     let id = repo
         .insert(&event("run-1", None, None))
@@ -27,7 +27,7 @@ async fn insert_writes_minimal_event() {
 #[tokio::test]
 async fn insert_writes_full_event_with_target_and_context() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRunEventRepo::new(pool.clone());
+    let repo = RunEventRepo::new(pool.clone());
 
     let id = repo
         .insert(&event(
@@ -59,7 +59,7 @@ async fn insert_writes_full_event_with_target_and_context() {
 #[tokio::test]
 async fn insert_two_events_for_same_run_id_returns_distinct_ids() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRunEventRepo::new(pool);
+    let repo = RunEventRepo::new(pool);
 
     let first = repo
         .insert(&event("run-1", None, None))

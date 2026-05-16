@@ -1,8 +1,8 @@
 mod common;
 
 use rss_ai_news_storage::{
-    AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepository, ClaimRequest,
-    NewAiResult, SqliteArticleAiResultRepo, lease_expires_at,
+    AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
+    ClaimRequest, NewAiResult, lease_expires_at,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -19,7 +19,7 @@ async fn insert_pending_and_advance_advances_article_to_ai_pending() {
         "schema-sha-1",
     )
     .await;
-    let repo = SqliteArticleAiResultRepo::new(pool.clone());
+    let repo = ArticleAiResultRepo::new(pool.clone());
 
     let outcome = repo
         .insert_pending_and_advance_article(
@@ -46,7 +46,7 @@ async fn insert_pending_returns_none_on_unique_conflict_and_detects_article_alre
         "schema-sha-2",
     )
     .await;
-    let repo = SqliteArticleAiResultRepo::new(pool.clone());
+    let repo = ArticleAiResultRepo::new(pool.clone());
     let item = new_ai_result(article_id, prompt_version, output_schema_version, "model-a");
     let first = repo
         .insert_pending_and_advance_article(&item, OffsetDateTime::now_utc())
@@ -185,7 +185,7 @@ async fn release_success_keep_false_with_other_succeeded_returns_no_change() {
 async fn setup_claimed_ai_result(
     pool: &sqlx::SqlitePool,
     model_id: &str,
-) -> (SqliteArticleAiResultRepo, i64, i64, String) {
+) -> (ArticleAiResultRepo, i64, i64, String) {
     let (prompt_version, _entry_id, article_id) = seed_article(pool).await;
     let output_schema_version = insert_rule(
         pool,
@@ -194,7 +194,7 @@ async fn setup_claimed_ai_result(
         &format!("schema-sha-{model_id}"),
     )
     .await;
-    let repo = SqliteArticleAiResultRepo::new(pool.clone());
+    let repo = ArticleAiResultRepo::new(pool.clone());
     let inserted = repo
         .insert_pending_and_advance_article(
             &new_ai_result(article_id, prompt_version, output_schema_version, model_id),

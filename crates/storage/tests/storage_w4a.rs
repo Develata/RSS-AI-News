@@ -10,8 +10,8 @@ use rss_ai_news_domain::{
     state::{FeedKind, FeedSourceStatus},
 };
 use rss_ai_news_storage::{
-    FeedSourceRepository, SqliteFeedSourceRepo, SqliteRuleVersionRepo, StorageError,
-    build_sqlite_pool, classify_sqlite_error, run_migrations,
+    FeedSourceRepo, FeedSourceRepository, RuleVersionRepo, StorageError, build_sqlite_pool,
+    classify_sqlite_error, run_migrations,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -265,7 +265,7 @@ async fn raw_artifacts_reject_inline_without_body() {
 async fn feed_source_repo_upsert_and_find_by_id_round_trip() {
     let (_dir, pool) = make_test_pool().await;
     let config_id = insert_rule(&pool, "config", "cfg", "cfg-sha").await;
-    let repo = SqliteFeedSourceRepo::new(pool);
+    let repo = FeedSourceRepo::new(pool);
     let now = OffsetDateTime::now_utc();
     let source = FeedSource {
         id: 0,
@@ -305,7 +305,7 @@ async fn feed_source_repo_upsert_and_find_by_id_round_trip() {
 #[tokio::test]
 async fn feed_source_repo_find_by_keys_returns_none_when_missing() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteFeedSourceRepo::new(pool);
+    let repo = FeedSourceRepo::new(pool);
 
     let found = repo
         .find_by_keys("missing", "missing")
@@ -318,7 +318,7 @@ async fn feed_source_repo_find_by_keys_returns_none_when_missing() {
 #[tokio::test]
 async fn rule_version_config_get_or_create_returns_same_id_for_same_sha() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRuleVersionRepo::new(pool);
+    let repo = RuleVersionRepo::new(pool);
 
     let left = repo
         .get_or_create_config_version_async("0123456789abcdef")
@@ -335,7 +335,7 @@ async fn rule_version_config_get_or_create_returns_same_id_for_same_sha() {
 #[tokio::test]
 async fn rule_version_config_get_or_create_returns_different_ids_for_different_sha() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRuleVersionRepo::new(pool);
+    let repo = RuleVersionRepo::new(pool);
 
     let left = repo
         .get_or_create_config_version_async("aaaaaaaaaaaabbbb")
@@ -354,7 +354,7 @@ async fn config_version_store_trait_impl_round_trip() {
     use rss_ai_news_config::ConfigVersionStore;
 
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRuleVersionRepo::new(pool);
+    let repo = RuleVersionRepo::new(pool);
     let store: &dyn ConfigVersionStore = &repo;
 
     let first = store

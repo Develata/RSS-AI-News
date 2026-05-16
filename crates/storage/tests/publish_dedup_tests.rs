@@ -1,8 +1,8 @@
 mod common;
 
 use rss_ai_news_storage::{
-    ClaimRequest, NewPublishRecord, PublishRecordRepository, SqlitePublishRecordRepo,
-    build_owner_id, lease_expires_at,
+    ClaimRequest, NewPublishRecord, PublishRecordRepo, PublishRecordRepository, build_owner_id,
+    lease_expires_at,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -13,7 +13,7 @@ async fn publish_record_idempotency_key_duplicate_returns_none() {
     let (_dir, pool) = make_test_pool().await;
     let rule_id = insert_rule(&pool, "render", "v1", "render-sha").await;
     let policy_id = insert_rule(&pool, "selection_policy", "v1", "policy-sha").await;
-    let repo = SqlitePublishRecordRepo::new(pool);
+    let repo = PublishRecordRepo::new(pool);
     let item = new_publish_record(rule_id, policy_id);
 
     let first = repo
@@ -34,7 +34,7 @@ async fn publish_record_can_be_recovered_by_idempotency_key_after_duplicate() {
     let (_dir, pool) = make_test_pool().await;
     let rule_id = insert_rule(&pool, "render", "v1", "render-sha").await;
     let policy_id = insert_rule(&pool, "selection_policy", "v1", "policy-sha").await;
-    let repo = SqlitePublishRecordRepo::new(pool);
+    let repo = PublishRecordRepo::new(pool);
     let item = new_publish_record(rule_id, policy_id);
 
     repo.create_if_new(&item)
@@ -59,7 +59,7 @@ async fn claim_pending_for_freeze_only_acquires_lease_keeps_state_pending() {
     let (_dir, pool) = make_test_pool().await;
     let rule_id = insert_rule(&pool, "render", "v-claim", "render-sha-claim").await;
     let policy_id = insert_rule(&pool, "selection_policy", "v-claim", "policy-sha-claim").await;
-    let repo = SqlitePublishRecordRepo::new(pool);
+    let repo = PublishRecordRepo::new(pool);
     let item = NewPublishRecord {
         idempotency_key: "ai-2026-04-25-v-claim".to_string(),
         ..new_publish_record(rule_id, policy_id)

@@ -1,6 +1,6 @@
 mod common;
 
-use rss_ai_news_storage::{ArticleRepository, SqliteArticleRepo};
+use rss_ai_news_storage::{ArticleRepo, ArticleRepository};
 
 use common::{insert_article, insert_feed_entry, insert_rule, make_test_pool, seed_source};
 
@@ -27,7 +27,7 @@ async fn list_persisted_filters_state_persisted_orders_by_id() {
         .await
         .expect("article state should update");
 
-    let repo = SqliteArticleRepo::new(pool);
+    let repo = ArticleRepo::new(pool);
     let candidates = repo
         .list_persisted_for_ai_task_gen(10, 0)
         .await
@@ -60,7 +60,7 @@ async fn list_persisted_paginates_by_after_id() {
         .await
         .expect("third article should insert");
 
-    let repo = SqliteArticleRepo::new(pool);
+    let repo = ArticleRepo::new(pool);
     let candidates = repo
         .list_persisted_for_ai_task_gen(1, first)
         .await
@@ -97,7 +97,7 @@ async fn list_persisted_returns_empty_when_no_candidates() {
         .await
         .expect("article state should update");
 
-    let repo = SqliteArticleRepo::new(pool);
+    let repo = ArticleRepo::new(pool);
     let candidates = repo
         .list_persisted_for_ai_task_gen(10, 0)
         .await

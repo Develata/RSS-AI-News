@@ -4,8 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rss_ai_news_report::{RenderConfig, ReportError, rebuild_markdown, render_markdown};
 use rss_ai_news_storage::{
-    PublishItemRepository, SqlitePublishItemRepo, SqlitePublishRecordRepo, build_sqlite_pool,
-    run_migrations,
+    PublishItemRepo, PublishItemRepository, PublishRecordRepo, build_sqlite_pool, run_migrations,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -16,8 +15,8 @@ static TEST_DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
 async fn rebuild_returns_byte_equal_markdown_when_render_config_matches() {
     let (_dir, pool) = make_pool().await;
     let record_id = seed_snapshot(&pool).await;
-    let record_repo = SqlitePublishRecordRepo::new(pool.clone());
-    let item_repo = SqlitePublishItemRepo::new(pool);
+    let record_repo = PublishRecordRepo::new(pool.clone());
+    let item_repo = PublishItemRepo::new(pool);
     let items = item_repo.list_by_publish_record(record_id).await.unwrap();
     let frozen = items
         .into_iter()
@@ -53,8 +52,8 @@ async fn rebuild_returns_byte_equal_markdown_when_render_config_matches() {
 #[tokio::test]
 async fn rebuild_returns_error_when_publish_record_missing() {
     let (_dir, pool) = make_pool().await;
-    let record_repo = SqlitePublishRecordRepo::new(pool.clone());
-    let item_repo = SqlitePublishItemRepo::new(pool);
+    let record_repo = PublishRecordRepo::new(pool.clone());
+    let item_repo = PublishItemRepo::new(pool);
 
     let error = rebuild_markdown(&record_repo, &item_repo, 999, &render_config())
         .await

@@ -2,9 +2,7 @@ mod common;
 
 use std::{collections::HashSet, sync::Arc};
 
-use rss_ai_news_storage::{
-    ClaimRequest, FeedEntryRepository, SqliteFeedEntryRepo, lease_expires_at,
-};
+use rss_ai_news_storage::{ClaimRequest, FeedEntryRepo, FeedEntryRepository, lease_expires_at};
 use time::{Duration, OffsetDateTime};
 
 use common::{insert_feed_entry, make_test_pool_with_connections, seed_source};
@@ -22,7 +20,7 @@ async fn parallel_claim_returns_disjoint_rows() {
         )
         .await;
     }
-    let repo = Arc::new(SqliteFeedEntryRepo::new(pool));
+    let repo = Arc::new(FeedEntryRepo::new(pool));
 
     let mut handles = Vec::new();
     for worker in 0..4 {
@@ -63,7 +61,7 @@ async fn release_with_wrong_owner_returns_false() {
     let (_dir, pool) = make_test_pool_with_connections(2).await;
     let source_id = seed_source(&pool).await;
     let entry_id = insert_feed_entry(&pool, source_id, "uid-1", "link-hash-1").await;
-    let repo = SqliteFeedEntryRepo::new(pool);
+    let repo = FeedEntryRepo::new(pool);
 
     let claimed = repo
         .claim_pending_fetch(&claim_request("worker-a", 1))
@@ -84,7 +82,7 @@ async fn reclaim_expired_lease_clears_owner_and_allows_reclaim() {
     let (_dir, pool) = make_test_pool_with_connections(2).await;
     let source_id = seed_source(&pool).await;
     let entry_id = insert_feed_entry(&pool, source_id, "uid-1", "link-hash-1").await;
-    let repo = SqliteFeedEntryRepo::new(pool.clone());
+    let repo = FeedEntryRepo::new(pool.clone());
 
     let claimed = repo
         .claim_pending_fetch(&claim_request("worker-a", 1))

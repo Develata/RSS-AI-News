@@ -22,11 +22,11 @@ pub trait RunEventRepository: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct SqliteRunEventRepo {
+pub struct RunEventRepo {
     pool: StoragePool,
 }
 
-impl SqliteRunEventRepo {
+impl RunEventRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool: StoragePool::Sqlite(pool),
@@ -44,7 +44,7 @@ impl SqliteRunEventRepo {
 }
 
 #[async_trait]
-impl RunEventRepository for SqliteRunEventRepo {
+impl RunEventRepository for RunEventRepo {
     async fn insert(&self, event: &NewRunEvent) -> Result<i64, StorageError> {
         let pool = self.sqlite_pool()?;
         sqlx::query_scalar::<_, i64>(

@@ -5,9 +5,9 @@ use rss_ai_news_domain::{
     state::{FeedKind, FeedSourceStatus},
 };
 use rss_ai_news_storage::{
-    ArticleRepository, FeedEntryRepository, FeedSourceRepository, NewRawArtifact,
-    RawArtifactRepository, ResetFailedFilter, SqliteArticleRepo, SqliteFeedEntryRepo,
-    SqliteFeedSourceRepo, SqliteRawArtifactRepo, UpdateContentHashOutcome,
+    ArticleRepo, ArticleRepository, FeedEntryRepo, FeedEntryRepository, FeedSourceRepo,
+    FeedSourceRepository, NewRawArtifact, RawArtifactRepo, RawArtifactRepository,
+    ResetFailedFilter, UpdateContentHashOutcome,
 };
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
@@ -15,7 +15,7 @@ use time::{Duration, OffsetDateTime};
 #[tokio::test]
 async fn raw_artifact_find_by_id_found() {
     let (_dir, pool) = common::make_test_pool().await;
-    let repo = SqliteRawArtifactRepo::new(pool);
+    let repo = RawArtifactRepo::new(pool);
     let id = repo
         .upsert_inline(&artifact("feed_payload", "k1"))
         .await
@@ -29,7 +29,7 @@ async fn raw_artifact_find_by_id_found() {
 #[tokio::test]
 async fn raw_artifact_find_by_id_missing() {
     let (_dir, pool) = common::make_test_pool().await;
-    let repo = SqliteRawArtifactRepo::new(pool);
+    let repo = RawArtifactRepo::new(pool);
 
     assert!(repo.find_by_id(99).await.unwrap().is_none());
 }
@@ -40,7 +40,7 @@ async fn reset_failed_resets_all_failed() {
     let source_id = common::seed_source(&pool).await;
     insert_entry_state(&pool, source_id, "a", "failed", OffsetDateTime::now_utc()).await;
     insert_entry_state(&pool, source_id, "b", "failed", OffsetDateTime::now_utc()).await;
-    let repo = SqliteFeedEntryRepo::new(pool.clone());
+    let repo = FeedEntryRepo::new(pool.clone());
 
     let outcome = repo
         .reset_failed_in_window(&ResetFailedFilter::default())
@@ -58,7 +58,7 @@ async fn reset_failed_honors_window() {
     let now = OffsetDateTime::now_utc();
     insert_entry_state(&pool, source_id, "old", "failed", now - Duration::days(3)).await;
     insert_entry_state(&pool, source_id, "new", "failed", now).await;
-    let repo = SqliteFeedEntryRepo::new(pool.clone());
+    let repo = FeedEntryRepo::new(pool.clone());
 
     let outcome = repo
         .reset_failed_in_window(&ResetFailedFilter {
@@ -84,7 +84,7 @@ async fn reset_failed_ignores_non_failed() {
         OffsetDateTime::now_utc(),
     )
     .await;
-    let repo = SqliteFeedEntryRepo::new(pool);
+    let repo = FeedEntryRepo::new(pool);
 
     let outcome = repo
         .reset_failed_in_window(&ResetFailedFilter::default())
@@ -99,7 +99,7 @@ async fn reset_failed_ignores_non_failed() {
 async fn article_backfill_lists_all_non_retired() {
     let (_dir, pool) = common::make_test_pool().await;
     let (_rule, _entry, article_id) = common::seed_article(&pool).await;
-    let repo = SqliteArticleRepo::new(pool);
+    let repo = ArticleRepo::new(pool);
 
     let rows = repo
         .list_in_window_for_backfill(None, None, 10, 0)
@@ -121,7 +121,7 @@ async fn article_backfill_honors_date_from() {
         .execute(&pool)
         .await
         .unwrap();
-    let repo = SqliteArticleRepo::new(pool);
+    let repo = ArticleRepo::new(pool);
 
     let rows = repo
         .list_in_window_for_backfill(Some(now - Duration::hours(1)), None, 10, 0)
@@ -136,7 +136,7 @@ async fn article_backfill_honors_date_to_and_after_id() {
     let (_dir, pool) = common::make_test_pool().await;
     let (_rule, _entry, first) = common::seed_article(&pool).await;
     let second = insert_article_with_hash(&pool, "content-hash-second").await;
-    let repo = SqliteArticleRepo::new(pool);
+    let repo = ArticleRepo::new(pool);
 
     let rows = repo
         .list_in_window_for_backfill(
@@ -158,7 +158,7 @@ async fn link_hash_reindex_lists_after_id() {
     let source_id = common::seed_source(&pool).await;
     let first = common::insert_feed_entry(&pool, source_id, "a", "old-a").await;
     let second = common::insert_feed_entry(&pool, source_id, "b", "old-b").await;
-    let repo = SqliteFeedEntryRepo::new(pool);
+    let repo = FeedEntryRepo::new(pool);
 
     let rows = repo.list_for_link_hash_reindex(first, 10).await.unwrap();
 
@@ -171,7 +171,7 @@ async fn update_link_hash_success() {
     let (_dir, pool) = common::make_test_pool().await;
     let source_id = common::seed_source(&pool).await;
     let id = common::insert_feed_entry(&pool, source_id, "a", "old").await;
-    let repo = SqliteFeedEntryRepo::new(pool.clone());
+    let repo = FeedEntryRepo::new(pool.clone());
 
     assert!(repo.update_link_hash(id, "new").await.unwrap());
     assert_eq!(entry_link_hash(&pool, id).await, "new");
@@ -180,7 +180,7 @@ async fn update_link_hash_success() {
 #[tokio::test]
 async fn update_link_hash_missing_false() {
     let (_dir, pool) = common::make_test_pool().await;
-    let repo = SqliteFeedEntryRepo::new(pool);
+    let repo = FeedEntryRepo::new(pool);
 
     assert!(!repo.update_link_hash(99, "new").await.unwrap());
 }
@@ -189,7 +189,7 @@ async fn update_link_hash_missing_false() {
 async fn update_content_hash_updated() {
     let (_dir, pool) = common::make_test_pool().await;
     let (_rule, _entry, id) = common::seed_article(&pool).await;
-    let repo = SqliteArticleRepo::new(pool);
+    let repo = ArticleRepo::new(pool);
 
     assert_eq!(
         repo.update_content_hash(id, "new-content-hash")
@@ -205,7 +205,7 @@ async fn update_content_hash_conflict() {
     let (_rule, _entry, id) = common::seed_article(&pool).await;
     let other = insert_article_with_hash(&pool, "other-hash").await;
     let other_hash = article_hash(&pool, other).await;
-    let repo = SqliteArticleRepo::new(pool);
+    let repo = ArticleRepo::new(pool);
 
     assert_eq!(
         repo.update_content_hash(id, &other_hash).await.unwrap(),
@@ -218,7 +218,7 @@ async fn update_content_hash_unchanged() {
     let (_dir, pool) = common::make_test_pool().await;
     let (_rule, _entry, id) = common::seed_article(&pool).await;
     let hash = article_hash(&pool, id).await;
-    let repo = SqliteArticleRepo::new(pool);
+    let repo = ArticleRepo::new(pool);
 
     assert_eq!(
         repo.update_content_hash(id, &hash).await.unwrap(),
@@ -229,7 +229,7 @@ async fn update_content_hash_unchanged() {
 #[tokio::test]
 async fn feed_source_list_all_returns_all_statuses() {
     let (_dir, pool) = common::make_test_pool().await;
-    let repo = SqliteFeedSourceRepo::new(pool.clone());
+    let repo = FeedSourceRepo::new(pool.clone());
     let config_version = common::insert_rule(&pool, "config", "cfg-list-all", "sha-list-all").await;
     repo.upsert(&feed_source(
         "ai",
@@ -256,7 +256,7 @@ async fn feed_source_list_all_returns_all_statuses() {
 #[tokio::test]
 async fn feed_source_mark_archived_once() {
     let (_dir, pool) = common::make_test_pool().await;
-    let repo = SqliteFeedSourceRepo::new(pool.clone());
+    let repo = FeedSourceRepo::new(pool.clone());
     let config_version = common::insert_rule(&pool, "config", "cfg-archive", "sha-archive").await;
     let id = repo
         .upsert(&feed_source(
@@ -275,7 +275,7 @@ async fn feed_source_mark_archived_once() {
 #[tokio::test]
 async fn feed_source_archived_hidden_from_list_by_category() {
     let (_dir, pool) = common::make_test_pool().await;
-    let repo = SqliteFeedSourceRepo::new(pool.clone());
+    let repo = FeedSourceRepo::new(pool.clone());
     let config_version = common::insert_rule(&pool, "config", "cfg-hidden", "sha-hidden").await;
     let id = repo
         .upsert(&feed_source(

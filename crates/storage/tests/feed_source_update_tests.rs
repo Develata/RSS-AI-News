@@ -1,6 +1,6 @@
 mod common;
 
-use rss_ai_news_storage::{FeedSourceRepository, SqliteFeedSourceRepo};
+use rss_ai_news_storage::{FeedSourceRepo, FeedSourceRepository};
 use time::OffsetDateTime;
 
 use common::{make_test_pool, seed_source};
@@ -19,7 +19,7 @@ type SourceFetchState = (
 async fn update_after_fetch_success_clears_error_and_zeroes_failures() {
     let (_dir, pool) = make_test_pool().await;
     let source_id = seed_source(&pool).await;
-    let repo = SqliteFeedSourceRepo::new(pool.clone());
+    let repo = FeedSourceRepo::new(pool.clone());
     let now = OffsetDateTime::now_utc();
 
     repo.update_after_fetch_failure(source_id, now, "boom", "http_5xx")
@@ -55,7 +55,7 @@ async fn update_after_fetch_success_clears_error_and_zeroes_failures() {
 async fn update_after_fetch_failure_increments_failures() {
     let (_dir, pool) = make_test_pool().await;
     let source_id = seed_source(&pool).await;
-    let repo = SqliteFeedSourceRepo::new(pool.clone());
+    let repo = FeedSourceRepo::new(pool.clone());
     let now = OffsetDateTime::now_utc();
 
     repo.update_after_fetch_failure(source_id, now, "first", "http_5xx")
@@ -80,7 +80,7 @@ async fn update_after_fetch_failure_increments_failures() {
 #[tokio::test]
 async fn update_after_unknown_id_returns_false() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteFeedSourceRepo::new(pool);
+    let repo = FeedSourceRepo::new(pool);
     let now = OffsetDateTime::now_utc();
 
     let success = repo

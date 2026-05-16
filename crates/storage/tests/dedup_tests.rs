@@ -1,8 +1,8 @@
 mod common;
 
 use rss_ai_news_storage::{
-    ArticleAiResultRepository, FeedEntryRepository, NewAiResult, NewFeedEntry,
-    SqliteArticleAiResultRepo, SqliteFeedEntryRepo, StorageError,
+    ArticleAiResultRepo, ArticleAiResultRepository, FeedEntryRepo, FeedEntryRepository,
+    NewAiResult, NewFeedEntry, StorageError,
 };
 use time::OffsetDateTime;
 
@@ -14,7 +14,7 @@ use common::{
 async fn feed_entry_uid_unique_duplicate_returns_none() {
     let (_dir, pool) = make_test_pool().await;
     let source_id = seed_source(&pool).await;
-    let repo = SqliteFeedEntryRepo::new(pool);
+    let repo = FeedEntryRepo::new(pool);
     let entry = new_feed_entry(source_id, "uid-1", "link-hash-1");
 
     let first = repo
@@ -34,7 +34,7 @@ async fn feed_entry_uid_unique_duplicate_returns_none() {
 async fn feed_entry_link_hash_lookup_distinguishes_hit_and_miss() {
     let (_dir, pool) = make_test_pool().await;
     let source_id = seed_source(&pool).await;
-    let repo = SqliteFeedEntryRepo::new(pool);
+    let repo = FeedEntryRepo::new(pool);
 
     repo.insert_if_new(&new_feed_entry(source_id, "uid-1", "hash-hit"))
         .await
@@ -75,7 +75,7 @@ async fn ai_result_unique_tuple_duplicate_returns_none_via_repo() {
     let (_dir, pool) = make_test_pool().await;
     let (prompt_id, _entry_id, article_id) = seed_article(&pool).await;
     let schema_id = insert_rule(&pool, "ai_output_schema", "v1", "schema-sha").await;
-    let repo = SqliteArticleAiResultRepo::new(pool);
+    let repo = ArticleAiResultRepo::new(pool);
     let item = NewAiResult {
         article_id,
         prompt_version: prompt_id,

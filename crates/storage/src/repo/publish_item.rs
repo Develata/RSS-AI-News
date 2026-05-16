@@ -78,11 +78,11 @@ pub trait PublishItemRepository: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct SqlitePublishItemRepo {
+pub struct PublishItemRepo {
     pool: StoragePool,
 }
 
-impl SqlitePublishItemRepo {
+impl PublishItemRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool: StoragePool::Sqlite(pool),
@@ -100,7 +100,7 @@ impl SqlitePublishItemRepo {
 }
 
 #[async_trait]
-impl PublishItemRepository for SqlitePublishItemRepo {
+impl PublishItemRepository for PublishItemRepo {
     async fn select_ai_path_candidates(
         &self,
         category_key: &str,

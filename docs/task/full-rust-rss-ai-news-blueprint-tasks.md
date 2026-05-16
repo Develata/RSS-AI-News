@@ -349,7 +349,7 @@
 - [x] tracing 初始化（F15-13 tracing-appender::rolling::daily + F15-16 try_init 显式 warn；详见 [crates/observability/src/tracing_init.rs](../../crates/observability/src/tracing_init.rs)）
 - [x] metrics 注册（F15-14 prometheus exporter + `/metrics` HTTP 端点；详见 [crates/observability/src/prometheus.rs](../../crates/observability/src/prometheus.rs)。业务侧 counter/histogram 调用点接入是另一桩 instrumentation 工作，独立追踪）
 - [x] health probe（W7-T705 实装；详见 [crates/observability/src/health.rs](../../crates/observability/src/health.rs)）
-- [x] 关键事件结构化日志（W3-T303 起，`SqliteRunEventRepo` + `RunEventEmitter` 在 ingest / extract / ai / publish / reindex 五个 stage 全部接入，事件持久化进 `run_events` 表）
+- [x] 关键事件结构化日志（W3-T303 起，`RunEventRepo` + `RunEventEmitter` 在 ingest / extract / ai / publish / reindex 五个 stage 全部接入，事件持久化进 `run_events` 表）
 
 ### T902 doctor 命令
 

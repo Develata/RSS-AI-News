@@ -1,9 +1,9 @@
 mod common;
 
 use rss_ai_news_storage::{
-    ClaimRequest, FreezeSnapshotItem, FreezeSnapshotStatus, NewPublishRecord,
-    PublishItemRepository, PublishRecordRepository, SqlitePublishItemRepo, SqlitePublishRecordRepo,
-    build_owner_id, lease_expires_at,
+    ClaimRequest, FreezeSnapshotItem, FreezeSnapshotStatus, NewPublishRecord, PublishItemRepo,
+    PublishItemRepository, PublishRecordRepo, PublishRecordRepository, build_owner_id,
+    lease_expires_at,
 };
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
@@ -16,7 +16,7 @@ async fn freeze_snapshot_inserts_items_advances_record_to_snapshot_frozen() {
     let (record_id, owner) = claimed_publish_record(&pool).await;
     let article_id = seed_article(&pool, "freeze-ai", "ready_for_publish").await;
     let ai_id = seed_ai_row(&pool, article_id).await;
-    let repo = SqlitePublishItemRepo::new(pool.clone());
+    let repo = PublishItemRepo::new(pool.clone());
 
     let outcome = repo
         .freeze_snapshot(
@@ -50,7 +50,7 @@ async fn freeze_snapshot_promotes_ai_off_articles_persisted_to_ready_for_publish
     let (_dir, pool) = make_test_pool().await;
     let (record_id, owner) = claimed_publish_record(&pool).await;
     let article_id = seed_article(&pool, "freeze-direct", "persisted").await;
-    let repo = SqlitePublishItemRepo::new(pool.clone());
+    let repo = PublishItemRepo::new(pool.clone());
 
     let outcome = repo
         .freeze_snapshot(
@@ -78,7 +78,7 @@ async fn freeze_snapshot_returns_publish_record_conflict_when_lease_owner_mismat
     let (record_id, _owner) = claimed_publish_record(&pool).await;
     let article_id = seed_article(&pool, "lease-conflict", "ready_for_publish").await;
     let ai_id = seed_ai_row(&pool, article_id).await;
-    let repo = SqlitePublishItemRepo::new(pool.clone());
+    let repo = PublishItemRepo::new(pool.clone());
 
     let outcome = repo
         .freeze_snapshot(
@@ -112,7 +112,7 @@ async fn freeze_snapshot_returns_publish_record_conflict_when_state_not_pending(
         .unwrap();
     let article_id = seed_article(&pool, "state-conflict", "ready_for_publish").await;
     let ai_id = seed_ai_row(&pool, article_id).await;
-    let repo = SqlitePublishItemRepo::new(pool.clone());
+    let repo = PublishItemRepo::new(pool.clone());
 
     let outcome = repo
         .freeze_snapshot(
@@ -140,7 +140,7 @@ async fn freeze_snapshot_returns_article_state_conflict_when_promote_target_alre
     let (_dir, pool) = make_test_pool().await;
     let (record_id, owner) = claimed_publish_record(&pool).await;
     let article_id = seed_article(&pool, "article-conflict", "ready_for_publish").await;
-    let repo = SqlitePublishItemRepo::new(pool.clone());
+    let repo = PublishItemRepo::new(pool.clone());
 
     let outcome = repo
         .freeze_snapshot(
@@ -169,7 +169,7 @@ async fn freeze_snapshot_returns_article_state_conflict_when_promote_target_alre
 async fn freeze_snapshot_with_empty_items_only_advances_record() {
     let (_dir, pool) = make_test_pool().await;
     let (record_id, owner) = claimed_publish_record(&pool).await;
-    let repo = SqlitePublishItemRepo::new(pool.clone());
+    let repo = PublishItemRepo::new(pool.clone());
 
     let outcome = repo
         .freeze_snapshot(record_id, &owner, Vec::new(), Vec::new(), now())
@@ -201,7 +201,7 @@ async fn claimed_publish_record(pool: &SqlitePool) -> (i64, String) {
         "policy-sha",
     )
     .await;
-    let record_repo = SqlitePublishRecordRepo::new(pool.clone());
+    let record_repo = PublishRecordRepo::new(pool.clone());
     let id = record_repo
         .create_if_new(&NewPublishRecord {
             idempotency_key: format!("ai-2026-04-28-v{}", unique()),

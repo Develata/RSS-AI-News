@@ -22,7 +22,7 @@
 
 mod common;
 
-use rss_ai_news_storage::{ReindexJobRepository, SqliteReindexJobRepo, StorageError};
+use rss_ai_news_storage::{ReindexJobRepo, ReindexJobRepository, StorageError};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
@@ -44,7 +44,7 @@ fn ts(secs: i64) -> OffsetDateTime {
 #[tokio::test]
 async fn insert_pending_creates_row_in_pending_state_with_zero_attempts() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let now = ts(0);
 
@@ -72,7 +72,7 @@ async fn insert_pending_creates_row_in_pending_state_with_zero_attempts() {
 #[tokio::test]
 async fn insert_pending_rejects_duplicate_active_job_for_same_target() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     repo.insert_pending("articles", rule_id, ts(0))
         .await
@@ -89,7 +89,7 @@ async fn insert_pending_rejects_duplicate_active_job_for_same_target() {
 #[tokio::test]
 async fn insert_pending_allows_new_job_after_previous_terminal() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let first = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -119,7 +119,7 @@ async fn insert_pending_allows_new_job_after_previous_terminal() {
 #[tokio::test]
 async fn claim_pending_returns_none_when_no_pending_rows() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool);
+    let repo = ReindexJobRepo::new(pool);
 
     let claimed = repo
         .claim_pending("worker-a", ts(0), ts(60))
@@ -132,7 +132,7 @@ async fn claim_pending_returns_none_when_no_pending_rows() {
 #[tokio::test]
 async fn claim_pending_transitions_to_running_and_writes_lease() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -160,7 +160,7 @@ async fn claim_pending_transitions_to_running_and_writes_lease() {
 #[tokio::test]
 async fn claim_pending_preserves_started_at_through_reclaim_cycle() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -198,7 +198,7 @@ async fn claim_pending_preserves_started_at_through_reclaim_cycle() {
 #[tokio::test]
 async fn claim_pending_orders_by_created_at_then_id() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let earlier = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -228,7 +228,7 @@ async fn claim_pending_orders_by_created_at_then_id() {
 #[tokio::test]
 async fn claim_by_id_targets_specific_pending_even_when_older_exists() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let _older = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -264,7 +264,7 @@ async fn claim_by_id_targets_specific_pending_even_when_older_exists() {
 #[tokio::test]
 async fn claim_by_id_writes_lease_started_at_and_increments_attempts() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -289,7 +289,7 @@ async fn claim_by_id_writes_lease_started_at_and_increments_attempts() {
 #[tokio::test]
 async fn claim_by_id_preserves_started_at_through_reclaim_cycle() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -324,7 +324,7 @@ async fn claim_by_id_preserves_started_at_through_reclaim_cycle() {
 #[tokio::test]
 async fn claim_by_id_rejects_when_already_running_with_valid_lease() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -352,7 +352,7 @@ async fn claim_by_id_rejects_when_already_running_with_valid_lease() {
 #[tokio::test]
 async fn claim_by_id_returns_none_for_missing_id() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let result = repo
         .claim_by_id(9_999_999, "worker-a", ts(5), ts(65))
         .await
@@ -363,7 +363,7 @@ async fn claim_by_id_returns_none_for_missing_id() {
 #[tokio::test]
 async fn claim_by_id_returns_none_for_terminal_state() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -394,7 +394,7 @@ async fn claim_by_id_returns_none_for_terminal_state() {
 #[tokio::test]
 async fn advance_checkpoint_writes_progress_for_owning_worker() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -420,7 +420,7 @@ async fn advance_checkpoint_writes_progress_for_owning_worker() {
 #[tokio::test]
 async fn advance_checkpoint_rejects_wrong_owner() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -444,7 +444,7 @@ async fn advance_checkpoint_rejects_wrong_owner() {
 #[tokio::test]
 async fn advance_checkpoint_rejects_when_not_running() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -466,7 +466,7 @@ async fn advance_checkpoint_rejects_when_not_running() {
 #[tokio::test]
 async fn assert_lease_held_returns_true_for_owning_worker_in_running_state() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -490,7 +490,7 @@ async fn assert_lease_held_returns_true_for_owning_worker_in_running_state() {
 #[tokio::test]
 async fn assert_lease_held_returns_false_for_wrong_owner() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -515,7 +515,7 @@ async fn assert_lease_held_returns_false_after_abort_or_reclaim() {
     // 用它当 per-write guard 的依据（categories target 没有 checkpoint
     // 顺带 guard，要靠这个原语挡住 abort 后旧 worker 的覆盖写）。
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -544,7 +544,7 @@ async fn assert_lease_held_returns_false_after_abort_or_reclaim() {
 #[tokio::test]
 async fn advance_to_completed_finalizes_running_job_and_clears_lease() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -572,7 +572,7 @@ async fn advance_to_completed_finalizes_running_job_and_clears_lease() {
 #[tokio::test]
 async fn advance_to_completed_rejects_wrong_owner() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -599,7 +599,7 @@ async fn advance_to_completed_rejects_wrong_owner() {
 #[tokio::test]
 async fn advance_to_completed_rejects_when_pending() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -624,7 +624,7 @@ async fn advance_to_completed_rejects_when_pending() {
 #[tokio::test]
 async fn mark_failed_writes_error_and_clears_lease() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -651,7 +651,7 @@ async fn mark_failed_writes_error_and_clears_lease() {
 #[tokio::test]
 async fn mark_failed_rejects_wrong_owner() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -680,7 +680,7 @@ async fn mark_failed_rejects_wrong_owner() {
 #[tokio::test]
 async fn abort_from_pending_succeeds() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -702,7 +702,7 @@ async fn abort_from_pending_succeeds() {
 #[tokio::test]
 async fn abort_from_running_clears_lease() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -729,7 +729,7 @@ async fn abort_from_running_clears_lease() {
 #[tokio::test]
 async fn abort_rejects_terminal_states() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -761,7 +761,7 @@ async fn abort_rejects_terminal_states() {
 #[tokio::test]
 async fn reclaim_expired_leases_returns_zero_when_nothing_expired() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     repo.insert_pending("articles", rule_id, ts(0))
         .await
@@ -782,7 +782,7 @@ async fn reclaim_expired_leases_returns_zero_when_nothing_expired() {
 #[tokio::test]
 async fn reclaim_expired_leases_returns_running_to_pending_preserving_progress() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -821,7 +821,7 @@ async fn reclaim_expired_leases_returns_running_to_pending_preserving_progress()
 #[tokio::test]
 async fn reclaim_expired_leases_only_touches_expired_rows() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_expired = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -860,7 +860,7 @@ async fn reclaim_expired_leases_only_touches_expired_rows() {
 #[tokio::test]
 async fn list_running_returns_pending_and_running_only() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     // pending
     let pending_id = repo
@@ -908,7 +908,7 @@ async fn list_running_returns_pending_and_running_only() {
 #[tokio::test]
 async fn find_active_by_target_returns_running_row() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -932,7 +932,7 @@ async fn find_active_by_target_returns_running_row() {
 #[tokio::test]
 async fn find_active_by_target_returns_none_when_all_jobs_terminal() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = seed_rule_version(&pool, "v1").await;
     let job_id = repo
         .insert_pending("articles", rule_id, ts(0))
@@ -960,7 +960,7 @@ async fn find_active_by_target_returns_none_when_all_jobs_terminal() {
 #[tokio::test]
 async fn find_by_id_returns_none_for_missing_row() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool);
+    let repo = ReindexJobRepo::new(pool);
 
     let row = repo.find_by_id(9999).await.expect("query ok");
 
@@ -1004,7 +1004,7 @@ async fn seed_active_rule(pool: &SqlitePool, kind: &str, tag: &str) -> i64 {
 /// 行，并返回 `(rule_version_id, job_id)`。所有 finish_reindex_tx 测试都以
 /// 此为起点。
 async fn seed_running_reindex(
-    repo: &SqliteReindexJobRepo,
+    repo: &ReindexJobRepo,
     tag: &str,
     target: &str,
     owner: &str,
@@ -1047,7 +1047,7 @@ async fn rule_retired_at(pool: &SqlitePool, id: i64) -> Option<OffsetDateTime> {
 #[tokio::test]
 async fn finish_reindex_tx_promotes_pending_and_demotes_old_active() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let old_active_id = seed_active_rule(&pool, "reindex", "v-old").await;
     let (new_rule_id, job_id) =
         seed_running_reindex(&repo, "v-new", "articles", "worker-a", ts(10)).await;
@@ -1080,7 +1080,7 @@ async fn finish_reindex_tx_handles_first_version_without_demote() {
     // 该 kind 下尚无 active 行：demoted_rule_version_id = None，但 promote
     // 依然完成。
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let (new_rule_id, job_id) =
         seed_running_reindex(&repo, "v-first", "articles", "worker-a", ts(10)).await;
 
@@ -1106,7 +1106,7 @@ async fn finish_reindex_tx_rolls_back_when_lease_owner_mismatches() {
     // lease guard 失败 → 整段回滚：rule_versions 不变（旧 active 仍 active /
     // pending 仍 pending），reindex_jobs 不变。
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let old_active_id = seed_active_rule(&pool, "reindex", "v-old").await;
     let (new_rule_id, job_id) =
         seed_running_reindex(&repo, "v-new", "articles", "worker-a", ts(10)).await;
@@ -1137,7 +1137,7 @@ async fn finish_reindex_tx_rolls_back_when_lease_owner_mismatches() {
 async fn finish_reindex_tx_rolls_back_when_job_not_running() {
     // job 处于 pending（未 claim）→ state guard 失败 → 整段回滚。
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let outcome_start = repo
         .start_reindex_tx("reindex", "v-new", "desc", "sha-v-new", "articles", ts(10))
         .await
@@ -1163,7 +1163,7 @@ async fn finish_reindex_tx_rejects_when_rule_version_already_consumed() {
     // 协议违例：rule_version_id 已经是 'active'（或其他非 pending 态）
     // → 返 Conflict；旧 active 行 **不应**被 demote（事务整段回滚）。
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let old_active_id = seed_active_rule(&pool, "reindex", "v-old").await;
     let (new_rule_id, job_id) =
         seed_running_reindex(&repo, "v-new", "articles", "worker-a", ts(10)).await;
@@ -1202,7 +1202,7 @@ async fn finish_reindex_tx_rejects_when_rule_version_already_consumed() {
 async fn finish_reindex_tx_preserves_other_kinds_active_rows() {
     // 仅 demote 同 kind 的 active 行：其他 kind 的 active 行不动。
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let other_active = seed_active_rule(&pool, "extractor", "v-extractor-active").await;
     let reindex_old_active = seed_active_rule(&pool, "reindex", "v-old").await;
     let (new_rule_id, job_id) =

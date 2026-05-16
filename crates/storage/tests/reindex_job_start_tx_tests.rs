@@ -1,4 +1,4 @@
-//! F15-7 W9-F4: SqliteReindexJobRepo::start_reindex_tx 单测。
+//! F15-7 W9-F4: ReindexJobRepo::start_reindex_tx 单测。
 //!
 //! 锁定 reindex 启动入口的跨表事务语义：
 //!   - 两条 INSERT 原子写入（rule_versions(status='pending') +
@@ -10,7 +10,7 @@
 
 mod common;
 
-use rss_ai_news_storage::{ReindexJobRepository, SqliteReindexJobRepo, StorageError};
+use rss_ai_news_storage::{ReindexJobRepo, ReindexJobRepository, StorageError};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
@@ -52,7 +52,7 @@ async fn rule_status(pool: &SqlitePool, id: i64) -> String {
 #[tokio::test]
 async fn writes_both_rows_atomically_with_pending_status() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
 
     let outcome = repo
         .start_reindex_tx(
@@ -91,7 +91,7 @@ async fn writes_both_rows_atomically_with_pending_status() {
 #[tokio::test]
 async fn distinct_targets_can_coexist_in_pending() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
 
     let a = repo
         .start_reindex_tx(
@@ -130,7 +130,7 @@ async fn distinct_targets_can_coexist_in_pending() {
 #[tokio::test]
 async fn rolls_back_when_target_already_has_active_job() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
 
     repo.start_reindex_tx(
         "reindex",
@@ -180,7 +180,7 @@ async fn rolls_back_when_target_already_has_active_job() {
 #[tokio::test]
 async fn rolls_back_when_rule_version_tag_collides() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
 
     // 先用 link_hash + tag-shared 占住 rule_versions(kind='reindex',
     // version_tag='tag-shared')。
@@ -236,7 +236,7 @@ async fn rolls_back_when_rule_version_tag_collides() {
 #[tokio::test]
 async fn allows_restart_after_previous_terminal() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
 
     let first = repo
         .start_reindex_tx("reindex", "tag-r1", "r1", "sha-r1", "link_hash", ts(0))
@@ -268,7 +268,7 @@ async fn allows_restart_after_previous_terminal() {
 #[tokio::test]
 async fn complete_without_claim_finalizes_pending_row_and_clears_lease_fields() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
 
     let outcome = repo
         .start_reindex_tx("reindex", "tag-c1", "c1", "sha-c1", "link_hash", ts(0))
@@ -295,7 +295,7 @@ async fn complete_without_claim_finalizes_pending_row_and_clears_lease_fields() 
 #[tokio::test]
 async fn complete_without_claim_no_ops_for_non_pending_state() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
 
     let outcome = repo
         .start_reindex_tx("reindex", "tag-c2", "c2", "sha-c2", "link_hash", ts(0))
@@ -327,7 +327,7 @@ async fn complete_without_claim_no_ops_for_non_pending_state() {
 #[tokio::test]
 async fn complete_without_claim_no_ops_for_missing_row() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
 
     let updated = repo
         .complete_without_claim(9_999_999, ts(0))

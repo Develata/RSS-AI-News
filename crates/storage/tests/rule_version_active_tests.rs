@@ -1,13 +1,13 @@
 mod common;
 
-use rss_ai_news_storage::{RuleVersionRepository, SqliteRuleVersionRepo};
+use rss_ai_news_storage::{RuleVersionRepo, RuleVersionRepository};
 
 use common::make_test_pool;
 
 #[tokio::test]
 async fn active_rule_returns_none_for_unknown_kind_in_empty_db() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRuleVersionRepo::new(pool.clone());
+    let repo = RuleVersionRepo::new(pool.clone());
 
     let active = repo
         .active_rule("nonexistent_kind")
@@ -20,7 +20,7 @@ async fn active_rule_returns_none_for_unknown_kind_in_empty_db() {
 #[tokio::test]
 async fn active_rule_returns_seeded_active_row() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRuleVersionRepo::new(pool.clone());
+    let repo = RuleVersionRepo::new(pool.clone());
     let id = repo
         .get_or_create("prompt", "default", "default prompt", "sha-default")
         .await
@@ -43,7 +43,7 @@ async fn active_rule_returns_seeded_active_row() {
 #[tokio::test]
 async fn active_rule_skips_non_active_rows() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRuleVersionRepo::new(pool.clone());
+    let repo = RuleVersionRepo::new(pool.clone());
     repo.get_or_create("prompt", "v1", "v1 prompt", "sha-v1")
         .await
         .expect("insert v1");
@@ -71,7 +71,7 @@ async fn active_rule_skips_non_active_rows() {
 #[tokio::test]
 async fn active_rule_returns_none_when_all_rows_superseded() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRuleVersionRepo::new(pool.clone());
+    let repo = RuleVersionRepo::new(pool.clone());
     repo.get_or_create("prompt", "v1", "v1 prompt", "sha-v1")
         .await
         .expect("insert v1");
@@ -94,7 +94,7 @@ async fn active_rule_returns_none_when_all_rows_superseded() {
 #[tokio::test]
 async fn partial_unique_index_rejects_second_active_row_for_same_kind() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRuleVersionRepo::new(pool.clone());
+    let repo = RuleVersionRepo::new(pool.clone());
     repo.get_or_create("prompt", "v1", "v1", "sha-v1")
         .await
         .expect("insert v1");

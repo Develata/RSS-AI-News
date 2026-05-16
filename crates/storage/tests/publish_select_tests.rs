@@ -2,7 +2,7 @@ mod common;
 
 use std::num::NonZeroU32;
 
-use rss_ai_news_storage::{PublishItemRepository, SqlitePublishItemRepo};
+use rss_ai_news_storage::{PublishItemRepo, PublishItemRepository};
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
 
@@ -16,7 +16,7 @@ const LIMIT_10: NonZeroU32 = match NonZeroU32::new(10) {
 #[tokio::test]
 async fn select_ai_path_returns_only_ready_for_publish_with_keep_and_min_score() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqlitePublishItemRepo::new(pool.clone());
+    let repo = PublishItemRepo::new(pool.clone());
     let keep = seed_ai_article(&pool, "ai", "keep", "ready_for_publish", 90, 1).await;
     seed_ai_article(&pool, "ai", "low", "ready_for_publish", 20, 1).await;
     seed_ai_article(&pool, "ai", "filtered", "ready_for_publish", 95, 0).await;
@@ -35,7 +35,7 @@ async fn select_ai_path_returns_only_ready_for_publish_with_keep_and_min_score()
 #[tokio::test]
 async fn select_ai_path_orders_by_score_desc_then_created_at_desc() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqlitePublishItemRepo::new(pool.clone());
+    let repo = PublishItemRepo::new(pool.clone());
     let older = seed_ai_article(&pool, "ai", "older", "ready_for_publish", 80, 1).await;
     let newer = seed_ai_article(&pool, "ai", "newer", "ready_for_publish", 80, 1).await;
     let top = seed_ai_article(&pool, "ai", "top", "ready_for_publish", 95, 1).await;
@@ -56,7 +56,7 @@ async fn select_ai_path_orders_by_score_desc_then_created_at_desc() {
 #[tokio::test]
 async fn select_ai_path_filters_by_category_key() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqlitePublishItemRepo::new(pool.clone());
+    let repo = PublishItemRepo::new(pool.clone());
     let ai = seed_ai_article(&pool, "ai", "ai-cat", "ready_for_publish", 90, 1).await;
     seed_ai_article(&pool, "ml", "ml-cat", "ready_for_publish", 95, 1).await;
 
@@ -73,7 +73,7 @@ async fn select_ai_path_filters_by_category_key() {
 #[tokio::test]
 async fn select_ai_off_passthrough_returns_persisted_articles_without_any_ai_row() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqlitePublishItemRepo::new(pool.clone());
+    let repo = PublishItemRepo::new(pool.clone());
     let article = seed_passthrough_article(&pool, "ai", "direct", "persisted").await;
 
     let rows = repo
@@ -92,7 +92,7 @@ async fn select_ai_off_passthrough_returns_persisted_articles_without_any_ai_row
 #[tokio::test]
 async fn select_ai_off_passthrough_excludes_articles_with_filtered_or_permanent_failed_ai_rows() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqlitePublishItemRepo::new(pool.clone());
+    let repo = PublishItemRepo::new(pool.clone());
     let clean = seed_passthrough_article(&pool, "ai", "clean", "persisted").await;
     let filtered = seed_passthrough_article(&pool, "ai", "filtered-direct", "persisted").await;
     let failed = seed_passthrough_article(&pool, "ai", "failed-direct", "persisted").await;

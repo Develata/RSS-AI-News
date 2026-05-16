@@ -465,7 +465,7 @@ async fn abort_running_job_transitions_to_aborted_and_preserves_data() {
     // 306 一致：失败/取消不自动清理 pending rule_versions）。
     let (_dir, pool) = common::make_test_pool().await;
     // 先用 start_reindex_tx + claim_by_id 构造 running job
-    let repo = rss_ai_news_storage::SqliteReindexJobRepo::new(pool.clone());
+    let repo = rss_ai_news_storage::ReindexJobRepo::new(pool.clone());
     let outcome = repo
         .start_reindex_tx(
             "reindex",
@@ -526,7 +526,7 @@ async fn abort_running_job_transitions_to_aborted_and_preserves_data() {
 #[tokio::test]
 async fn abort_already_terminal_job_is_idempotent_noop() {
     let (_dir, pool) = common::make_test_pool().await;
-    let repo = rss_ai_news_storage::SqliteReindexJobRepo::new(pool.clone());
+    let repo = rss_ai_news_storage::ReindexJobRepo::new(pool.clone());
     let outcome = repo
         .start_reindex_tx(
             "reindex",
@@ -764,7 +764,7 @@ async fn reindex_lease_reclaim_preserves_checkpoint_and_started_at_for_resume() 
     // started_at、**不**动 attempt_count。新 worker claim_by_id 续作时
     // attempt_count += 1，last_processed_id 透传，从断点续作。
     let (_dir, pool) = common::make_test_pool().await;
-    let repo = rss_ai_news_storage::SqliteReindexJobRepo::new(pool.clone());
+    let repo = rss_ai_news_storage::ReindexJobRepo::new(pool.clone());
 
     let started = OffsetDateTime::now_utc();
     let outcome = repo
@@ -873,7 +873,7 @@ async fn reindex_second_start_for_same_target_rejected_by_partial_unique() {
     // 必须被 `uq_reindex_jobs_target_active` 拒绝，并且整段 TX 回滚——
     // rule_versions 不能留孤儿 pending 行（F15-7 的核心不变量）。
     let (_dir, pool) = common::make_test_pool().await;
-    let repo = rss_ai_news_storage::SqliteReindexJobRepo::new(pool.clone());
+    let repo = rss_ai_news_storage::ReindexJobRepo::new(pool.clone());
 
     let now = OffsetDateTime::now_utc();
     repo.start_reindex_tx("reindex", "tag-1", "desc-1", "sha-1", "link_hash", now)
@@ -926,7 +926,7 @@ async fn reindex_mark_failed_keeps_old_active_and_pending_new_rule_version() {
         .unwrap();
     let first_active_id = first.new_rule_version_id;
 
-    let repo = rss_ai_news_storage::SqliteReindexJobRepo::new(pool.clone());
+    let repo = rss_ai_news_storage::ReindexJobRepo::new(pool.clone());
     let now = OffsetDateTime::now_utc();
     let started = repo
         .start_reindex_tx(

@@ -219,7 +219,7 @@ P2 期间仅 `cli migrate` 子命令对 `driver=postgres` 放行，用于跑通 
 
 ### 6.2 Repo trait 内部分发
 
-现有 `SqliteFeedSourceRepo` 重命名 `FeedSourceRepo`，构造时取 `StoragePool`，trait 方法内部 `match` 分发：
+P2-B 后所有 repo struct 已从 `Sqlite*Repo` 重命名为 `*Repo`（如 `FeedSourceRepo`），内部持有 `StoragePool`，trait 方法 `match` 分发：
 
 ```rust
 pub struct FeedSourceRepo { pool: StoragePool }

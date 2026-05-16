@@ -111,11 +111,11 @@ pub trait ArticleAiResultRepository: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct SqliteArticleAiResultRepo {
+pub struct ArticleAiResultRepo {
     pool: StoragePool,
 }
 
-impl SqliteArticleAiResultRepo {
+impl ArticleAiResultRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool: StoragePool::Sqlite(pool),
@@ -133,7 +133,7 @@ impl SqliteArticleAiResultRepo {
 }
 
 #[async_trait]
-impl ArticleAiResultRepository for SqliteArticleAiResultRepo {
+impl ArticleAiResultRepository for ArticleAiResultRepo {
     async fn insert_pending(&self, item: &NewAiResult) -> Result<Option<i64>, StorageError> {
         let pool = self.sqlite_pool()?;
         sqlx::query_scalar::<_, i64>(

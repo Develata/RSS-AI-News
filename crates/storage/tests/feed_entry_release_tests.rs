@@ -1,8 +1,6 @@
 mod common;
 
-use rss_ai_news_storage::{
-    ClaimRequest, FeedEntryRepository, SqliteFeedEntryRepo, lease_expires_at,
-};
+use rss_ai_news_storage::{ClaimRequest, FeedEntryRepo, FeedEntryRepository, lease_expires_at};
 use time::{Duration, OffsetDateTime};
 
 use common::{insert_article, insert_feed_entry, insert_rule, make_test_pool, seed_source};
@@ -86,10 +84,7 @@ async fn release_fallback_persisted_with_wrong_owner_returns_false() {
     assert_eq!(row.1, None);
 }
 
-async fn setup_claimed_entry(
-    pool: &sqlx::SqlitePool,
-    owner: &str,
-) -> (SqliteFeedEntryRepo, i64, i64) {
+async fn setup_claimed_entry(pool: &sqlx::SqlitePool, owner: &str) -> (FeedEntryRepo, i64, i64) {
     let source_id = seed_source(pool).await;
     let entry_id = insert_feed_entry(pool, source_id, "uid-1", "link-hash-1").await;
     let rule_id = insert_rule(pool, "extractor", "release-test", "release-test-sha").await;
@@ -104,7 +99,7 @@ async fn setup_claimed_entry(
         .execute(pool)
         .await
         .expect("article origin entry should not be claimable");
-    let repo = SqliteFeedEntryRepo::new(pool.clone());
+    let repo = FeedEntryRepo::new(pool.clone());
     let claimed = repo
         .claim_pending_fetch(&claim_request(owner))
         .await

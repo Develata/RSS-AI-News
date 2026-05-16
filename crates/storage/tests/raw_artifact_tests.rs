@@ -1,14 +1,14 @@
 mod common;
 
 use rss_ai_news_domain::state::ArtifactKind;
-use rss_ai_news_storage::{NewRawArtifact, RawArtifactRepository, SqliteRawArtifactRepo};
+use rss_ai_news_storage::{NewRawArtifact, RawArtifactRepo, RawArtifactRepository};
 
 use common::make_test_pool;
 
 #[tokio::test]
 async fn upsert_inline_inserts_new_row() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRawArtifactRepo::new(pool);
+    let repo = RawArtifactRepo::new(pool);
 
     let id = repo
         .upsert_inline(&artifact("feed_payload", "1", b"hello", "sha-a"))
@@ -21,7 +21,7 @@ async fn upsert_inline_inserts_new_row() {
 #[tokio::test]
 async fn upsert_inline_overwrites_existing_by_kind_and_key() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRawArtifactRepo::new(pool);
+    let repo = RawArtifactRepo::new(pool);
 
     let first = repo
         .upsert_inline(&artifact("feed_payload", "1", b"old", "sha-old"))
@@ -45,7 +45,7 @@ async fn upsert_inline_overwrites_existing_by_kind_and_key() {
 #[tokio::test]
 async fn find_by_key_returns_none_when_missing() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRawArtifactRepo::new(pool);
+    let repo = RawArtifactRepo::new(pool);
 
     let found = repo
         .find_by_key("feed_payload", "missing")
@@ -58,7 +58,7 @@ async fn find_by_key_returns_none_when_missing() {
 #[tokio::test]
 async fn find_by_key_returns_inserted_row() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteRawArtifactRepo::new(pool);
+    let repo = RawArtifactRepo::new(pool);
 
     let id = repo
         .upsert_inline(&artifact("feed_payload", "1", b"body", "sha-body"))

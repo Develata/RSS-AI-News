@@ -12,31 +12,31 @@ pub mod rule_version;
 pub mod run_event;
 
 pub use article::{
-    ArticleAiTaskCandidate, ArticleInsertOutcome, ArticleRepository, BackfillArticleCandidate,
-    ContentHashReindexCandidate, NewArticle, SqliteArticleRepo, UpdateContentHashOutcome,
+    ArticleAiTaskCandidate, ArticleInsertOutcome, ArticleRepo, ArticleRepository,
+    BackfillArticleCandidate, ContentHashReindexCandidate, NewArticle, UpdateContentHashOutcome,
 };
 pub use article_ai_result::{
-    AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepository, ClaimedAiResult,
-    InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome, SqliteArticleAiResultRepo,
+    AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
+    ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome,
 };
 pub use feed_entry::{
-    ClaimedFeedEntry, FeedEntry, FeedEntryRepository, LinkHashReindexCandidate, NewFeedEntry,
-    ResetFailedFilter, ResetFailedOutcome, SqliteFeedEntryRepo,
+    ClaimedFeedEntry, FeedEntry, FeedEntryRepo, FeedEntryRepository, LinkHashReindexCandidate,
+    NewFeedEntry, ResetFailedFilter, ResetFailedOutcome,
 };
-pub use feed_source::{FeedSourceRepository, LeaseGuardedWriteOutcome, SqliteFeedSourceRepo};
+pub use feed_source::{FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome};
 pub use publish_item::{
     FreezeSnapshotItem, FreezeSnapshotOutcome, FreezeSnapshotStatus, PublishCandidateRow,
-    PublishItemRepository, SqlitePublishItemRepo,
+    PublishItemRepo, PublishItemRepository,
 };
 pub use publish_record::{
-    ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord,
-    PublishRecordRepository, PublishState, PublishTimestampField, SqlitePublishRecordRepo,
-    TerminalAdvanceOutcome, TerminalAdvanceStatus,
+    ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord, PublishRecordRepo,
+    PublishRecordRepository, PublishState, PublishTimestampField, TerminalAdvanceOutcome,
+    TerminalAdvanceStatus,
 };
-pub use raw_artifact::{NewRawArtifact, RawArtifactRepository, SqliteRawArtifactRepo};
+pub use raw_artifact::{NewRawArtifact, RawArtifactRepo, RawArtifactRepository};
 pub use reindex_job::{
-    ClaimedReindexJob, FinishReindexTxOutcome, ReindexJob, ReindexJobRepository,
-    SqliteReindexJobRepo, StartReindexTxOutcome,
+    ClaimedReindexJob, FinishReindexTxOutcome, ReindexJob, ReindexJobRepo, ReindexJobRepository,
+    StartReindexTxOutcome,
 };
-pub use rule_version::{RuleVersion, RuleVersionRepository, SqliteRuleVersionRepo};
-pub use run_event::{NewRunEvent, RunEventRepository, SqliteRunEventRepo};
+pub use rule_version::{RuleVersion, RuleVersionRepo, RuleVersionRepository};
+pub use run_event::{NewRunEvent, RunEventRepo, RunEventRepository};

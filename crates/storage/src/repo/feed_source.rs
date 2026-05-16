@@ -91,11 +91,11 @@ pub trait FeedSourceRepository: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct SqliteFeedSourceRepo {
+pub struct FeedSourceRepo {
     pool: StoragePool,
 }
 
-impl SqliteFeedSourceRepo {
+impl FeedSourceRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool: StoragePool::Sqlite(pool),
@@ -113,7 +113,7 @@ impl SqliteFeedSourceRepo {
 }
 
 #[async_trait]
-impl FeedSourceRepository for SqliteFeedSourceRepo {
+impl FeedSourceRepository for FeedSourceRepo {
     async fn upsert(&self, src: &FeedSource) -> Result<i64, StorageError> {
         let pool = self.sqlite_pool()?;
         let id = sqlx::query_scalar::<_, i64>(

@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use rss_ai_news_config as config;
 use rss_ai_news_storage::{
-    ReindexJobRepository, SqliteReindexJobRepo, build_sqlite_pool, run_migrations,
+    ReindexJobRepo, ReindexJobRepository, build_sqlite_pool, run_migrations,
 };
 use serde::Serialize;
 
@@ -71,7 +71,7 @@ pub async fn check(cli: &Cli) -> Result<MigrateCommandSummary, CliError> {
 /// 此时视为 0 active job 放行（新库 + 首次 migrate run 不存在 active
 /// reindex_job 的物理可能性）；其它 StorageError 透传。
 pub(crate) async fn assert_no_running_reindex(pool: &sqlx::SqlitePool) -> Result<(), CliError> {
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rows = match repo.list_running().await {
         Ok(rows) => rows,
         Err(rss_ai_news_storage::StorageError::Sqlx(error))

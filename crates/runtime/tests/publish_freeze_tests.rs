@@ -11,7 +11,7 @@ use rss_ai_news_feed::{FeedError, FeedFetcher};
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishFreezeStatus, PublishInitOptions, PublishInitOutcome,
 };
-use rss_ai_news_storage::{PublishItemRepository, SqlitePublishItemRepo};
+use rss_ai_news_storage::{PublishItemRepo, PublishItemRepository};
 use sqlx::SqlitePool;
 
 use common::{
@@ -69,7 +69,7 @@ async fn freeze_with_ai_path_inserts_publish_items_and_advances_record_to_snapsh
     assert_eq!(outcome.status, PublishFreezeStatus::Frozen);
     assert_eq!(outcome.item_count, 1);
     assert_record_state(&pool, publish_record_id, "snapshot_frozen").await;
-    let items = SqlitePublishItemRepo::new(pool.clone())
+    let items = PublishItemRepo::new(pool.clone())
         .list_by_publish_record(publish_record_id)
         .await
         .unwrap();

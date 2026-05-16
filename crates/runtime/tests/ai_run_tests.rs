@@ -13,8 +13,8 @@ use rss_ai_news_feed::{FeedError, FeedFetcher};
 use rss_ai_news_publish::LocalFsTarget;
 use rss_ai_news_runtime::{AiRunFlow, AiRunOptions, RunContext, RunContextDeps};
 use rss_ai_news_storage::{
-    SqliteArticleAiResultRepo, SqliteArticleRepo, SqliteFeedEntryRepo, SqliteFeedSourceRepo,
-    SqlitePublishItemRepo, SqlitePublishRecordRepo, SqliteRawArtifactRepo, SqliteRunEventRepo,
+    ArticleAiResultRepo, ArticleRepo, FeedEntryRepo, FeedSourceRepo, PublishItemRepo,
+    PublishRecordRepo, RawArtifactRepo, RunEventRepo,
 };
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
@@ -219,18 +219,16 @@ fn flow(pool: SqlitePool, ai_client: Arc<MockAiClient>) -> AiRunFlow {
             ai_client,
             publish_target_local: Arc::new(LocalFsTarget::new(std::env::temp_dir())),
             publish_target_remote: None,
-            feed_source_repo: Arc::new(SqliteFeedSourceRepo::new(pool.clone())),
-            feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
-            article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),
-            ai_result_repo: Arc::new(SqliteArticleAiResultRepo::new(pool.clone())),
-            publish_record_repo: Arc::new(SqlitePublishRecordRepo::new(pool.clone())),
-            publish_item_repo: Arc::new(SqlitePublishItemRepo::new(pool.clone())),
-            artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
-            event_repo: Arc::new(SqliteRunEventRepo::new(pool.clone())),
-            rule_version_repo: Arc::new(rss_ai_news_storage::SqliteRuleVersionRepo::new(
-                pool.clone(),
-            )),
-            reindex_job_repo: Arc::new(rss_ai_news_storage::SqliteReindexJobRepo::new(pool)),
+            feed_source_repo: Arc::new(FeedSourceRepo::new(pool.clone())),
+            feed_entry_repo: Arc::new(FeedEntryRepo::new(pool.clone())),
+            article_repo: Arc::new(ArticleRepo::new(pool.clone())),
+            ai_result_repo: Arc::new(ArticleAiResultRepo::new(pool.clone())),
+            publish_record_repo: Arc::new(PublishRecordRepo::new(pool.clone())),
+            publish_item_repo: Arc::new(PublishItemRepo::new(pool.clone())),
+            artifact_repo: Arc::new(RawArtifactRepo::new(pool.clone())),
+            event_repo: Arc::new(RunEventRepo::new(pool.clone())),
+            rule_version_repo: Arc::new(rss_ai_news_storage::RuleVersionRepo::new(pool.clone())),
+            reindex_job_repo: Arc::new(rss_ai_news_storage::ReindexJobRepo::new(pool)),
         },
     ));
     AiRunFlow::new(ctx)

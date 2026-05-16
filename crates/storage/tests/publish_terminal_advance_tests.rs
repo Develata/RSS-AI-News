@@ -1,9 +1,9 @@
 mod common;
 
 use rss_ai_news_storage::{
-    ClaimRequest, NewPublishRecord, PublishAdvanceExtras, PublishRecordRepository, PublishState,
-    PublishTimestampField, SqlitePublishRecordRepo, TerminalAdvanceStatus, build_owner_id,
-    lease_expires_at,
+    ClaimRequest, NewPublishRecord, PublishAdvanceExtras, PublishRecordRepo,
+    PublishRecordRepository, PublishState, PublishTimestampField, TerminalAdvanceStatus,
+    build_owner_id, lease_expires_at,
 };
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
@@ -15,7 +15,7 @@ async fn terminal_advance_published_local_advances_record_and_promotes_articles(
     let (_dir, pool) = make_test_pool().await;
     let (record_id, owner) = claimed_rendered_record(&pool).await;
     let article_id = seed_article(&pool, "terminal-ok", "ready_for_publish").await;
-    let repo = SqlitePublishRecordRepo::new(pool.clone());
+    let repo = PublishRecordRepo::new(pool.clone());
 
     let outcome = repo
         .release_terminal_advance_with_articles(
@@ -51,7 +51,7 @@ async fn publish_terminal_advance_stored_local_to_published_remote_with_articles
     let (_dir, pool) = make_test_pool().await;
     let (record_id, owner) = claimed_stored_local_record(&pool).await;
     let article_id = seed_article(&pool, "terminal-remote-ok", "ready_for_publish").await;
-    let repo = SqlitePublishRecordRepo::new(pool.clone());
+    let repo = PublishRecordRepo::new(pool.clone());
 
     let outcome = repo
         .release_terminal_advance_with_articles(
@@ -96,7 +96,7 @@ async fn terminal_advance_returns_publish_record_conflict_when_lease_owner_misma
     let (_dir, pool) = make_test_pool().await;
     let (record_id, _owner) = claimed_rendered_record(&pool).await;
     let article_id = seed_article(&pool, "terminal-owner-conflict", "ready_for_publish").await;
-    let repo = SqlitePublishRecordRepo::new(pool.clone());
+    let repo = PublishRecordRepo::new(pool.clone());
 
     let outcome = repo
         .release_terminal_advance_with_articles(
@@ -127,7 +127,7 @@ async fn terminal_advance_returns_publish_record_conflict_when_state_not_matchin
         .await
         .unwrap();
     let article_id = seed_article(&pool, "terminal-state-conflict", "ready_for_publish").await;
-    let repo = SqlitePublishRecordRepo::new(pool.clone());
+    let repo = PublishRecordRepo::new(pool.clone());
 
     let outcome = repo
         .release_terminal_advance_with_articles(
@@ -153,7 +153,7 @@ async fn terminal_advance_returns_article_state_conflict_when_promote_target_alr
     let (_dir, pool) = make_test_pool().await;
     let (record_id, owner) = claimed_rendered_record(&pool).await;
     let article_id = seed_article(&pool, "terminal-article-conflict", "published").await;
-    let repo = SqlitePublishRecordRepo::new(pool.clone());
+    let repo = PublishRecordRepo::new(pool.clone());
 
     let outcome = repo
         .release_terminal_advance_with_articles(
@@ -181,7 +181,7 @@ async fn terminal_advance_returns_article_state_conflict_when_promote_target_alr
 async fn terminal_advance_with_empty_promote_ids_only_advances_record() {
     let (_dir, pool) = make_test_pool().await;
     let (record_id, owner) = claimed_rendered_record(&pool).await;
-    let repo = SqlitePublishRecordRepo::new(pool.clone());
+    let repo = PublishRecordRepo::new(pool.clone());
 
     let outcome = repo
         .release_terminal_advance_with_articles(
@@ -216,7 +216,7 @@ async fn claimed_rendered_record(pool: &SqlitePool) -> (i64, String) {
         "policy-sha",
     )
     .await;
-    let repo = SqlitePublishRecordRepo::new(pool.clone());
+    let repo = PublishRecordRepo::new(pool.clone());
     let id = repo
         .create_if_new(&NewPublishRecord {
             idempotency_key: format!("ai-2026-04-28-v{}", unique()),
@@ -270,7 +270,7 @@ async fn claimed_stored_local_record(pool: &SqlitePool) -> (i64, String) {
     .await
     .unwrap();
     let owner = build_owner_id();
-    let repo = SqlitePublishRecordRepo::new(pool.clone());
+    let repo = PublishRecordRepo::new(pool.clone());
     let rows = repo
         .claim_local_for_remote_publish(&ClaimRequest {
             owner: owner.clone(),

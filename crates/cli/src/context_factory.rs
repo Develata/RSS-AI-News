@@ -10,10 +10,9 @@ use rss_ai_news_feed::ReqwestFeedFetcher;
 use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, LocalFsTarget, PublishTarget};
 use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
-    RuleVersionRepository, SqliteArticleAiResultRepo, SqliteArticleRepo, SqliteFeedEntryRepo,
-    SqliteFeedSourceRepo, SqlitePublishItemRepo, SqlitePublishRecordRepo, SqliteRawArtifactRepo,
-    SqliteReindexJobRepo, SqliteRuleVersionRepo, SqliteRunEventRepo, build_sqlite_pool,
-    run_migrations,
+    ArticleAiResultRepo, ArticleRepo, FeedEntryRepo, FeedSourceRepo, PublishItemRepo,
+    PublishRecordRepo, RawArtifactRepo, ReindexJobRepo, RuleVersionRepo, RuleVersionRepository,
+    RunEventRepo, build_sqlite_pool, run_migrations,
 };
 use sqlx::SqlitePool;
 
@@ -108,16 +107,16 @@ pub async fn build_run_context(
             ai_client,
             publish_target_local,
             publish_target_remote,
-            feed_source_repo: Arc::new(SqliteFeedSourceRepo::new(pool.clone())),
-            feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
-            article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),
-            ai_result_repo: Arc::new(SqliteArticleAiResultRepo::new(pool.clone())),
-            publish_record_repo: Arc::new(SqlitePublishRecordRepo::new(pool.clone())),
-            publish_item_repo: Arc::new(SqlitePublishItemRepo::new(pool.clone())),
-            artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
-            event_repo: Arc::new(SqliteRunEventRepo::new(pool.clone())),
-            rule_version_repo: Arc::new(SqliteRuleVersionRepo::new(pool.clone())),
-            reindex_job_repo: Arc::new(SqliteReindexJobRepo::new(pool.clone())),
+            feed_source_repo: Arc::new(FeedSourceRepo::new(pool.clone())),
+            feed_entry_repo: Arc::new(FeedEntryRepo::new(pool.clone())),
+            article_repo: Arc::new(ArticleRepo::new(pool.clone())),
+            ai_result_repo: Arc::new(ArticleAiResultRepo::new(pool.clone())),
+            publish_record_repo: Arc::new(PublishRecordRepo::new(pool.clone())),
+            publish_item_repo: Arc::new(PublishItemRepo::new(pool.clone())),
+            artifact_repo: Arc::new(RawArtifactRepo::new(pool.clone())),
+            event_repo: Arc::new(RunEventRepo::new(pool.clone())),
+            rule_version_repo: Arc::new(RuleVersionRepo::new(pool.clone())),
+            reindex_job_repo: Arc::new(ReindexJobRepo::new(pool.clone())),
         },
     );
 
@@ -146,9 +145,9 @@ pub async fn build_replay_deps(cli: &crate::args::Cli) -> Result<ReplayDeps, Cli
 
     Ok(ReplayDeps {
         pool: pool.clone(),
-        artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
-        article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),
-        feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool)),
+        artifact_repo: Arc::new(RawArtifactRepo::new(pool.clone())),
+        article_repo: Arc::new(ArticleRepo::new(pool.clone())),
+        feed_entry_repo: Arc::new(FeedEntryRepo::new(pool)),
     })
 }
 
@@ -197,7 +196,7 @@ async fn ensure_default_rule_version(
     pool: &SqlitePool,
     config_sha256: &str,
 ) -> Result<(), rss_ai_news_storage::StorageError> {
-    let repo = SqliteRuleVersionRepo::new(pool.clone());
+    let repo = RuleVersionRepo::new(pool.clone());
     repo.active_rule_or_register(
         "config",
         "cli-default",

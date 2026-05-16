@@ -173,11 +173,11 @@ pub trait PublishRecordRepository: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct SqlitePublishRecordRepo {
+pub struct PublishRecordRepo {
     pub(super) pool: StoragePool,
 }
 
-impl SqlitePublishRecordRepo {
+impl PublishRecordRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool: StoragePool::Sqlite(pool),

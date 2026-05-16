@@ -24,8 +24,8 @@ use rss_ai_news_domain::{
     state::{FeedKind, FeedSourceStatus},
 };
 use rss_ai_news_storage::{
-    FeedSourceRepository, LeaseGuardedWriteOutcome, ReindexJobRepository, SqliteFeedSourceRepo,
-    SqliteReindexJobRepo, build_owner_id, lease_expires_at,
+    FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome, ReindexJobRepo,
+    ReindexJobRepository, build_owner_id, lease_expires_at,
 };
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
@@ -33,7 +33,7 @@ use time::{Duration, OffsetDateTime};
 use common::{insert_rule, make_test_pool};
 
 async fn seed_running_job(pool: &SqlitePool) -> (i64, String) {
-    let repo = SqliteReindexJobRepo::new(pool.clone());
+    let repo = ReindexJobRepo::new(pool.clone());
     let rule_id = insert_rule(pool, "reindex", "fix7-test", "fix7-sha").await;
     let now = OffsetDateTime::now_utc();
     let job_id = repo
@@ -85,7 +85,7 @@ async fn upsert_with_lease_guard_writes_when_lease_held() {
     let (_dir, pool) = make_test_pool().await;
     let (job_id, owner) = seed_running_job(&pool).await;
     let config_id = insert_rule(&pool, "config", "cfg-1", "cfg-sha-1").await;
-    let repo = SqliteFeedSourceRepo::new(pool.clone());
+    let repo = FeedSourceRepo::new(pool.clone());
 
     let src = sample_source("ai", "main", config_id);
     let outcome = repo
@@ -110,8 +110,8 @@ async fn upsert_with_lease_guard_rolls_back_after_abort() {
     let (_dir, pool) = make_test_pool().await;
     let (job_id, owner) = seed_running_job(&pool).await;
     let config_id = insert_rule(&pool, "config", "cfg-1", "cfg-sha-1").await;
-    let feed_repo = SqliteFeedSourceRepo::new(pool.clone());
-    let job_repo = SqliteReindexJobRepo::new(pool.clone());
+    let feed_repo = FeedSourceRepo::new(pool.clone());
+    let job_repo = ReindexJobRepo::new(pool.clone());
 
     let before = count_feed_sources(&pool).await;
     job_repo
@@ -140,7 +140,7 @@ async fn upsert_with_lease_guard_rejects_wrong_owner() {
     let (_dir, pool) = make_test_pool().await;
     let (job_id, _real_owner) = seed_running_job(&pool).await;
     let config_id = insert_rule(&pool, "config", "cfg-1", "cfg-sha-1").await;
-    let repo = SqliteFeedSourceRepo::new(pool.clone());
+    let repo = FeedSourceRepo::new(pool.clone());
 
     let src = sample_source("ai", "main", config_id);
     let outcome = repo
@@ -156,7 +156,7 @@ async fn mark_archived_with_lease_guard_three_outcomes() {
     let (_dir, pool) = make_test_pool().await;
     let (job_id, owner) = seed_running_job(&pool).await;
     let config_id = insert_rule(&pool, "config", "cfg-1", "cfg-sha-1").await;
-    let repo = SqliteFeedSourceRepo::new(pool.clone());
+    let repo = FeedSourceRepo::new(pool.clone());
     let now = OffsetDateTime::now_utc();
 
     // 先用 lease-guarded upsert 写一行 active 行（同时验证 Applied 路径）。
@@ -184,7 +184,7 @@ async fn mark_archived_with_lease_guard_three_outcomes() {
     assert_eq!(outcome, LeaseGuardedWriteOutcome::NoOp);
 
     // LeaseLost：abort 后再调；feed_sources 状态保持 archived。
-    SqliteReindexJobRepo::new(pool.clone())
+    ReindexJobRepo::new(pool.clone())
         .abort(job_id, "test", now)
         .await
         .expect("abort ok");

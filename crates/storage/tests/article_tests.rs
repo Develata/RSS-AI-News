@@ -1,7 +1,7 @@
 mod common;
 
 use rss_ai_news_domain::state::{ArticleState, ContentQuality, ExtractorStrategy};
-use rss_ai_news_storage::{ArticleRepository, NewArticle, SqliteArticleRepo};
+use rss_ai_news_storage::{ArticleRepo, ArticleRepository, NewArticle};
 
 use common::{insert_feed_entry, insert_rule, make_test_pool, seed_source};
 
@@ -64,7 +64,7 @@ async fn find_by_id_returns_inserted_article() {
 #[tokio::test]
 async fn find_by_id_returns_none_when_missing() {
     let (_dir, pool) = make_test_pool().await;
-    let repo = SqliteArticleRepo::new(pool);
+    let repo = ArticleRepo::new(pool);
 
     let article = repo
         .find_by_id(9_999)
@@ -74,11 +74,11 @@ async fn find_by_id_returns_none_when_missing() {
     assert!(article.is_none());
 }
 
-async fn setup(pool: &sqlx::SqlitePool) -> (SqliteArticleRepo, i64, i64) {
+async fn setup(pool: &sqlx::SqlitePool) -> (ArticleRepo, i64, i64) {
     let rule_id = insert_rule(pool, "extractor", "article-test", "article-test-sha").await;
     let source_id = seed_source(pool).await;
     let entry_id = insert_feed_entry(pool, source_id, "uid-1", "link-hash-1").await;
-    (SqliteArticleRepo::new(pool.clone()), entry_id, rule_id)
+    (ArticleRepo::new(pool.clone()), entry_id, rule_id)
 }
 
 fn new_article(content_hash: &str, entry_id: i64, rule_id: i64) -> NewArticle {

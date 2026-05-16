@@ -274,11 +274,11 @@ pub trait ReindexJobRepository: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct SqliteReindexJobRepo {
+pub struct ReindexJobRepo {
     pool: StoragePool,
 }
 
-impl SqliteReindexJobRepo {
+impl ReindexJobRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool: StoragePool::Sqlite(pool),
@@ -302,7 +302,7 @@ const SELECT_REINDEX_JOB_COLUMNS: &str = r#"
 "#;
 
 #[async_trait]
-impl ReindexJobRepository for SqliteReindexJobRepo {
+impl ReindexJobRepository for ReindexJobRepo {
     async fn start_reindex_tx(
         &self,
         rule_kind: &str,

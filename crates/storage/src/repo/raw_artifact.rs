@@ -29,11 +29,11 @@ pub trait RawArtifactRepository: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct SqliteRawArtifactRepo {
+pub struct RawArtifactRepo {
     pool: StoragePool,
 }
 
-impl SqliteRawArtifactRepo {
+impl RawArtifactRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool: StoragePool::Sqlite(pool),
@@ -51,7 +51,7 @@ impl SqliteRawArtifactRepo {
 }
 
 #[async_trait]
-impl RawArtifactRepository for SqliteRawArtifactRepo {
+impl RawArtifactRepository for RawArtifactRepo {
     async fn upsert_inline(&self, artifact: &NewRawArtifact) -> Result<i64, StorageError> {
         let pool = self.sqlite_pool()?;
         sqlx::query_scalar::<_, i64>(

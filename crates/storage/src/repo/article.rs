@@ -104,11 +104,11 @@ pub trait ArticleRepository: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct SqliteArticleRepo {
+pub struct ArticleRepo {
     pool: StoragePool,
 }
 
-impl SqliteArticleRepo {
+impl ArticleRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool: StoragePool::Sqlite(pool),
@@ -126,7 +126,7 @@ impl SqliteArticleRepo {
 }
 
 #[async_trait]
-impl ArticleRepository for SqliteArticleRepo {
+impl ArticleRepository for ArticleRepo {
     async fn insert_or_get_by_content_hash(
         &self,
         article: &NewArticle,

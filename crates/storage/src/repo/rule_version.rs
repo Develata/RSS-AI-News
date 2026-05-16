@@ -78,11 +78,11 @@ pub trait RuleVersionRepository: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct SqliteRuleVersionRepo {
+pub struct RuleVersionRepo {
     pool: StoragePool,
 }
 
-impl SqliteRuleVersionRepo {
+impl RuleVersionRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self {
             pool: StoragePool::Sqlite(pool),
@@ -121,7 +121,7 @@ impl SqliteRuleVersionRepo {
 }
 
 #[async_trait]
-impl ConfigVersionStore for SqliteRuleVersionRepo {
+impl ConfigVersionStore for RuleVersionRepo {
     async fn get_or_create_config_version(
         &self,
         sha256: &str,
@@ -133,7 +133,7 @@ impl ConfigVersionStore for SqliteRuleVersionRepo {
 }
 
 #[async_trait]
-impl RuleVersionRepository for SqliteRuleVersionRepo {
+impl RuleVersionRepository for RuleVersionRepo {
     async fn get_or_create(
         &self,
         kind: &str,

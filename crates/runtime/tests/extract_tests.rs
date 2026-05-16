@@ -16,9 +16,8 @@ use rss_ai_news_runtime::{
     ExtractEntryStatus, ExtractFlow, ExtractOptions, RunContext, RunContextDeps,
 };
 use rss_ai_news_storage::{
-    ArticleRepository, NewArticle, SqliteArticleAiResultRepo, SqliteArticleRepo,
-    SqliteFeedEntryRepo, SqliteFeedSourceRepo, SqlitePublishItemRepo, SqlitePublishRecordRepo,
-    SqliteRawArtifactRepo, SqliteRunEventRepo,
+    ArticleAiResultRepo, ArticleRepo, ArticleRepository, FeedEntryRepo, FeedSourceRepo, NewArticle,
+    PublishItemRepo, PublishRecordRepo, RawArtifactRepo, RunEventRepo,
 };
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
@@ -127,7 +126,7 @@ async fn extract_dedup_skipped_when_content_hash_matches_existing_article() {
     let (rule_id, source_id) = setup_base(&pool).await;
     let existing_entry_id =
         seed_pending_fetch_entry(&pool, source_id, "uid-existing", "hash-existing", None).await;
-    let existing_article_id = SqliteArticleRepo::new(pool.clone())
+    let existing_article_id = ArticleRepo::new(pool.clone())
         .insert_or_get_by_content_hash(&new_article("content-hash-dup", existing_entry_id, rule_id))
         .await
         .expect("existing article should insert")
@@ -377,18 +376,16 @@ fn flow(
             ai_client: Arc::new(DummyAiClient),
             publish_target_local: Arc::new(LocalFsTarget::new(std::env::temp_dir())),
             publish_target_remote: None,
-            feed_source_repo: Arc::new(SqliteFeedSourceRepo::new(pool.clone())),
-            feed_entry_repo: Arc::new(SqliteFeedEntryRepo::new(pool.clone())),
-            article_repo: Arc::new(SqliteArticleRepo::new(pool.clone())),
-            ai_result_repo: Arc::new(SqliteArticleAiResultRepo::new(pool.clone())),
-            publish_record_repo: Arc::new(SqlitePublishRecordRepo::new(pool.clone())),
-            publish_item_repo: Arc::new(SqlitePublishItemRepo::new(pool.clone())),
-            artifact_repo: Arc::new(SqliteRawArtifactRepo::new(pool.clone())),
-            event_repo: Arc::new(SqliteRunEventRepo::new(pool.clone())),
-            rule_version_repo: Arc::new(rss_ai_news_storage::SqliteRuleVersionRepo::new(
-                pool.clone(),
-            )),
-            reindex_job_repo: Arc::new(rss_ai_news_storage::SqliteReindexJobRepo::new(pool)),
+            feed_source_repo: Arc::new(FeedSourceRepo::new(pool.clone())),
+            feed_entry_repo: Arc::new(FeedEntryRepo::new(pool.clone())),
+            article_repo: Arc::new(ArticleRepo::new(pool.clone())),
+            ai_result_repo: Arc::new(ArticleAiResultRepo::new(pool.clone())),
+            publish_record_repo: Arc::new(PublishRecordRepo::new(pool.clone())),
+            publish_item_repo: Arc::new(PublishItemRepo::new(pool.clone())),
+            artifact_repo: Arc::new(RawArtifactRepo::new(pool.clone())),
+            event_repo: Arc::new(RunEventRepo::new(pool.clone())),
+            rule_version_repo: Arc::new(rss_ai_news_storage::RuleVersionRepo::new(pool.clone())),
+            reindex_job_repo: Arc::new(rss_ai_news_storage::ReindexJobRepo::new(pool)),
         },
     ));
     ExtractFlow::new(ctx)
