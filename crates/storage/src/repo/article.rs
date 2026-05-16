@@ -308,8 +308,8 @@ impl ArticleRepository for SqliteArticleRepo {
             return Ok(UpdateContentHashOutcome::Unchanged);
         }
 
-        let conflict = sqlx::query_scalar::<_, i64>(
-            "SELECT EXISTS(SELECT 1 FROM articles WHERE content_hash = ? AND id <> ?)",
+        let conflict = sqlx::query_scalar::<_, i32>(
+            "SELECT CASE WHEN EXISTS(SELECT 1 FROM articles WHERE content_hash = ? AND id <> ?) THEN 1 ELSE 0 END",
         )
         .bind(new_content_hash)
         .bind(id)

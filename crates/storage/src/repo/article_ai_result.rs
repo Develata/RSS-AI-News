@@ -488,13 +488,13 @@ async fn compute_article_advance(
             }
         }
         Some(false) => {
-            let other_succeeded = sqlx::query_scalar::<_, i64>(
+            let other_succeeded = sqlx::query_scalar::<_, i32>(
                 r#"
-                SELECT EXISTS (
+                SELECT CASE WHEN EXISTS (
                     SELECT 1
                     FROM article_ai_results
                     WHERE article_id = ? AND state = 'succeeded' AND id != ?
-                )
+                ) THEN 1 ELSE 0 END
                 "#,
             )
             .bind(article_id)

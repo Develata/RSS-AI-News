@@ -174,8 +174,8 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
     }
 
     async fn exists_by_link_hash(&self, link_hash: &str) -> Result<bool, StorageError> {
-        let exists = sqlx::query_scalar::<_, i64>(
-            "SELECT EXISTS(SELECT 1 FROM feed_entries WHERE link_hash = ?)",
+        let exists = sqlx::query_scalar::<_, i32>(
+            "SELECT CASE WHEN EXISTS(SELECT 1 FROM feed_entries WHERE link_hash = ?) THEN 1 ELSE 0 END",
         )
         .bind(link_hash)
         .fetch_one(&self.pool)
