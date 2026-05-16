@@ -32,9 +32,11 @@ impl StoragePool {
         busy_timeout_ms: u32,
     ) -> Result<Self, StorageError> {
         if Self::is_postgres_url(url) {
-            return Err(StorageError::UnsupportedBackend(format!(
-                "postgres backend (url={url}) not implemented in P2-A; only sqlite is wired"
-            )));
+            // 不把 url 拼进错误信息：PG URL 形如 `postgres://user:password@host/db`，
+            // 拼出会让密码顺着 error chain / 日志泄露。stub 阶段返回固定串即可。
+            return Err(StorageError::UnsupportedBackend(
+                "postgres backend not implemented in P2-A; only sqlite is wired".into(),
+            ));
         }
         let sqlite_path_str = strip_sqlite_scheme(url);
         let sqlite_path = Path::new(sqlite_path_str.as_ref());
@@ -42,8 +44,17 @@ impl StoragePool {
         Ok(Self::Sqlite(pool))
     }
 
+    /// 不区分大小写 + 容忍前导空白：`POSTGRES://`、`  postgresql://` 都识别为 PG，
+    /// 避免大小写绕过让 PG URL 落进 sqlite 路径（会被当成文件名打开，行为离谱）。
     pub fn is_postgres_url(url: &str) -> bool {
-        url.starts_with("postgres://") || url.starts_with("postgresql://")
+        let trimmed = url.trim_start();
+        // scheme 一定是 ASCII，用 ascii lowercase 足够且不分配整串副本时也只在前 11 字节比较。
+        let head: String = trimmed
+            .chars()
+            .take("postgresql://".len())
+            .flat_map(char::to_lowercase)
+            .collect();
+        head.starts_with("postgres://") || head.starts_with("postgresql://")
     }
 }
 
@@ -73,4 +84,53 @@ pub async fn build_sqlite_pool(
         .connect_with(options)
         .await
         .map_err(StorageError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::StorageError;
+
+    #[test]
+    fn is_postgres_url_accepts_canonical_schemes() {
+        assert!(StoragePool::is_postgres_url("postgres://u:p@h/db"));
+        assert!(StoragePool::is_postgres_url("postgresql://u:p@h/db"));
+    }
+
+    #[test]
+    fn is_postgres_url_is_case_insensitive_and_trims() {
+        assert!(StoragePool::is_postgres_url("POSTGRES://u@h/db"));
+        assert!(StoragePool::is_postgres_url("Postgres://u@h/db"));
+        assert!(StoragePool::is_postgres_url("  postgresql://u@h/db"));
+        assert!(StoragePool::is_postgres_url("\tPOSTGRESQL://u@h/db"));
+    }
+
+    #[test]
+    fn is_postgres_url_rejects_non_postgres() {
+        assert!(!StoragePool::is_postgres_url("sqlite://./rss.db"));
+        assert!(!StoragePool::is_postgres_url("./rss.db"));
+        assert!(!StoragePool::is_postgres_url(""));
+        assert!(!StoragePool::is_postgres_url("postgr://x")); // 前缀不全
+        assert!(!StoragePool::is_postgres_url("mysql://x"));
+    }
+
+    #[tokio::test]
+    async fn build_pg_url_returns_unsupported_backend_without_leaking_credentials() {
+        let secret = "ne1ther_user_n0r_password_leak";
+        let url = format!("postgres://alice:{secret}@db.example.com/mydb");
+        let err = StoragePool::build(&url, 1, 100).await.unwrap_err();
+        match err {
+            StorageError::UnsupportedBackend(msg) => {
+                assert!(
+                    !msg.contains(secret),
+                    "error message must not leak password: {msg}"
+                );
+                assert!(
+                    !msg.contains("alice"),
+                    "error message must not leak username: {msg}"
+                );
+            }
+            other => panic!("expected UnsupportedBackend, got: {other:?}"),
+        }
+    }
 }
