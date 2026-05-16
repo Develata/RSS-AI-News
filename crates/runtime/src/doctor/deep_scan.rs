@@ -1,4 +1,5 @@
 use sqlx::{Row, SqlitePool};
+use time::OffsetDateTime;
 
 use rss_ai_news_storage::StorageError;
 
@@ -184,14 +185,15 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
                 FROM article_ai_results aar
                 WHERE aar.state = 'running'
                   AND aar.lease_expires_at IS NOT NULL
-                  AND aar.lease_expires_at < datetime('now')
+                  AND aar.lease_expires_at < ?
             "#,
         },
     ];
 
+    let now = OffsetDateTime::now_utc();
     let mut results = Vec::with_capacity(specs.len());
     for spec in specs {
-        results.push(run_spec(pool, spec).await?);
+        results.push(run_spec(pool, spec, now).await?);
     }
     Ok(DeepScanReport { results })
 }
@@ -201,17 +203,26 @@ struct Spec {
     select: &'static str,
 }
 
-async fn run_spec(pool: &SqlitePool, spec: Spec) -> Result<InvariantResult, StorageError> {
+async fn run_spec(
+    pool: &SqlitePool,
+    spec: Spec,
+    now: OffsetDateTime,
+) -> Result<InvariantResult, StorageError> {
+    let placeholders = spec.select.matches('?').count();
+
     let count_sql = format!("SELECT COUNT(*) FROM ({}) AS violations", spec.select);
-    let total_count = sqlx::query_scalar::<_, i64>(&count_sql)
-        .fetch_one(pool)
-        .await
-        .map_err(StorageError::from)?;
+    let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
+    for _ in 0..placeholders {
+        count_q = count_q.bind(now);
+    }
+    let total_count = count_q.fetch_one(pool).await.map_err(StorageError::from)?;
+
     let select_sql = format!("{} LIMIT 50", spec.select);
-    let rows = sqlx::query(&select_sql)
-        .fetch_all(pool)
-        .await
-        .map_err(StorageError::from)?;
+    let mut select_q = sqlx::query(&select_sql);
+    for _ in 0..placeholders {
+        select_q = select_q.bind(now);
+    }
+    let rows = select_q.fetch_all(pool).await.map_err(StorageError::from)?;
     let violations = rows
         .into_iter()
         .map(|row| ViolationRow {

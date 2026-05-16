@@ -5,6 +5,7 @@ use reqwest::Client;
 use rss_ai_news_config::LoadedConfig;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use time::OffsetDateTime;
 
 use crate::redact::{redact_authorization_header, redact_url_userinfo};
 
@@ -461,8 +462,9 @@ pub mod lease_check {
 
         async fn run(&self) -> CheckOutcome {
             let result = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM article_ai_results WHERE state = 'running' AND lease_expires_at < datetime('now')",
+                "SELECT COUNT(*) FROM article_ai_results WHERE state = 'running' AND lease_expires_at < ?",
             )
+            .bind(OffsetDateTime::now_utc())
             .fetch_one(&self.pool)
             .await;
             match result {

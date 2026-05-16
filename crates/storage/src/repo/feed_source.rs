@@ -228,10 +228,11 @@ impl FeedSourceRepository for SqliteFeedSourceRepo {
         let result = sqlx::query(
             r#"
             UPDATE feed_sources
-            SET status = 'archived', updated_at = CURRENT_TIMESTAMP
+            SET status = 'archived', updated_at = ?
             WHERE id = ? AND status <> 'archived'
             "#,
         )
+        .bind(OffsetDateTime::now_utc())
         .bind(id)
         .execute(&self.pool)
         .await

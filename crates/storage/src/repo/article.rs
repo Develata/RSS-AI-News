@@ -272,11 +272,12 @@ impl ArticleRepository for SqliteArticleRepo {
                 let result = sqlx::query(
                     r#"
                     UPDATE articles
-                    SET content_hash = ?, updated_at = CURRENT_TIMESTAMP
+                    SET content_hash = ?, updated_at = ?
                     WHERE id = ?
                     "#,
                 )
                 .bind(new_content_hash)
+                .bind(OffsetDateTime::now_utc())
                 .bind(id)
                 .execute(&self.pool)
                 .await

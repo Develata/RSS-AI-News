@@ -388,7 +388,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
                 last_error_kind = NULL,
                 lease_owner = NULL,
                 lease_expires_at = NULL,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = ?3
             WHERE state = 'failed'
               AND (?1 IS NULL OR created_at >= ?1)
               AND (?2 IS NULL OR created_at < ?2)
@@ -396,6 +396,7 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         )
         .bind(filter.date_from)
         .bind(filter.date_to)
+        .bind(OffsetDateTime::now_utc())
         .execute(&self.pool)
         .await
         .map_err(StorageError::from)?;
@@ -431,11 +432,12 @@ impl FeedEntryRepository for SqliteFeedEntryRepo {
         let result = sqlx::query(
             r#"
             UPDATE feed_entries
-            SET link_hash = ?, updated_at = CURRENT_TIMESTAMP
+            SET link_hash = ?, updated_at = ?
             WHERE id = ?
             "#,
         )
         .bind(new_link_hash)
+        .bind(OffsetDateTime::now_utc())
         .bind(id)
         .execute(&self.pool)
         .await
