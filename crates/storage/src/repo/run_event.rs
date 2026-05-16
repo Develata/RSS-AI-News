@@ -41,7 +41,7 @@ impl RunEventRepository for SqliteRunEventRepo {
                 run_id, trace_id, stage, severity, event_kind,
                 target_kind, target_id, message, context_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id
             "#,
         )

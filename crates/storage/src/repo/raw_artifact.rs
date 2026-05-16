@@ -48,7 +48,7 @@ impl RawArtifactRepository for SqliteRawArtifactRepo {
                 kind, artifact_key, content_encoding, storage_kind, inline_body, file_path,
                 byte_size, sha256, retention_policy, expires_at
             )
-            VALUES (?, ?, ?, 'inline', ?, NULL, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, 'inline', $4, NULL, $5, $6, $7, $8)
             ON CONFLICT(kind, artifact_key) DO UPDATE SET
                 content_encoding = excluded.content_encoding,
                 storage_kind = excluded.storage_kind,
@@ -90,7 +90,7 @@ impl RawArtifactRepository for SqliteRawArtifactRepo {
             SELECT id, kind, artifact_key, content_encoding, storage_kind, inline_body,
                    file_path, byte_size, sha256, retention_policy, expires_at, created_at
             FROM raw_artifacts
-            WHERE kind = ? AND artifact_key = ?
+            WHERE kind = $1 AND artifact_key = $2
             "#,
         )
         .bind(kind)
@@ -108,7 +108,7 @@ impl RawArtifactRepository for SqliteRawArtifactRepo {
             SELECT id, kind, artifact_key, content_encoding, storage_kind, inline_body,
                    file_path, byte_size, sha256, retention_policy, expires_at, created_at
             FROM raw_artifacts
-            WHERE id = ?
+            WHERE id = $1
             "#,
         )
         .bind(id)

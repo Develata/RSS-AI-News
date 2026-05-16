@@ -92,7 +92,7 @@ impl SqliteRuleVersionRepo {
         sha256: &str,
     ) -> Result<i64, StorageError> {
         if let Some(id) = sqlx::query_scalar::<_, i64>(
-            "SELECT id FROM rule_versions WHERE kind = 'config' AND payload_sha256 = ? LIMIT 1",
+            "SELECT id FROM rule_versions WHERE kind = 'config' AND payload_sha256 = $1 LIMIT 1",
         )
         .bind(sha256)
         .fetch_optional(&self.pool)
@@ -139,11 +139,11 @@ impl RuleVersionRepository for SqliteRuleVersionRepo {
             r#"
             INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status)
             VALUES (
-                ?, ?, ?, ?,
+                $1, $2, $3, $4,
                 CASE
                     WHEN EXISTS (
                         SELECT 1 FROM rule_versions
-                        WHERE kind = ? AND status = 'active'
+                        WHERE kind = $5 AND status = 'active'
                     ) THEN 'pending'
                     ELSE 'active'
                 END
@@ -168,7 +168,7 @@ impl RuleVersionRepository for SqliteRuleVersionRepo {
         }
 
         sqlx::query_scalar::<_, i64>(
-            "SELECT id FROM rule_versions WHERE kind = ? AND version_tag = ? LIMIT 1",
+            "SELECT id FROM rule_versions WHERE kind = $1 AND version_tag = $2 LIMIT 1",
         )
         .bind(kind)
         .bind(version_tag)
@@ -187,7 +187,7 @@ impl RuleVersionRepository for SqliteRuleVersionRepo {
         sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status)
-            VALUES (?, ?, ?, ?, 'pending')
+            VALUES ($1, $2, $3, $4, 'pending')
             RETURNING id
             "#,
         )
@@ -220,7 +220,7 @@ impl RuleVersionRepository for SqliteRuleVersionRepo {
             SELECT id, kind, version_tag, description, payload_sha256,
                    status, retired_at, created_at
             FROM rule_versions
-            WHERE kind = ? AND status = 'active'
+            WHERE kind = $1 AND status = 'active'
             LIMIT 1
             "#,
         )

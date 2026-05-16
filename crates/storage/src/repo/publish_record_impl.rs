@@ -24,7 +24,7 @@ impl PublishRecordRepository for SqlitePublishRecordRepo {
                 idempotency_key, category_key, report_date, target_timezone,
                 render_version, selection_policy_version, remote_target
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT(idempotency_key) DO NOTHING
             RETURNING id
             "#,
@@ -54,7 +54,7 @@ impl PublishRecordRepository for SqlitePublishRecordRepo {
         key: &str,
     ) -> Result<Option<PublishRecord>, StorageError> {
         sqlx::query_as::<_, PublishRecord>(
-            &SELECT_PUBLISH_RECORD_BY_ID.replace("WHERE id = ?", "WHERE idempotency_key = ?"),
+            &SELECT_PUBLISH_RECORD_BY_ID.replace("WHERE id = $1", "WHERE idempotency_key = $1"),
         )
         .bind(key)
         .fetch_optional(&self.pool)
@@ -151,7 +151,7 @@ impl PublishRecordRepository for SqlitePublishRecordRepo {
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
         let result = sqlx::query(
-            "UPDATE publish_records SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL, last_error = ?, last_error_kind = ?, updated_at = ? WHERE id = ? AND lease_owner = ?",
+            "UPDATE publish_records SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL, last_error = $1, last_error_kind = $2, updated_at = $3 WHERE id = $4 AND lease_owner = $5",
         )
         .bind(error)
         .bind(kind)
@@ -168,9 +168,9 @@ impl PublishRecordRepository for SqlitePublishRecordRepo {
         let result = sqlx::query(
             r#"
             UPDATE publish_records
-            SET lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+            SET lease_owner = NULL, lease_expires_at = NULL, updated_at = $1
             WHERE lease_expires_at IS NOT NULL
-              AND lease_expires_at < ?
+              AND lease_expires_at < $2
               AND state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local')
             "#,
         )
@@ -223,7 +223,7 @@ impl PublishRecordRepository for SqlitePublishRecordRepo {
 
         for article_id in promote_article_ids {
             let result = sqlx::query(
-                "UPDATE articles SET state = 'published', updated_at = ? WHERE id = ? AND state = 'ready_for_publish'",
+                "UPDATE articles SET state = 'published', updated_at = $1 WHERE id = $2 AND state = 'ready_for_publish'",
             )
             .bind(now)
             .bind(article_id)
