@@ -162,6 +162,156 @@ async fn pg_insert_pending_then_claim_then_release_success() {
         .await
         .expect("pg release_success");
     assert!(released);
+
+    ctx.cleanup().await;
+}
+
+/// codex P3-E-fix1 HIGH-2 修复：§6.4 SKIP LOCKED 确定性验证（仿 fix1 H2 模板）。
+/// tx_a `SELECT FOR UPDATE` 锁住首个 pending AI 任务不提交 → 另一连接
+/// `claim_pending` 必跳被锁行 + 拿后续 + 5s timeout 兜底（SKIP LOCKED 回归 →
+/// 等行锁超时）。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_claim_pending_skips_explicitly_locked_row() {
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "skip-lock").await;
+    let article_a = seed_article(&ctx, "skip-lock-a", "persisted").await;
+    let article_b = seed_article(&ctx, "skip-lock-b", "persisted").await;
+    let repo = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+
+    // seed 两条 pending AI 任务（id 升序 = ORDER BY id ASC 命中顺序）
+    let id_a = repo
+        .insert_pending(&NewAiResult {
+            article_id: article_a,
+            prompt_version: prompt_id,
+            output_schema_version: schema_id,
+            model_id: "gpt-4".to_string(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let id_b = repo
+        .insert_pending(&NewAiResult {
+            article_id: article_b,
+            prompt_version: prompt_id,
+            output_schema_version: schema_id,
+            model_id: "gpt-4".to_string(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(id_a < id_b, "test depends on monotonic id ordering");
+
+    // tx_a 独立连接锁 id_a 不提交
+    let mut tx_a = ctx.pg_pool().begin().await.expect("begin tx_a");
+    let locked: i64 =
+        sqlx::query_scalar("SELECT id FROM article_ai_results WHERE id = $1 FOR UPDATE")
+            .bind(id_a)
+            .fetch_one(&mut *tx_a)
+            .await
+            .expect("tx_a FOR UPDATE on id_a");
+    assert_eq!(locked, id_a);
+
+    // worker B 调 claim_pending(batch_size=1)：SKIP LOCKED 跳 id_a 拿 id_b
+    let now = OffsetDateTime::now_utc();
+    let claimed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        repo.claim_pending(&ClaimRequest {
+            owner: "worker-B".to_string(),
+            now,
+            lease_expires_at: lease_expires(now),
+            batch_size: 1,
+            max_attempts: 3,
+        }),
+    )
+    .await
+    .expect("claim_pending must return within 5s (else SKIP LOCKED regressed)")
+    .expect("claim call");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(
+        claimed[0].id, id_b,
+        "SKIP LOCKED must skip locked id_a and pick id_b"
+    );
+
+    tx_a.rollback().await.expect("rollback tx_a");
+    let id_a_state: String =
+        sqlx::query_scalar("SELECT state FROM article_ai_results WHERE id = $1")
+            .bind(id_a)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        id_a_state, "pending",
+        "id_a must remain pending (SKIP LOCKED only skipped)"
+    );
+
+    ctx.cleanup().await;
+}
+
+/// codex P3-E-fix1 HIGH-3 修复：跨表事务回滚分支实证。
+///
+/// `insert_pending_and_advance_article`：article 当前不是 'persisted'（如已
+/// ai_pending / ai_done），UPDATE articles `WHERE id AND state='persisted'`
+/// rows_affected=0 → 整段事务回滚 → 已 INSERT 的 article_ai_results 行被
+/// 撤销 + outcome.ai_result_id=None + article_already_advanced=true。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_insert_pending_and_advance_rolls_back_when_article_not_persisted() {
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "rollback").await;
+    // article 已经在 ai_pending（不是 persisted），UPDATE 谓词不命中
+    let article_id = seed_article(&ctx, "rollback", "ai_pending").await;
+    let repo = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+
+    let now = OffsetDateTime::now_utc();
+    let outcome = repo
+        .insert_pending_and_advance_article(
+            &NewAiResult {
+                article_id,
+                prompt_version: prompt_id,
+                output_schema_version: schema_id,
+                model_id: "gpt-4".to_string(),
+            },
+            now,
+        )
+        .await
+        .expect("pg insert_pending_and_advance");
+    assert!(
+        outcome.ai_result_id.is_none(),
+        "rollback path returns ai_result_id=None"
+    );
+    assert!(!outcome.article_advanced);
+    assert!(
+        outcome.article_already_advanced,
+        "non-persisted article triggers article_already_advanced=true"
+    );
+
+    // 关键断言：INSERT 的 article_ai_results 行已回滚，不存在
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM article_ai_results \
+         WHERE article_id = $1 AND prompt_version = $2 AND output_schema_version = $3 \
+           AND model_id = 'gpt-4'",
+    )
+    .bind(article_id)
+    .bind(prompt_id)
+    .bind(schema_id)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 0,
+        "cross-table rollback must NOT leave orphan article_ai_results row"
+    );
+
+    // articles.state 仍是 'ai_pending'（未被 UPDATE 命中）
+    let state: String = sqlx::query_scalar("SELECT state FROM articles WHERE id = $1")
+        .bind(article_id)
+        .fetch_one(ctx.pg_pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "ai_pending");
+
+    ctx.cleanup().await;
 }
 
 #[tokio::test]
@@ -196,6 +346,8 @@ async fn pg_insert_pending_and_advance_article_atomically() {
         .await
         .unwrap();
     assert_eq!(state, "ai_pending");
+
+    ctx.cleanup().await;
 }
 
 #[tokio::test]
@@ -255,6 +407,8 @@ async fn pg_release_success_and_advance_keep_ready_for_publish() {
         .await
         .unwrap();
     assert_eq!(state, "ready_for_publish");
+
+    ctx.cleanup().await;
 }
 
 #[tokio::test]
@@ -314,4 +468,6 @@ async fn pg_release_success_and_advance_filtered_publish_skipped() {
         .await
         .unwrap();
     assert_eq!(state, "publish_skipped");
+
+    ctx.cleanup().await;
 }

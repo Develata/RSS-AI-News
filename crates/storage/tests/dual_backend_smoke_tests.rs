@@ -22,9 +22,12 @@ use rss_ai_news_domain::{
     state::{FeedKind, FeedSourceStatus},
 };
 use rss_ai_news_storage::{
-    ArticleRepo, ArticleRepository, FeedSourceRepo, FeedSourceRepository, NewArticle,
-    NewPublishRecord, PublishRecordRepo, PublishRecordRepository, ReindexJobRepo,
-    ReindexJobRepository, StoragePool,
+    ArticleAiResultRepo, ArticleAiResultRepository, ArticleRepo, ArticleRepository, FeedEntryRepo,
+    FeedEntryRepository, FeedSourceRepo, FeedSourceRepository, NewAiResult, NewArticle,
+    NewFeedEntry, NewPublishRecord, NewRawArtifact, NewRunEvent, PublishRecordRepo,
+    PublishRecordRepository, RawArtifactRepo, RawArtifactRepository, ReindexJobRepo,
+    ReindexJobRepository, RuleVersionRepo, RuleVersionRepository, RunEventRepo, RunEventRepository,
+    StoragePool,
 };
 use sqlx::Executor;
 use time::OffsetDateTime;
@@ -189,6 +192,7 @@ async fn sqlite_happy_feed_source_upsert() {
 async fn pg_happy_feed_source_upsert() {
     let ctx = make_pg_test_pool().await;
     happy_feed_source_upsert(ctx.storage_pool()).await;
+    ctx.cleanup().await;
 }
 
 // ── 2) ReindexJobRepo.insert_pending happy ─────────────────────
@@ -221,6 +225,7 @@ async fn sqlite_happy_reindex_insert_pending() {
 async fn pg_happy_reindex_insert_pending() {
     let ctx = make_pg_test_pool().await;
     happy_reindex_insert_pending(ctx.storage_pool()).await;
+    ctx.cleanup().await;
 }
 
 // ── 3) ArticleRepo.insert_or_get_by_content_hash happy ────────
@@ -256,6 +261,7 @@ async fn sqlite_happy_article_insert_then_find() {
 async fn pg_happy_article_insert_then_find() {
     let ctx = make_pg_test_pool().await;
     happy_article_insert_then_find(ctx.storage_pool()).await;
+    ctx.cleanup().await;
 }
 
 // ── 4) PublishRecordRepo.create_if_new happy ──────────────────
@@ -310,4 +316,253 @@ async fn sqlite_happy_publish_record_create() {
 async fn pg_happy_publish_record_create() {
     let ctx = make_pg_test_pool().await;
     happy_publish_record_create(ctx.storage_pool()).await;
+    ctx.cleanup().await;
+}
+
+// ── codex P3-E-fix1 MEDIUM-1 修复：扩 dual_backend smoke 到 P3-E 5 个 repo ──
+//
+// 每个 repo 1 个 backend-agnostic happy：让 P4 全量 rstest 启动时不会同时
+// 承担"发现 P3-E 差异" + "扩展测试框架" 两件事。
+
+// 5) RuleVersionRepo.get_or_create happy
+
+async fn happy_rule_version_get_or_create(pool: &StoragePool) {
+    ensure_schema_ready(pool).await;
+    let repo = RuleVersionRepo::new_with_storage(pool.clone());
+
+    let id = repo
+        .get_or_create("extractor", "rv-dual-1", "first", "sha-rv-1")
+        .await
+        .expect("get_or_create first");
+    assert!(id > 0);
+
+    // 二次同 key：ON CONFLICT DO NOTHING + 兜底 SELECT 返同 id
+    let id_again = repo
+        .get_or_create("extractor", "rv-dual-1", "first-again", "sha-rv-1-again")
+        .await
+        .expect("get_or_create same key");
+    assert_eq!(id, id_again);
+
+    let active = repo
+        .active_rule("extractor")
+        .await
+        .expect("active_rule")
+        .expect("present");
+    assert_eq!(active.id, id, "first row of a new kind is active");
+}
+
+#[tokio::test]
+async fn sqlite_happy_rule_version_get_or_create() {
+    let (_dir, pool) = make_test_pool().await;
+    happy_rule_version_get_or_create(&StoragePool::Sqlite(pool)).await;
+}
+
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_happy_rule_version_get_or_create() {
+    let ctx = make_pg_test_pool().await;
+    happy_rule_version_get_or_create(ctx.storage_pool()).await;
+    ctx.cleanup().await;
+}
+
+// 6) RawArtifactRepo.upsert_inline happy
+
+async fn happy_raw_artifact_upsert_inline(pool: &StoragePool) {
+    ensure_schema_ready(pool).await;
+    let repo = RawArtifactRepo::new_with_storage(pool.clone());
+
+    let payload = NewRawArtifact {
+        kind: "feed_payload".to_string(),
+        artifact_key: "https://example.com/dual.xml".to_string(),
+        content_encoding: "utf-8".to_string(),
+        inline_body: b"<rss>dual</rss>".to_vec(),
+        byte_size: 15,
+        sha256: "sha-dual".to_string(),
+        retention_policy: "ephemeral".to_string(),
+        expires_at: None,
+    };
+    let id = repo.upsert_inline(&payload).await.expect("upsert_inline");
+
+    let found = repo
+        .find_by_key("feed_payload", "https://example.com/dual.xml")
+        .await
+        .expect("find_by_key")
+        .expect("present");
+    assert_eq!(found.id, id);
+    assert_eq!(found.byte_size, 15);
+    assert_eq!(
+        found.inline_body.as_deref(),
+        Some(b"<rss>dual</rss>".as_slice())
+    );
+}
+
+#[tokio::test]
+async fn sqlite_happy_raw_artifact_upsert_inline() {
+    let (_dir, pool) = make_test_pool().await;
+    happy_raw_artifact_upsert_inline(&StoragePool::Sqlite(pool)).await;
+}
+
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_happy_raw_artifact_upsert_inline() {
+    let ctx = make_pg_test_pool().await;
+    happy_raw_artifact_upsert_inline(ctx.storage_pool()).await;
+    ctx.cleanup().await;
+}
+
+// 7) RunEventRepo.insert happy
+
+async fn happy_run_event_insert(pool: &StoragePool) {
+    ensure_schema_ready(pool).await;
+    let repo = RunEventRepo::new_with_storage(pool.clone());
+
+    let id = repo
+        .insert(&NewRunEvent {
+            run_id: "run-dual".to_string(),
+            trace_id: Some("trace-dual".to_string()),
+            stage: "ingest".to_string(),
+            severity: "info".to_string(),
+            event_kind: "started".to_string(),
+            target_kind: None,
+            target_id: None,
+            message: "msg".to_string(),
+            context_json: None,
+        })
+        .await
+        .expect("run_event insert");
+    assert!(id > 0);
+}
+
+#[tokio::test]
+async fn sqlite_happy_run_event_insert() {
+    let (_dir, pool) = make_test_pool().await;
+    happy_run_event_insert(&StoragePool::Sqlite(pool)).await;
+}
+
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_happy_run_event_insert() {
+    let ctx = make_pg_test_pool().await;
+    happy_run_event_insert(ctx.storage_pool()).await;
+    ctx.cleanup().await;
+}
+
+// 8) FeedEntryRepo.insert_if_new + find_by_id happy
+
+async fn happy_feed_entry_insert_then_find(pool: &StoragePool) {
+    ensure_schema_ready(pool).await;
+    let config_rule = seed_rule(pool, "config", "fe-dual").await;
+    let source_id = seed_feed_source(pool, "fe-dual", config_rule).await;
+    let repo = FeedEntryRepo::new_with_storage(pool.clone());
+
+    let entry = NewFeedEntry {
+        source_id,
+        feed_entry_uid: "uid-fe-dual".to_string(),
+        normalized_link: "https://example.com/uid-fe-dual".to_string(),
+        link_hash: "hash-fe-dual".to_string(),
+        title_raw: "Title".to_string(),
+        summary_raw: None,
+        published_at: None,
+        discovered_at: OffsetDateTime::now_utc(),
+    };
+    let id = repo
+        .insert_if_new(&entry)
+        .await
+        .expect("insert_if_new")
+        .expect("first inserts");
+
+    let second = repo
+        .insert_if_new(&entry)
+        .await
+        .expect("insert_if_new second");
+    assert!(
+        second.is_none(),
+        "ON CONFLICT(source_id, feed_entry_uid) DO NOTHING returns None"
+    );
+
+    let found = repo.find_by_id(id).await.expect("find").expect("present");
+    assert_eq!(found.state, "pending_fetch");
+    assert_eq!(found.feed_entry_uid, "uid-fe-dual");
+}
+
+#[tokio::test]
+async fn sqlite_happy_feed_entry_insert_then_find() {
+    let (_dir, pool) = make_test_pool().await;
+    happy_feed_entry_insert_then_find(&StoragePool::Sqlite(pool)).await;
+}
+
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_happy_feed_entry_insert_then_find() {
+    let ctx = make_pg_test_pool().await;
+    happy_feed_entry_insert_then_find(ctx.storage_pool()).await;
+    ctx.cleanup().await;
+}
+
+// 9) ArticleAiResultRepo.insert_pending happy
+
+async fn happy_article_ai_result_insert_pending(pool: &StoragePool) {
+    ensure_schema_ready(pool).await;
+    let config_rule = seed_rule(pool, "config", "ai-dual").await;
+    let extractor_rule = seed_rule(pool, "extractor", "ai-dual").await;
+    let prompt_rule = seed_rule(pool, "ai_prompt", "ai-dual").await;
+    let schema_rule = seed_rule(pool, "ai_schema", "ai-dual").await;
+    let source_id = seed_feed_source(pool, "ai-dual", config_rule).await;
+    let entry_id = seed_feed_entry(pool, source_id, "uid-ai-dual").await;
+    let article_repo = ArticleRepo::new_with_storage(pool.clone());
+    let outcome = article_repo
+        .insert_or_get_by_content_hash(&NewArticle {
+            content_hash: "hash-ai-dual".to_string(),
+            canonical_link: "https://example.com/a".to_string(),
+            title: "t".to_string(),
+            body_text: "b".to_string(),
+            body_html_artifact_id: None,
+            extractor_strategy: "readability".to_string(),
+            extractor_version: extractor_rule,
+            content_quality: "high".to_string(),
+            word_count: 1,
+            origin_feed_entry_id: entry_id,
+        })
+        .await
+        .unwrap();
+    let article_id = outcome.article_id;
+
+    let repo = ArticleAiResultRepo::new_with_storage(pool.clone());
+    let id = repo
+        .insert_pending(&NewAiResult {
+            article_id,
+            prompt_version: prompt_rule,
+            output_schema_version: schema_rule,
+            model_id: "gpt-4".to_string(),
+        })
+        .await
+        .expect("insert_pending")
+        .expect("first inserts");
+    assert!(id > 0);
+
+    // 二次同 unique 四元组：ON CONFLICT DO NOTHING 返 None
+    let second = repo
+        .insert_pending(&NewAiResult {
+            article_id,
+            prompt_version: prompt_rule,
+            output_schema_version: schema_rule,
+            model_id: "gpt-4".to_string(),
+        })
+        .await
+        .expect("insert_pending second");
+    assert!(second.is_none());
+}
+
+#[tokio::test]
+async fn sqlite_happy_article_ai_result_insert_pending() {
+    let (_dir, pool) = make_test_pool().await;
+    happy_article_ai_result_insert_pending(&StoragePool::Sqlite(pool)).await;
+}
+
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_happy_article_ai_result_insert_pending() {
+    let ctx = make_pg_test_pool().await;
+    happy_article_ai_result_insert_pending(ctx.storage_pool()).await;
+    ctx.cleanup().await;
 }

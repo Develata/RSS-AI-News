@@ -115,29 +115,34 @@ impl PgTestContext {
         &self.schema
     }
 
-    /// codex P3-C 评审 MEDIUM-1 修复：显式 async cleanup。
+    /// codex P3-C 评审 MEDIUM-1 修复 + P3-E-fix1 加固：显式 async cleanup。
     ///
     /// 顺序：
-    ///   1. close 业务 pool（释放 max=4 连接，让 DROP SCHEMA 不被 active session 阻塞）
-    ///   2. admin pool 上 `DROP SCHEMA IF EXISTS ... CASCADE`，await 完成
+    ///   1. close 业务 pool（5s timeout）——释放 max=4 连接
+    ///   2. admin pool 上 `DROP SCHEMA IF EXISTS ... CASCADE`（5s timeout）
     ///   3. 标记 `cleaned=true`，[`Drop`] 里跳过 fire-and-forget 兜底
     ///
     /// 推荐 P4 全量 PG rstest 测试在 happy 结束时显式 `ctx.cleanup().await`，
     /// 避免 ~80 个测试积累的 schema 等到进程结束才释放。
-    /// **失败静默**：cleanup 内任一步出错（runtime 状态异常 / schema 已被外部清理）
+    /// **失败静默**：任一步出错（runtime 异常 / schema 已被外部清理 / 5s 超时）
     /// 都不抛——清理是 best-effort，容器停止会兜底回收整库。
+    ///
+    /// P3-E-fix1 教训：cargo test 默认并发执行多个 `#[tokio::test]`，多个
+    /// cleanup 会同时打 admin pool（admin max 从 1 升 8 后并发空间够），
+    /// 但若任一 `pool.close()` 或 `DROP SCHEMA` 卡 hung session，5s timeout
+    /// 让最坏情况只损失 5s 而非测试卡死整套（曾见过 11000s 卡死）。
     pub async fn cleanup(&self) {
         if self.cleaned.swap(true, Ordering::SeqCst) {
             return; // 已清，幂等
         }
         if let StoragePool::Postgres(p) = &self.pool {
-            p.close().await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), p.close()).await;
         }
-        let _ = sqlx::query(&format!(
-            "DROP SCHEMA IF EXISTS \"{}\" CASCADE",
-            self.schema
-        ))
-        .execute(&self.admin)
+        let drop_sql = format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", self.schema);
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sqlx::query(&drop_sql).execute(&self.admin),
+        )
         .await;
     }
 }
@@ -234,8 +239,11 @@ async fn pg_endpoint() -> PgEndpoint {
     PgEndpoint { host, port }
 }
 
-/// admin pool 单例，仅 1 个连接（CREATE / DROP SCHEMA 一次一条，无并发需求）。
-/// 连默认 `public` schema，不嵌入 search_path 选项。
+/// admin pool 单例，连默认 `public` schema，不嵌入 search_path 选项。
+/// `max_connections=8` 给多并发 PG 测试同时 CREATE/DROP SCHEMA 留余量
+/// （codex P3-E-fix1 M2 + cargo test 默认并发执行多个 #[tokio::test] 时，
+/// 多个 PgTestContext::cleanup 可能并发跑 DROP SCHEMA；max=1 会让它们排队
+/// 等到超时）。
 async fn pg_admin_pool(endpoint: &PgEndpoint) -> PgPool {
     PG_ADMIN_POOL
         .get_or_init(|| async {
@@ -244,7 +252,7 @@ async fn pg_admin_pool(endpoint: &PgEndpoint) -> PgPool {
                 host = endpoint.host,
                 port = endpoint.port,
             );
-            build_pg_pool(&url, 1).await.expect("build admin pg pool")
+            build_pg_pool(&url, 8).await.expect("build admin pg pool")
         })
         .await
         .clone()

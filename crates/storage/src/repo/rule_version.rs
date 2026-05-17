@@ -286,7 +286,36 @@ async fn sqlite_active_rule(
 
 // ── PostgreSQL helper（W11-P3-E-1） ─────────────────────────────
 
+/// codex P3-E-fix1 HIGH-1 修复：PG 上 `get_or_create` 的并发首版 seed race。
+///
+/// 场景：两连接同 `kind`、**不同** `version_tag` 同时调 `get_or_create`，
+/// 二者 CASE/EXISTS 子查询都看到"无 active"，都尝试插 `status='active'` →
+/// partial unique `uq_rule_versions_kind_active` (kind WHERE status='active')
+/// 让其中一个 INSERT 报 23505，但 `ON CONFLICT(kind, version_tag) DO NOTHING`
+/// 不命中（不同 tag），整段 INSERT fail。SQLite 写串行化下不发生此 race。
+///
+/// 修复：检测到 `StorageError::Conflict { table: "rule_versions", .. }`（23505
+/// 映射），retry 一次。重试时 CASE 子查询已能看到另一连接 commit 的 active
+/// 行，新插入自动选 `status='pending'`，绕开 partial unique。最坏两 worker
+/// 并发，一次重试足够；多重 race 极端情况下重试失败仍向上抛 Conflict 让 CLI
+/// 显式 fail（而非无限循环）。
 async fn pg_get_or_create(
+    pool: &PgPool,
+    kind: &str,
+    version_tag: &str,
+    description: &str,
+    payload_sha256: &str,
+) -> Result<i64, StorageError> {
+    match pg_get_or_create_once(pool, kind, version_tag, description, payload_sha256).await {
+        Ok(id) => Ok(id),
+        Err(StorageError::Conflict { table, .. }) if table == "rule_versions" => {
+            pg_get_or_create_once(pool, kind, version_tag, description, payload_sha256).await
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn pg_get_or_create_once(
     pool: &PgPool,
     kind: &str,
     version_tag: &str,

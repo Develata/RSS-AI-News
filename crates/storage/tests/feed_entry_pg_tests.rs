@@ -103,6 +103,8 @@ async fn pg_insert_if_new_returns_none_on_duplicate() {
     let found = repo.find_by_id(first).await.unwrap().unwrap();
     assert_eq!(found.feed_entry_uid, "uid-1");
     assert_eq!(found.state, "pending_fetch");
+
+    ctx.cleanup().await;
 }
 
 #[tokio::test]
@@ -123,6 +125,8 @@ async fn pg_exists_by_link_hash_with_case_when_decode_i32() {
         .unwrap();
     let found = repo.exists_by_link_hash("hash-uid-exists").await.unwrap();
     assert!(found, "CASE WHEN EXISTS decode i32 must work on PG");
+
+    ctx.cleanup().await;
 }
 
 #[tokio::test]
@@ -168,6 +172,8 @@ async fn pg_claim_pending_fetch_then_release_success() {
     assert_eq!(after.state, "persisted");
     assert_eq!(after.article_id, Some(article_id));
     assert_eq!(after.lease_owner, None);
+
+    ctx.cleanup().await;
 }
 
 /// P3-C-fix1 H2 模板：tx_a `SELECT FOR UPDATE` 锁住一条 pending_fetch 不提交 →
@@ -242,6 +248,8 @@ async fn pg_claim_pending_fetch_skips_explicitly_locked_row() {
         entry_a_state, "pending_fetch",
         "entry_a must remain pending_fetch"
     );
+
+    ctx.cleanup().await;
 }
 
 #[tokio::test]
@@ -284,4 +292,6 @@ async fn pg_reset_failed_in_window_counts_and_resets() {
     let reset_row = repo.find_by_id(id_failed).await.unwrap().unwrap();
     assert_eq!(reset_row.state, "discovered", "failed → discovered");
     assert_eq!(reset_row.attempt_count, 0);
+
+    ctx.cleanup().await;
 }
