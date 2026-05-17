@@ -3,7 +3,7 @@ use rss_ai_news_domain::{model::RawArtifact, state::ArtifactKind};
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{StorageError, StoragePool, classify_sqlite_error};
+use crate::{StorageError, StoragePool, classify_db_error};
 
 #[derive(Debug, Clone)]
 pub struct NewRawArtifact {
@@ -79,7 +79,7 @@ impl RawArtifactRepository for RawArtifactRepo {
         .fetch_one(pool)
         .await
         .map_err(|error| {
-            classify_sqlite_error(
+            classify_db_error(
                 error,
                 "raw_artifacts",
                 format!("{}/{}", artifact.kind, artifact.artifact_key),

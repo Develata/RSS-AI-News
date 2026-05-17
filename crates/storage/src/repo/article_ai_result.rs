@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{ClaimRequest, StorageError, StoragePool, classify_sqlite_error};
+use crate::{ClaimRequest, StorageError, StoragePool, classify_db_error};
 
 #[derive(Debug, Clone)]
 pub struct NewAiResult {
@@ -148,7 +148,7 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
         .fetch_optional(pool)
         .await
         .map_err(|error| {
-            classify_sqlite_error(
+            classify_db_error(
                 error,
                 "article_ai_results",
                 format!(
@@ -320,7 +320,7 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
         .fetch_optional(&mut *tx)
         .await
         .map_err(|error| {
-            classify_sqlite_error(
+            classify_db_error(
                 error,
                 "article_ai_results",
                 format!(

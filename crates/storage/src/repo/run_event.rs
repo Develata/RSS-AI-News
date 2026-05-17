@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use sqlx::SqlitePool;
 
-use crate::{StorageError, StoragePool, classify_sqlite_error};
+use crate::{StorageError, StoragePool, classify_db_error};
 
 #[derive(Debug, Clone)]
 pub struct NewRunEvent {
@@ -63,6 +63,6 @@ impl RunEventRepository for RunEventRepo {
         .bind(&event.context_json)
         .fetch_one(pool)
         .await
-        .map_err(|error| classify_sqlite_error(error, "run_events", &event.run_id))
+        .map_err(|error| classify_db_error(error, "run_events", &event.run_id))
     }
 }

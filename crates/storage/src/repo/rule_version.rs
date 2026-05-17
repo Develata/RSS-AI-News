@@ -3,7 +3,7 @@ use rss_ai_news_config::{ConfigVersionStore, ConfigVersionStoreError};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
-use crate::{StorageError, StoragePool, classify_sqlite_error};
+use crate::{StorageError, StoragePool, classify_db_error};
 
 /// 单条 `rule_versions` 行的领域投影。所有规则消费方（ingest / extract /
 /// ai_run / publish / rebuild）通过 [`RuleVersionRepository::active_rule`]
@@ -168,7 +168,7 @@ impl RuleVersionRepository for RuleVersionRepo {
         .fetch_optional(pool)
         .await
         .map_err(|error| {
-            classify_sqlite_error(error, "rule_versions", format!("{kind}/{version_tag}"))
+            classify_db_error(error, "rule_versions", format!("{kind}/{version_tag}"))
         })?;
 
         if let Some(id) = inserted {
@@ -206,9 +206,7 @@ impl RuleVersionRepository for RuleVersionRepo {
         .bind(payload_sha256)
         .fetch_one(pool)
         .await
-        .map_err(|error| {
-            classify_sqlite_error(error, "rule_versions", format!("{kind}/{version_tag}"))
-        })
+        .map_err(|error| classify_db_error(error, "rule_versions", format!("{kind}/{version_tag}")))
     }
 
     async fn active_rule(&self, kind: &str) -> Result<Option<RuleVersion>, StorageError> {

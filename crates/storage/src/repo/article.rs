@@ -4,7 +4,7 @@ use rss_ai_news_domain::state::{ArticleState, ContentQuality, ExtractorStrategy}
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{StorageError, StoragePool, classify_sqlite_error};
+use crate::{StorageError, StoragePool, classify_db_error};
 
 #[derive(Debug, Clone)]
 pub struct NewArticle {
@@ -152,7 +152,7 @@ impl ArticleRepository for ArticleRepo {
         .bind(article.origin_feed_entry_id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|error| classify_sqlite_error(error, "articles", &article.content_hash))?;
+        .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
 
         let (article_id, newly_created) = if let Some(id) = inserted_id {
             (id, true)

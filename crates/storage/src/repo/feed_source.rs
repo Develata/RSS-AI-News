@@ -6,7 +6,7 @@ use rss_ai_news_domain::{
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{StorageError, StoragePool, classify_sqlite_error};
+use crate::{StorageError, StoragePool, classify_db_error};
 
 /// F15-fix7：reindex `categories` target 写 `feed_sources` 时的 lease-guarded
 /// 写入结果。`upsert_with_lease_guard` / `mark_archived_with_lease_guard`
@@ -48,7 +48,7 @@ pub trait FeedSourceRepository: Send + Sync {
     /// 不被修改，返 `LeaseLost`——调用方上抛 `RuntimeError::LeaseConflict`。
     ///
     /// 与 `upsert` 相比的语义边界：本方法**不**返回 id（runtime 端不需要），
-    /// 节省一次 RETURNING；INSERT/UPDATE 冲突仍由 `classify_sqlite_error`
+    /// 节省一次 RETURNING；INSERT/UPDATE 冲突仍由 `classify_db_error`
     /// 映射为 `StorageError::Conflict`。
     ///
     /// **F15-fix9**：`now` 显式从调用方传入，把 `reindex_jobs.updated_at`
@@ -158,7 +158,7 @@ impl FeedSourceRepository for FeedSourceRepo {
         .fetch_one(pool)
         .await
         .map_err(|error| {
-            classify_sqlite_error(
+            classify_db_error(
                 error,
                 "feed_sources",
                 format!("{}/{}", src.category_key, src.source_key),
@@ -288,7 +288,7 @@ impl FeedSourceRepository for FeedSourceRepo {
 
         // 2) feed_sources upsert（与 `upsert` 完全相同的 SQL；不复用是因为
         //    那一版直接走 self.pool，本路径要在 tx 上执行）。INSERT/UPDATE
-        //    冲突保留 classify_sqlite_error 映射；本方法不返回 id。
+        //    冲突保留 classify_db_error 映射；本方法不返回 id。
         sqlx::query(
             r#"
             INSERT INTO feed_sources (
@@ -335,7 +335,7 @@ impl FeedSourceRepository for FeedSourceRepo {
         .execute(&mut *tx)
         .await
         .map_err(|error| {
-            classify_sqlite_error(
+            classify_db_error(
                 error,
                 "feed_sources",
                 format!("{}/{}", src.category_key, src.source_key),

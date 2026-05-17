@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use time::OffsetDateTime;
 
-use crate::{ClaimRequest, StorageError, classify_sqlite_error};
+use crate::{ClaimRequest, StorageError, classify_db_error};
 
 use super::{
     publish_record::{
@@ -39,7 +39,7 @@ impl PublishRecordRepository for PublishRecordRepo {
         .bind(&item.remote_target)
         .fetch_optional(pool)
         .await
-        .map_err(|error| classify_sqlite_error(error, "publish_records", &item.idempotency_key))
+        .map_err(|error| classify_db_error(error, "publish_records", &item.idempotency_key))
     }
 
     async fn find_by_id(&self, id: i64) -> Result<Option<PublishRecord>, StorageError> {

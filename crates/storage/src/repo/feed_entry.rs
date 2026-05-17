@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{ClaimRequest, StorageError, StoragePool, classify_sqlite_error};
+use crate::{ClaimRequest, StorageError, StoragePool, classify_db_error};
 
 #[derive(Debug, Clone)]
 pub struct NewFeedEntry {
@@ -172,7 +172,7 @@ impl FeedEntryRepository for FeedEntryRepo {
         .fetch_optional(pool)
         .await
         .map_err(|error| {
-            classify_sqlite_error(
+            classify_db_error(
                 error,
                 "feed_entries",
                 format!("{}/{}", entry.source_id, entry.feed_entry_uid),

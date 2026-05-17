@@ -7,7 +7,7 @@ use std::{
 };
 
 use rss_ai_news_storage::{
-    StorageError, StoragePool, build_sqlite_pool, classify_sqlite_error, run_migrations,
+    StorageError, StoragePool, build_sqlite_pool, classify_db_error, run_migrations,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -137,7 +137,7 @@ pub async fn insert_article(
     .bind(origin_feed_entry_id)
     .fetch_one(pool)
     .await
-    .map_err(|error| classify_sqlite_error(error, "articles", content_hash))
+    .map_err(|error| classify_db_error(error, "articles", content_hash))
 }
 
 pub async fn seed_article(pool: &SqlitePool) -> (i64, i64, i64) {

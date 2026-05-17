@@ -11,7 +11,7 @@ use rss_ai_news_domain::{
 };
 use rss_ai_news_storage::{
     FeedSourceRepo, FeedSourceRepository, RuleVersionRepo, StorageError, StoragePool,
-    build_sqlite_pool, classify_sqlite_error, run_migrations,
+    build_sqlite_pool, classify_db_error, run_migrations,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -112,7 +112,7 @@ async fn insert_article(
     .bind(origin_feed_entry_id)
     .fetch_one(pool)
     .await
-    .map_err(|error| classify_sqlite_error(error, "articles", content_hash))
+    .map_err(|error| classify_db_error(error, "articles", content_hash))
 }
 
 async fn seed_article(pool: &SqlitePool) -> (i64, i64, i64) {
@@ -198,7 +198,7 @@ async fn article_ai_results_unique_tuple_is_conflict() {
         .execute(&pool)
         .await
         .map_err(|error| {
-            classify_sqlite_error(error, "article_ai_results", "article/prompt/schema/model")
+            classify_db_error(error, "article_ai_results", "article/prompt/schema/model")
         });
 
         if let Err(error) = result {
@@ -255,7 +255,7 @@ async fn raw_artifacts_reject_inline_without_body() {
     )
     .execute(&pool)
     .await
-    .map_err(|error| classify_sqlite_error(error, "raw_artifacts", "storage_kind"))
+    .map_err(|error| classify_db_error(error, "raw_artifacts", "storage_kind"))
     .expect_err("inline artifact without inline_body should be rejected");
 
     assert!(matches!(error, StorageError::Sqlx(_)));
@@ -450,5 +450,5 @@ async fn insert_publish_item(
     .execute(pool)
     .await
     .map(|_| ())
-    .map_err(|error| classify_sqlite_error(error, "publish_items", "checks"))
+    .map_err(|error| classify_db_error(error, "publish_items", "checks"))
 }

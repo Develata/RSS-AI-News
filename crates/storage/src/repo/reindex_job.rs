@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{StorageError, StoragePool, classify_sqlite_error};
+use crate::{StorageError, StoragePool, classify_db_error};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct ReindexJob {
@@ -96,7 +96,7 @@ pub trait ReindexJobRepository: Send + Sync {
     ///     （同 target 已有 pending/running job）→ 回滚，rule_versions 行
     ///     也不写入（避免"孤儿 pending"）
     ///
-    /// 两条 INSERT 的 UNIQUE 违例都通过 [`classify_sqlite_error`] 映射为
+    /// 两条 INSERT 的 UNIQUE 违例都通过 [`classify_db_error`] 映射为
     /// [`StorageError::Conflict { table, key }`]，调用方靠 `table` 字段
     /// 区分是 rule_versions tag 重复还是 target 已被占用。
     async fn start_reindex_tx(
@@ -158,7 +158,7 @@ pub trait ReindexJobRepository: Send + Sync {
 
     /// `(无) → pending`。`partial unique` 索引 `uq_reindex_jobs_target_active`
     /// 保证同 target 同时只能有一个 `pending`/`running` job；冲突返回
-    /// [`StorageError::Conflict`]（classify_sqlite_error 把 UNIQUE 违例映射为
+    /// [`StorageError::Conflict`]（classify_db_error 把 UNIQUE 违例映射为
     /// Conflict）。
     ///
     /// 注：reindex flow 入口应使用 [`Self::start_reindex_tx`] 把 rule_versions
@@ -324,7 +324,7 @@ impl ReindexJobRepository for ReindexJobRepo {
         .fetch_one(&mut *tx)
         .await
         .map_err(|error| {
-            classify_sqlite_error(
+            classify_db_error(
                 error,
                 "rule_versions",
                 format!("{rule_kind}/{rule_version_tag}"),
@@ -348,7 +348,7 @@ impl ReindexJobRepository for ReindexJobRepo {
         .fetch_one(&mut *tx)
         .await
         .map_err(|error| {
-            classify_sqlite_error(
+            classify_db_error(
                 error,
                 "reindex_jobs",
                 format!("target={target}/rule_version_id={rule_version_id}"),
@@ -499,7 +499,7 @@ impl ReindexJobRepository for ReindexJobRepo {
         .fetch_one(pool)
         .await
         .map_err(|error| {
-            classify_sqlite_error(
+            classify_db_error(
                 error,
                 "reindex_jobs",
                 format!("target={target}/rule_version_id={rule_version_id}"),
