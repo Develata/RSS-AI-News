@@ -286,12 +286,7 @@ impl ReindexJobRepo {
     }
 
     fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
-        match &self.pool {
-            StoragePool::Sqlite(p) => Ok(p),
-            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
-                "reindex_job_repo postgres path is P3+".into(),
-            )),
-        }
+        self.pool.require_sqlite("reindex_job_repo")
     }
 }
 

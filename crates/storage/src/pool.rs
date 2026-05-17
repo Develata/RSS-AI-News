@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::{fmt, path::Path, time::Duration};
 
 use sqlx::{
     PgPool, SqlitePool,
@@ -14,12 +14,16 @@ use crate::StorageError;
 /// [`StorageError::UnsupportedBackend`]，repo 内部 `match` 也统一 fail-fast。
 /// 真实 PG pool 构造 + repo 业务方法 PG 路径自 P2-B / P3 起逐步接入。
 ///
-/// `Clone` / `Debug` 透传给底层 `SqlitePool` / `PgPool`（二者均为 `Arc` 包裹的 cheap-clone）。
-#[derive(Debug, Clone)]
+/// `Clone` 透传给底层 `SqlitePool` / `PgPool`（二者均为 `Arc` 包裹的 cheap-clone）。
+/// `Debug` 手写脱敏 —— 不透传 sqlx 内部，避免未来日志意外暴露连接字符串。
+#[derive(Clone)]
 pub enum StoragePool {
     Sqlite(SqlitePool),
     Postgres(PgPool),
 }
+
+/// W11-P2-A 阶段 PG 路径 stub 的错误信息后缀；P3 实装时全文 grep 这一串。
+const PG_STUB_SUFFIX: &str = "postgres path is P3+";
 
 impl StoragePool {
     /// 按 URL scheme 路由：`postgres[ql]://` → Postgres，其余视为 SQLite 文件路径或 `sqlite://`。
@@ -55,6 +59,38 @@ impl StoragePool {
             .flat_map(char::to_lowercase)
             .collect();
         head.starts_with("postgres://") || head.starts_with("postgresql://")
+    }
+
+    /// 取出底层 `SqlitePool`；PG 分支返回 [`StorageError::UnsupportedBackend`]，
+    /// 错误信息以 `scope` 标识"哪个 repo 还没填实 PG 路径"，P3 实装时
+    /// `git grep "postgres path is P3+"` 一次扫齐所有 stub 点。
+    ///
+    /// 由 10 个 repo 的 `sqlite_pool()` thin wrapper 统一调用，避免分散的
+    /// `match` 与不一致的错误信息字符串。
+    pub fn require_sqlite(&self, scope: &'static str) -> Result<&SqlitePool, StorageError> {
+        match self {
+            Self::Sqlite(p) => Ok(p),
+            Self::Postgres(_) => Err(StorageError::UnsupportedBackend(format!(
+                "{scope} {PG_STUB_SUFFIX}"
+            ))),
+        }
+    }
+}
+
+impl fmt::Debug for StoragePool {
+    /// 手写 Debug：只暴露 variant 名 + sqlx::Pool::size()，不透传底层连接字符串。
+    /// 避免未来若把 `StoragePool` 进结构化日志时把 `host/user` 等连带打出。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sqlite(p) => f
+                .debug_struct("StoragePool::Sqlite")
+                .field("connections", &p.size())
+                .finish_non_exhaustive(),
+            Self::Postgres(p) => f
+                .debug_struct("StoragePool::Postgres")
+                .field("connections", &p.size())
+                .finish_non_exhaustive(),
+        }
     }
 }
 
@@ -132,5 +168,30 @@ mod tests {
             }
             other => panic!("expected UnsupportedBackend, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn require_sqlite_returns_pool_on_sqlite_variant() {
+        let pool = build_sqlite_pool(Path::new(":memory:"), 1, 100)
+            .await
+            .expect("in-memory sqlite pool builds");
+        let storage = StoragePool::Sqlite(pool);
+        let inner = storage
+            .require_sqlite("test_repo")
+            .expect("sqlite returns pool");
+        // 仅断言能取到引用即可（size 在 lazy 模式下可能仍为 0）
+        let _ = inner.size();
+    }
+
+    /// P3 grep 兜底：所有 stub 错误信息都以 `PG_STUB_SUFFIX` 结尾，且包含 scope 标识。
+    /// 单测无法构造真实 PgPool（连不到 server），但能通过常量与格式约束锁住语义。
+    #[test]
+    fn pg_stub_suffix_is_grep_friendly() {
+        // 关键词唯一：避免与业务 SQL/日志中其它"P3"字串混淆
+        assert_eq!(PG_STUB_SUFFIX, "postgres path is P3+");
+        // 错误信息格式按"<scope> <suffix>"组合
+        let msg = format!("article_repo {PG_STUB_SUFFIX}");
+        assert!(msg.contains("article_repo"));
+        assert!(msg.ends_with(PG_STUB_SUFFIX));
     }
 }

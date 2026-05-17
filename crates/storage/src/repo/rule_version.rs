@@ -90,12 +90,7 @@ impl RuleVersionRepo {
     }
 
     fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
-        match &self.pool {
-            StoragePool::Sqlite(p) => Ok(p),
-            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
-                "rule_version_repo postgres path is P3+".into(),
-            )),
-        }
+        self.pool.require_sqlite("rule_version_repo")
     }
 
     pub async fn get_or_create_config_version_async(

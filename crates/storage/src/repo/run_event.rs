@@ -34,12 +34,7 @@ impl RunEventRepo {
     }
 
     fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
-        match &self.pool {
-            StoragePool::Sqlite(p) => Ok(p),
-            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
-                "run_event_repo postgres path is P3+".into(),
-            )),
-        }
+        self.pool.require_sqlite("run_event_repo")
     }
 }
 

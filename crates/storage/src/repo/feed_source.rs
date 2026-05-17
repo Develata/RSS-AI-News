@@ -103,12 +103,7 @@ impl FeedSourceRepo {
     }
 
     fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
-        match &self.pool {
-            StoragePool::Sqlite(p) => Ok(p),
-            StoragePool::Postgres(_) => Err(StorageError::UnsupportedBackend(
-                "feed_source_repo postgres path is P3+".into(),
-            )),
-        }
+        self.pool.require_sqlite("feed_source_repo")
     }
 }
 
