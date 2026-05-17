@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use rss_ai_news_config as config;
 use rss_ai_news_storage::{
-    ReindexJobRepo, ReindexJobRepository, build_sqlite_pool, run_migrations,
+    ReindexJobRepo, ReindexJobRepository, StoragePool, build_sqlite_pool, run_migrations,
 };
 use serde::Serialize;
 
@@ -50,7 +50,7 @@ pub async fn run(cli: &Cli) -> Result<MigrateCommandSummary, CliError> {
     // StorageError；该路径仅在"全新 DB 首次 migrate run"时触发，此时
     // 也不可能有 active reindex_job，故捕获并视为 0 active job。
     assert_no_running_reindex(&pool).await?;
-    run_migrations(&pool).await?;
+    run_migrations(&StoragePool::Sqlite(pool.clone())).await?;
     summary("run", &pool).await
 }
 
@@ -125,7 +125,7 @@ async fn summary(action: &str, pool: &sqlx::SqlitePool) -> Result<MigrateCommand
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rss_ai_news_storage::{build_sqlite_pool, run_migrations};
+    use rss_ai_news_storage::{StoragePool, build_sqlite_pool, run_migrations};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -140,7 +140,9 @@ mod tests {
             .unwrap_or(0);
         let db_path = dir.path().join(format!("migrate-{counter}-{nanos}.sqlite"));
         let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
-        run_migrations(&pool).await.expect("migrations");
+        run_migrations(&StoragePool::Sqlite(pool.clone()))
+            .await
+            .expect("migrations");
         (dir, pool)
     }
 

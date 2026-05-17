@@ -1,7 +1,8 @@
-use std::{fmt, path::Path, time::Duration};
+use std::{fmt, path::Path, str::FromStr, time::Duration};
 
 use sqlx::{
     PgPool, SqlitePool,
+    postgres::{PgConnectOptions, PgPoolOptions},
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
@@ -9,10 +10,10 @@ use crate::StorageError;
 
 /// 多方言存储池枚举。
 ///
-/// W11-P2-A 期间 `Postgres` 分支仅作为类型占位 —— [`StoragePool::build`] 在收到
-/// `postgres://` / `postgresql://` URL 时直接返回
-/// [`StorageError::UnsupportedBackend`]，repo 内部 `match` 也统一 fail-fast。
-/// 真实 PG pool 构造 + repo 业务方法 PG 路径自 P2-B / P3 起逐步接入。
+/// W11-P3-A 起 PG 分支可真实构造 pool（参见 [`StoragePool::build`] / [`build_pg_pool`]），
+/// 但 repo 业务方法 PG 路径仍是 stub —— [`StoragePool::require_sqlite`] 在 PG 分支
+/// 仍返回 [`StorageError::UnsupportedBackend("<scope> postgres path is P3+")`]。
+/// P3-C 起逐 repo 替换为真实 PG 实现，届时 require_sqlite 调用点逐个迁出。
 ///
 /// `Clone` 透传给底层 `SqlitePool` / `PgPool`（二者均为 `Arc` 包裹的 cheap-clone）。
 /// `Debug` 手写脱敏 —— 不透传 sqlx 内部，避免未来日志意外暴露连接字符串。
@@ -28,19 +29,15 @@ const PG_STUB_SUFFIX: &str = "postgres path is P3+";
 impl StoragePool {
     /// 按 URL scheme 路由：`postgres[ql]://` → Postgres，其余视为 SQLite 文件路径或 `sqlite://`。
     ///
-    /// W11-P2-A 阶段 Postgres 路径直接返回 [`StorageError::UnsupportedBackend`]，
-    /// P2-B 起接 `build_pg_pool`。
+    /// `busy_timeout_ms` 仅对 SQLite 生效；PG 走 sqlx 默认的 connection 行为。
     pub async fn build(
         url: &str,
         max_connections: u32,
         busy_timeout_ms: u32,
     ) -> Result<Self, StorageError> {
         if Self::is_postgres_url(url) {
-            // 不把 url 拼进错误信息：PG URL 形如 `postgres://user:password@host/db`，
-            // 拼出会让密码顺着 error chain / 日志泄露。stub 阶段返回固定串即可。
-            return Err(StorageError::UnsupportedBackend(
-                "postgres backend not implemented in P2-A; only sqlite is wired".into(),
-            ));
+            let pool = build_pg_pool(url, max_connections).await?;
+            return Ok(Self::Postgres(pool));
         }
         let sqlite_path_str = strip_sqlite_scheme(url);
         let sqlite_path = Path::new(sqlite_path_str.as_ref());
@@ -122,10 +119,25 @@ pub async fn build_sqlite_pool(
         .map_err(StorageError::from)
 }
 
+/// PG pool 构造：用 `PgConnectOptions::from_str` 解析 URL，避免直接把 url 字符串
+/// 暴露在错误链里（sqlx::Error 本身不携带 url，但 connect 失败时的 message
+/// 可能引用 host/port —— 密码不会泄露）。
+///
+/// 不调用 `connect_lazy_with`：W11-P3-A 出口标准要求"PG apply migration 成功"，
+/// 这意味着 build 时即必须真实连通；连不上则立即 fail，调用方据此 fallback。
+pub async fn build_pg_pool(url: &str, max_connections: u32) -> Result<PgPool, StorageError> {
+    // FromStr 实现解析 user:password@host:port/db 等 URL 字段，password 不进 Debug 输出。
+    let options = PgConnectOptions::from_str(url).map_err(StorageError::from)?;
+    PgPoolOptions::new()
+        .max_connections(max_connections)
+        .connect_with(options)
+        .await
+        .map_err(StorageError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::StorageError;
 
     #[test]
     fn is_postgres_url_accepts_canonical_schemes() {
@@ -150,24 +162,25 @@ mod tests {
         assert!(!StoragePool::is_postgres_url("mysql://x"));
     }
 
+    /// W11-P3-A：build 在 PG URL 上不再 stub，而是真实尝试连接。本测试用
+    /// `127.0.0.1:1`（root-only port，普通进程必拒）验证 connect 失败时
+    /// 错误链里不含用户名 / 密码字串 —— sqlx 的 connect error 仅引用 host:port。
     #[tokio::test]
-    async fn build_pg_url_returns_unsupported_backend_without_leaking_credentials() {
+    async fn build_pg_url_connect_error_does_not_leak_credentials() {
         let secret = "ne1ther_user_n0r_password_leak";
-        let url = format!("postgres://alice:{secret}@db.example.com/mydb");
+        // unique 用户名，避免与 host/port 字串巧合相同
+        let user = "alice_qwert_xyzzy";
+        let url = format!("postgres://{user}:{secret}@127.0.0.1:1/mydb");
         let err = StoragePool::build(&url, 1, 100).await.unwrap_err();
-        match err {
-            StorageError::UnsupportedBackend(msg) => {
-                assert!(
-                    !msg.contains(secret),
-                    "error message must not leak password: {msg}"
-                );
-                assert!(
-                    !msg.contains("alice"),
-                    "error message must not leak username: {msg}"
-                );
-            }
-            other => panic!("expected UnsupportedBackend, got: {other:?}"),
-        }
+        let msg = format!("{err}");
+        assert!(
+            !msg.contains(secret),
+            "error message must not leak password: {msg}"
+        );
+        assert!(
+            !msg.contains(user),
+            "error message must not leak username: {msg}"
+        );
     }
 
     #[tokio::test]

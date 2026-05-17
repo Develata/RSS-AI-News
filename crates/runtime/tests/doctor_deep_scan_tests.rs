@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rss_ai_news_runtime::doctor::deep_scan::{InvariantId, run};
-use rss_ai_news_storage::{build_sqlite_pool, run_migrations};
+use rss_ai_news_storage::{StoragePool, build_sqlite_pool, run_migrations};
 use sqlx::SqlitePool;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -92,7 +92,9 @@ async fn make_pool() -> SqlitePool {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let db_path = dir.join("test.sqlite");
     let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
-    run_migrations(&pool).await.expect("migrations");
+    run_migrations(&StoragePool::Sqlite(pool.clone()))
+        .await
+        .expect("migrations");
     pool
 }
 

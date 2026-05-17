@@ -4,7 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rss_ai_news_report::{RenderConfig, ReportError, rebuild_markdown, render_markdown};
 use rss_ai_news_storage::{
-    PublishItemRepo, PublishItemRepository, PublishRecordRepo, build_sqlite_pool, run_migrations,
+    PublishItemRepo, PublishItemRepository, PublishRecordRepo, StoragePool, build_sqlite_pool,
+    run_migrations,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -77,7 +78,9 @@ async fn make_pool() -> (PathBuf, SqlitePool) {
     let pool = build_sqlite_pool(&dir.join("test.sqlite"), 1, 5_000)
         .await
         .unwrap();
-    run_migrations(&pool).await.unwrap();
+    run_migrations(&StoragePool::Sqlite(pool.clone()))
+        .await
+        .unwrap();
     (dir, pool)
 }
 

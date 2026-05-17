@@ -12,7 +12,7 @@ use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
     ArticleAiResultRepo, ArticleRepo, FeedEntryRepo, FeedSourceRepo, PublishItemRepo,
     PublishRecordRepo, RawArtifactRepo, ReindexJobRepo, RuleVersionRepo, RuleVersionRepository,
-    RunEventRepo, build_sqlite_pool, run_migrations,
+    RunEventRepo, StoragePool, build_sqlite_pool, run_migrations,
 };
 use sqlx::SqlitePool;
 
@@ -31,7 +31,9 @@ pub async fn build_run_context(
     )
     .await
     .map_err(CliError::Storage)?;
-    run_migrations(&pool).await.map_err(CliError::Storage)?;
+    run_migrations(&StoragePool::Sqlite(pool.clone()))
+        .await
+        .map_err(CliError::Storage)?;
     ensure_default_rule_version(&pool, &loaded.config_sha256)
         .await
         .map_err(CliError::Storage)?;
@@ -141,7 +143,9 @@ pub async fn build_replay_deps(cli: &crate::args::Cli) -> Result<ReplayDeps, Cli
     )
     .await
     .map_err(CliError::Storage)?;
-    run_migrations(&pool).await.map_err(CliError::Storage)?;
+    run_migrations(&StoragePool::Sqlite(pool.clone()))
+        .await
+        .map_err(CliError::Storage)?;
 
     Ok(ReplayDeps {
         pool: pool.clone(),
@@ -168,7 +172,9 @@ pub async fn build_doctor_deps(cli: &crate::args::Cli) -> Result<DoctorDeps, Cli
     )
     .await
     .map_err(CliError::Storage)?;
-    run_migrations(&pool).await.map_err(CliError::Storage)?;
+    run_migrations(&StoragePool::Sqlite(pool.clone()))
+        .await
+        .map_err(CliError::Storage)?;
     ensure_default_rule_version(&pool, &loaded.config_sha256)
         .await
         .map_err(CliError::Storage)?;

@@ -10,7 +10,7 @@ use rss_ai_news_observability::health::{CheckOutcome, CheckReport};
 use rss_ai_news_runtime::doctor::deep_scan::{
     DeepScanReport, InvariantId, InvariantResult, ViolationRow,
 };
-use rss_ai_news_storage::{build_sqlite_pool, run_migrations};
+use rss_ai_news_storage::{StoragePool, build_sqlite_pool, run_migrations};
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -272,7 +272,9 @@ enabled = true
 
 async fn seed_i6_violation(db_path: &Path) {
     let pool = build_sqlite_pool(db_path, 1, 5_000).await.expect("pool");
-    run_migrations(&pool).await.expect("migrations");
+    run_migrations(&StoragePool::Sqlite(pool.clone()))
+        .await
+        .expect("migrations");
     let rule = insert_rule(&pool, "config").await;
     let extractor = insert_rule(&pool, "extractor").await;
     let prompt = insert_rule(&pool, "prompt").await;

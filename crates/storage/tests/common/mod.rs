@@ -6,7 +6,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rss_ai_news_storage::{StorageError, build_sqlite_pool, classify_sqlite_error, run_migrations};
+use rss_ai_news_storage::{
+    StorageError, StoragePool, build_sqlite_pool, classify_sqlite_error, run_migrations,
+};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
@@ -28,7 +30,7 @@ pub async fn make_test_pool_with_connections(max_connections: u32) -> (PathBuf, 
     let pool = build_sqlite_pool(&db_path, max_connections, 5_000)
         .await
         .expect("test pool should be created");
-    run_migrations(&pool)
+    run_migrations(&StoragePool::Sqlite(pool.clone()))
         .await
         .expect("migrations should apply");
     (dir, pool)

@@ -10,8 +10,8 @@ use rss_ai_news_domain::{
     state::{FeedKind, FeedSourceStatus},
 };
 use rss_ai_news_storage::{
-    FeedSourceRepo, FeedSourceRepository, RuleVersionRepo, StorageError, build_sqlite_pool,
-    classify_sqlite_error, run_migrations,
+    FeedSourceRepo, FeedSourceRepository, RuleVersionRepo, StorageError, StoragePool,
+    build_sqlite_pool, classify_sqlite_error, run_migrations,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -34,7 +34,7 @@ async fn make_test_pool() -> (PathBuf, SqlitePool) {
     let pool = build_sqlite_pool(&db_path, 1, 5_000)
         .await
         .expect("test pool should be created");
-    run_migrations(&pool)
+    run_migrations(&StoragePool::Sqlite(pool.clone()))
         .await
         .expect("migrations should apply");
     (dir, pool)

@@ -217,6 +217,8 @@ DATABASE_URL 路由由 `cli::context_factory::build_run_context` 调用 `Storage
 
 P2 期间仅 `cli migrate` 子命令对 `driver=postgres` 放行，用于跑通 `migrations/postgres/0001` 的 apply 测试。
 
+**P3-A 进度（W11-P3-A）**：`StoragePool::build` PG 分支已实装 [`build_pg_pool`]，`migrations/postgres/{0001,0002}.{up,down}.sql` 已落盘，`run_migrations(&StoragePool)` 按 backend 分发；`migration_pair_parity_tests` 在 CI 上保护编号配对；`migrations_postgres_apply_tests`（`#[ignore]`，需 `--include-ignored` + docker）已在本地 PG 16-alpine 容器上跑通幂等 apply。**repo 业务方法仍保持 P2 阶段的 [`StoragePool::require_sqlite`] stub** —— `git grep "postgres path is P3+"` 一次扫齐所有 stub 点，P3-C 起逐 repo 迁出。
+
 ### 6.2 Repo trait 内部分发
 
 P2-B 后所有 repo struct 已从 `Sqlite*Repo` 重命名为 `*Repo`（如 `FeedSourceRepo`），内部持有 `StoragePool`，trait 方法 `match` 分发：

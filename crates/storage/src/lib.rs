@@ -11,7 +11,7 @@ pub mod repo;
 pub use error::{StorageError, classify_sqlite_error};
 pub use lease::{ClaimRequest, ReleaseOutcome, build_owner_id, lease_expires_at};
 pub use migrate::run_migrations;
-pub use pool::{StoragePool, build_sqlite_pool};
+pub use pool::{StoragePool, build_pg_pool, build_sqlite_pool};
 pub use repo::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
     ArticleAiTaskCandidate, ArticleInsertOutcome, ArticleRepo, ArticleRepository,

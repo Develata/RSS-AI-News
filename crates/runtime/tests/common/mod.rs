@@ -23,7 +23,8 @@ use rss_ai_news_publish::{LocalFsTarget, PublishError, PublishTarget, PublishedA
 use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
     ArticleAiResultRepo, ArticleRepo, FeedEntryRepo, FeedSourceRepo, PublishItemRepo,
-    PublishRecordRepo, RawArtifactRepo, RunEventRepo, build_sqlite_pool, run_migrations,
+    PublishRecordRepo, RawArtifactRepo, RunEventRepo, StoragePool, build_sqlite_pool,
+    run_migrations,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -50,7 +51,7 @@ pub async fn make_test_pool_with_connections(max_connections: u32) -> (PathBuf, 
     let pool = build_sqlite_pool(&db_path, max_connections, 5_000)
         .await
         .expect("test pool should be created");
-    run_migrations(&pool)
+    run_migrations(&StoragePool::Sqlite(pool.clone()))
         .await
         .expect("migrations should apply");
     (dir, pool)
