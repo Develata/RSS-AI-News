@@ -2,11 +2,11 @@ use std::io::{self, Write};
 
 use rss_ai_news_config as config;
 use rss_ai_news_storage::{
-    ReindexJobRepo, ReindexJobRepository, StoragePool, build_sqlite_pool, run_migrations,
+    ReindexJobRepo, ReindexJobRepository, StorageError, StoragePool, run_migrations,
 };
 use serde::Serialize;
 
-use crate::{args::Cli, error::CliError, output::CommandSummary};
+use crate::{args::Cli, db_url::resolve_storage_url, error::CliError, output::CommandSummary};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MigrateCommandSummary {
@@ -33,13 +33,18 @@ impl CommandSummary for MigrateCommandSummary {
     }
 }
 
-// migrate is an infrastructure command: it only opens SQLite and runs the
-// embedded schema migrations. It must not be gated by OPENAI_* / RSSHUB_BASE_URL
-// env presence — those are business-credential concerns enforced for AI / fetch
-// commands by `validate::run_general_checks`. See loader::load_skip_env_checks.
+// migrate is an infrastructure command: it only opens the configured backend
+// (SQLite or PG) and runs the embedded schema migrations. It must not be gated
+// by OPENAI_* / RSSHUB_BASE_URL env presence — those are business-credential
+// concerns enforced for AI / fetch commands by `validate::run_general_checks`.
+// See loader::load_skip_env_checks.
+//
+// W11-P3-A-fix1.H1：`cli migrate` 是 driver=postgres 的唯一放行入口，
+// 必须走 StoragePool::build 真实路由（不再硬走 SQLite）。其它命令在
+// build_run_context 入口对 driver=postgres fail-fast。
 pub async fn run(cli: &Cli) -> Result<MigrateCommandSummary, CliError> {
     let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
-    let pool = open_pool(&loaded.app).await?;
+    let pool = open_pool(&loaded).await?;
     // F15-11 W9-F4：cli-semantics §4.8 line 312 —— `migrate run` 与
     // `running`/`pending` reindex_job 互斥。在执行任何 schema 升级前必须
     // 先确认无 active reindex（schema 与 rule-version 升级职责边界明确：
@@ -50,13 +55,13 @@ pub async fn run(cli: &Cli) -> Result<MigrateCommandSummary, CliError> {
     // StorageError；该路径仅在"全新 DB 首次 migrate run"时触发，此时
     // 也不可能有 active reindex_job，故捕获并视为 0 active job。
     assert_no_running_reindex(&pool).await?;
-    run_migrations(&StoragePool::Sqlite(pool.clone())).await?;
+    run_migrations(&pool).await?;
     summary("run", &pool).await
 }
 
 pub async fn check(cli: &Cli) -> Result<MigrateCommandSummary, CliError> {
     let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
-    let pool = open_pool(&loaded.app).await?;
+    let pool = open_pool(&loaded).await?;
     // `migrate check` 仅查询版本号，**不阻塞**：cli-semantics §4.8 line 312
     // 只要求 `migrate run` 互斥；check 是只读探测，allowed during reindex
     // —— 否则 oncall 无法在排查时确认 schema 状态。
@@ -70,13 +75,19 @@ pub async fn check(cli: &Cli) -> Result<MigrateCommandSummary, CliError> {
 /// 之前的 schema 上调用 list_running，sqlx 会返 "no such table" 错误。
 /// 此时视为 0 active job 放行（新库 + 首次 migrate run 不存在 active
 /// reindex_job 的物理可能性）；其它 StorageError 透传。
-pub(crate) async fn assert_no_running_reindex(pool: &sqlx::SqlitePool) -> Result<(), CliError> {
-    let repo = ReindexJobRepo::new(pool.clone());
+pub(crate) async fn assert_no_running_reindex(pool: &StoragePool) -> Result<(), CliError> {
+    // P3-A-fix1.H1：PG 阶段 reindex_jobs 业务方法仍是 require_sqlite stub
+    // （`list_running` 必返 UnsupportedBackend）。语义上等同"新库 + 首次
+    // migrate run"——PG 上不可能存在 active reindex_job，直接放行。
+    // P3-C 把 reindex_job_repo PG 分支实装后，本路径自然回到真实查询。
+    let sqlite_pool = match pool {
+        StoragePool::Sqlite(p) => p,
+        StoragePool::Postgres(_) => return Ok(()),
+    };
+    let repo = ReindexJobRepo::new(sqlite_pool.clone());
     let rows = match repo.list_running().await {
         Ok(rows) => rows,
-        Err(rss_ai_news_storage::StorageError::Sqlx(error))
-            if error.to_string().contains("no such table") =>
-        {
+        Err(StorageError::Sqlx(error)) if error.to_string().contains("no such table") => {
             return Ok(());
         }
         Err(error) => return Err(CliError::Storage(error)),
@@ -91,29 +102,34 @@ pub(crate) async fn assert_no_running_reindex(pool: &sqlx::SqlitePool) -> Result
     })
 }
 
-async fn open_pool(app: &config::AppConfig) -> Result<sqlx::SqlitePool, CliError> {
+/// W11-P3-A-fix1.H1：按 `loaded.app.database.driver` + `loaded.env.database_url`
+/// 路由到 [`StoragePool::build`]，让 `cli migrate` 真实成为 PG 入口。
+async fn open_pool(loaded: &config::LoadedConfig) -> Result<StoragePool, CliError> {
+    let url = resolve_storage_url(loaded)?;
+    let app = &loaded.app;
     let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
-    build_sqlite_pool(
-        &app.database.sqlite_path,
-        app.database.max_connections,
-        busy_timeout_ms,
-    )
-    .await
-    .map_err(CliError::Storage)
+    StoragePool::build(&url, app.database.max_connections, busy_timeout_ms)
+        .await
+        .map_err(CliError::Storage)
 }
 
-async fn summary(action: &str, pool: &sqlx::SqlitePool) -> Result<MigrateCommandSummary, CliError> {
-    let applied_versions =
-        match sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations ORDER BY version")
-            .fetch_all(pool)
-            .await
-        {
-            Ok(values) => values,
-            Err(sqlx::Error::Database(error)) if error.message().contains("_sqlx_migrations") => {
-                Vec::new()
-            }
-            Err(error) => return Err(rss_ai_news_storage::StorageError::from(error).into()),
-        };
+async fn summary(action: &str, pool: &StoragePool) -> Result<MigrateCommandSummary, CliError> {
+    // `_sqlx_migrations` schema 在两个 backend 上完全等价：
+    //   `version BIGINT PRIMARY KEY` —— sqlx::migrate! 自身嵌入，跨方言一致。
+    // 唯一的差异在 sqlx::query 的 Pool 类型签名上。
+    let query = "SELECT version FROM _sqlx_migrations ORDER BY version";
+    let applied_versions: Vec<i64> = match pool {
+        StoragePool::Sqlite(p) => match sqlx::query_scalar::<_, i64>(query).fetch_all(p).await {
+            Ok(v) => v,
+            Err(sqlx::Error::Database(e)) if e.message().contains("_sqlx_migrations") => Vec::new(),
+            Err(error) => return Err(StorageError::from(error).into()),
+        },
+        StoragePool::Postgres(p) => match sqlx::query_scalar::<_, i64>(query).fetch_all(p).await {
+            Ok(v) => v,
+            Err(sqlx::Error::Database(e)) if e.message().contains("_sqlx_migrations") => Vec::new(),
+            Err(error) => return Err(StorageError::from(error).into()),
+        },
+    };
     let current_version = applied_versions.iter().copied().max();
     Ok(MigrateCommandSummary {
         action: action.to_string(),
@@ -199,7 +215,7 @@ mod tests {
     #[tokio::test]
     async fn empty_reindex_jobs_table_passes_gate() {
         let (_dir, pool) = make_test_pool().await;
-        assert_no_running_reindex(&pool)
+        assert_no_running_reindex(&StoragePool::Sqlite(pool.clone()))
             .await
             .expect("no active job → Ok");
     }
@@ -210,7 +226,7 @@ mod tests {
         let rule_id = insert_reindex_rule(&pool, "v-pending").await;
         let job_id = insert_reindex_job(&pool, "link_hash", "pending", rule_id).await;
 
-        let err = assert_no_running_reindex(&pool)
+        let err = assert_no_running_reindex(&StoragePool::Sqlite(pool.clone()))
             .await
             .expect_err("pending must block");
         match err {
@@ -242,7 +258,7 @@ mod tests {
         .await
         .expect("running job");
 
-        let err = assert_no_running_reindex(&pool)
+        let err = assert_no_running_reindex(&StoragePool::Sqlite(pool.clone()))
             .await
             .expect_err("running must block");
         match err {
@@ -266,7 +282,7 @@ mod tests {
         ] {
             insert_reindex_job(&pool, target, state, rule_id).await;
         }
-        assert_no_running_reindex(&pool)
+        assert_no_running_reindex(&StoragePool::Sqlite(pool.clone()))
             .await
             .expect("terminal-only → Ok");
     }
@@ -309,7 +325,9 @@ mod tests {
         .await
         .expect("running");
 
-        let err = assert_no_running_reindex(&pool).await.expect_err("blocked");
+        let err = assert_no_running_reindex(&StoragePool::Sqlite(pool.clone()))
+            .await
+            .expect_err("blocked");
         match err {
             CliError::MigrateBlockedByRunningReindex { count, job_ids } => {
                 assert_eq!(count, 2);

@@ -3,6 +3,7 @@
 pub mod args;
 pub mod commands;
 pub mod context_factory;
+pub mod db_url;
 pub mod error;
 pub mod exit_code;
 pub mod output;

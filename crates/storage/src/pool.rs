@@ -119,17 +119,31 @@ pub async fn build_sqlite_pool(
         .map_err(StorageError::from)
 }
 
+/// W11-P3-A-fix1.L1：PG pool acquire 超时显式上限。
+///
+/// sqlx 的 `PgPoolOptions::acquire_timeout` 包含"新建连接 + 等待空闲连接"
+/// 整段时间——CLI 启动期 / migration apply 时这一层就是 connect 上限。
+///
+/// 30 秒与 sqlx 默认一致：放宽到这个值是因为 testcontainers PG 容器冷启动
+/// （含镜像 init / 初次 ready）有时接近 15-20s；本地测试与生产对超时的诉求
+/// 不一致。生产 CLI 若想更快 fail，调用方再用 `tokio::time::timeout` 包一层
+/// （[`build_pg_pool`] 内部不再做额外硬限）。
+pub const PG_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// PG pool 构造：用 `PgConnectOptions::from_str` 解析 URL，避免直接把 url 字符串
 /// 暴露在错误链里（sqlx::Error 本身不携带 url，但 connect 失败时的 message
 /// 可能引用 host/port —— 密码不会泄露）。
 ///
 /// 不调用 `connect_lazy_with`：W11-P3-A 出口标准要求"PG apply migration 成功"，
 /// 这意味着 build 时即必须真实连通；连不上则立即 fail，调用方据此 fallback。
+///
+/// 超时上限：参见 [`PG_ACQUIRE_TIMEOUT`]。
 pub async fn build_pg_pool(url: &str, max_connections: u32) -> Result<PgPool, StorageError> {
     // FromStr 实现解析 user:password@host:port/db 等 URL 字段，password 不进 Debug 输出。
     let options = PgConnectOptions::from_str(url).map_err(StorageError::from)?;
     PgPoolOptions::new()
         .max_connections(max_connections)
+        .acquire_timeout(PG_ACQUIRE_TIMEOUT)
         .connect_with(options)
         .await
         .map_err(StorageError::from)
@@ -194,6 +208,30 @@ mod tests {
             .expect("sqlite returns pool");
         // 仅断言能取到引用即可（size 在 lazy 模式下可能仍为 0）
         let _ = inner.size();
+    }
+
+    /// W11-P3-A-fix1.L1：blackhole 地址（TEST-NET-1 `192.0.2.1`，RFC 5737 保留
+    /// 不可路由）锁住 [`build_pg_pool`] 的 acquire 上限。`tokio::time::timeout`
+    /// 加 5 秒 slack 兜底，超时即测试 fail（说明 [`PG_ACQUIRE_TIMEOUT`] 没生效）。
+    ///
+    /// `#[ignore]`：30+ 秒等待对默认 `cargo test` 太慢，与 docker apply 测试同等
+    /// 走 `--include-ignored` 入口。
+    #[tokio::test]
+    #[ignore = "blackhole connect 测试 ~30s；--include-ignored 才跑"]
+    async fn build_pg_pool_blackhole_respects_acquire_timeout() {
+        // 192.0.2.0/24 是 RFC 5737 TEST-NET-1 documentation prefix，
+        // 全球公网路由器都不会转发 —— TCP SYN 包必然走丢直到本地超时。
+        let url = "postgres://u:p@192.0.2.1:5432/test";
+        let slack = Duration::from_secs(5);
+        let outcome = tokio::time::timeout(PG_ACQUIRE_TIMEOUT + slack, build_pg_pool(url, 1)).await;
+        let inner = outcome.expect(
+            "build_pg_pool must return within PG_ACQUIRE_TIMEOUT + slack; \
+             outer timeout means acquire_timeout did not fire",
+        );
+        assert!(
+            inner.is_err(),
+            "expected connect error on blackhole, got Ok pool"
+        );
     }
 
     /// P3 grep 兜底：所有 stub 错误信息都以 `PG_STUB_SUFFIX` 结尾，且包含 scope 标识。

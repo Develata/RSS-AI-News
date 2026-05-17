@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use reqwest::Client;
 use rss_ai_news_ai::{AiClient, AiClientConfig, AiError, AiResponse, AiTask, OpenAiCompatClient};
-use rss_ai_news_config::{self as config, LoadedConfig};
+use rss_ai_news_config::{self as config, DatabaseDriver, LoadedConfig};
 use rss_ai_news_domain::SecretString;
 use rss_ai_news_extractor::{ContentStrategy, ReqwestHtmlFetcher};
 use rss_ai_news_feed::ReqwestFeedFetcher;
@@ -12,7 +12,7 @@ use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
     ArticleAiResultRepo, ArticleRepo, FeedEntryRepo, FeedSourceRepo, PublishItemRepo,
     PublishRecordRepo, RawArtifactRepo, ReindexJobRepo, RuleVersionRepo, RuleVersionRepository,
-    RunEventRepo, StoragePool, build_sqlite_pool, run_migrations,
+    RunEventRepo, StorageError, StoragePool, build_sqlite_pool, run_migrations,
 };
 use sqlx::SqlitePool;
 
@@ -22,6 +22,12 @@ pub async fn build_run_context(
     stage: &str,
     loaded: &LoadedConfig,
 ) -> Result<(SqlitePool, Arc<RunContext>), CliError> {
+    // W11-P3-A-fix1.H1：driver=postgres + 非 migrate 子命令 → 启动期 fail-fast。
+    // 设计 storage-multi-dialect §6.1 P2/P3 阶段边界：repo 业务方法 PG 路径
+    // 仍是 require_sqlite stub（P3-C 后逐 repo 迁出），此时跑 run/ingest/ai-run/
+    // publish/doctor 会在第一个 repo 调用时炸；不如启动期就明确拒绝，引导
+    // 用户切到 sqlite 或等 P3-C+ 发布。
+    require_sqlite_driver(loaded)?;
     let app = Arc::new(loaded.app.clone());
     let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
     let pool = build_sqlite_pool(
@@ -134,6 +140,7 @@ pub struct ReplayDeps {
 
 pub async fn build_replay_deps(cli: &crate::args::Cli) -> Result<ReplayDeps, CliError> {
     let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
+    require_sqlite_driver(&loaded)?;
     let app = &loaded.app;
     let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
     let pool = build_sqlite_pool(
@@ -163,6 +170,7 @@ pub struct DoctorDeps {
 
 pub async fn build_doctor_deps(cli: &crate::args::Cli) -> Result<DoctorDeps, CliError> {
     let loaded = Arc::new(config::load(&cli.config_dir, None, cli.to_cli_overrides())?);
+    require_sqlite_driver(&loaded)?;
     let app = &loaded.app;
     let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
     let pool = build_sqlite_pool(
@@ -210,6 +218,17 @@ async fn ensure_default_rule_version(
         config_sha256,
     )
     .await?;
+    Ok(())
+}
+
+/// W11-P3-A-fix1.H1：driver=postgres 时拒绝 build_*_deps，引导用户走 cli migrate
+/// 或回退 sqlite。仅 `cli migrate` 子命令对 PG 放行（参见 commands/migrate.rs）。
+fn require_sqlite_driver(loaded: &LoadedConfig) -> Result<(), CliError> {
+    if loaded.app.database.driver == DatabaseDriver::Postgres {
+        return Err(CliError::Storage(StorageError::UnsupportedBackend(
+            "postgres repo path is P3+; only `cli migrate` may currently target postgres".into(),
+        )));
+    }
     Ok(())
 }
 
