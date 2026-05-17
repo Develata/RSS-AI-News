@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use rss_ai_news_config::{ConfigVersionStore, ConfigVersionStoreError};
-use sqlx::SqlitePool;
+use sqlx::{PgPool, SqlitePool};
 use time::OffsetDateTime;
 
 use crate::{StorageError, StoragePool, classify_db_error};
@@ -89,26 +89,35 @@ impl RuleVersionRepo {
         }
     }
 
-    fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
-        self.pool.require_sqlite("rule_version_repo")
+    /// W11-P3-E-1：PG 入口；旧 `new(SqlitePool)` thin wrapper 保留兼容。
+    pub fn new_with_storage(pool: StoragePool) -> Self {
+        Self { pool }
     }
 
     pub async fn get_or_create_config_version_async(
         &self,
         sha256: &str,
     ) -> Result<i64, StorageError> {
-        let pool = self.sqlite_pool()?;
-        if let Some(id) = sqlx::query_scalar::<_, i64>(
-            "SELECT id FROM rule_versions WHERE kind = 'config' AND payload_sha256 = $1 LIMIT 1",
-        )
-        .bind(sha256)
-        .fetch_optional(pool)
-        .await
-        .map_err(StorageError::from)?
-        {
+        // 先查已有的 config sha256：跨方言等价 const SQL。
+        let existing = match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlx::query_scalar::<_, i64>(SELECT_CONFIG_VERSION_BY_SHA_SQL)
+                    .bind(sha256)
+                    .fetch_optional(p)
+                    .await
+                    .map_err(StorageError::from)?
+            }
+            StoragePool::Postgres(p) => {
+                sqlx::query_scalar::<_, i64>(SELECT_CONFIG_VERSION_BY_SHA_SQL)
+                    .bind(sha256)
+                    .fetch_optional(p)
+                    .await
+                    .map_err(StorageError::from)?
+            }
+        };
+        if let Some(id) = existing {
             return Ok(id);
         }
-
         let version_tag: String = sha256.chars().take(12).collect();
         self.get_or_create("config", &version_tag, "auto-registered config", sha256)
             .await
@@ -127,6 +136,50 @@ impl ConfigVersionStore for RuleVersionRepo {
     }
 }
 
+// ── 共享 SQL（跨方言完全等价） ─────────────────────────────────
+
+const SELECT_CONFIG_VERSION_BY_SHA_SQL: &str =
+    "SELECT id FROM rule_versions WHERE kind = 'config' AND payload_sha256 = $1 LIMIT 1";
+
+/// F15-1 引入了 partial unique index `uq_rule_versions_kind_active`
+/// (kind WHERE status='active')。get_or_create 不感知"是否首版"，因此
+/// 用 CASE/EXISTS 子查询自动选 status：该 kind 已有 active 行则新行写
+/// 'pending'（避免 partial unique 冲突），否则写 'active'。
+const GET_OR_CREATE_RULE_VERSION_SQL: &str = r#"
+INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status)
+VALUES (
+    $1, $2, $3, $4,
+    CASE
+        WHEN EXISTS (
+            SELECT 1 FROM rule_versions
+            WHERE kind = $5 AND status = 'active'
+        ) THEN 'pending'
+        ELSE 'active'
+    END
+)
+ON CONFLICT(kind, version_tag) DO NOTHING
+RETURNING id
+"#;
+
+const SELECT_RULE_VERSION_BY_KIND_TAG_SQL: &str =
+    "SELECT id FROM rule_versions WHERE kind = $1 AND version_tag = $2 LIMIT 1";
+
+const INSERT_PENDING_RULE_VERSION_SQL: &str = r#"
+INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status)
+VALUES ($1, $2, $3, $4, 'pending')
+RETURNING id
+"#;
+
+const SELECT_ACTIVE_RULE_BY_KIND_SQL: &str = r#"
+SELECT id, kind, version_tag, description, payload_sha256,
+       status, retired_at, created_at
+FROM rule_versions
+WHERE kind = $1 AND status = 'active'
+LIMIT 1
+"#;
+
+// ── trait 实现：按 backend 分发 ─────────────────────────────────
+
 #[async_trait]
 impl RuleVersionRepository for RuleVersionRepo {
     async fn get_or_create(
@@ -136,30 +189,51 @@ impl RuleVersionRepository for RuleVersionRepo {
         description: &str,
         payload_sha256: &str,
     ) -> Result<i64, StorageError> {
-        let pool = self.sqlite_pool()?;
-        // F15-1 引入了 partial unique index `uq_rule_versions_kind_active`
-        // (kind WHERE status='active')。get_or_create 不感知"是否首版"，因此
-        // 用 CASE/EXISTS 子查询自动选 status：当该 kind 已有 active 行则
-        // 新行写 'pending'（避免 partial unique 冲突），否则写 'active'。
-        // 这保留 `get_or_create` 对 caller 透明的语义；rule 真正切换由
-        // 后续 reindex 终止事务（F15-7）显式 pending → active 推进完成。
-        let inserted = sqlx::query_scalar::<_, i64>(
-            r#"
-            INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status)
-            VALUES (
-                $1, $2, $3, $4,
-                CASE
-                    WHEN EXISTS (
-                        SELECT 1 FROM rule_versions
-                        WHERE kind = $5 AND status = 'active'
-                    ) THEN 'pending'
-                    ELSE 'active'
-                END
-            )
-            ON CONFLICT(kind, version_tag) DO NOTHING
-            RETURNING id
-            "#,
-        )
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_get_or_create(p, kind, version_tag, description, payload_sha256).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_get_or_create(p, kind, version_tag, description, payload_sha256).await
+            }
+        }
+    }
+
+    async fn insert_pending_rule(
+        &self,
+        kind: &str,
+        version_tag: &str,
+        description: &str,
+        payload_sha256: &str,
+    ) -> Result<i64, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_insert_pending_rule(p, kind, version_tag, description, payload_sha256).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_insert_pending_rule(p, kind, version_tag, description, payload_sha256).await
+            }
+        }
+    }
+
+    async fn active_rule(&self, kind: &str) -> Result<Option<RuleVersion>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_active_rule(p, kind).await,
+            StoragePool::Postgres(p) => pg_active_rule(p, kind).await,
+        }
+    }
+}
+
+// ── SQLite helper ──────────────────────────────────────────────
+
+async fn sqlite_get_or_create(
+    pool: &SqlitePool,
+    kind: &str,
+    version_tag: &str,
+    description: &str,
+    payload_sha256: &str,
+) -> Result<i64, StorageError> {
+    let inserted = sqlx::query_scalar::<_, i64>(GET_OR_CREATE_RULE_VERSION_SQL)
         .bind(kind)
         .bind(version_tag)
         .bind(description)
@@ -170,36 +244,25 @@ impl RuleVersionRepository for RuleVersionRepo {
         .map_err(|error| {
             classify_db_error(error, "rule_versions", format!("{kind}/{version_tag}"))
         })?;
-
-        if let Some(id) = inserted {
-            return Ok(id);
-        }
-
-        sqlx::query_scalar::<_, i64>(
-            "SELECT id FROM rule_versions WHERE kind = $1 AND version_tag = $2 LIMIT 1",
-        )
+    if let Some(id) = inserted {
+        return Ok(id);
+    }
+    sqlx::query_scalar::<_, i64>(SELECT_RULE_VERSION_BY_KIND_TAG_SQL)
         .bind(kind)
         .bind(version_tag)
         .fetch_one(pool)
         .await
         .map_err(StorageError::from)
-    }
+}
 
-    async fn insert_pending_rule(
-        &self,
-        kind: &str,
-        version_tag: &str,
-        description: &str,
-        payload_sha256: &str,
-    ) -> Result<i64, StorageError> {
-        let pool = self.sqlite_pool()?;
-        sqlx::query_scalar::<_, i64>(
-            r#"
-            INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status)
-            VALUES ($1, $2, $3, $4, 'pending')
-            RETURNING id
-            "#,
-        )
+async fn sqlite_insert_pending_rule(
+    pool: &SqlitePool,
+    kind: &str,
+    version_tag: &str,
+    description: &str,
+    payload_sha256: &str,
+) -> Result<i64, StorageError> {
+    sqlx::query_scalar::<_, i64>(INSERT_PENDING_RULE_VERSION_SQL)
         .bind(kind)
         .bind(version_tag)
         .bind(description)
@@ -207,57 +270,103 @@ impl RuleVersionRepository for RuleVersionRepo {
         .fetch_one(pool)
         .await
         .map_err(|error| classify_db_error(error, "rule_versions", format!("{kind}/{version_tag}")))
-    }
+}
 
-    async fn active_rule(&self, kind: &str) -> Result<Option<RuleVersion>, StorageError> {
-        let pool = self.sqlite_pool()?;
-        sqlx::query_as::<
-            _,
-            (
-                i64,
-                String,
-                String,
-                String,
-                String,
-                String,
-                Option<OffsetDateTime>,
-                OffsetDateTime,
-            ),
-        >(
-            r#"
-            SELECT id, kind, version_tag, description, payload_sha256,
-                   status, retired_at, created_at
-            FROM rule_versions
-            WHERE kind = $1 AND status = 'active'
-            LIMIT 1
-            "#,
-        )
+async fn sqlite_active_rule(
+    pool: &SqlitePool,
+    kind: &str,
+) -> Result<Option<RuleVersion>, StorageError> {
+    sqlx::query_as::<_, RuleVersionTuple>(SELECT_ACTIVE_RULE_BY_KIND_SQL)
         .bind(kind)
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)
-        .map(|opt| {
-            opt.map(
-                |(
-                    id,
-                    kind,
-                    version_tag,
-                    description,
-                    payload_sha256,
-                    status,
-                    retired_at,
-                    created_at,
-                )| RuleVersion {
-                    id,
-                    kind,
-                    version_tag,
-                    description,
-                    payload_sha256,
-                    status,
-                    retired_at,
-                    created_at,
-                },
-            )
-        })
+        .map(|opt| opt.map(RuleVersion::from))
+}
+
+// ── PostgreSQL helper（W11-P3-E-1） ─────────────────────────────
+
+async fn pg_get_or_create(
+    pool: &PgPool,
+    kind: &str,
+    version_tag: &str,
+    description: &str,
+    payload_sha256: &str,
+) -> Result<i64, StorageError> {
+    let inserted = sqlx::query_scalar::<_, i64>(GET_OR_CREATE_RULE_VERSION_SQL)
+        .bind(kind)
+        .bind(version_tag)
+        .bind(description)
+        .bind(payload_sha256)
+        .bind(kind)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| {
+            classify_db_error(error, "rule_versions", format!("{kind}/{version_tag}"))
+        })?;
+    if let Some(id) = inserted {
+        return Ok(id);
+    }
+    sqlx::query_scalar::<_, i64>(SELECT_RULE_VERSION_BY_KIND_TAG_SQL)
+        .bind(kind)
+        .bind(version_tag)
+        .fetch_one(pool)
+        .await
+        .map_err(StorageError::from)
+}
+
+async fn pg_insert_pending_rule(
+    pool: &PgPool,
+    kind: &str,
+    version_tag: &str,
+    description: &str,
+    payload_sha256: &str,
+) -> Result<i64, StorageError> {
+    sqlx::query_scalar::<_, i64>(INSERT_PENDING_RULE_VERSION_SQL)
+        .bind(kind)
+        .bind(version_tag)
+        .bind(description)
+        .bind(payload_sha256)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| classify_db_error(error, "rule_versions", format!("{kind}/{version_tag}")))
+}
+
+async fn pg_active_rule(pool: &PgPool, kind: &str) -> Result<Option<RuleVersion>, StorageError> {
+    sqlx::query_as::<_, RuleVersionTuple>(SELECT_ACTIVE_RULE_BY_KIND_SQL)
+        .bind(kind)
+        .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)
+        .map(|opt| opt.map(RuleVersion::from))
+}
+
+// ── row tuple + 转换 ──────────────────────────────────────────
+
+type RuleVersionTuple = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<OffsetDateTime>,
+    OffsetDateTime,
+);
+
+impl From<RuleVersionTuple> for RuleVersion {
+    fn from(t: RuleVersionTuple) -> Self {
+        let (id, kind, version_tag, description, payload_sha256, status, retired_at, created_at) =
+            t;
+        RuleVersion {
+            id,
+            kind,
+            version_tag,
+            description,
+            payload_sha256,
+            status,
+            retired_at,
+            created_at,
+        }
     }
 }
