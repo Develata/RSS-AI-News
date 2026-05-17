@@ -129,3 +129,11 @@ WHERE lease_expires_at IS NOT NULL
   AND state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local')
 "#;
 pub(super) const PROMOTE_ARTICLE_PUBLISHED_SQL: &str = "UPDATE articles SET state = 'published', updated_at = $1 WHERE id = $2 AND state = 'ready_for_publish'";
+
+/// codex P3-C 评审 LOW-1 修复：PG `id = ANY($2)` 批量 UPDATE + `RETURNING id`，
+/// 避免逐行 N+1 拉长事务时间与行锁持有窗口。SQLite 无数组 bind 仍走逐行。
+///
+/// 调用方通过比对 `RETURNING` 返回的 id 集合与 input promote_article_ids 列表
+/// 找出第一个未 promote 的 id（保留 `ArticleStateConflict { article_id }` 的
+/// 单 id 语义）。
+pub(super) const PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL: &str = "UPDATE articles SET state = 'published', updated_at = $1 WHERE id = ANY($2) AND state = 'ready_for_publish' RETURNING id";

@@ -20,7 +20,10 @@ use rss_ai_news_domain::{
     model::FeedSource,
     state::{FeedKind, FeedSourceStatus},
 };
-use rss_ai_news_storage::{FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome};
+use rss_ai_news_storage::{
+    FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome, ReindexJobRepo,
+    ReindexJobRepository,
+};
 use time::OffsetDateTime;
 
 fn sample_feed_source(category: &str, source: &str, config_version: i64) -> FeedSource {
@@ -199,6 +202,83 @@ async fn pg_upsert_with_lease_guard_applied_writes_row_in_same_tx() {
         .unwrap()
         .expect("lease-held upsert writes feed_sources row");
     assert_eq!(found.display_name, "sample");
+}
+
+/// codex P3-C 评审 HIGH-1 修复：§8.4 跨表事务契约 PG 实证。
+///
+/// 设计 §2.3 / §6.4 表格断言：lease guard 失败 → 整段事务回滚，feed_sources
+/// 不被写入。原 P3-C-2 只有 `pg_lease_guard_loses_to_concurrent_abort`
+/// 覆盖了 reindex_jobs 单表层，缺**跨表事务 + lease 失效后跨表写入回滚**的
+/// 真实证据。本测试补齐：
+///
+///   A claim reindex job → B 抢先 abort（清掉 running + lease_owner）→
+///   A 调 `FeedSourceRepo.upsert_with_lease_guard`：lease guard UPDATE
+///   `WHERE state='running' AND lease_owner=A` 返 rows_affected=0 →
+///   整段事务回滚 → outcome=LeaseLost + feed_sources 行不存在
+///
+/// 这是 P3-E（剩余 6 个跨表 lease guard repo）会复制的契约模板，必须先用
+/// 真实并发场景锁住。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_upsert_with_lease_guard_rolls_back_after_concurrent_abort() {
+    let ctx = make_pg_test_pool().await;
+    let rule_id = seed_rule_version(&ctx, "v1").await;
+    let owner = "owner-A";
+    let job_id = seed_running_reindex_job(&ctx, rule_id, owner).await;
+
+    let fs_repo = FeedSourceRepo::new_with_storage(ctx.storage_pool().clone());
+    let job_repo = ReindexJobRepo::new_with_storage(ctx.storage_pool().clone());
+
+    let now = OffsetDateTime::now_utc();
+
+    // B 抢先 abort：reindex_jobs.state running → aborted，清 lease_owner
+    let aborted = job_repo
+        .abort(job_id, "external abort", now)
+        .await
+        .expect("pg abort");
+    assert!(aborted, "abort applied (job was running)");
+
+    // A 不知情，继续调跨表 lease-guarded upsert。lease guard UPDATE 谓词
+    // `state='running' AND lease_owner='owner-A'` 不再成立 → rows_affected=0
+    // → 整段事务回滚 → feed_sources 行不被写入。
+    let src = sample_feed_source("ai", "cross-tx-rollback", rule_id);
+    let outcome = fs_repo
+        .upsert_with_lease_guard(&src, job_id, owner, now)
+        .await
+        .expect("pg upsert_with_lease_guard");
+    assert_eq!(
+        outcome,
+        LeaseGuardedWriteOutcome::LeaseLost,
+        "lease guard must fail after concurrent abort cleared lease_owner"
+    );
+
+    // 关键断言：feed_sources 行**不存在**——证明跨表 INSERT 与 reindex_jobs
+    // lease guard 在同事务回滚，没有泄漏。
+    let leaked = fs_repo
+        .find_by_keys("ai", "cross-tx-rollback")
+        .await
+        .expect("pg find_by_keys");
+    assert!(
+        leaked.is_none(),
+        "lease-lost rollback must NOT leave a feed_sources row (cross-table tx atomicity)"
+    );
+
+    // 同样验证 mark_archived_with_lease_guard 的回滚路径：先写一个 active
+    // feed_source（用 plain upsert 绕过 lease），再 abort 后调 lease-guard 的
+    // mark_archived，断言 status 仍是 active（未被改 archived）。
+    let active = sample_feed_source("ai", "guard-mark", rule_id);
+    let id = fs_repo.upsert(&active).await.unwrap();
+    let outcome2 = fs_repo
+        .mark_archived_with_lease_guard(id, job_id, owner, now)
+        .await
+        .expect("pg mark_archived_with_lease_guard");
+    assert_eq!(outcome2, LeaseGuardedWriteOutcome::LeaseLost);
+    let still_active = fs_repo.find_by_id(id).await.unwrap().unwrap();
+    assert_eq!(
+        still_active.status,
+        FeedSourceStatus::Active,
+        "lease-lost must NOT flip feed_sources to archived"
+    );
 }
 
 #[tokio::test]

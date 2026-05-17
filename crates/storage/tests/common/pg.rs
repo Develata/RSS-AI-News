@@ -49,7 +49,7 @@
 #![allow(dead_code)]
 
 use std::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -89,6 +89,9 @@ pub struct PgTestContext {
     /// 留 admin pool 引用——drop cleanup 时需要在 admin pool 上跑 DROP SCHEMA，
     /// 而不能用即将关闭的业务 pool。clone 仅是 Arc 增引用，开销可忽略。
     admin: PgPool,
+    /// codex P3-C 评审 MEDIUM-1：是否已通过显式 [`Self::cleanup`] 清理；
+    /// 已清的 context 在 [`Drop`] 里跳过 fire-and-forget 兜底，避免双重 DROP。
+    cleaned: AtomicBool,
 }
 
 impl PgTestContext {
@@ -111,13 +114,42 @@ impl PgTestContext {
     pub fn schema(&self) -> &str {
         &self.schema
     }
+
+    /// codex P3-C 评审 MEDIUM-1 修复：显式 async cleanup。
+    ///
+    /// 顺序：
+    ///   1. close 业务 pool（释放 max=4 连接，让 DROP SCHEMA 不被 active session 阻塞）
+    ///   2. admin pool 上 `DROP SCHEMA IF EXISTS ... CASCADE`，await 完成
+    ///   3. 标记 `cleaned=true`，[`Drop`] 里跳过 fire-and-forget 兜底
+    ///
+    /// 推荐 P4 全量 PG rstest 测试在 happy 结束时显式 `ctx.cleanup().await`，
+    /// 避免 ~80 个测试积累的 schema 等到进程结束才释放。
+    /// **失败静默**：cleanup 内任一步出错（runtime 状态异常 / schema 已被外部清理）
+    /// 都不抛——清理是 best-effort，容器停止会兜底回收整库。
+    pub async fn cleanup(&self) {
+        if self.cleaned.swap(true, Ordering::SeqCst) {
+            return; // 已清，幂等
+        }
+        if let StoragePool::Postgres(p) = &self.pool {
+            p.close().await;
+        }
+        let _ = sqlx::query(&format!(
+            "DROP SCHEMA IF EXISTS \"{}\" CASCADE",
+            self.schema
+        ))
+        .execute(&self.admin)
+        .await;
+    }
 }
 
 impl Drop for PgTestContext {
     fn drop(&mut self) {
-        // Drop 内不能 await——把 DROP SCHEMA 提交到当前 runtime 后立即返回。
-        // 失败原因可能是：runtime 已 shutdown（cargo test 末尾），admin pool
-        // 已关，schema 已被外部清理 —— 都不抛错。容器停止会兜底清理整库。
+        // 已通过显式 cleanup 清理：跳过兜底，避免双重 DROP / 无用 spawn。
+        if *self.cleaned.get_mut() {
+            return;
+        }
+        // 否则 fire-and-forget DROP SCHEMA 兜底——runtime 关闭可能让 task 来不及
+        // 完成，容器停止时整库回收。
         let schema = std::mem::take(&mut self.schema);
         let admin = self.admin.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -174,6 +206,7 @@ pub async fn make_pg_test_pool() -> PgTestContext {
         pool: storage,
         schema,
         admin,
+        cleaned: AtomicBool::new(false),
     }
 }
 

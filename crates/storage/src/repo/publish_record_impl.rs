@@ -18,9 +18,10 @@ use super::{
     },
     publish_record_sql::{
         ADVANCE_LOCAL_SQL, ADVANCE_REMOTE_SQL, ADVANCE_RENDERED_SQL, ADVANCE_SNAPSHOT_SQL,
-        CREATE_IF_NEW_SQL, PROMOTE_ARTICLE_PUBLISHED_SQL, RECLAIM_PUBLISH_LEASES_SQL,
-        RELEASE_PERMANENT_FAILURE_SQL, RELEASE_PUBLISH_FAILURE_SQL, SELECT_PUBLISH_RECORD_BY_ID,
-        SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY, claim_publish_pg, claim_publish_sqlite,
+        CREATE_IF_NEW_SQL, PROMOTE_ARTICLE_PUBLISHED_SQL, PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL,
+        RECLAIM_PUBLISH_LEASES_SQL, RELEASE_PERMANENT_FAILURE_SQL, RELEASE_PUBLISH_FAILURE_SQL,
+        SELECT_PUBLISH_RECORD_BY_ID, SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY, claim_publish_pg,
+        claim_publish_sqlite,
     },
 };
 
@@ -532,18 +533,31 @@ async fn pg_release_terminal_advance(
         });
     }
 
-    for article_id in promote_article_ids {
-        let result = sqlx::query(PROMOTE_ARTICLE_PUBLISHED_SQL)
+    // codex P3-C 评审 LOW-1 修复：PG 批量 `id = ANY($2)` 替代 N+1 逐行 UPDATE，
+    // 缩短大 batch 下事务时间与行锁持有窗口；RETURNING id 给冲突检测用。
+    if !promote_article_ids.is_empty() {
+        let promoted_ids: Vec<i64> = sqlx::query_scalar(PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL)
             .bind(now)
-            .bind(article_id)
-            .execute(&mut *tx)
+            .bind(&promote_article_ids)
+            .fetch_all(&mut *tx)
             .await
             .map_err(StorageError::from)?;
-        if result.rows_affected() != 1 {
-            tx.rollback().await.map_err(StorageError::from)?;
-            return Ok(TerminalAdvanceOutcome {
-                status: TerminalAdvanceStatus::ArticleStateConflict { article_id },
-            });
+
+        if promoted_ids.len() != promote_article_ids.len() {
+            // 找出第一个未 promote 的 id（state != 'ready_for_publish' 或行已删）。
+            // 保留 ArticleStateConflict 单 id 语义，与 SQLite 逐行实装一致。
+            let promoted_set: std::collections::HashSet<i64> =
+                promoted_ids.iter().copied().collect();
+            let missing = promote_article_ids
+                .iter()
+                .copied()
+                .find(|aid| !promoted_set.contains(aid));
+            if let Some(article_id) = missing {
+                tx.rollback().await.map_err(StorageError::from)?;
+                return Ok(TerminalAdvanceOutcome {
+                    status: TerminalAdvanceStatus::ArticleStateConflict { article_id },
+                });
+            }
         }
     }
 
