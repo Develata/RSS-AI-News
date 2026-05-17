@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use rss_ai_news_domain::model::Article;
 use rss_ai_news_domain::state::{ArticleState, ContentQuality, ExtractorStrategy};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, PgPool, SqlitePool};
 use time::OffsetDateTime;
 
 use crate::{StorageError, StoragePool, classify_db_error};
@@ -115,10 +115,75 @@ impl ArticleRepo {
         }
     }
 
-    fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
-        self.pool.require_sqlite("article_repo")
+    /// W11-P3-C-3：PG 入口；旧 `new(SqlitePool)` thin wrapper 保留兼容。
+    pub fn new_with_storage(pool: StoragePool) -> Self {
+        Self { pool }
     }
 }
+
+// ── 共享 SQL（跨方言完全等价；EXISTS 已 P1 改 CASE WHEN decode i32） ──
+
+const INSERT_ARTICLE_ON_CONFLICT_SQL: &str = r#"
+INSERT INTO articles (
+    content_hash, canonical_link, title, body_text, body_html_artifact_id,
+    extractor_strategy, extractor_version, content_quality, word_count,
+    origin_feed_entry_id, state
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'persisted')
+ON CONFLICT(content_hash) DO NOTHING
+RETURNING id
+"#;
+
+const SELECT_ARTICLE_ID_BY_CONTENT_HASH_SQL: &str =
+    "SELECT id FROM articles WHERE content_hash = $1";
+
+const SELECT_ARTICLE_BY_ID_SQL: &str = r#"
+SELECT id, content_hash, canonical_link, title, body_text,
+       body_html_artifact_id, extractor_strategy, extractor_version,
+       content_quality, word_count, origin_feed_entry_id, state,
+       created_at, updated_at
+FROM articles
+WHERE id = $1
+"#;
+
+const LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL: &str = r#"
+SELECT id AS article_id, title, body_text, origin_feed_entry_id
+FROM articles
+WHERE state = 'persisted' AND id > $1
+ORDER BY id ASC
+LIMIT $2
+"#;
+
+const LIST_ARTICLES_IN_WINDOW_FOR_BACKFILL_SQL: &str = r#"
+SELECT id AS article_id, state
+FROM articles
+WHERE state <> 'retired'
+  AND id > $1
+  AND ($2 IS NULL OR created_at >= $2)
+  AND ($3 IS NULL OR created_at < $3)
+ORDER BY id ASC
+LIMIT $4
+"#;
+
+const LIST_ARTICLES_FOR_CONTENT_HASH_REINDEX_SQL: &str = r#"
+SELECT id, body_text, content_hash
+FROM articles
+WHERE id > $1
+ORDER BY id ASC
+LIMIT $2
+"#;
+
+const UPDATE_ARTICLE_CONTENT_HASH_SQL: &str = r#"
+UPDATE articles
+SET content_hash = $1, updated_at = $2
+WHERE id = $3
+"#;
+
+const SELECT_ARTICLE_CONTENT_HASH_SQL: &str = "SELECT content_hash FROM articles WHERE id = $1";
+
+const SELECT_ARTICLE_CONTENT_HASH_COLLISION_SQL: &str = "SELECT CASE WHEN EXISTS(SELECT 1 FROM articles WHERE content_hash = $1 AND id <> $2) THEN 1 ELSE 0 END";
+
+// ── trait 实现：按 backend 分发 ─────────────────────────────────
 
 #[async_trait]
 impl ArticleRepository for ArticleRepo {
@@ -126,20 +191,105 @@ impl ArticleRepository for ArticleRepo {
         &self,
         article: &NewArticle,
     ) -> Result<ArticleInsertOutcome, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let mut tx = pool.begin().await.map_err(StorageError::from)?;
-        let inserted_id = sqlx::query_scalar::<_, i64>(
-            r#"
-            INSERT INTO articles (
-                content_hash, canonical_link, title, body_text, body_html_artifact_id,
-                extractor_strategy, extractor_version, content_quality, word_count,
-                origin_feed_entry_id, state
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'persisted')
-            ON CONFLICT(content_hash) DO NOTHING
-            RETURNING id
-            "#,
-        )
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_insert_or_get_by_content_hash(p, article).await,
+            StoragePool::Postgres(p) => pg_insert_or_get_by_content_hash(p, article).await,
+        }
+    }
+
+    async fn find_by_id(&self, id: i64) -> Result<Option<Article>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_find_by_id(p, id).await,
+            StoragePool::Postgres(p) => pg_find_by_id(p, id).await,
+        }
+    }
+
+    async fn list_persisted_for_ai_task_gen(
+        &self,
+        batch_size: u32,
+        after_id: i64,
+    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_list_persisted_for_ai_task_gen(p, batch_size, after_id).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_list_persisted_for_ai_task_gen(p, batch_size, after_id).await
+            }
+        }
+    }
+
+    async fn list_in_window_for_backfill(
+        &self,
+        date_from: Option<OffsetDateTime>,
+        date_to: Option<OffsetDateTime>,
+        batch_size: u32,
+        after_id: i64,
+    ) -> Result<Vec<BackfillArticleCandidate>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_list_in_window_for_backfill(p, date_from, date_to, batch_size, after_id)
+                    .await
+            }
+            StoragePool::Postgres(p) => {
+                pg_list_in_window_for_backfill(p, date_from, date_to, batch_size, after_id).await
+            }
+        }
+    }
+
+    async fn list_for_content_hash_reindex(
+        &self,
+        after_id: i64,
+        batch_size: u32,
+    ) -> Result<Vec<ContentHashReindexCandidate>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_list_for_content_hash_reindex(p, after_id, batch_size).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_list_for_content_hash_reindex(p, after_id, batch_size).await
+            }
+        }
+    }
+
+    async fn update_content_hash(
+        &self,
+        id: i64,
+        new_content_hash: &str,
+    ) -> Result<UpdateContentHashOutcome, StorageError> {
+        // peek 实现已经走 trait method `match`，update 再 `match` 一次走真正的 UPDATE
+        match self.peek_content_hash_outcome(id, new_content_hash).await? {
+            UpdateContentHashOutcome::Unchanged => Ok(UpdateContentHashOutcome::Unchanged),
+            UpdateContentHashOutcome::Conflict => Ok(UpdateContentHashOutcome::Conflict),
+            UpdateContentHashOutcome::Updated => match &self.pool {
+                StoragePool::Sqlite(p) => sqlite_update_content_hash(p, id, new_content_hash).await,
+                StoragePool::Postgres(p) => pg_update_content_hash(p, id, new_content_hash).await,
+            },
+        }
+    }
+
+    async fn peek_content_hash_outcome(
+        &self,
+        id: i64,
+        new_content_hash: &str,
+    ) -> Result<UpdateContentHashOutcome, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_peek_content_hash_outcome(p, id, new_content_hash).await
+            }
+            StoragePool::Postgres(p) => pg_peek_content_hash_outcome(p, id, new_content_hash).await,
+        }
+    }
+}
+
+// ── SQLite helper ──────────────────────────────────────────────
+
+async fn sqlite_insert_or_get_by_content_hash(
+    pool: &SqlitePool,
+    article: &NewArticle,
+) -> Result<ArticleInsertOutcome, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_ARTICLE_ON_CONFLICT_SQL)
         .bind(&article.content_hash)
         .bind(&article.canonical_link)
         .bind(&article.title)
@@ -154,88 +304,55 @@ impl ArticleRepository for ArticleRepo {
         .await
         .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
 
-        let (article_id, newly_created) = if let Some(id) = inserted_id {
-            (id, true)
-        } else {
-            let id =
-                sqlx::query_scalar::<_, i64>("SELECT id FROM articles WHERE content_hash = $1")
-                    .bind(&article.content_hash)
-                    .fetch_one(&mut *tx)
-                    .await
-                    .map_err(StorageError::from)?;
-            (id, false)
-        };
+    let (article_id, newly_created) = if let Some(id) = inserted_id {
+        (id, true)
+    } else {
+        let id = sqlx::query_scalar::<_, i64>(SELECT_ARTICLE_ID_BY_CONTENT_HASH_SQL)
+            .bind(&article.content_hash)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+        (id, false)
+    };
 
-        tx.commit().await.map_err(StorageError::from)?;
-        Ok(ArticleInsertOutcome {
-            article_id,
-            newly_created,
-        })
-    }
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(ArticleInsertOutcome {
+        article_id,
+        newly_created,
+    })
+}
 
-    async fn find_by_id(&self, id: i64) -> Result<Option<Article>, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let row = sqlx::query_as::<_, ArticleRow>(
-            r#"
-            SELECT id, content_hash, canonical_link, title, body_text,
-                   body_html_artifact_id, extractor_strategy, extractor_version,
-                   content_quality, word_count, origin_feed_entry_id, state,
-                   created_at, updated_at
-            FROM articles
-            WHERE id = $1
-            "#,
-        )
+async fn sqlite_find_by_id(pool: &SqlitePool, id: i64) -> Result<Option<Article>, StorageError> {
+    let row = sqlx::query_as::<_, ArticleRow>(SELECT_ARTICLE_BY_ID_SQL)
         .bind(id)
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;
+    row.map(Article::try_from).transpose()
+}
 
-        row.map(Article::try_from).transpose()
-    }
-
-    async fn list_persisted_for_ai_task_gen(
-        &self,
-        batch_size: u32,
-        after_id: i64,
-    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
-        let pool = self.sqlite_pool()?;
-        sqlx::query_as::<_, ArticleAiTaskCandidateRow>(
-            r#"
-            SELECT id AS article_id, title, body_text, origin_feed_entry_id
-            FROM articles
-            WHERE state = 'persisted' AND id > $1
-            ORDER BY id ASC
-            LIMIT $2
-            "#,
-        )
+async fn sqlite_list_persisted_for_ai_task_gen(
+    pool: &SqlitePool,
+    batch_size: u32,
+    after_id: i64,
+) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
+    sqlx::query_as::<_, ArticleAiTaskCandidateRow>(LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL)
         .bind(after_id)
         .bind(i64::from(batch_size))
         .fetch_all(pool)
         .await
         .map(|rows| rows.into_iter().map(ArticleAiTaskCandidate::from).collect())
         .map_err(StorageError::from)
-    }
+}
 
-    async fn list_in_window_for_backfill(
-        &self,
-        date_from: Option<OffsetDateTime>,
-        date_to: Option<OffsetDateTime>,
-        batch_size: u32,
-        after_id: i64,
-    ) -> Result<Vec<BackfillArticleCandidate>, StorageError> {
-        let pool = self.sqlite_pool()?;
-        sqlx::query_as::<_, BackfillArticleCandidateRow>(
-            r#"
-            SELECT id AS article_id, state
-            FROM articles
-            WHERE state <> 'retired'
-              AND id > $1
-              AND ($2 IS NULL OR created_at >= $2)
-              AND ($3 IS NULL OR created_at < $3)
-            ORDER BY id ASC
-            LIMIT $4
-            "#,
-        )
+async fn sqlite_list_in_window_for_backfill(
+    pool: &SqlitePool,
+    date_from: Option<OffsetDateTime>,
+    date_to: Option<OffsetDateTime>,
+    batch_size: u32,
+    after_id: i64,
+) -> Result<Vec<BackfillArticleCandidate>, StorageError> {
+    sqlx::query_as::<_, BackfillArticleCandidateRow>(LIST_ARTICLES_IN_WINDOW_FOR_BACKFILL_SQL)
         .bind(after_id)
         .bind(date_from)
         .bind(date_to)
@@ -248,97 +365,218 @@ impl ArticleRepository for ArticleRepo {
                 .collect()
         })
         .map_err(StorageError::from)
-    }
+}
 
-    async fn list_for_content_hash_reindex(
-        &self,
-        after_id: i64,
-        batch_size: u32,
-    ) -> Result<Vec<ContentHashReindexCandidate>, StorageError> {
-        let pool = self.sqlite_pool()?;
-        sqlx::query_as::<_, ContentHashReindexCandidate>(
-            r#"
-            SELECT id, body_text, content_hash
-            FROM articles
-            WHERE id > $1
-            ORDER BY id ASC
-            LIMIT $2
-            "#,
-        )
+async fn sqlite_list_for_content_hash_reindex(
+    pool: &SqlitePool,
+    after_id: i64,
+    batch_size: u32,
+) -> Result<Vec<ContentHashReindexCandidate>, StorageError> {
+    sqlx::query_as::<_, ContentHashReindexCandidate>(LIST_ARTICLES_FOR_CONTENT_HASH_REINDEX_SQL)
         .bind(after_id)
         .bind(i64::from(batch_size))
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)
+}
+
+async fn sqlite_update_content_hash(
+    pool: &SqlitePool,
+    id: i64,
+    new_content_hash: &str,
+) -> Result<UpdateContentHashOutcome, StorageError> {
+    let result = sqlx::query(UPDATE_ARTICLE_CONTENT_HASH_SQL)
+        .bind(new_content_hash)
+        .bind(OffsetDateTime::now_utc())
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(StorageError::from)?;
+    if result.rows_affected() == 1 {
+        Ok(UpdateContentHashOutcome::Updated)
+    } else {
+        Ok(UpdateContentHashOutcome::Conflict)
+    }
+}
+
+async fn sqlite_peek_content_hash_outcome(
+    pool: &SqlitePool,
+    id: i64,
+    new_content_hash: &str,
+) -> Result<UpdateContentHashOutcome, StorageError> {
+    let current = sqlx::query_scalar::<_, String>(SELECT_ARTICLE_CONTENT_HASH_SQL)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)?;
+    let Some(current) = current else {
+        return Ok(UpdateContentHashOutcome::Conflict);
+    };
+    if current == new_content_hash {
+        return Ok(UpdateContentHashOutcome::Unchanged);
     }
 
-    async fn update_content_hash(
-        &self,
-        id: i64,
-        new_content_hash: &str,
-    ) -> Result<UpdateContentHashOutcome, StorageError> {
-        match self.peek_content_hash_outcome(id, new_content_hash).await? {
-            UpdateContentHashOutcome::Unchanged => Ok(UpdateContentHashOutcome::Unchanged),
-            UpdateContentHashOutcome::Conflict => Ok(UpdateContentHashOutcome::Conflict),
-            UpdateContentHashOutcome::Updated => {
-                let pool = self.sqlite_pool()?;
-                let result = sqlx::query(
-                    r#"
-                    UPDATE articles
-                    SET content_hash = $1, updated_at = $2
-                    WHERE id = $3
-                    "#,
-                )
-                .bind(new_content_hash)
-                .bind(OffsetDateTime::now_utc())
-                .bind(id)
-                .execute(pool)
-                .await
-                .map_err(StorageError::from)?;
-                if result.rows_affected() == 1 {
-                    Ok(UpdateContentHashOutcome::Updated)
-                } else {
-                    Ok(UpdateContentHashOutcome::Conflict)
-                }
-            }
-        }
-    }
-
-    async fn peek_content_hash_outcome(
-        &self,
-        id: i64,
-        new_content_hash: &str,
-    ) -> Result<UpdateContentHashOutcome, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let current =
-            sqlx::query_scalar::<_, String>("SELECT content_hash FROM articles WHERE id = $1")
-                .bind(id)
-                .fetch_optional(pool)
-                .await
-                .map_err(StorageError::from)?;
-        let Some(current) = current else {
-            return Ok(UpdateContentHashOutcome::Conflict);
-        };
-        if current == new_content_hash {
-            return Ok(UpdateContentHashOutcome::Unchanged);
-        }
-
-        let conflict = sqlx::query_scalar::<_, i32>(
-            "SELECT CASE WHEN EXISTS(SELECT 1 FROM articles WHERE content_hash = $1 AND id <> $2) THEN 1 ELSE 0 END",
-        )
+    let conflict = sqlx::query_scalar::<_, i32>(SELECT_ARTICLE_CONTENT_HASH_COLLISION_SQL)
         .bind(new_content_hash)
         .bind(id)
         .fetch_one(pool)
         .await
         .map_err(StorageError::from)?
-            != 0;
-        if conflict {
-            return Ok(UpdateContentHashOutcome::Conflict);
-        }
+        != 0;
+    if conflict {
+        return Ok(UpdateContentHashOutcome::Conflict);
+    }
+    Ok(UpdateContentHashOutcome::Updated)
+}
 
+// ── PostgreSQL helper（W11-P3-C-3） ─────────────────────────────
+
+async fn pg_insert_or_get_by_content_hash(
+    pool: &PgPool,
+    article: &NewArticle,
+) -> Result<ArticleInsertOutcome, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_ARTICLE_ON_CONFLICT_SQL)
+        .bind(&article.content_hash)
+        .bind(&article.canonical_link)
+        .bind(&article.title)
+        .bind(&article.body_text)
+        .bind(article.body_html_artifact_id)
+        .bind(&article.extractor_strategy)
+        .bind(article.extractor_version)
+        .bind(&article.content_quality)
+        .bind(article.word_count)
+        .bind(article.origin_feed_entry_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
+
+    let (article_id, newly_created) = if let Some(id) = inserted_id {
+        (id, true)
+    } else {
+        let id = sqlx::query_scalar::<_, i64>(SELECT_ARTICLE_ID_BY_CONTENT_HASH_SQL)
+            .bind(&article.content_hash)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+        (id, false)
+    };
+
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(ArticleInsertOutcome {
+        article_id,
+        newly_created,
+    })
+}
+
+async fn pg_find_by_id(pool: &PgPool, id: i64) -> Result<Option<Article>, StorageError> {
+    let row = sqlx::query_as::<_, ArticleRow>(SELECT_ARTICLE_BY_ID_SQL)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)?;
+    row.map(Article::try_from).transpose()
+}
+
+async fn pg_list_persisted_for_ai_task_gen(
+    pool: &PgPool,
+    batch_size: u32,
+    after_id: i64,
+) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
+    sqlx::query_as::<_, ArticleAiTaskCandidateRow>(LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL)
+        .bind(after_id)
+        .bind(i64::from(batch_size))
+        .fetch_all(pool)
+        .await
+        .map(|rows| rows.into_iter().map(ArticleAiTaskCandidate::from).collect())
+        .map_err(StorageError::from)
+}
+
+async fn pg_list_in_window_for_backfill(
+    pool: &PgPool,
+    date_from: Option<OffsetDateTime>,
+    date_to: Option<OffsetDateTime>,
+    batch_size: u32,
+    after_id: i64,
+) -> Result<Vec<BackfillArticleCandidate>, StorageError> {
+    sqlx::query_as::<_, BackfillArticleCandidateRow>(LIST_ARTICLES_IN_WINDOW_FOR_BACKFILL_SQL)
+        .bind(after_id)
+        .bind(date_from)
+        .bind(date_to)
+        .bind(i64::from(batch_size))
+        .fetch_all(pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(BackfillArticleCandidate::from)
+                .collect()
+        })
+        .map_err(StorageError::from)
+}
+
+async fn pg_list_for_content_hash_reindex(
+    pool: &PgPool,
+    after_id: i64,
+    batch_size: u32,
+) -> Result<Vec<ContentHashReindexCandidate>, StorageError> {
+    sqlx::query_as::<_, ContentHashReindexCandidate>(LIST_ARTICLES_FOR_CONTENT_HASH_REINDEX_SQL)
+        .bind(after_id)
+        .bind(i64::from(batch_size))
+        .fetch_all(pool)
+        .await
+        .map_err(StorageError::from)
+}
+
+async fn pg_update_content_hash(
+    pool: &PgPool,
+    id: i64,
+    new_content_hash: &str,
+) -> Result<UpdateContentHashOutcome, StorageError> {
+    let result = sqlx::query(UPDATE_ARTICLE_CONTENT_HASH_SQL)
+        .bind(new_content_hash)
+        .bind(OffsetDateTime::now_utc())
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(StorageError::from)?;
+    if result.rows_affected() == 1 {
         Ok(UpdateContentHashOutcome::Updated)
+    } else {
+        Ok(UpdateContentHashOutcome::Conflict)
     }
 }
+
+async fn pg_peek_content_hash_outcome(
+    pool: &PgPool,
+    id: i64,
+    new_content_hash: &str,
+) -> Result<UpdateContentHashOutcome, StorageError> {
+    let current = sqlx::query_scalar::<_, String>(SELECT_ARTICLE_CONTENT_HASH_SQL)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)?;
+    let Some(current) = current else {
+        return Ok(UpdateContentHashOutcome::Conflict);
+    };
+    if current == new_content_hash {
+        return Ok(UpdateContentHashOutcome::Unchanged);
+    }
+
+    let conflict = sqlx::query_scalar::<_, i32>(SELECT_ARTICLE_CONTENT_HASH_COLLISION_SQL)
+        .bind(new_content_hash)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .map_err(StorageError::from)?
+        != 0;
+    if conflict {
+        return Ok(UpdateContentHashOutcome::Conflict);
+    }
+    Ok(UpdateContentHashOutcome::Updated)
+}
+
+// ── row 类型 + 解析 ─────────────────────────────────────────────
 
 #[derive(Debug, FromRow)]
 struct ArticleRow {
