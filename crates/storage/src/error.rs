@@ -65,13 +65,18 @@ impl ClassifiedError for StorageError {
     }
 }
 
-/// W11-P3-B：多方言数据库错误分类。
+/// W11-P3-B / fix1：多方言数据库错误分类。
 ///
 /// 按 `sqlx::Error::Database` 的 SQLSTATE / SQLite extended code 分发：
 /// - 唯一约束违例（SQLite 2067/1555、PG 23505）→ [`StorageError::Conflict`]
-/// - FK / NOT NULL / CHECK 违例（SQLite 787、PG 23503/23502/23514）→ [`StorageError::Integrity`]
-/// - 连接 / 序列化 / 死锁等可重试（PG 40001/40P01/08xxx/57P0x）→ [`StorageError::Unavailable`]
-///   （让 [`StorageError::is_retryable`] 返回 true）
+/// - FK / NOT NULL / CHECK / EXCLUDE 违例 → [`StorageError::Integrity`]
+///   - SQLite 787 (FK) / 1299 (NOT NULL) / 275 (CHECK)
+///   - PG 23503 (FK) / 23502 (NOT NULL) / 23514 (CHECK) / 23P01 (EXCLUDE)
+/// - **仅** PG 连接 / 序列化 / 死锁可重试码 → [`StorageError::Unavailable`]
+///   （40001、40P01、显式 08xxx 子码、57P01-03）
+/// - SQLite busy/locked（5/6）→ fallthrough [`StorageError::Sqlx`]；
+///   [`StorageError::is_retryable`] 仍返回 true（保留 P3-B 前行为，
+///   避免污染 runtime 的 `last_error_kind` 观测语义 —— 详见 P3-B-fix1.H1）
 /// - 其它走 fallthrough [`StorageError::Sqlx`]
 ///
 /// `table` / `key` 进入 Conflict/Integrity 的 message，用于上层定位实体。
@@ -94,9 +99,13 @@ pub fn classify_db_error(
                 reference: key,
             }
         }
-        sqlx::Error::Database(db_error) if is_retryable_db_code(db_error.as_ref()) => {
-            // 把 PG 40001/40P01 等可重试错误映射成 Unavailable（自动获得
+        sqlx::Error::Database(db_error) if is_pg_unavailable_code(db_error.as_ref()) => {
+            // 把 PG 40001/40P01/08xxx/57P0x 映射成 Unavailable（自动获得
             // is_retryable=true），让上层重试器无需识别 SQLSTATE。
+            //
+            // SQLite busy/locked 故意**不**走这一支：保留旧 P3-B 前行为
+            // (fallthrough Sqlx)，但 is_retryable() 仍识别为 true，
+            // 不破坏 runtime 的 last_error_kind 观测语义。
             StorageError::Unavailable(db_error.message().to_string())
         }
         sqlx::Error::PoolTimedOut => StorageError::Timeout,
@@ -112,7 +121,9 @@ fn is_unique_constraint(error: &dyn sqlx::error::DatabaseError) -> bool {
     if matches!(code.as_deref(), Some("2067") | Some("1555") | Some("23505")) {
         return true;
     }
-    // SQLite 历史 message 兜底（部分老 sqlx 版本 code 缺失）
+    // SQLite 历史 message 兜底（部分老 sqlx 版本 code 缺失）。
+    // PG message 是 "duplicate key value violates unique constraint ..."，
+    // 不会命中这条 fallback —— PG 码在前已识别。
     let message = error.message().to_ascii_lowercase();
     message.contains("unique constraint failed")
 }
@@ -127,41 +138,62 @@ fn is_foreign_key_constraint(error: &dyn sqlx::error::DatabaseError) -> bool {
     message.contains("foreign key constraint failed")
 }
 
-/// PG NOT NULL (23502) / CHECK (23514) 违例统一映射 Integrity。SQLite 这两类
-/// 历史 fallthrough 到 Sqlx；本期不改 SQLite 行为，仅扩展 PG。
+/// 违例码集合（跨方言保持等价）：
+/// - SQLite：787 (FK) / 1299 (NOT NULL) / 275 (CHECK)
+/// - PG：23503 (FK) / 23502 (NOT NULL) / 23514 (CHECK) / 23P01 (EXCLUDE)
 fn is_integrity_violation(error: &dyn sqlx::error::DatabaseError) -> bool {
     if is_foreign_key_constraint(error) {
         return true;
     }
     let code = error.code().map(|code| code.into_owned());
-    matches!(code.as_deref(), Some("23502") | Some("23514"))
+    matches!(
+        code.as_deref(),
+        // SQLite extended codes
+        Some("1299") | Some("275")
+        // PG SQLSTATE class 23 残余
+        | Some("23502") | Some("23514") | Some("23P01")
+    )
 }
 
-/// 可重试 DB 错误码集合：
+/// 仅 PG 端可被映射为 [`StorageError::Unavailable`] 的可重试码：
+/// - 40001 序列化冲突 / 40P01 deadlock —— 事务级 retryable
+/// - 08xxx **显式枚举**：08000/01/03/04/06/07 connection_* 类。
+///   **故意排除 08P01 protocol_violation**（客户端/驱动 bug，不该 retry）
+/// - 57P01 / 57P02 / 57P03 admin_shutdown / cannot_connect_now / pg_terminate
+///
+/// SQLite busy/locked 不在此处映射，但 [`is_retryable_db_code`] 仍会
+/// 识别 —— 保留 P3-B 前的 fallthrough Sqlx 行为。
+fn is_pg_unavailable_code(error: &dyn sqlx::error::DatabaseError) -> bool {
+    let Some(code) = error.code() else {
+        return false;
+    };
+    matches!(
+        code.as_ref(),
+        // class 40 (transaction rollback)
+        "40001" | "40P01"
+        // class 08 (connection exception) —— 显式排除 08P01
+        | "08000" | "08001" | "08003" | "08004" | "08006" | "08007"
+        // class 57 (operator intervention)
+        | "57P01" | "57P02" | "57P03"
+    )
+}
+
+/// 可重试 DB 错误码集合（仅用于 [`StorageError::is_retryable`] 判定，
+/// **不参与** classify_db_error 的 variant 映射）：
 /// - SQLite: `5` / `6` / `SQLITE_BUSY` / `SQLITE_LOCKED` —— 锁等待，retry 通常解决
-/// - PG: `40001` 序列化冲突、`40P01` deadlock、`08000-08007` connection_*、
-///   `57P01-57P03` admin_shutdown / cannot_connect_now —— 短暂故障
+/// - PG: 见 [`is_pg_unavailable_code`]
 ///
 /// 返回 true 时 [`StorageError::is_retryable`] 报告可重试，上层重试器即放行。
 fn is_retryable_db_code(error: &dyn sqlx::error::DatabaseError) -> bool {
     let Some(code) = error.code() else {
         return false;
     };
-    let code = code.into_owned();
-    // SQLite
-    if matches!(code.as_str(), "5" | "6" | "SQLITE_BUSY" | "SQLITE_LOCKED") {
+    // SQLite busy/locked
+    if matches!(code.as_ref(), "5" | "6" | "SQLITE_BUSY" | "SQLITE_LOCKED") {
         return true;
     }
-    // PG SQLSTATE
-    matches!(
-        code.as_str(),
-        // class 40 (transaction rollback)
-        "40001" | "40P01"
-        // class 08 (connection exception)
-        | "08000" | "08001" | "08003" | "08004" | "08006" | "08007"
-        // class 57 (operator intervention)
-        | "57P01" | "57P02" | "57P03"
-    )
+    // PG 复用 is_pg_unavailable_code 的同一份白名单
+    is_pg_unavailable_code(error)
 }
 
 #[cfg(test)]
@@ -211,22 +243,22 @@ mod tests {
         sqlx::Error::Database(Box::new(MockDb { code, message }))
     }
 
+    // ── Conflict (UNIQUE / PK 违例) ──
+
     #[test]
     fn sqlite_unique_2067_maps_to_conflict() {
         let err = classify_db_error(db_err(Some("2067"), "UNIQUE failed"), "feed_sources", "k1");
         assert!(matches!(err, StorageError::Conflict { .. }));
+        assert!(!err.is_retryable());
+        assert_eq!(err.error_kind(), "conflict");
     }
 
     #[test]
     fn sqlite_pk_1555_maps_to_conflict() {
         let err = classify_db_error(db_err(Some("1555"), "PRIMARY KEY"), "rule_versions", "k");
         assert!(matches!(err, StorageError::Conflict { .. }));
-    }
-
-    #[test]
-    fn sqlite_fk_787_maps_to_integrity() {
-        let err = classify_db_error(db_err(Some("787"), "FOREIGN KEY"), "articles", "fk");
-        assert!(matches!(err, StorageError::Integrity { .. }));
+        assert!(!err.is_retryable());
+        assert_eq!(err.error_kind(), "conflict");
     }
 
     #[test]
@@ -238,6 +270,7 @@ mod tests {
             "k",
         );
         assert!(matches!(err, StorageError::Conflict { .. }));
+        assert!(!err.is_retryable());
     }
 
     #[test]
@@ -248,6 +281,42 @@ mod tests {
             "k1",
         );
         assert!(matches!(err, StorageError::Conflict { .. }));
+        assert!(!err.is_retryable());
+        assert_eq!(err.error_kind(), "conflict");
+    }
+
+    // ── Integrity (FK / NOT NULL / CHECK / EXCLUDE 违例) ──
+
+    #[test]
+    fn sqlite_fk_787_maps_to_integrity() {
+        let err = classify_db_error(db_err(Some("787"), "FOREIGN KEY"), "articles", "fk");
+        assert!(matches!(err, StorageError::Integrity { .. }));
+        assert!(!err.is_retryable());
+        assert_eq!(err.error_kind(), "integrity");
+    }
+
+    #[test]
+    fn sqlite_not_null_1299_maps_to_integrity() {
+        // P3-B-fix1.M1：双向对齐，SQLite NOT NULL 也走 Integrity（PG 23502 等价）
+        let err = classify_db_error(
+            db_err(Some("1299"), "NOT NULL constraint failed"),
+            "feed_sources",
+            "k",
+        );
+        assert!(matches!(err, StorageError::Integrity { .. }));
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn sqlite_check_275_maps_to_integrity() {
+        // P3-B-fix1.M1：双向对齐，SQLite CHECK 也走 Integrity（PG 23514 等价）
+        let err = classify_db_error(
+            db_err(Some("275"), "CHECK constraint failed"),
+            "article_ai_results",
+            "k",
+        );
+        assert!(matches!(err, StorageError::Integrity { .. }));
+        assert!(!err.is_retryable());
     }
 
     #[test]
@@ -258,6 +327,8 @@ mod tests {
             "fk",
         );
         assert!(matches!(err, StorageError::Integrity { .. }));
+        assert!(!err.is_retryable());
+        assert_eq!(err.error_kind(), "integrity");
     }
 
     #[test]
@@ -268,6 +339,7 @@ mod tests {
             "k",
         );
         assert!(matches!(err, StorageError::Integrity { .. }));
+        assert!(!err.is_retryable());
     }
 
     #[test]
@@ -278,7 +350,25 @@ mod tests {
             "k",
         );
         assert!(matches!(err, StorageError::Integrity { .. }));
+        assert!(!err.is_retryable());
     }
+
+    #[test]
+    fn pg_exclusion_23p01_maps_to_integrity() {
+        // P3-B-fix1.M2：当前 schema 无 EXCLUDE 约束，但提前固化分类避免 P3-C/D 漏网
+        let err = classify_db_error(
+            db_err(
+                Some("23P01"),
+                "conflicting key value violates exclusion constraint",
+            ),
+            "reindex_jobs",
+            "k",
+        );
+        assert!(matches!(err, StorageError::Integrity { .. }));
+        assert!(!err.is_retryable());
+    }
+
+    // ── Unavailable (PG retryable) ──
 
     #[test]
     fn pg_serialization_40001_is_retryable_unavailable() {
@@ -289,6 +379,7 @@ mod tests {
         );
         assert!(matches!(err, StorageError::Unavailable(_)));
         assert!(err.is_retryable());
+        assert_eq!(err.error_kind(), "db_unavailable");
     }
 
     #[test]
@@ -321,20 +412,52 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_busy_5_is_retryable_via_sqlx_fallthrough() {
-        // SQLite busy/locked 不是 unique/integrity/PG retryable code，
-        // 但 is_retryable_db_code 会返 true —— 此时 classify_db_error
-        // 走"Unavailable retry"分支。
+    fn pg_protocol_violation_08p01_is_not_retryable() {
+        // P3-B-fix1.L1：08P01 是客户端/驱动 bug，绝不能 retry，否则掩盖真实问题。
+        // 不在 08xxx 通配里 —— 走 fallthrough Sqlx。
+        let err = classify_db_error(
+            db_err(Some("08P01"), "invalid frontend message type"),
+            "x",
+            "k",
+        );
+        assert!(matches!(err, StorageError::Sqlx(_)));
+        assert!(!err.is_retryable());
+    }
+
+    // ── SQLite busy/locked：fallthrough Sqlx + is_retryable=true ──
+
+    #[test]
+    fn sqlite_busy_5_falls_through_sqlx_but_is_retryable() {
+        // P3-B-fix1.H1：SQLite busy/locked 不再被改写成 Unavailable variant
+        // （避免污染 last_error_kind 观测语义），但 is_retryable() 仍然识别。
         let err = classify_db_error(db_err(Some("5"), "database is locked"), "x", "k");
-        assert!(matches!(err, StorageError::Unavailable(_)));
+        assert!(matches!(err, StorageError::Sqlx(_)));
+        assert!(err.is_retryable());
+        assert_eq!(err.error_kind(), "db_error");
+    }
+
+    #[test]
+    fn sqlite_locked_6_falls_through_sqlx_but_is_retryable() {
+        let err = classify_db_error(db_err(Some("6"), "database table is locked"), "x", "k");
+        assert!(matches!(err, StorageError::Sqlx(_)));
         assert!(err.is_retryable());
     }
+
+    #[test]
+    fn sqlite_busy_named_falls_through_sqlx_but_is_retryable() {
+        let err = classify_db_error(db_err(Some("SQLITE_BUSY"), "busy"), "x", "k");
+        assert!(matches!(err, StorageError::Sqlx(_)));
+        assert!(err.is_retryable());
+    }
+
+    // ── 未知 / fallthrough ──
 
     #[test]
     fn unknown_pg_code_falls_through_to_sqlx() {
         let err = classify_db_error(db_err(Some("99999"), "unknown"), "x", "k");
         assert!(matches!(err, StorageError::Sqlx(_)));
         assert!(!err.is_retryable());
+        assert_eq!(err.error_kind(), "db_error");
     }
 
     #[test]

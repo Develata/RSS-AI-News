@@ -333,25 +333,31 @@ SELECT id FROM reindex_jobs
 
 ### 6.6 错误分类（SQLSTATE）
 
-当前 [`crates/storage/src/error.rs:71-108`](../../crates/storage/src/error.rs) 的 `classify_sqlite_error` / `is_unique_constraint` / `is_foreign_key_constraint` 只识别 SQLite 错误码（`2067` / `1555` unique、`787` FK）+ 字符串匹配。**P3 必须扩展为多方言分类器**：
+**P3-B 已实装**（参见 [`crates/storage/src/error.rs`](../../crates/storage/src/error.rs)）。`classify_db_error` 按 `sqlx::Error::Database(db_error)` 的 `db_error.code()` 走两套分支：SQLite 现有逻辑保留，PG 走 SQLSTATE。
 
-```rust
-// classify_db_error(error, table, key)
-// SQLite 沿用现有 2067/1555/787 + message 兜底
-// PG 走 SQLSTATE：
-//   23505  unique_violation       → StorageError::Conflict
-//   23503  foreign_key_violation  → StorageError::Integrity
-//   23502  not_null_violation     → StorageError::Integrity（暴露字段名）
-//   23514  check_violation        → StorageError::Integrity
-//   40001  serialization_failure  → StorageError::Unavailable（可重试；标记 is_retryable=true）
-//   40P01  deadlock_detected      → StorageError::Unavailable（可重试）
-//   57P01..03 admin_shutdown 等   → StorageError::Unavailable
-//   08000 / 08006 connection_*    → StorageError::Unavailable
-```
+**完整码表**：
 
-`is_retryable` 需要新增对 PG `40001` / `40P01` / `08xxx` 的识别——否则 publish flow 的重试器在 PG 下不会重试可恢复错误，导致 false-negative。
+| 来源 | 码 | 语义 | 映射 | is_retryable |
+|---|---|---|---|---|
+| SQLite | `2067` / `1555` | UNIQUE / PK 违例 | `Conflict` | false |
+| SQLite | `787` | FOREIGN KEY 违例 | `Integrity` | false |
+| SQLite | `1299` / `275` | NOT NULL / CHECK 违例（P3-B-fix1.M1 双向对齐） | `Integrity` | false |
+| SQLite | `5` / `6` / `SQLITE_BUSY` / `SQLITE_LOCKED` | 锁等待 | **fallthrough `Sqlx`** | **true** |
+| PG | `23505` | unique_violation | `Conflict` | false |
+| PG | `23503` | foreign_key_violation | `Integrity` | false |
+| PG | `23502` | not_null_violation | `Integrity` | false |
+| PG | `23514` | check_violation | `Integrity` | false |
+| PG | `23P01` | exclusion_violation（fix1.M2） | `Integrity` | false |
+| PG | `40001` | serialization_failure | `Unavailable` | true |
+| PG | `40P01` | deadlock_detected | `Unavailable` | true |
+| PG | `08000` / `08001` / `08003` / `08004` / `08006` / `08007` | connection_* 各子码 | `Unavailable` | true |
+| PG | `57P01` / `57P02` / `57P03` | admin_shutdown / cannot_connect_now / database_dropped | `Unavailable` | true |
 
-`classify_sqlite_error` 重命名 `classify_db_error`，内部按 `sqlx::Error::Database(db_error)` 的 `db_error.code()` 走两套分支：SQLite 现有逻辑保留，PG 走 SQLSTATE。
+**关键边界**（P3-B-fix1）：
+
+- **SQLite busy/locked 不进 `Unavailable`**：走 fallthrough `Sqlx`，避免污染 runtime `last_error_kind`（保留 P3-B 前可观测语义）；`is_retryable()` 仍识别。
+- **PG `08xxx` 精确白名单**：仅列 `08000/01/03/04/06/07`，**显式排除 `08P01 protocol_violation`**（客户端/驱动 bug，不该 retry）。
+- **`is_retryable` 必须识别 PG `40001` / `40P01` / `08xxx` / `57P0x`** —— 否则 publish flow 的重试器在 PG 下不会重试可恢复错误，false-negative 把短暂故障变成永久失败。
 
 ## 7. PostgreSQL schema 翻译
 

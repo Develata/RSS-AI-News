@@ -219,7 +219,8 @@ async fn publish_items_reject_ai_result_null_with_score() {
     let error = insert_publish_item(&pool, publish_record_id, article_id, None, Some(10))
         .await
         .expect_err("half AI path should be rejected");
-    assert!(matches!(error, StorageError::Sqlx(_)));
+    // P3-B-fix1.M1：SQLite CHECK 违例（code 275）现在与 PG 23514 一致归 Integrity
+    assert!(matches!(error, StorageError::Integrity { .. }));
 }
 
 #[tokio::test]
@@ -239,7 +240,8 @@ async fn publish_items_reject_frozen_score_out_of_range() {
     )
     .await
     .expect_err("score > 100 should be rejected");
-    assert!(matches!(error, StorageError::Sqlx(_)));
+    // P3-B-fix1.M1：SQLite CHECK 违例（code 275）现在与 PG 23514 一致归 Integrity
+    assert!(matches!(error, StorageError::Integrity { .. }));
 }
 
 #[tokio::test]
@@ -258,7 +260,8 @@ async fn raw_artifacts_reject_inline_without_body() {
     .map_err(|error| classify_db_error(error, "raw_artifacts", "storage_kind"))
     .expect_err("inline artifact without inline_body should be rejected");
 
-    assert!(matches!(error, StorageError::Sqlx(_)));
+    // P3-B-fix1.M1：SQLite CHECK 违例（code 275）现在与 PG 23514 一致归 Integrity
+    assert!(matches!(error, StorageError::Integrity { .. }));
 }
 
 #[tokio::test]
