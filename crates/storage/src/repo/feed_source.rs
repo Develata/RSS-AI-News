@@ -3,7 +3,7 @@ use rss_ai_news_domain::{
     model::FeedSource,
     state::{FeedKind, FeedSourceStatus},
 };
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, PgPool, SqlitePool};
 use time::OffsetDateTime;
 
 use crate::{StorageError, StoragePool, classify_db_error};
@@ -102,42 +102,279 @@ impl FeedSourceRepo {
         }
     }
 
-    fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
-        self.pool.require_sqlite("feed_source_repo")
+    /// W11-P3-C-1：直接接受 [`StoragePool`]——`StoragePool::Postgres` 也走
+    /// 这条入口。`new`（接 `SqlitePool`）作为旧调用点的兼容 thin wrapper 保留，
+    /// 但不再是 PG 路径的唯一入口。
+    pub fn new_with_storage(pool: StoragePool) -> Self {
+        Self { pool }
     }
 }
 
+// ── trait 实现：按 backend 分发到 sqlite_* / pg_* helper ──
+//
+// SQL 字符串 100% 跨方言等价（已用 `$N` 占位符 + `ON CONFLICT` + `RETURNING`），
+// 提取到 const 共享；只有 sqlx 类型签名（`SqlitePool` vs `PgPool`、
+// `Transaction<Sqlite>` vs `Transaction<Postgres>`）和 row decode 类型分叉。
 #[async_trait]
 impl FeedSourceRepository for FeedSourceRepo {
     async fn upsert(&self, src: &FeedSource) -> Result<i64, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let id = sqlx::query_scalar::<_, i64>(
-            r#"
-            INSERT INTO feed_sources (
-                category_key, source_key, display_name, feed_url, feed_kind, status,
-                priority, etag, last_modified, last_fetched_at, last_success_at,
-                consecutive_failures, last_error, last_error_kind, config_version,
-                created_at, updated_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-            ON CONFLICT(category_key, source_key) DO UPDATE SET
-                display_name = excluded.display_name,
-                feed_url = excluded.feed_url,
-                feed_kind = excluded.feed_kind,
-                status = excluded.status,
-                priority = excluded.priority,
-                etag = excluded.etag,
-                last_modified = excluded.last_modified,
-                last_fetched_at = excluded.last_fetched_at,
-                last_success_at = excluded.last_success_at,
-                consecutive_failures = excluded.consecutive_failures,
-                last_error = excluded.last_error,
-                last_error_kind = excluded.last_error_kind,
-                config_version = excluded.config_version,
-                updated_at = excluded.updated_at
-            RETURNING id
-            "#,
-        )
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_upsert(p, src).await,
+            StoragePool::Postgres(p) => pg_upsert(p, src).await,
+        }
+    }
+
+    async fn find_by_id(&self, id: i64) -> Result<Option<FeedSource>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_find_by_id(p, id).await,
+            StoragePool::Postgres(p) => pg_find_by_id(p, id).await,
+        }
+    }
+
+    async fn find_by_keys(
+        &self,
+        category_key: &str,
+        source_key: &str,
+    ) -> Result<Option<FeedSource>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_find_by_keys(p, category_key, source_key).await,
+            StoragePool::Postgres(p) => pg_find_by_keys(p, category_key, source_key).await,
+        }
+    }
+
+    async fn list_by_category(&self, category_key: &str) -> Result<Vec<FeedSource>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_list_by_category(p, category_key).await,
+            StoragePool::Postgres(p) => pg_list_by_category(p, category_key).await,
+        }
+    }
+
+    async fn list_all(&self) -> Result<Vec<FeedSource>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_list_all(p).await,
+            StoragePool::Postgres(p) => pg_list_all(p).await,
+        }
+    }
+
+    async fn mark_archived(&self, id: i64) -> Result<bool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_mark_archived(p, id).await,
+            StoragePool::Postgres(p) => pg_mark_archived(p, id).await,
+        }
+    }
+
+    async fn upsert_with_lease_guard(
+        &self,
+        src: &FeedSource,
+        job_id: i64,
+        owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_upsert_with_lease_guard(p, src, job_id, owner, now).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_upsert_with_lease_guard(p, src, job_id, owner, now).await
+            }
+        }
+    }
+
+    async fn mark_archived_with_lease_guard(
+        &self,
+        id: i64,
+        job_id: i64,
+        owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_mark_archived_with_lease_guard(p, id, job_id, owner, now).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_mark_archived_with_lease_guard(p, id, job_id, owner, now).await
+            }
+        }
+    }
+
+    async fn update_after_fetch_success(
+        &self,
+        id: i64,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        fetched_at: OffsetDateTime,
+        success_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_update_after_fetch_success(
+                    p,
+                    id,
+                    etag,
+                    last_modified,
+                    fetched_at,
+                    success_at,
+                )
+                .await
+            }
+            StoragePool::Postgres(p) => {
+                pg_update_after_fetch_success(p, id, etag, last_modified, fetched_at, success_at)
+                    .await
+            }
+        }
+    }
+
+    async fn update_after_fetch_failure(
+        &self,
+        id: i64,
+        fetched_at: OffsetDateTime,
+        error_msg: &str,
+        error_kind: &str,
+    ) -> Result<bool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_update_after_fetch_failure(p, id, fetched_at, error_msg, error_kind).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_update_after_fetch_failure(p, id, fetched_at, error_msg, error_kind).await
+            }
+        }
+    }
+}
+
+// ── 共享 SQL 字符串（跨方言完全等价） ──────────────────────────
+
+const UPSERT_FEED_SOURCE_RETURNING_ID_SQL: &str = r#"
+INSERT INTO feed_sources (
+    category_key, source_key, display_name, feed_url, feed_kind, status,
+    priority, etag, last_modified, last_fetched_at, last_success_at,
+    consecutive_failures, last_error, last_error_kind, config_version,
+    created_at, updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+ON CONFLICT(category_key, source_key) DO UPDATE SET
+    display_name = excluded.display_name,
+    feed_url = excluded.feed_url,
+    feed_kind = excluded.feed_kind,
+    status = excluded.status,
+    priority = excluded.priority,
+    etag = excluded.etag,
+    last_modified = excluded.last_modified,
+    last_fetched_at = excluded.last_fetched_at,
+    last_success_at = excluded.last_success_at,
+    consecutive_failures = excluded.consecutive_failures,
+    last_error = excluded.last_error,
+    last_error_kind = excluded.last_error_kind,
+    config_version = excluded.config_version,
+    updated_at = excluded.updated_at
+RETURNING id
+"#;
+
+/// 与 [`UPSERT_FEED_SOURCE_RETURNING_ID_SQL`] 同体，无 `RETURNING id`——
+/// `upsert_with_lease_guard` 不需要返回 id 节省一次 RETURNING。
+const UPSERT_FEED_SOURCE_SQL: &str = r#"
+INSERT INTO feed_sources (
+    category_key, source_key, display_name, feed_url, feed_kind, status,
+    priority, etag, last_modified, last_fetched_at, last_success_at,
+    consecutive_failures, last_error, last_error_kind, config_version,
+    created_at, updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+ON CONFLICT(category_key, source_key) DO UPDATE SET
+    display_name = excluded.display_name,
+    feed_url = excluded.feed_url,
+    feed_kind = excluded.feed_kind,
+    status = excluded.status,
+    priority = excluded.priority,
+    etag = excluded.etag,
+    last_modified = excluded.last_modified,
+    last_fetched_at = excluded.last_fetched_at,
+    last_success_at = excluded.last_success_at,
+    consecutive_failures = excluded.consecutive_failures,
+    last_error = excluded.last_error,
+    last_error_kind = excluded.last_error_kind,
+    config_version = excluded.config_version,
+    updated_at = excluded.updated_at
+"#;
+
+const SELECT_FEED_SOURCE_BY_ID_SQL: &str = r#"
+SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
+       priority, etag, last_modified, last_fetched_at, last_success_at,
+       consecutive_failures, last_error, last_error_kind, config_version,
+       created_at, updated_at
+FROM feed_sources
+WHERE id = $1
+"#;
+
+const SELECT_FEED_SOURCE_BY_KEYS_SQL: &str = r#"
+SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
+       priority, etag, last_modified, last_fetched_at, last_success_at,
+       consecutive_failures, last_error, last_error_kind, config_version,
+       created_at, updated_at
+FROM feed_sources
+WHERE category_key = $1 AND source_key = $2
+"#;
+
+const LIST_FEED_SOURCES_BY_CATEGORY_SQL: &str = r#"
+SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
+       priority, etag, last_modified, last_fetched_at, last_success_at,
+       consecutive_failures, last_error, last_error_kind, config_version,
+       created_at, updated_at
+FROM feed_sources
+WHERE category_key = $1 AND status = 'active'
+ORDER BY priority ASC, source_key ASC
+"#;
+
+const LIST_FEED_SOURCES_ALL_SQL: &str = r#"
+SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
+       priority, etag, last_modified, last_fetched_at, last_success_at,
+       consecutive_failures, last_error, last_error_kind, config_version,
+       created_at, updated_at
+FROM feed_sources
+ORDER BY id ASC
+"#;
+
+const MARK_FEED_SOURCE_ARCHIVED_SQL: &str = r#"
+UPDATE feed_sources
+SET status = 'archived', updated_at = $1
+WHERE id = $2 AND status <> 'archived'
+"#;
+
+/// lease guard 用——把 reindex_jobs 行的 updated_at 顺手刷成 `now`
+/// （fix9 heartbeat 语义）。`rows_affected == 1` ↔ lease 仍在手。
+const LEASE_GUARD_UPDATE_REINDEX_JOBS_SQL: &str = r#"
+UPDATE reindex_jobs
+SET updated_at = $1
+WHERE id = $2 AND state = 'running' AND lease_owner = $3
+"#;
+
+const UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL: &str = r#"
+UPDATE feed_sources
+SET etag = $1,
+    last_modified = $2,
+    last_fetched_at = $3,
+    last_success_at = $4,
+    consecutive_failures = 0,
+    last_error = NULL,
+    last_error_kind = NULL,
+    updated_at = $5
+WHERE id = $6
+"#;
+
+const UPDATE_FEED_SOURCE_AFTER_FETCH_FAILURE_SQL: &str = r#"
+UPDATE feed_sources
+SET last_fetched_at = $1,
+    consecutive_failures = consecutive_failures + 1,
+    last_error = $2,
+    last_error_kind = $3,
+    updated_at = $4
+WHERE id = $5
+"#;
+
+// ── SQLite helper（保留 P3-C-0 前的行为） ──────────────────────
+
+async fn sqlite_upsert(pool: &SqlitePool, src: &FeedSource) -> Result<i64, StorageError> {
+    sqlx::query_scalar::<_, i64>(UPSERT_FEED_SOURCE_RETURNING_ID_SQL)
         .bind(&src.category_key)
         .bind(&src.source_key)
         .bind(&src.display_name)
@@ -157,164 +394,84 @@ impl FeedSourceRepository for FeedSourceRepo {
         .bind(src.updated_at)
         .fetch_one(pool)
         .await
-        .map_err(|error| {
-            classify_db_error(
-                error,
-                "feed_sources",
-                format!("{}/{}", src.category_key, src.source_key),
-            )
-        })?;
+        .map_err(|error| classify_upsert_error(error, src))
+}
 
-        Ok(id)
-    }
+async fn sqlite_find_by_id(pool: &SqlitePool, id: i64) -> Result<Option<FeedSource>, StorageError> {
+    let row = sqlx::query_as::<_, FeedSourceRow>(SELECT_FEED_SOURCE_BY_ID_SQL)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)?;
+    row.map(FeedSource::try_from).transpose()
+}
 
-    async fn find_by_id(&self, id: i64) -> Result<Option<FeedSource>, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let row = sqlx::query_as::<_, FeedSourceRow>(SELECT_FEED_SOURCE_BY_ID)
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(StorageError::from)?;
+async fn sqlite_find_by_keys(
+    pool: &SqlitePool,
+    category_key: &str,
+    source_key: &str,
+) -> Result<Option<FeedSource>, StorageError> {
+    let row = sqlx::query_as::<_, FeedSourceRow>(SELECT_FEED_SOURCE_BY_KEYS_SQL)
+        .bind(category_key)
+        .bind(source_key)
+        .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)?;
+    row.map(FeedSource::try_from).transpose()
+}
 
-        row.map(FeedSource::try_from).transpose()
-    }
-
-    async fn find_by_keys(
-        &self,
-        category_key: &str,
-        source_key: &str,
-    ) -> Result<Option<FeedSource>, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let row = sqlx::query_as::<_, FeedSourceRow>(SELECT_FEED_SOURCE_BY_KEYS)
-            .bind(category_key)
-            .bind(source_key)
-            .fetch_optional(pool)
-            .await
-            .map_err(StorageError::from)?;
-
-        row.map(FeedSource::try_from).transpose()
-    }
-
-    async fn list_by_category(&self, category_key: &str) -> Result<Vec<FeedSource>, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let rows = sqlx::query_as::<_, FeedSourceRow>(
-            r#"
-            SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
-                   priority, etag, last_modified, last_fetched_at, last_success_at,
-                   consecutive_failures, last_error, last_error_kind, config_version,
-                   created_at, updated_at
-            FROM feed_sources
-            WHERE category_key = $1 AND status = 'active'
-            ORDER BY priority ASC, source_key ASC
-            "#,
-        )
+async fn sqlite_list_by_category(
+    pool: &SqlitePool,
+    category_key: &str,
+) -> Result<Vec<FeedSource>, StorageError> {
+    let rows = sqlx::query_as::<_, FeedSourceRow>(LIST_FEED_SOURCES_BY_CATEGORY_SQL)
         .bind(category_key)
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)?;
+    rows.into_iter().map(FeedSource::try_from).collect()
+}
 
-        rows.into_iter().map(FeedSource::try_from).collect()
-    }
-
-    async fn list_all(&self) -> Result<Vec<FeedSource>, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let rows = sqlx::query_as::<_, FeedSourceRow>(
-            r#"
-            SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
-                   priority, etag, last_modified, last_fetched_at, last_success_at,
-                   consecutive_failures, last_error, last_error_kind, config_version,
-                   created_at, updated_at
-            FROM feed_sources
-            ORDER BY id ASC
-            "#,
-        )
+async fn sqlite_list_all(pool: &SqlitePool) -> Result<Vec<FeedSource>, StorageError> {
+    let rows = sqlx::query_as::<_, FeedSourceRow>(LIST_FEED_SOURCES_ALL_SQL)
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)?;
+    rows.into_iter().map(FeedSource::try_from).collect()
+}
 
-        rows.into_iter().map(FeedSource::try_from).collect()
-    }
-
-    async fn mark_archived(&self, id: i64) -> Result<bool, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let result = sqlx::query(
-            r#"
-            UPDATE feed_sources
-            SET status = 'archived', updated_at = $1
-            WHERE id = $2 AND status <> 'archived'
-            "#,
-        )
+async fn sqlite_mark_archived(pool: &SqlitePool, id: i64) -> Result<bool, StorageError> {
+    let result = sqlx::query(MARK_FEED_SOURCE_ARCHIVED_SQL)
         .bind(OffsetDateTime::now_utc())
         .bind(id)
         .execute(pool)
         .await
         .map_err(StorageError::from)?;
+    Ok(result.rows_affected() == 1)
+}
 
-        Ok(result.rows_affected() == 1)
-    }
+async fn sqlite_upsert_with_lease_guard(
+    pool: &SqlitePool,
+    src: &FeedSource,
+    job_id: i64,
+    owner: &str,
+    now: OffsetDateTime,
+) -> Result<LeaseGuardedWriteOutcome, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
 
-    async fn upsert_with_lease_guard(
-        &self,
-        src: &FeedSource,
-        job_id: i64,
-        owner: &str,
-        now: OffsetDateTime,
-    ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let mut tx = pool.begin().await.map_err(StorageError::from)?;
-
-        // 1) lease guard：与 `ReindexJobRepository::assert_lease_held` 同语义
-        //    的 UPDATE——rows_affected 充当谓词，顺手把 reindex_jobs.updated_at
-        //    刷新到调用方传入的 `now`（fix9：与 src.updated_at 解耦，让 reclaim
-        //    巡检的 heartbeat 跟随实际写入瞬时）。lease 失效（state≠'running'
-        //    或 owner 不匹配）时 rows_affected == 0，整段回滚 → LeaseLost。
-        let lease = sqlx::query(
-            r#"
-            UPDATE reindex_jobs
-            SET updated_at = $1
-            WHERE id = $2 AND state = 'running' AND lease_owner = $3
-            "#,
-        )
+    let lease = sqlx::query(LEASE_GUARD_UPDATE_REINDEX_JOBS_SQL)
         .bind(now)
         .bind(job_id)
         .bind(owner)
         .execute(&mut *tx)
         .await
         .map_err(StorageError::from)?;
-        if lease.rows_affected() != 1 {
-            tx.rollback().await.map_err(StorageError::from)?;
-            return Ok(LeaseGuardedWriteOutcome::LeaseLost);
-        }
+    if lease.rows_affected() != 1 {
+        tx.rollback().await.map_err(StorageError::from)?;
+        return Ok(LeaseGuardedWriteOutcome::LeaseLost);
+    }
 
-        // 2) feed_sources upsert（与 `upsert` 完全相同的 SQL；不复用是因为
-        //    那一版直接走 self.pool，本路径要在 tx 上执行）。INSERT/UPDATE
-        //    冲突保留 classify_db_error 映射；本方法不返回 id。
-        sqlx::query(
-            r#"
-            INSERT INTO feed_sources (
-                category_key, source_key, display_name, feed_url, feed_kind, status,
-                priority, etag, last_modified, last_fetched_at, last_success_at,
-                consecutive_failures, last_error, last_error_kind, config_version,
-                created_at, updated_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-            ON CONFLICT(category_key, source_key) DO UPDATE SET
-                display_name = excluded.display_name,
-                feed_url = excluded.feed_url,
-                feed_kind = excluded.feed_kind,
-                status = excluded.status,
-                priority = excluded.priority,
-                etag = excluded.etag,
-                last_modified = excluded.last_modified,
-                last_fetched_at = excluded.last_fetched_at,
-                last_success_at = excluded.last_success_at,
-                consecutive_failures = excluded.consecutive_failures,
-                last_error = excluded.last_error,
-                last_error_kind = excluded.last_error_kind,
-                config_version = excluded.config_version,
-                updated_at = excluded.updated_at
-            "#,
-        )
+    sqlx::query(UPSERT_FEED_SOURCE_SQL)
         .bind(&src.category_key)
         .bind(&src.source_key)
         .bind(&src.display_name)
@@ -334,90 +491,57 @@ impl FeedSourceRepository for FeedSourceRepo {
         .bind(src.updated_at)
         .execute(&mut *tx)
         .await
-        .map_err(|error| {
-            classify_db_error(
-                error,
-                "feed_sources",
-                format!("{}/{}", src.category_key, src.source_key),
-            )
-        })?;
+        .map_err(|error| classify_upsert_error(error, src))?;
 
-        tx.commit().await.map_err(StorageError::from)?;
-        Ok(LeaseGuardedWriteOutcome::Applied)
-    }
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(LeaseGuardedWriteOutcome::Applied)
+}
 
-    async fn mark_archived_with_lease_guard(
-        &self,
-        id: i64,
-        job_id: i64,
-        owner: &str,
-        now: OffsetDateTime,
-    ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let mut tx = pool.begin().await.map_err(StorageError::from)?;
+async fn sqlite_mark_archived_with_lease_guard(
+    pool: &SqlitePool,
+    id: i64,
+    job_id: i64,
+    owner: &str,
+    now: OffsetDateTime,
+) -> Result<LeaseGuardedWriteOutcome, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
 
-        let lease = sqlx::query(
-            r#"
-            UPDATE reindex_jobs
-            SET updated_at = $1
-            WHERE id = $2 AND state = 'running' AND lease_owner = $3
-            "#,
-        )
+    let lease = sqlx::query(LEASE_GUARD_UPDATE_REINDEX_JOBS_SQL)
         .bind(now)
         .bind(job_id)
         .bind(owner)
         .execute(&mut *tx)
         .await
         .map_err(StorageError::from)?;
-        if lease.rows_affected() != 1 {
-            tx.rollback().await.map_err(StorageError::from)?;
-            return Ok(LeaseGuardedWriteOutcome::LeaseLost);
-        }
+    if lease.rows_affected() != 1 {
+        tx.rollback().await.map_err(StorageError::from)?;
+        return Ok(LeaseGuardedWriteOutcome::LeaseLost);
+    }
 
-        let archived = sqlx::query(
-            r#"
-            UPDATE feed_sources
-            SET status = 'archived', updated_at = $1
-            WHERE id = $2 AND status <> 'archived'
-            "#,
-        )
+    let archived = sqlx::query(MARK_FEED_SOURCE_ARCHIVED_SQL)
         .bind(now)
         .bind(id)
         .execute(&mut *tx)
         .await
         .map_err(StorageError::from)?;
 
-        tx.commit().await.map_err(StorageError::from)?;
-        if archived.rows_affected() == 1 {
-            Ok(LeaseGuardedWriteOutcome::Applied)
-        } else {
-            Ok(LeaseGuardedWriteOutcome::NoOp)
-        }
+    tx.commit().await.map_err(StorageError::from)?;
+    if archived.rows_affected() == 1 {
+        Ok(LeaseGuardedWriteOutcome::Applied)
+    } else {
+        Ok(LeaseGuardedWriteOutcome::NoOp)
     }
+}
 
-    async fn update_after_fetch_success(
-        &self,
-        id: i64,
-        etag: Option<&str>,
-        last_modified: Option<&str>,
-        fetched_at: OffsetDateTime,
-        success_at: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let result = sqlx::query(
-            r#"
-            UPDATE feed_sources
-            SET etag = $1,
-                last_modified = $2,
-                last_fetched_at = $3,
-                last_success_at = $4,
-                consecutive_failures = 0,
-                last_error = NULL,
-                last_error_kind = NULL,
-                updated_at = $5
-            WHERE id = $6
-            "#,
-        )
+async fn sqlite_update_after_fetch_success(
+    pool: &SqlitePool,
+    id: i64,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+    fetched_at: OffsetDateTime,
+    success_at: OffsetDateTime,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL)
         .bind(etag)
         .bind(last_modified)
         .bind(fetched_at)
@@ -427,29 +551,17 @@ impl FeedSourceRepository for FeedSourceRepo {
         .execute(pool)
         .await
         .map_err(StorageError::from)?;
+    Ok(result.rows_affected() == 1)
+}
 
-        Ok(result.rows_affected() == 1)
-    }
-
-    async fn update_after_fetch_failure(
-        &self,
-        id: i64,
-        fetched_at: OffsetDateTime,
-        error_msg: &str,
-        error_kind: &str,
-    ) -> Result<bool, StorageError> {
-        let pool = self.sqlite_pool()?;
-        let result = sqlx::query(
-            r#"
-            UPDATE feed_sources
-            SET last_fetched_at = $1,
-                consecutive_failures = consecutive_failures + 1,
-                last_error = $2,
-                last_error_kind = $3,
-                updated_at = $4
-            WHERE id = $5
-            "#,
-        )
+async fn sqlite_update_after_fetch_failure(
+    pool: &SqlitePool,
+    id: i64,
+    fetched_at: OffsetDateTime,
+    error_msg: &str,
+    error_kind: &str,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(UPDATE_FEED_SOURCE_AFTER_FETCH_FAILURE_SQL)
         .bind(fetched_at)
         .bind(error_msg)
         .bind(error_kind)
@@ -458,28 +570,224 @@ impl FeedSourceRepository for FeedSourceRepo {
         .execute(pool)
         .await
         .map_err(StorageError::from)?;
+    Ok(result.rows_affected() == 1)
+}
 
-        Ok(result.rows_affected() == 1)
+// ── PostgreSQL helper（W11-P3-C-1） ─────────────────────────────
+//
+// SQL 100% 与 SQLite 同字符串；只在 sqlx 类型签名上分叉。`Transaction<Postgres>`
+// 与 `Transaction<Sqlite>` 不共享 lifetime/Database 关联类型，故无法用泛型
+// 抽出 helper。
+
+async fn pg_upsert(pool: &PgPool, src: &FeedSource) -> Result<i64, StorageError> {
+    sqlx::query_scalar::<_, i64>(UPSERT_FEED_SOURCE_RETURNING_ID_SQL)
+        .bind(&src.category_key)
+        .bind(&src.source_key)
+        .bind(&src.display_name)
+        .bind(&src.feed_url)
+        .bind(feed_kind_to_str(src.feed_kind))
+        .bind(feed_source_status_to_str(src.status))
+        .bind(src.priority)
+        .bind(&src.etag)
+        .bind(&src.last_modified)
+        .bind(src.last_fetched_at)
+        .bind(src.last_success_at)
+        .bind(src.consecutive_failures)
+        .bind(&src.last_error)
+        .bind(&src.last_error_kind)
+        .bind(src.config_version)
+        .bind(src.created_at)
+        .bind(src.updated_at)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| classify_upsert_error(error, src))
+}
+
+async fn pg_find_by_id(pool: &PgPool, id: i64) -> Result<Option<FeedSource>, StorageError> {
+    let row = sqlx::query_as::<_, FeedSourceRow>(SELECT_FEED_SOURCE_BY_ID_SQL)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)?;
+    row.map(FeedSource::try_from).transpose()
+}
+
+async fn pg_find_by_keys(
+    pool: &PgPool,
+    category_key: &str,
+    source_key: &str,
+) -> Result<Option<FeedSource>, StorageError> {
+    let row = sqlx::query_as::<_, FeedSourceRow>(SELECT_FEED_SOURCE_BY_KEYS_SQL)
+        .bind(category_key)
+        .bind(source_key)
+        .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)?;
+    row.map(FeedSource::try_from).transpose()
+}
+
+async fn pg_list_by_category(
+    pool: &PgPool,
+    category_key: &str,
+) -> Result<Vec<FeedSource>, StorageError> {
+    let rows = sqlx::query_as::<_, FeedSourceRow>(LIST_FEED_SOURCES_BY_CATEGORY_SQL)
+        .bind(category_key)
+        .fetch_all(pool)
+        .await
+        .map_err(StorageError::from)?;
+    rows.into_iter().map(FeedSource::try_from).collect()
+}
+
+async fn pg_list_all(pool: &PgPool) -> Result<Vec<FeedSource>, StorageError> {
+    let rows = sqlx::query_as::<_, FeedSourceRow>(LIST_FEED_SOURCES_ALL_SQL)
+        .fetch_all(pool)
+        .await
+        .map_err(StorageError::from)?;
+    rows.into_iter().map(FeedSource::try_from).collect()
+}
+
+async fn pg_mark_archived(pool: &PgPool, id: i64) -> Result<bool, StorageError> {
+    let result = sqlx::query(MARK_FEED_SOURCE_ARCHIVED_SQL)
+        .bind(OffsetDateTime::now_utc())
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected() == 1)
+}
+
+async fn pg_upsert_with_lease_guard(
+    pool: &PgPool,
+    src: &FeedSource,
+    job_id: i64,
+    owner: &str,
+    now: OffsetDateTime,
+) -> Result<LeaseGuardedWriteOutcome, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+
+    let lease = sqlx::query(LEASE_GUARD_UPDATE_REINDEX_JOBS_SQL)
+        .bind(now)
+        .bind(job_id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    if lease.rows_affected() != 1 {
+        tx.rollback().await.map_err(StorageError::from)?;
+        return Ok(LeaseGuardedWriteOutcome::LeaseLost);
+    }
+
+    sqlx::query(UPSERT_FEED_SOURCE_SQL)
+        .bind(&src.category_key)
+        .bind(&src.source_key)
+        .bind(&src.display_name)
+        .bind(&src.feed_url)
+        .bind(feed_kind_to_str(src.feed_kind))
+        .bind(feed_source_status_to_str(src.status))
+        .bind(src.priority)
+        .bind(&src.etag)
+        .bind(&src.last_modified)
+        .bind(src.last_fetched_at)
+        .bind(src.last_success_at)
+        .bind(src.consecutive_failures)
+        .bind(&src.last_error)
+        .bind(&src.last_error_kind)
+        .bind(src.config_version)
+        .bind(src.created_at)
+        .bind(src.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| classify_upsert_error(error, src))?;
+
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(LeaseGuardedWriteOutcome::Applied)
+}
+
+async fn pg_mark_archived_with_lease_guard(
+    pool: &PgPool,
+    id: i64,
+    job_id: i64,
+    owner: &str,
+    now: OffsetDateTime,
+) -> Result<LeaseGuardedWriteOutcome, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+
+    let lease = sqlx::query(LEASE_GUARD_UPDATE_REINDEX_JOBS_SQL)
+        .bind(now)
+        .bind(job_id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    if lease.rows_affected() != 1 {
+        tx.rollback().await.map_err(StorageError::from)?;
+        return Ok(LeaseGuardedWriteOutcome::LeaseLost);
+    }
+
+    let archived = sqlx::query(MARK_FEED_SOURCE_ARCHIVED_SQL)
+        .bind(now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+
+    tx.commit().await.map_err(StorageError::from)?;
+    if archived.rows_affected() == 1 {
+        Ok(LeaseGuardedWriteOutcome::Applied)
+    } else {
+        Ok(LeaseGuardedWriteOutcome::NoOp)
     }
 }
 
-const SELECT_FEED_SOURCE_BY_ID: &str = r#"
-SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
-       priority, etag, last_modified, last_fetched_at, last_success_at,
-       consecutive_failures, last_error, last_error_kind, config_version,
-       created_at, updated_at
-FROM feed_sources
-WHERE id = $1
-"#;
+async fn pg_update_after_fetch_success(
+    pool: &PgPool,
+    id: i64,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+    fetched_at: OffsetDateTime,
+    success_at: OffsetDateTime,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL)
+        .bind(etag)
+        .bind(last_modified)
+        .bind(fetched_at)
+        .bind(success_at)
+        .bind(fetched_at)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected() == 1)
+}
 
-const SELECT_FEED_SOURCE_BY_KEYS: &str = r#"
-SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
-       priority, etag, last_modified, last_fetched_at, last_success_at,
-       consecutive_failures, last_error, last_error_kind, config_version,
-       created_at, updated_at
-FROM feed_sources
-WHERE category_key = $1 AND source_key = $2
-"#;
+async fn pg_update_after_fetch_failure(
+    pool: &PgPool,
+    id: i64,
+    fetched_at: OffsetDateTime,
+    error_msg: &str,
+    error_kind: &str,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(UPDATE_FEED_SOURCE_AFTER_FETCH_FAILURE_SQL)
+        .bind(fetched_at)
+        .bind(error_msg)
+        .bind(error_kind)
+        .bind(fetched_at)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected() == 1)
+}
+
+// ── shared helpers ──────────────────────────────────────────────
+
+fn classify_upsert_error(error: sqlx::Error, src: &FeedSource) -> StorageError {
+    classify_db_error(
+        error,
+        "feed_sources",
+        format!("{}/{}", src.category_key, src.source_key),
+    )
+}
 
 #[derive(Debug, FromRow)]
 struct FeedSourceRow {
