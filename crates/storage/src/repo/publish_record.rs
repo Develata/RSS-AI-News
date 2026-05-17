@@ -184,7 +184,12 @@ impl PublishRecordRepo {
         }
     }
 
-    pub(super) fn sqlite_pool(&self) -> Result<&SqlitePool, StorageError> {
-        self.pool.require_sqlite("publish_record_repo")
+    /// W11-P3-C-4：PG 入口；旧 `new(SqlitePool)` thin wrapper 保留兼容。
+    pub fn new_with_storage(pool: StoragePool) -> Self {
+        Self { pool }
+    }
+
+    pub(super) fn storage_pool(&self) -> &StoragePool {
+        &self.pool
     }
 }
