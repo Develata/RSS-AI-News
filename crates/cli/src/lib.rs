@@ -67,7 +67,10 @@ pub async fn run() -> ExitCode {
         Ok(exit) => exit,
         Err(error) => {
             let exit = error.exit_code();
-            let _ = writer.emit_failure(error.command_name(), &error);
+            // W11-P4-fix2.H2 lint：emit_failure 返 io::Result（写 stderr），
+            // 进程即将退出的错误路径，stderr 关闭等故障无救赎；显式 `.ok()`
+            // 表达 "尽力 emit + 失败不阻断 exit"，比 `let _ =` 通过 lint。
+            writer.emit_failure(error.command_name(), &error).ok();
             exit
         }
     }

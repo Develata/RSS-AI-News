@@ -32,16 +32,25 @@
 
 ### 2.3 存储策略
 
-#### 内联 vs 文件
+> **v0.1.0 实装边界**：当前仅实装 `storage_kind='inline'` 路径，所有 artifact
+> 走 `inline_body`（schema CHECK 约束 `(storage_kind='inline' AND inline_body
+> IS NOT NULL) OR (storage_kind='file' AND file_path IS NOT NULL)` 仍然保留，
+> 让未来切换 file-backed 时不需要 schema migration）。`inline_threshold_bytes`
+> 与 `file_storage_dir` 配置字段保留为前向兼容占位，运行期暂未消费。
+>
+> **file-backed 实装属 v0.2 follow-up**（追踪：`runtime::artifact::ArtifactWriter`
+> 顶部 comment）。本节文档保留完整设计是为了让 v0.2 实装时不需要重新设计。
+
+#### 内联 vs 文件（v0.2 设计稿，v0.1.0 仅 inline）
 
 | 条件 | 存储方式 | 字段 |
 |---|---|---|
 | `byte_size <= inline_threshold_bytes` | 直接存表 | `storage_kind='inline'`, `inline_body` 非空 |
-| `byte_size > inline_threshold_bytes` | 外部文件 | `storage_kind='file'`, `file_path` 非空 |
+| `byte_size > inline_threshold_bytes`（v0.2）| 外部文件 | `storage_kind='file'`, `file_path` 非空 |
 
 `inline_threshold_bytes` 默认 64 KB（见 [config-schema §4](./config-schema.md)）。
 
-#### 文件存储路径
+#### 文件存储路径（v0.2 设计稿）
 
 ```text
 {artifact.file_storage_dir}/{kind}/{YYYY}/{MM}/{DD}/{artifact_key_safe}.{ext}

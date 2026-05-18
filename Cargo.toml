@@ -21,6 +21,28 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/Develata/RSS-AI-News"
 
+# W11-P4-fix2.H2：error-and-observability §3.3 "禁止静默吞错" 第 1 层 enforcement
+# 落地（task T101 W1 阶段就承诺，迁延至发布前补齐）。三层 enforcement：
+#   1) workspace.lints —— 编译期 deny / warn（本节）
+#   2) CI .ci/check_swallowed_errors.sh 文本扫描（已落地）
+#   3) code review 人工守门
+#
+# `unused_must_use=deny`：丢弃 `Result<_, _>` 等 #[must_use] 返回值即编译失败。
+# `clippy::let_underscore_must_use=deny`：`let _ = result_or_future()` 静默丢弃即拒绝。
+# `clippy::let_underscore_future=deny`：丢弃 future 而不 await 即拒绝。
+# `clippy::ok_expect=warn`：`.ok().expect(_)` 退化为 `.expect`，让 panic 信息保留 Err 上下文。
+# `clippy::ignored_unit_patterns=warn`：`match _ { ... }` 等忽略 unit-like enum 的写法易隐藏失败分支。
+#
+# `priority = -1` 保留 crate-level allow 优先级——单文件 `#[allow(...)]` 覆盖此处。
+[workspace.lints.rust]
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+let_underscore_must_use = "deny"
+let_underscore_future = "deny"
+ok_expect = "warn"
+ignored_unit_patterns = "warn"
+
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
@@ -109,3 +131,6 @@ rss-ai-news-runtime.workspace = true
 rss-ai-news-storage.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[lints]
+workspace = true

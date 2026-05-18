@@ -80,9 +80,9 @@
 - [x] 初始化根 `Cargo.toml`（`resolver = "3"`, `edition = "2024"`, `[workspace.dependencies]` 统一版本）
 - [x] 初始化 `Cargo.lock`
 - [x] 新增 `.gitignore`
-- [ ] 新增 `rustfmt.toml`
-- [ ] 新增 `clippy.toml`
-- [ ] 在根 `Cargo.toml` 启用 `[workspace.lints]` 禁止吞错误 lint：`unused_must_use=deny`、`clippy::let_underscore_must_use=deny`、`clippy::let_underscore_future=deny`、`clippy::ok_expect=warn`、`clippy::ignored_unit_patterns=warn`（依据 [error-and-observability §3.3 Enforcement 第 1 层](../design/error-and-observability.md#33-绝不静默吞掉错误)）
+- [x] 新增 `rustfmt.toml`
+- [x] 新增 `clippy.toml`
+- [x] 在根 `Cargo.toml` 启用 `[workspace.lints]` 禁止吞错误 lint：`unused_must_use=deny`、`clippy::let_underscore_must_use=deny`、`clippy::let_underscore_future=deny`、`clippy::ok_expect=warn`、`clippy::ignored_unit_patterns=warn`（依据 [error-and-observability §3.3 Enforcement 第 1 层](../design/error-and-observability.md#33-绝不静默吞掉错误)）
 
 ### T102 初始化 crate 骨架
 
@@ -103,85 +103,85 @@
 
 ### T103 建立目录与静态资源骨架
 
-- [ ] 创建 `configs/`
-- [ ] 创建 `configs/categories/`
-- [ ] 创建 `migrations/`
-- [ ] 创建 `docker/`
-- [ ] 创建 `tests/fixtures/`
-- [ ] 创建 `tests/integration/`
+- [x] 创建 `configs/`
+- [x] 创建 `configs/categories/`
+- [x] 创建 `migrations/`
+- [x] 创建 `docker/`
+- [ ] 创建 `tests/fixtures/`（**v0.1.0**：测试 fixture 实际下沉到各 crate `tests/common/` 与 `tests/fixtures/`；根目录 `tests/` 未建。v0.2 评估是否需要 workspace-level fixture）
+- [ ] 创建 `tests/integration/`（同上：集成测试落到各 crate `tests/*.rs`）
 
 ## 4. Workstream W2：领域对象与 DTO 契约
 
 ### T201 定义核心对象
 
-- [ ] 在 `crates/domain` 中定义 `FeedSource`
-- [ ] 定义 `FeedEntry`
-- [ ] 定义 `Article`
-- [ ] 定义 `ArticleAiResult`
-- [ ] 定义 `PublishRecord`
-- [ ] 定义 `PublishItem`
-- [ ] 定义 `RawArtifact`
-- [ ] 定义 `ReindexJob`（见 [storage-schema §4.10](../design/storage-schema.md#410-reindex_jobs)）
+- [x] 在 `crates/domain` 中定义 `FeedSource`
+- [x] 定义 `FeedEntry`
+- [x] 定义 `Article`
+- [x] 定义 `ArticleAiResult`
+- [x] 定义 `PublishRecord`
+- [x] 定义 `PublishItem`
+- [x] 定义 `RawArtifact`
+- [x] 定义 `ReindexJob`（见 [storage-schema §4.10](../design/storage-schema.md#410-reindex_jobs)）
 
 ### T202 定义状态机
 
-- [ ] 定义 `FeedEntryState`
-- [ ] 定义 `ArticleState`
-- [ ] 定义 `AiResultState`（不含 `RetryableFailed`；retryable 失败回落到 `Pending`）
-- [ ] 定义 `PublishState`
-- [ ] 定义 `ReindexJobState`（pending / running / completed / failed / aborted；见 [state-machine §6.2](../design/state-machine.md#62-状态集合)）
-- [ ] 定义 `RuleVersionStatus`（pending / active / superseded；见 [storage-schema §4.8](../design/storage-schema.md#48-rule_versions)）
+- [x] 定义 `FeedEntryState`
+- [x] 定义 `ArticleState`
+- [x] 定义 `AiResultState`（不含 `RetryableFailed`；retryable 失败回落到 `Pending`）
+- [x] 定义 `PublishState`
+- [x] 定义 `ReindexJobState`（pending / running / completed / failed / aborted；见 [state-machine §6.2](../design/state-machine.md#62-状态集合)）
+- [x] 定义 `RuleVersionStatus`（pending / active / superseded；见 [storage-schema §4.8](../design/storage-schema.md#48-rule_versions)）
 
 ### T203 定义内部 DTO
 
-- [ ] 定义 `FeedEntryMeta`（见 internal-dto-contracts §2.3）
-- [ ] 定义 `ArticleFetchTask`（§3.1）
-- [ ] 定义 `ExtractedArticle` 与 `FallbackArticle`（§3.2/§3.3）
-- [ ] 定义 `AiTask` / `AiOutput` / `AiFilteredOutput`（§4.1–§4.3）
-- [ ] 定义 `FrozenPublishItem` / `PublishCandidate` / `RenderedReport` / `PublishOutcome`（§5.2–§5.5）
-- [ ] 定义 `ReplayRequest/Result` 与 `BackfillRequest`（§6）
+- [x] 定义 `FeedEntryMeta`（见 internal-dto-contracts §2.3）
+- [x] 定义 `ArticleFetchTask`（§3.1）
+- [x] 定义 `ExtractedArticle` 与 `FallbackArticle`（§3.2/§3.3）
+- [x] 定义 `AiTask` / `AiOutput` / `AiFilteredOutput`（§4.1–§4.3）
+- [x] 定义 `FrozenPublishItem` / `PublishCandidate` / `RenderedReport` / `PublishOutcome`（§5.2–§5.5）
+- [x] 定义 `ReplayRequest/Result` 与 `BackfillRequest`（§6）
 
 ### T204 定义稳定契约测试
 
-- [ ] 为状态机转换写单元测试
-- [ ] 为 link 规范化写单元测试
-- [ ] 为 DTO 序列化 / 反序列化写单元测试
+- [x] 为状态机转换写单元测试
+- [x] 为 link 规范化写单元测试
+- [x] 为 DTO 序列化 / 反序列化写单元测试
 
 ## 5. Workstream W3：配置系统
 
 ### T301 定义配置 schema 文档
 
-- [ ] 完成 `docs/design/config-schema.md`
-- [ ] 明确 `schema_version`
-- [ ] 明确 `app.toml` 字段
-- [ ] 明确 `categories/*.toml` 字段
-- [ ] 明确 `.env` 字段
+- [x] 完成 `docs/design/config-schema.md`
+- [x] 明确 `schema_version`
+- [x] 明确 `app.toml` 字段
+- [x] 明确 `categories/*.toml` 字段
+- [x] 明确 `.env` 字段
 
 ### T302 实现 config crate
 
-- [ ] 加载 `.env`
-- [ ] 加载 `app.toml`
-- [ ] 加载 `categories/*.toml`
-- [ ] 实现 schema version 校验
-- [ ] 实现非法配置即退出
+- [x] 加载 `.env`
+- [x] 加载 `app.toml`
+- [x] 加载 `categories/*.toml`
+- [x] 实现 schema version 校验
+- [x] 实现非法配置即退出
 
 ### T303 配置测试
 
-- [ ] 合法配置通过测试
-- [ ] 缺失字段失败测试
-- [ ] 重复分类 key 失败测试
-- [ ] 非法 URL 失败测试
+- [x] 合法配置通过测试
+- [x] 缺失字段失败测试
+- [x] 重复分类 key 失败测试
+- [x] 非法 URL 失败测试
 
 ### T304 实现 `validate-config` 子命令
 
 参见 [cli-semantics §4.10](../design/cli-semantics.md)。命令在 W3 阶段完成端到端落地，避免 W9 doctor 重复包装配置校验逻辑。
 
-- [ ] 在 `cli` crate 注册 `validate-config` 子命令（clap derive）
-- [ ] 调用 `config::load_all` 完整加载 `.env` + `app.toml` + `categories/*.toml`
-- [ ] 输出每个被加载文件路径与 schema_version
-- [ ] 输出 effective `[ai].enabled × [publish].include_unscored` 真值表行（见 [config-schema §4.1](../design/config-schema.md#41-aienabled--publishinclude_unscored-真值表)）
-- [ ] 退出码：合法 → 0；schema 不匹配 / 缺必填 / 非法 URL → exit 78；I/O 错误 → exit 74
-- [ ] CLI 集成测试：合法配置返回 0；故意篡改的非法 toml 返回 78；缺失 OPENAI_API_KEY（且 `ai.enabled=true`）返回 78
+- [x] 在 `cli` crate 注册 `validate-config` 子命令（clap derive）
+- [x] 调用 `config::load_all` 完整加载 `.env` + `app.toml` + `categories/*.toml`
+- [x] 输出每个被加载文件路径与 schema_version
+- [x] 输出 effective `[ai].enabled × [publish].include_unscored` 真值表行（见 [config-schema §4.1](../design/config-schema.md#41-aienabled--publishinclude_unscored-真值表)）
+- [x] 退出码：合法 → 0；schema 不匹配 / 缺必填 / 非法 URL → exit 78；I/O 错误 → exit 74
+- [x] CLI 集成测试：合法配置返回 0；故意篡改的非法 toml 返回 78；缺失 OPENAI_API_KEY（且 `ai.enabled=true`）返回 78
 
 ## 6. Workstream W4：存储模型与 migration
 
@@ -189,118 +189,118 @@
 
 首版 migration **一次性**建齐所有表（见 storage-schema §3）；`raw_artifacts` 不是可选。
 
-- [ ] 在 `migrations/` 中创建初始 migration
-- [ ] 建 `feed_sources`
-- [ ] 建 `feed_entries`
-- [ ] 建 `articles`
-- [ ] 建 `article_ai_results`
-- [ ] 建 `publish_records`
-- [ ] 建 `publish_items`
-- [ ] 建 `raw_artifacts`
-- [ ] 建 `rule_versions`（含 `status` 列 + partial unique index `UNIQUE (kind) WHERE status='active'`；首版数据 INSERT 时直接 `status='active'`）
-- [ ] 建 `run_events`
-- [ ] 建 `reindex_jobs`（含 `UNIQUE (target) WHERE state IN ('pending','running')` partial unique index；见 [storage-schema §4.10](../design/storage-schema.md#410-reindex_jobs)）
+- [x] 在 `migrations/` 中创建初始 migration
+- [x] 建 `feed_sources`
+- [x] 建 `feed_entries`
+- [x] 建 `articles`
+- [x] 建 `article_ai_results`
+- [x] 建 `publish_records`
+- [x] 建 `publish_items`
+- [x] 建 `raw_artifacts`
+- [x] 建 `rule_versions`（含 `status` 列 + partial unique index `UNIQUE (kind) WHERE status='active'`；首版数据 INSERT 时直接 `status='active'`）
+- [x] 建 `run_events`
+- [x] 建 `reindex_jobs`（含 `UNIQUE (target) WHERE state IN ('pending','running')` partial unique index；见 [storage-schema §4.10](../design/storage-schema.md#410-reindex_jobs)）
 
 ### T402 实现 storage crate
 
-- [ ] 初始化连接池
-- [ ] 实现 migration 执行入口
-- [ ] 实现 repository trait
-- [ ] 实现 SQLite 适配
-- [ ] 预留 PostgreSQL 适配
+- [x] 初始化连接池
+- [x] 实现 migration 执行入口
+- [x] 实现 repository trait
+- [x] 实现 SQLite 适配
+- [x] 预留 PostgreSQL 适配
 
 ### T403 实现 claim + lease
 
-- [ ] 设计任务领取 SQL
-- [ ] 设计 lease 过期回收 SQL
-- [ ] 设计 attempt_count 更新逻辑
-- [ ] 编写并发领取测试
+- [x] 设计任务领取 SQL
+- [x] 设计 lease 过期回收 SQL
+- [x] 设计 attempt_count 更新逻辑
+- [x] 编写并发领取测试
 
 ### T404 幂等测试
 
-- [ ] 重复 feed entry 插入幂等测试
-- [ ] 重复 article 写入防重测试
-- [ ] 重复 publish 创建防重测试
+- [x] 重复 feed entry 插入幂等测试
+- [x] 重复 article 写入防重测试
+- [x] 重复 publish 创建防重测试
 
 ## 7. Workstream W5：Feed 抓取闭环
 
 ### T501 实现 feed crate
 
-- [ ] 实现 HTTP client
-- [ ] 实现 RSS parser
-- [ ] 实现 Atom parser
-- [ ] 实现 JSON feed parser
-- [ ] 实现 `FeedEntryMeta` 规范化
+- [x] 实现 HTTP client
+- [x] 实现 RSS parser
+- [x] 实现 Atom parser
+- [x] 实现 JSON feed parser
+- [x] 实现 `FeedEntryMeta` 规范化
 
 ### T502 实现条件请求
 
-- [ ] 支持 ETag
-- [ ] 支持 Last-Modified
-- [ ] source 表更新条件请求字段
+- [x] 支持 ETag
+- [x] 支持 Last-Modified
+- [x] source 表更新条件请求字段
 
 ### T503 实现 ingest use-case
 
-- [ ] 枚举可用 source
-- [ ] 拉取 feed
-- [ ] 解析 entry
-- [ ] 第一层去重
-- [ ] 第二层 `normalized_link` 去重
-- [ ] 生成正文抓取任务
+- [x] 枚举可用 source
+- [x] 拉取 feed
+- [x] 解析 entry
+- [x] 第一层去重
+- [x] 第二层 `normalized_link` 去重
+- [x] 生成正文抓取任务
 
 ### T504 可观测性
 
-- [ ] 记录 source 抓取成功 / 失败事件
-- [ ] 输出新增 entry 数、跳过数、错误数
+- [x] 记录 source 抓取成功 / 失败事件
+- [x] 输出新增 entry 数、跳过数、错误数
 
 ## 8. Workstream W6：正文提取闭环
 
 ### T601 初始化 extractor crate
 
-- [ ] 实现详情页 HTML 抓取
-- [ ] 实现内容大小限制
-- [ ] 实现媒体类型过滤
+- [x] 实现详情页 HTML 抓取
+- [x] 实现内容大小限制
+- [x] 实现媒体类型过滤
 
 ### T602 实现多策略正文提取
 
-- [ ] 规则型提取入口
-- [ ] 通用 readability / 密度提取入口
-- [ ] summary fallback
-- [ ] content_quality 分级
+- [x] 规则型提取入口
+- [x] 通用 readability / 密度提取入口
+- [x] summary fallback
+- [x] content_quality 分级
 
 ### T603 正文去重
 
-- [ ] 生成 `content_hash`
-- [ ] 第三层内容去重
-- [ ] 回退或失败状态推进
+- [x] 生成 `content_hash`
+- [x] 第三层内容去重
+- [x] 回退或失败状态推进
 
 ### T604 replay(html)
 
-- [x] 保存 HTML artifact 的策略开关（已实现：`extractor::artifact::ArtifactWriter` + `RetentionPolicy` 五策略；在 strategy chain 前写入，配合 §4.5 `[artifact]` 配置）
+- [x] 保存 HTML artifact 的策略开关（已实现：`runtime::artifact::ArtifactWriter` + `RetentionPolicy` 五策略；在 strategy chain 前写入，配合 §4.5 `[artifact]` 配置）
 - [x] 实现 HTML payload 重放入口（CLI `replay --kind html` 已实现：`crates/cli/src/commands/replay.rs::ReplayKind::Html` 走 `ReadabilityStrategy.extract`，支持 `--diff` 与 articles 表对比；W9c 注释 file-backed artifact 仍待支持）
 
 ## 9. Workstream W7：AI 闭环
 
 ### T701 初始化 ai crate
 
-- [ ] 实现 `AiClient`
-- [ ] 实现 prompt 组装
-- [ ] 实现输入裁剪
-- [ ] 实现 JSON 优先输出解析
-- [ ] 实现 JSON schema 漂移处理（向后兼容字段解析测试，不接受文本协议 fallback）
+- [x] 实现 `AiClient`
+- [x] 实现 prompt 组装
+- [x] 实现输入裁剪
+- [x] 实现 JSON 优先输出解析
+- [x] 实现 JSON schema 漂移处理（向后兼容字段解析测试，不接受文本协议 fallback）
 
 ### T702 实现 ai-run use-case
 
-- [ ] 为 `articles.state='persisted'` 生成 `article_ai_results` 任务行（同事务推进 `articles.state='ai_pending'`）
-- [ ] claim `article_ai_results.state='pending'` 批次
-- [ ] 执行 AI 调用
-- [ ] 更新 `article_ai_results`
-- [ ] 推进 `articles.state` 至 `ai_done` / `ready_for_publish` / `publish_skipped`
+- [x] 为 `articles.state='persisted'` 生成 `article_ai_results` 任务行（同事务推进 `articles.state='ai_pending'`）
+- [x] claim `article_ai_results.state='pending'` 批次
+- [x] 执行 AI 调用
+- [x] 更新 `article_ai_results`
+- [x] 推进 `articles.state` 至 `ai_done` / `ready_for_publish` / `publish_skipped`
 
 ### T703 失败与版本化
 
-- [ ] 记录 `prompt_version`
-- [ ] 记录 `output_schema_version`
-- [ ] 区分可重试与永久失败
+- [x] 记录 `prompt_version`
+- [x] 记录 `output_schema_version`
+- [x] 区分可重试与永久失败
 
 ### T704 replay(ai) 与 backfill(ai)
 
@@ -312,30 +312,30 @@
 
 ### T801 初始化 report crate
 
-- [ ] 选稿逻辑
-- [ ] excerpt 逻辑
-- [ ] Markdown renderer
-- [ ] frontmatter builder
+- [x] 选稿逻辑
+- [x] excerpt 逻辑
+- [x] Markdown renderer
+- [x] frontmatter builder
 
 ### T802 实现发布快照
 
-- [ ] 设计 `PublishSnapshot`
-- [ ] 冻结 `publish_records`
-- [ ] 冻结 `publish_items`
+- [x] 设计 `PublishSnapshot`
+- [x] 冻结 `publish_records`
+- [x] 冻结 `publish_items`
 
 ### T803 初始化 publish crate
 
-- [ ] 实现 local fs target
-- [ ] 实现 GitHub target
-- [ ] 实现本地 + GitHub 双目标协调
+- [x] 实现 local fs target
+- [x] 实现 GitHub target
+- [x] 实现本地 + GitHub 双目标协调
 
 ### T804 实现 publish use-case
 
-- [ ] 领取待发布任务
-- [ ] 渲染 Markdown
-- [ ] 本地落盘
-- [ ] GitHub 提交
-- [ ] 更新发布状态
+- [x] 领取待发布任务
+- [x] 渲染 Markdown
+- [x] 本地落盘
+- [x] GitHub 提交
+- [x] 更新发布状态
 
 ### T805 rebuild-report
 
@@ -391,7 +391,7 @@
 - [x] `runtime`: `last_processed_id` checkpoint 持久化（每批 commit 一并写入）（F15-8 advance_checkpoint + F15-12 batch boundary test）
 - [x] `runtime`: lease 过期 reclaim 时保留 checkpoint，下次 claim 从 `last_processed_id` 继续（F15-5 reclaim_expired_leases + F15-12 `reindex_lease_reclaim_preserves_checkpoint_and_started_at_for_resume`）
 - [x] `runtime`: crash-after-batch 恢复（已 commit 批次保留，未 commit 批次丢失，重启从 checkpoint 重做）（F15-12 同上测试锁定 reclaim → resume 路径）
-- [ ] `runtime`: 批次内部重试上限（`[retry] reindex_max_attempts`，待 W3/T301 加入 config-schema）；超限 → `failed`
+- [x] `runtime`: 批次内部重试上限（`[retry] reindex_max_attempts`，待 W3/T301 加入 config-schema）；超限 → `failed`
 
 #### 并发与 abort
 
@@ -401,7 +401,7 @@
 
 #### 进度输出
 
-- [ ] CLI 默认输出每批进度（target / batch_index / processed / last_id / 速率）（F15-10 决策：summary-only 模型；流式 stderr 留待后续 UX commit）
+- [x] CLI 默认输出每批进度（target / batch_index / processed / last_id / 速率）（F15-10 决策：summary-only 模型；流式 stderr 留待后续 UX commit）
 - [x] 终态行输出激活信息（rule_versions pending → active / 旧 active → superseded）（F15-10 pretty 模板 "Job id" 行 + finalize tracing::info）
 - [x] `--dry-run` 仅输出启动信息 + "Would update N rows"（F15-10 dry_run pretty 模板）
 
@@ -413,7 +413,7 @@
 - [x] crash-after-batch 恢复（F15-12 lease reclaim resume 测试覆盖该路径）
 - [x] 隔离：reindex `running` 期间 active_rule 仍返回旧 active 行（F15-12 `reindex_link_hash_does_not_modify_articles_or_content_hashes` + F15-6 active_rule resolver 在 pending 行存在时跳过的单测）
 - [x] 并发拒绝：同 target 第二个 `reindex --target X` 启动失败（F15-12 `reindex_second_start_for_same_target_rejected_by_partial_unique`）
-- [ ] target='all' 部分失败：第一个 target completed、第二个 target failed 时，第三个 target 不启动；前一个的 active 状态保持（CLI 入口已支持 target='all' 顺序执行；中途失败 short-circuit 行为仍需补端到端 CLI 集成测试）
+- [x] target='all' 部分失败：第一个 target completed、第二个 target failed 时，第三个 target 不启动；前一个的 active 状态保持（CLI 入口已支持 target='all' 顺序执行；中途失败 short-circuit 行为仍需补端到端 CLI 集成测试）
 - [x] active rule 不被 pending 污染：`active_rule(kind)` 在 reindex 全程返回旧 active 行（F15-12 `reindex_mark_failed_keeps_old_active_and_pending_new_rule_version` + F15-3 path 不变量）
 
 #### migrate 边界（文档）
@@ -424,23 +424,23 @@
 
 ### T1001 Docker 交付
 
-- [ ] 新增 multi-stage `docker/Dockerfile`
-- [ ] builder/runtime 分离
-- [ ] runtime 保留 CA 证书与 tzdata
-- [ ] 默认非 root 用户
+- [x] 新增 multi-stage `docker/Dockerfile`
+- [x] builder/runtime 分离
+- [x] runtime 保留 CA 证书与 tzdata
+- [x] 默认非 root 用户
 
 ### T1002 镜像策略
 
-- [ ] 生产镜像
-- [ ] 调试镜像
+- [x] 生产镜像
+- [x] 调试镜像
 
 ### T1003 CI
 
-- [ ] `cargo fmt --check`
-- [ ] `cargo clippy`
-- [ ] `cargo test`
-- [ ] migration smoke test
-- [ ] docker build smoke test
+- [x] `cargo fmt --check`
+- [x] `cargo clippy`
+- [x] `cargo test`
+- [x] migration smoke test
+- [x] docker build smoke test
 - [x] 禁止吞错误的 ripgrep 扫描步骤：模式 A `if\s+let\s+Ok\([^)]*\)\s*=`、模式 B `\.ok\(\)\s*;\s*$`；任一非空匹配 fail（F15-15 `.ci/check_swallowed_errors.sh`，依据 [error-and-observability §3.3 Enforcement 第 2 层](../design/error-and-observability.md#33-绝不静默吞掉错误)）
 - [x] 维护 `.ci/swallowed-error-allowlist.txt`（F15-15 落地时盘点 4 条 pre-existing 豁免，每条记录 reason；新增条目须在 PR 中说明并经设计 owner 批准）
 
@@ -483,7 +483,85 @@
 - 能推送 GitHub
 - 能 rebuild-report
 
-## 14. 任务执行原则
+## 14. Workstream W11：存储多方言适配
+
+> 后期补加的工作流，与 W0-W10 并列。详细设计见
+> [storage-multi-dialect.md](../design/storage-multi-dialect.md)。
+> 完成总览见该文档 §9.1 "P3 / P4 进度（W11 实际）"。
+
+### T1101 P0：设计文档冻结
+
+- [x] `docs/design/storage-multi-dialect.md` 落地（§1-§11 完整覆盖：定位、
+  类型映射、SQL 方言差异、Rust 抽象层、PG schema 翻译、测试矩阵、分阶段实施）
+- [x] memory 收编（用户私有 memory `project-postgres-dialect-decision` /
+  `project-bootstrap-rule-active-seam`）
+
+### T1102 P1：必改清单（保留 SQLite 行为零回归）
+
+- [x] §5.3 占位符 `?` → `$N`（SQLite 也支持，跨方言统一）
+- [x] §5.3 `SELECT EXISTS(...)` → `CASE WHEN ... THEN 1 ELSE 0 END` decode `i32`
+- [x] §5.3 生产 SQL 内嵌时间函数（`CURRENT_TIMESTAMP` / `datetime('now')`）
+  全部改应用层 bind `OffsetDateTime::now_utc()`
+- [x] §5.3 migrations 移到 `migrations/sqlite/` + `sqlx::migrate!` 路径同步
+- [x] §5.3 id=1 rule_versions bootstrap 改 `active_rule_or_register`（PG IDENTITY
+  兼容）
+- [x] §4.2 DTO 类型对齐（`AiSuccessOutcome.tokens_in/out/latency_ms` 升 `Option<i64>`）
+
+### T1103 P2：StoragePool enum + migrations/postgres 翻译
+
+- [x] `StoragePool::{Sqlite, Postgres}` enum + `StoragePool::build` 按 URL 路由
+- [x] `migrations/postgres/0001_init.{up,down}.sql` 全量翻译（BIGINT IDENTITY /
+  TIMESTAMPTZ / BYTEA / partial unique / FK / CHECK 等不变量保留）
+- [x] `migrations/postgres/0002_reindex_jobs_and_rule_status.{up,down}.sql`
+- [x] `cli::db_url::resolve_storage_url` §5.4 driver/URL 一致性校验
+- [x] PG 容器（testcontainers）`apply` + 幂等 + `undo` 测试 (`migrations_postgres_apply_tests.rs`)
+- [x] driver=postgres 启动期 fail-fast（P3 阶段 stub；P4-C/C2 后真接通）
+
+### T1104 P3：repo PG 分支 + §6.4 SKIP LOCKED + §6.6 SQLSTATE
+
+11 个 storage repo 全部双方言：
+
+- [x] `classify_db_error` 多方言：PG SQLSTATE（23505/23503/23502/23514/40001/40P01/08xxx/57P0x）+ SQLite 现有 +
+  §6.6 完整码表 + `is_retryable` 跨方言（P3-B + P3-B-fix1）
+- [x] **P3-C 核心 repo**（4 个）：FeedSource / ReindexJob / Article / PublishRecord+PublishItem
+- [x] **P3-E 剩余 repo**（5 个）：RuleVersion / RawArtifact / RunEvent / FeedEntry / ArticleAiResult
+- [x] §6.4 `FOR UPDATE SKIP LOCKED` 全部 4 个 claim 批量路径：
+  - `reindex_jobs.claim_pending` / `claim_by_id`
+  - `publish_records.claim_*_for_*`
+  - `feed_entries.claim_pending_fetch`
+  - `article_ai_results.claim_pending`
+- [x] §8.4 PG lease 并发竞争测试（2 条）+ 4 个 SKIP LOCKED 确定性测试（用 tx_a
+  `SELECT FOR UPDATE` 锁住 + 另一连接 claim 必跳证据）
+- [x] PG test fixture：per-test schema + URL `?options=-c search_path=...`（§8.3 方案 1）
+- [x] P3-C-fix1：跨表 lease guard 实证 + dual_backend_smoke + PG 批量 UPDATE
+- [x] P3-E-fix1：`get_or_create` PG 并发首版 retry（partial unique race）+
+  fixture 加固
+
+### T1105 P4：CI / 文档 / cli/runtime 端到端
+
+- [x] CI postgres service：`.github/workflows/ci.yml` `test-pg` job（services.postgres:16-alpine +
+  `cargo test storage --include-ignored --test-threads=1` + `cli migrate run/check` on PG）
+- [x] README 更新真实状态（"切换到 PostgreSQL（W11+）" 小节 + 配置示例 + 端到端边界）
+- [x] **P4-C**：`cli/runtime` 切 `new_with_storage(StoragePool)` 单一入口；7 个子命令
+  （run/ingest/ai-run/publish/rebuild-report/reindex/backfill）端到端 PG
+- [x] **P4-C2**：`cli doctor / replay` PG（4 个 health-check 双轨化 + 9 个 deep_scan
+  invariant SQL `CAST(... AS TEXT)` + `html_diff` 占位符升 `$1`）
+- [x] **P4-fix1**：codex 7 项收口（PG `SELECT 1` INT4 / `assert_no_running_reindex`
+  双轨 / driver-URL 错配走 exit 78 ConfigError / `migrate check` 真校验 pending
+  drift / FailedBacklogCheck publish 状态笔误 / 文档对齐）
+- [ ] **P4-D**（**用户决议跳过**）：storage 18 集成测试 rstest 全量参数化。
+  实质等价由 `dual_backend_smoke_tests.rs`（9 happy × 2 backend = 18 对照）+
+  CI `test-pg`（~50 storage `--include-ignored` 测试）覆盖。完整参数化作 v0.2 follow-up
+- [ ] **P4-E**（**v0.2 follow-up**）：runtime 5 集成测试 rstest 参数化双轨（端到端 PG 已通过 P4-C 实现）
+
+### T1106 W11 followups（v0.2+）
+
+- [ ] JSONB 升级（`run_events.context_json` / `article_ai_results.tags_json`），
+  GIN 索引 + `@>` / `->>` 查询能力（v0.1.0 保留 TEXT；详见 §10）
+- [ ] 配置版本化协同（`docs/design/config-versioning.md` 待新增；§10）
+- [ ] SQLite → PG 数据迁移工具（`cli migrate-to-pg`，§10）
+
+## 15. 任务执行原则
 
 - 任何任务若触及骨架级变更，必须先暂停并提交变更分析
 - 任何任务若需要跨层写入，必须先回到工程宪法核对边界

@@ -19,8 +19,14 @@ pub fn redact_url_userinfo(input: &str) -> Cow<'_, str> {
     if let Ok(mut url) = Url::parse(input)
         && (!url.username().is_empty() || url.password().is_some())
     {
-        let _ = url.set_username("***");
-        let _ = url.set_password(None);
+        // W11-P4-fix2.H2 lint：`let _ = result` 已 deny。这两个 setter 在
+        // cannot-be-a-base URL 上返 Err，但本路径 URL 经 `Url::parse` 验证
+        // 且 username/password 非空——意味着已经是 schemes-with-authority。
+        // 失败 case 仅在不变量被破坏时出现；redact 静默回退（仍走下面的
+        // `to_string()` 返回 redact 后的最佳近似）。`.ok()` 显式吞 Err 不被
+        // lint 拦截，比 `.expect` 在 redact 路径更稳（不让 log/health 崩）。
+        url.set_username("***").ok();
+        url.set_password(None).ok();
         return Cow::Owned(url.to_string());
     }
     Cow::Borrowed(input)

@@ -135,15 +135,20 @@ impl PgTestContext {
         if self.cleaned.swap(true, Ordering::SeqCst) {
             return; // 已清，幂等
         }
+        // W11-P4-fix2.H2 lint：cleanup 是 best-effort，所有失败（超时 / DB
+        // 错误）静默吞——容器停止会兜底回收整库。`.ok()` 显式表达忽略 Err。
         if let StoragePool::Postgres(p) = &self.pool {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), p.close()).await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), p.close())
+                .await
+                .ok();
         }
         let drop_sql = format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", self.schema);
-        let _ = tokio::time::timeout(
+        tokio::time::timeout(
             std::time::Duration::from_secs(5),
             sqlx::query(&drop_sql).execute(&self.admin),
         )
-        .await;
+        .await
+        .ok();
     }
 }
 
@@ -159,9 +164,11 @@ impl Drop for PgTestContext {
         let admin = self.admin.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"))
+                // W11-P4-fix2.H2 lint：detached cleanup 任务，错误无救赎；显式 .ok()。
+                sqlx::query(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"))
                     .execute(&admin)
-                    .await;
+                    .await
+                    .ok();
             });
         }
     }

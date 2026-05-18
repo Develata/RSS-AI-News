@@ -42,8 +42,15 @@ pub fn normalize_link(raw: &str) -> Result<NormalizedLink, LinkNormalizeError> {
         scheme => return Err(LinkNormalizeError::UnsupportedScheme(scheme.to_string())),
     }
 
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
+    // url::Url::set_{username,password} 在 cannot-be-a-base URL 上返 Err。
+    // 上面 scheme 匹配已过滤 http/https 之外的方案，这两个**必然**是
+    // schemes-with-authority，set_* 在该不变量下不能失败。`.expect` 让违反
+    // 假设时立即 panic（W11-P4-fix2.H2 lint：`let _ = result` 已 deny，
+    // 改 `.expect` 表达"理论不可能 + 失败必 panic"——比静默丢错更显式）。
+    url.set_username("")
+        .expect("http/https URL must allow set_username; checked above");
+    url.set_password(None)
+        .expect("http/https URL must allow set_password; checked above");
     url.set_fragment(None);
 
     normalize_path(&mut url);

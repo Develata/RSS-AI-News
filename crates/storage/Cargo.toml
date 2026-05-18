@@ -17,3 +17,6 @@ tokio.workspace = true
 # W11-P3-A.5：本地拉一次性 PG 容器跑 migrations apply。
 # 测试默认 #[ignore]，要 docker daemon 时显式 `cargo test -- --include-ignored`。
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
+
+[lints]
+workspace = true

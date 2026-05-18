@@ -133,11 +133,13 @@ publish_max_attempts = 5
 max_batches_per_run = 10                 # extract claim 循环 / ai-run process 阶段 claim 循环上限；0 = 不限（仅由 lease/宿主超时兜底）
 
 # === Raw Artifact ===
+# v0.1.0：仅 inline 路径生效；inline_threshold_bytes / file_storage_dir
+# 为 v0.2 file-backed 路径预留（参见 replay-and-artifacts §2.3）。
 [artifact]
 retention_policy = "on_failure"          # 默认；"always" | "on_failure" | "sampled" | "debug_only" | "off"。on_failure = 解析前总是捕获并独立事务 commit，关联操作成功后同步清理；详见 replay-and-artifacts §3.1 / §3.2
 sample_rate = 0.1                        # retention_policy = "sampled" 时生效
-inline_threshold_bytes = 65536           # 小于此阈值存 inline，大于存文件
-file_storage_dir = "data/artifacts"
+inline_threshold_bytes = 65536           # v0.2：小于此阈值存 inline，大于存文件；v0.1.0 全 inline 不消费
+file_storage_dir = "data/artifacts"      # v0.2：file-backed artifact 落盘根目录；v0.1.0 不消费
 ttl_days = 30                            # expires_at 计算依据
 
 # === 观测 ===

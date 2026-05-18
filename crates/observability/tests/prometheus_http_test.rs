@@ -29,7 +29,10 @@ async fn metrics_endpoint_serves_counter_in_prometheus_text_format() {
         if std::net::TcpListener::bind(addr).is_ok() {
             let recorder_clone = recorder.clone();
             server_task = Some(tokio::spawn(async move {
-                let _ = serve_metrics(addr, recorder_clone).await;
+                // W11-P4-fix2.H2 lint：测试 spawn 任务，hyper server 退出时返
+                // 的 Err 不影响测试用例本身（端口探测早已成功）。`.ok()` 显式
+                // 表达 fire-and-forget。
+                serve_metrics(addr, recorder_clone).await.ok();
             }));
             server_addr = Some(addr);
             break;
@@ -78,7 +81,10 @@ async fn metrics_endpoint_returns_404_for_unknown_path() {
         if std::net::TcpListener::bind(addr).is_ok() {
             let recorder_clone = recorder.clone();
             server_task = Some(tokio::spawn(async move {
-                let _ = serve_metrics(addr, recorder_clone).await;
+                // W11-P4-fix2.H2 lint：测试 spawn 任务，hyper server 退出时返
+                // 的 Err 不影响测试用例本身（端口探测早已成功）。`.ok()` 显式
+                // 表达 fire-and-forget。
+                serve_metrics(addr, recorder_clone).await.ok();
             }));
             server_addr = Some(addr);
             break;

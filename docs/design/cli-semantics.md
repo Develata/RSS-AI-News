@@ -36,7 +36,7 @@ rss-ai-news
 | `--log-level` | | enum | `info` | `trace`/`debug`/`info`/`warn`/`error` |
 | `--log-format` | | enum | `pretty` | `pretty`/`json` |
 | `--output-format` | `-o` | enum | `pretty` | `pretty`/`json`，所有命令的最终结果输出格式（见 §5.2）|
-| `--dry-run` | `-n` | bool | false | 只打印将要执行的操作，不写入 |
+| `--dry-run` | `-n` | bool | false | 只打印将要执行的操作，不写入。**v0.1.0**：仅 `reindex` 子命令实装；其它命令（`ingest` 等）传入会返 `DryRunNotImplemented`，留待 v0.2 |
 | `--category` | `-C` | string | 全部 | 只处理指定分类 |
 | `--timezone` | | string | `app.toml` 中的值 | 覆盖时区 |
 
@@ -56,7 +56,7 @@ rss-ai-news
 
 | 参数 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `--source` | string | 全部 | 只处理指定源（`category_key:source_key`）|
+| `--source` | string | 全部 | 只处理指定源（`category_key:source_key`）。**v0.1.0**：CLI flag 暴露但传入会返 `IngestSourceFilterNotImplemented`（runtime 层的 category/max_sources 过滤已支持，但 source-level filter 尚未接通），留待 v0.2 |
 | `--skip-fetch` | bool | false | 跳过正文抓取（只发现 + 去重）|
 | `--batch-size` | u32 | 50 | 每批抓取任务数 |
 | `--max-batches` | u32 | `runtime.max_batches_per_run`（默认 10）| `extract` 阶段 claim 循环上限（不约束 fetch 阶段，后者由 `concurrent_feeds` + 宿主超时兜底）；`0` = 不限。详见 [config-schema §4.4](./config-schema.md#44-runtime-字段语义) |

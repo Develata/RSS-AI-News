@@ -19,9 +19,11 @@ use time::{Duration, OffsetDateTime};
 /// - 若未来扩展写入请求体（如调试场景下保留 outgoing request 用于
 ///   replay），调用方必须先剥离 secret-bearing headers。
 ///
-/// `ArtifactConfig.file_storage_dir` 配置项当前未被任何代码消费——artifact
-/// 全部走 SQLite，不落盘。该字段保留为未来 large-payload 外置存储的接入点；
-/// 接入时需同步遵守上述不变量。
+/// `ArtifactConfig.file_storage_dir` / `inline_threshold_bytes` 配置项当前
+/// 未被任何代码消费——v0.1.0 仅实装 inline 路径（artifact 全部走数据库，
+/// SQLite BLOB / PG BYTEA）。该字段为 v0.2 large-payload 外置存储预留；
+/// schema CHECK 约束已支持 `storage_kind='file'`，未来切换不需要 migration。
+/// 详见 [`docs/design/replay-and-artifacts.md`] §2.3。
 pub struct ArtifactWriter<'a> {
     pub config: &'a ArtifactConfig,
     pub repo: &'a dyn RawArtifactRepository,

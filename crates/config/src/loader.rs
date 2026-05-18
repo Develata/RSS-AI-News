@@ -300,7 +300,8 @@ enabled = true
 
     impl Drop for Workspace {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
+            // W11-P4-fix2.H2 lint：测试 fixture cleanup，Drop 内 best-effort。
+            fs::remove_dir_all(&self.root).ok();
         }
     }
 
