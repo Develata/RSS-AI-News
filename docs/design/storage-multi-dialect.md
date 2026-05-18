@@ -543,6 +543,37 @@ services:
 
 总计 **3-4 周**。每个 Phase 独立可发布。
 
+### 9.1 P3 / P4 进度（W11 实际）
+
+P3 已闭环（commit `8fefc11..c1f2ba5`）：
+
+- **P3-A**：PG pool + migrations 双目录 + apply 双轨
+- **P3-B**：`classify_db_error` 多方言 + SQLSTATE
+- **P3-C**：4 个核心 repo PG 分支（feed_source / reindex_job / article /
+  publish_record + publish_item）+ §8.4 PG 并发竞争测试 + per-test schema
+  fixture
+- **P3-C-fix1**：跨表 lease guard 真证 + SKIP LOCKED 确定性 + 显式
+  fixture cleanup + PG 批量 UPDATE
+- **P3-E**：剩余 5 个 repo PG 分支（rule_version / raw_artifact /
+  run_event / feed_entry / article_ai_result）
+- **P3-E-fix1**：`get_or_create` PG 并发首版 retry + AI claim SKIP LOCKED
+  测试 + advance 回滚分支测试 + dual_backend smoke 扩 P3-E 5 个 happy +
+  PG 测试显式 cleanup + fixture admin pool max=8
+
+至此 storage 11 个 repo 全部双方言，~50 PG/双轨测试本地全绿。
+
+P4 进度：
+
+- **P4-A**：CI `test-pg` job 落地（services.postgres + storage
+  `--include-ignored` + `migrate run/check` on PG）—— commit `9afc080`
+- **P4-B**：README + 本文档进度同步 —— 本次 commit
+- **P4-C**（待办）：`cli/runtime` 切 `new_with_storage(StoragePool)` 单一入口；
+  废 `Repo::new(SqlitePool)` 旧 API；context_factory + 10 个 repo 调用点
+  改造，让 `cli run / ingest / ai-run / publish / doctor` 端到端 PG 路径
+  可用（当前仍 `UnsupportedBackend` fail-fast）
+- **P4-D**（待办）：storage 18 个集成测试 rstest 参数化双轨
+- **P4-E**（待办）：runtime 5 个集成测试 rstest 参数化双轨（依赖 P4-C）
+
 ## 10. Open Questions / Followups
 
 - **JSONB**：`run_events.context_json` / `article_ai_results.tags_json` 在 PG 上保留 TEXT 还是升 JSONB？JSONB 提供 GIN 索引和 `@>` / `->>` 查询能力，但 Rust 侧 binding 改动较大。**决议**：初期保留 TEXT，应用层负责 JSON 有效性；下一轮 W11+ 单独评估升级路径
@@ -568,6 +599,14 @@ services:
   - **§5.4**：`ConfigError::DriverMismatch` 不存在——改走现有 `ConfigError::ValidationFailed` + `Diagnostic`
   - **§1.2 / §7.3 / §10**：清理本机绝对路径 `C:/Users/QQ/...` 与失效相对路径 `../../crates/storage/migrations/...`；改为纯文本引用 memory slug 或 P1 后正确路径
   - **§9**：P1 估时 3-4 天 → 4-5 天，覆盖新增的 DTO 类型对齐 + `include_str!` 路径子任务
+
+- 2026-05-18 — W11 P3 闭环 + P4-A/B 实装：
+  - **§9.1**：新增"P3 / P4 进度（W11 实际）"小节，记录从 P3-A 到 P3-E-fix1
+    14 个 commit 的实际落地情况；P4-A（CI `test-pg` job）+ P4-B（README +
+    本文档同步）已 commit；P4-C/D/E 列为待办
+  - **README**：删"默认 SQLite，PG 通过 DATABASE_URL 切换"裂缝表述，改"双
+    backend 实装"+ 新增"## 切换到 PostgreSQL（W11+）"小节明确配置 +
+    edge case（cli run/ingest 等端到端仍待 P4-C）
 
 - 2026-05-16 — codex 一轮 review 反馈整合（CRITICAL 1 + HIGH 5 + MEDIUM 4）：
   - **§2.5 / §3 / §5.3 / §10**：id=1 bootstrap 升 P0 阻塞决议，P1 改 `active_rule_or_register`

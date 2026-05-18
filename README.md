@@ -4,7 +4,8 @@ Rust 重构版的 RSS-AI-News：单进程一次性 CLI，按调度外部触发�
 **抓取 → 正文提取 → AI 摘要/分类 → 报告生成 → 发布** 的端到端管线。
 
 - 12 crate workspace，edition 2024 / resolver 3，构建工具链下限 **Rust 1.88+**（受 Cargo.lock 中 `time@0.3.47` / `icu_*@2.2.0` 等传递依赖约束）
-- 默认 SQLite，PostgreSQL 通过 `DATABASE_URL` 切换；rustls-only TLS，无 OpenSSL native
+- **双 backend 存储**：SQLite（默认）/ PostgreSQL（W11 起实装），按 `database.driver` 与 `DATABASE_URL` 路由（详见 [`docs/design/storage-multi-dialect.md`](./docs/design/storage-multi-dialect.md)）。CI 双轨覆盖 PG 路径
+- rustls-only TLS，无 OpenSSL native
 - 单进程 / 单次执行，**无内置 cron**：调度交给外部（cron / systemd timer / GitHub Actions / k8s CronJob）
 - 状态机驱动 + artifact 留痕，所有"对外副作用"均可幂等回放
 
@@ -66,10 +67,52 @@ cargo run --bin rss-ai-news -- --config-dir configs validate-config
 | `OPENAI_BASE_URL`  | 同上；默认 `https://api.openai.com/v1` |
 | `RSSHUB_BASE_URL`  | 任一 source 使用 `{RSSHUB}` 占位符时 |
 | `GITHUB_TOKEN`     | publish 远端模式且 `publish.github_owner` 非空时 |
-| `DATABASE_URL`     | 切换 PostgreSQL 时；不设则走 SQLite |
+| `DATABASE_URL`     | `database.driver = "postgres"` 时**必填**（`postgres://` 或 `postgresql://` scheme）；`driver = "sqlite"` 时可空，留空则用 `database.sqlite_path` |
 | `HTTP_PROXY` / `HTTPS_PROXY` | 可选；进程级代理 |
 
 校验未通过时进程以 **exit 78**（`ConfigError`）退出，错误信息会逐项指出缺哪个变量。
+
+---
+
+## 切换到 PostgreSQL（W11+）
+
+`storage` crate 自 W11 起双 backend 实装，11 个 repo 全部双轨化。
+
+```toml
+# configs/app.toml
+[database]
+driver = "postgres"
+# sqlite_path 在 driver = "postgres" 时被忽略，但字段仍需存在（schema 校验）
+sqlite_path = "data/rss-ai-news.db"
+max_connections = 8
+busy_timeout_ms = 5000  # PG 路径忽略
+```
+
+```bash
+# .env
+DATABASE_URL=postgres://user:pass@host:5432/dbname
+```
+
+启动期 `cli::context_factory` 会校验 `driver` 与 `DATABASE_URL` scheme
+一致（见 [`docs/design/storage-multi-dialect.md`](./docs/design/storage-multi-dialect.md) §5.4），
+不一致即 exit 78。
+
+**初始化 PG 库**：
+
+```bash
+DATABASE_URL=postgres://... rss-ai-news --config-dir configs migrate run
+DATABASE_URL=postgres://... rss-ai-news --config-dir configs migrate check
+```
+
+migrations 按 backend 分目录（`migrations/sqlite/` vs `migrations/postgres/`），
+但共享 schema 编号空间（CI 校验对偶）。
+
+**已知边界（W11 P3 阶段）**：
+
+- `cli run / ingest / ai-run / publish / doctor` 端到端 PG 路径**尚未接通**
+  （cli/runtime 仍用 `Repo::new(SqlitePool)` 旧入口；W11 P4-C 待办）
+- PG 路径目前能用：`cli migrate run/check` + storage crate 测试套件
+- 跟踪：[`docs/design/storage-multi-dialect.md`](./docs/design/storage-multi-dialect.md) §9 P4 行
 
 ---
 
@@ -135,7 +178,9 @@ cargo test --workspace --locked
 
 CI（GitHub Actions，见 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)）覆盖：
 `lint` / `test` / `migration-smoke`（sqlite 上跑 `migrate run` + `migrate check`）/
-`docker-build`（runtime + debug 镜像构建并 `--help` 冒烟）。
+`test-pg`（postgres:16-alpine service + storage `--include-ignored` 全套 +
+`migrate run/check` on PG）/ `docker-build`（runtime + debug 镜像构建并
+`--help` 冒烟）。
 
 Windows 上单机内存紧张时用 `CARGO_BUILD_JOBS=1` 限制并发。
 
@@ -143,6 +188,9 @@ Windows 上单机内存紧张时用 `CARGO_BUILD_JOBS=1` 限制并发。
 
 ## 状态
 
-W0–W10 全部交付（详见任务文档）。336 个测试通过。首版 `0.1.0`。
+W0–W11 P3 全部交付（详见任务文档）。storage 多方言双 backend 落地：
+11 个 repo 全部 SQLite/PostgreSQL 双轨化，PG-only / 双轨 smoke 测试约
+50 条全绿，CI `test-pg` 覆盖 PG 路径。W11 P4-C/D（cli/runtime 切换 +
+全量集成测试参数化）进行中。首版 `0.1.0`。
 
 License: MIT。
