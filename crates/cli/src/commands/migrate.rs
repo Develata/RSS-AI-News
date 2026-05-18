@@ -2,7 +2,8 @@ use std::io::{self, Write};
 
 use rss_ai_news_config as config;
 use rss_ai_news_storage::{
-    ReindexJobRepo, ReindexJobRepository, StorageError, StoragePool, run_migrations,
+    ReindexJobRepo, ReindexJobRepository, StorageError, StoragePool, embedded_migration_versions,
+    run_migrations,
 };
 use serde::Serialize;
 
@@ -65,7 +66,26 @@ pub async fn check(cli: &Cli) -> Result<MigrateCommandSummary, CliError> {
     // `migrate check` 仅查询版本号，**不阻塞**：cli-semantics §4.8 line 312
     // 只要求 `migrate run` 互斥；check 是只读探测，allowed during reindex
     // —— 否则 oncall 无法在排查时确认 schema 状态。
-    summary("check", &pool).await
+    //
+    // codex P4 评审 MEDIUM-2 修复：原 check 仅查 `_sqlx_migrations` 版本号，
+    // 不与代码内嵌 migration 列表对比 → 空库 / 漏 migration 也"check 成功"。
+    // 改：对比 embedded vs applied，任一 embedded 版本未 applied 即视为
+    // pending drift，返 `CliError::MigrateCheckPending`（exit code 1，CI
+    // 可据此分类）。
+    let result = summary("check", &pool).await?;
+    let embedded = embedded_migration_versions(&pool);
+    let pending: Vec<i64> = embedded
+        .iter()
+        .copied()
+        .filter(|v| !result.applied_versions.contains(v))
+        .collect();
+    if !pending.is_empty() {
+        return Err(CliError::MigrateCheckPending {
+            pending,
+            applied_count: result.applied_versions.len(),
+        });
+    }
+    Ok(result)
 }
 
 /// `migrate run` 阻塞门（F15-11）。若有 `pending`/`running` 状态的
@@ -76,18 +96,18 @@ pub async fn check(cli: &Cli) -> Result<MigrateCommandSummary, CliError> {
 /// 此时视为 0 active job 放行（新库 + 首次 migrate run 不存在 active
 /// reindex_job 的物理可能性）；其它 StorageError 透传。
 pub(crate) async fn assert_no_running_reindex(pool: &StoragePool) -> Result<(), CliError> {
-    // P3-A-fix1.H1：PG 阶段 reindex_jobs 业务方法仍是 require_sqlite stub
-    // （`list_running` 必返 UnsupportedBackend）。语义上等同"新库 + 首次
-    // migrate run"——PG 上不可能存在 active reindex_job，直接放行。
-    // P3-C 把 reindex_job_repo PG 分支实装后，本路径自然回到真实查询。
-    let sqlite_pool = match pool {
-        StoragePool::Sqlite(p) => p,
-        StoragePool::Postgres(_) => return Ok(()),
-    };
-    let repo = ReindexJobRepo::new(sqlite_pool.clone());
+    // codex P4 评审 HIGH-2 修复：P3-C-2 已让 ReindexJobRepo PG 分支实装，
+    // P4-C 让 `cli reindex` 端到端走 PG，PG 库当然可能存在 pending/running
+    // reindex_jobs；原 PG special-case 直接 Ok(()) 让 `migrate run` 在
+    // reindex 进行中也照样跑 schema migration，违反 F15-11 阻塞门契约。
+    //
+    // 改：跨方言 list_running()；新库容错保留（reindex_jobs 表不存在 →
+    // 0 active job 放行）。PG 错误 message 文本不同，所以容错改成同时识别
+    // SQLite "no such table" 与 PG "relation ... does not exist"。
+    let repo = ReindexJobRepo::new_with_storage(pool.clone());
     let rows = match repo.list_running().await {
         Ok(rows) => rows,
-        Err(StorageError::Sqlx(error)) if error.to_string().contains("no such table") => {
+        Err(StorageError::Sqlx(error)) if is_missing_reindex_jobs_table_error(&error) => {
             return Ok(());
         }
         Err(error) => return Err(CliError::Storage(error)),
@@ -100,6 +120,13 @@ pub(crate) async fn assert_no_running_reindex(pool: &StoragePool) -> Result<(), 
         count: job_ids.len(),
         job_ids,
     })
+}
+
+/// 识别"reindex_jobs 表不存在"错误的跨方言文本。SQLite 报
+/// `no such table: reindex_jobs`；PG 报 `relation "reindex_jobs" does not exist`。
+fn is_missing_reindex_jobs_table_error(error: &sqlx::Error) -> bool {
+    let msg = error.to_string();
+    msg.contains("no such table") || msg.contains("does not exist")
 }
 
 /// W11-P3-A-fix1.H1：按 `loaded.app.database.driver` + `loaded.env.database_url`

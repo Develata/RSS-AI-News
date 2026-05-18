@@ -109,13 +109,16 @@ pub mod db_check {
         }
 
         async fn run(&self) -> CheckOutcome {
-            // W11-P4-C2：双轨化。`SELECT 1` 跨方言等价。
+            // codex P4 评审 HIGH-1 修复：PG 上 `SELECT 1` 的 `1` 字面量推断为
+            // INT4，decode `i64` 会因类型 mismatch 失败让 doctor 误报 DB 不可达。
+            // 改 `i32`：SQLite INTEGER storage class 兼容 `i32` decode（与
+            // storage-multi-dialect §5.2 第 4 行 EXISTS CASE WHEN decode `i32` 同模式）。
             let result = match &self.pool {
                 StoragePool::Sqlite(p) => {
-                    sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(p).await
+                    sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(p).await
                 }
                 StoragePool::Postgres(p) => {
-                    sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(p).await
+                    sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(p).await
                 }
             };
             let backend = match &self.pool {
@@ -534,11 +537,15 @@ pub mod backlog_check {
         async fn run(&self) -> CheckOutcome {
             // W11-P4-C2：3 个 COUNT(*) 标量子查询跨方言等价；PG/SQLite
             // 都返 BIGINT/INT64，decode i64 OK；row.get::<i64, _> 跨方言通用。
+            // codex P4 评审 MEDIUM-3 修复：publish_records 失败状态枚举值是
+            // 'failed'（见 PublishState::Failed → "failed"），不是
+            // 'permanent_failed'（后者仅 article_ai_results 用）。原写法在
+            // 任何 publish 失败下都漏报 0，让运维永远看不到 publish 积压。
             let sql = r#"
                 SELECT
                     (SELECT COUNT(*) FROM feed_entries WHERE state = 'failed') AS failed_entries,
                     (SELECT COUNT(*) FROM article_ai_results WHERE state = 'permanent_failed') AS failed_ai,
-                    (SELECT COUNT(*) FROM publish_records WHERE state = 'permanent_failed') AS failed_publish
+                    (SELECT COUNT(*) FROM publish_records WHERE state = 'failed') AS failed_publish
                 "#;
             let result: Result<(i64, i64, i64), sqlx::Error> = match &self.pool {
                 StoragePool::Sqlite(p) => sqlx::query(sql)

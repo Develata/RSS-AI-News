@@ -107,12 +107,17 @@ DATABASE_URL=postgres://... rss-ai-news --config-dir configs migrate check
 migrations 按 backend 分目录（`migrations/sqlite/` vs `migrations/postgres/`），
 但共享 schema 编号空间（CI 校验对偶）。
 
-**已知边界（W11 P3 阶段）**：
+**当前 PG 端到端覆盖（W11 P4 阶段）**：
 
-- `cli run / ingest / ai-run / publish / doctor` 端到端 PG 路径**尚未接通**
-  （cli/runtime 仍用 `Repo::new(SqlitePool)` 旧入口；W11 P4-C 待办）
-- PG 路径目前能用：`cli migrate run/check` + storage crate 测试套件
-- 跟踪：[`docs/design/storage-multi-dialect.md`](./docs/design/storage-multi-dialect.md) §9 P4 行
+- 所有 10 个 CLI 子命令（`run / ingest / ai-run / publish / rebuild-report /
+  reindex / backfill / doctor / replay / migrate`）端到端 PG 路径已打通
+- `doctor` 4 个 health-check + 9 个 deep-scan invariant 双轨化
+- 配置错配（`driver` 与 `DATABASE_URL` scheme 不一致 / `driver=postgres`
+  无 URL）走 **exit 78**（ConfigError），与 SQLite 路径同语义
+- `migrate check` 检测 pending drift：内嵌 migration 与 `_sqlx_migrations`
+  对比，缺失非零退出
+- CI `test-pg` job 自动覆盖 ~50 PG 测试 + `migrate run/check` smoke
+- 跟踪：[`docs/design/storage-multi-dialect.md`](./docs/design/storage-multi-dialect.md) §9.1 W11 P3/P4 进度
 
 ---
 
@@ -188,9 +193,9 @@ Windows 上单机内存紧张时用 `CARGO_BUILD_JOBS=1` 限制并发。
 
 ## 状态
 
-W0–W11 P3 全部交付（详见任务文档）。storage 多方言双 backend 落地：
-11 个 repo 全部 SQLite/PostgreSQL 双轨化，PG-only / 双轨 smoke 测试约
-50 条全绿，CI `test-pg` 覆盖 PG 路径。W11 P4-C/D（cli/runtime 切换 +
-全量集成测试参数化）进行中。首版 `0.1.0`。
+W0–W11 P4 全部交付（详见任务文档）。storage 多方言双 backend 落地：
+11 个 repo 全部 SQLite/PostgreSQL 双轨化，cli 10 个子命令端到端 PG
+路径打通，PG-only / 双轨 smoke 测试约 50 条全绿，CI `test-pg` 覆盖
+PG 路径。首版 `0.1.0`。
 
 License: MIT。

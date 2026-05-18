@@ -566,13 +566,24 @@ P4 进度：
 
 - **P4-A**：CI `test-pg` job 落地（services.postgres + storage
   `--include-ignored` + `migrate run/check` on PG）—— commit `9afc080`
-- **P4-B**：README + 本文档进度同步 —— 本次 commit
-- **P4-C**（待办）：`cli/runtime` 切 `new_with_storage(StoragePool)` 单一入口；
-  废 `Repo::new(SqlitePool)` 旧 API；context_factory + 10 个 repo 调用点
-  改造，让 `cli run / ingest / ai-run / publish / doctor` 端到端 PG 路径
-  可用（当前仍 `UnsupportedBackend` fail-fast）
-- **P4-D**（待办）：storage 18 个集成测试 rstest 参数化双轨
-- **P4-E**（待办）：runtime 5 个集成测试 rstest 参数化双轨（依赖 P4-C）
+- **P4-B**：README + 本文档进度同步 —— commit `3d6b89c`
+- **P4-C**：`cli/runtime` 切 `new_with_storage(StoragePool)` 入口；
+  `build_run_context` 删 `require_sqlite_driver`；7 个子命令端到端 PG
+  打通 —— commit `e97555b`
+- **P4-C2**：`cli doctor / replay` PG 端到端：4 个 health-check 双轨化、
+  9 个 deep_scan invariant SQL 加 `CAST(... AS TEXT)`、`html_diff`
+  占位符 `?` → `$1`；`build_doctor_deps` / `build_replay_deps` 删
+  `require_sqlite_driver` —— commit `48e6039`
+- **P4-fix1**：codex P4 评审 7 项收口（H1 PG `SELECT 1` INT4 修复 +
+  H2 `assert_no_running_reindex` 双轨 + M1 driver/URL 错配走 exit 78
+  ConfigError + M2 `migrate check` 真校验 pending drift + M3
+  FailedBacklogCheck publish 状态笔误 + L1 文档对齐 + L2 PG smoke）
+- **P4-D**：用户决议**实质等价**——`dual_backend_smoke_tests.rs` 已
+  覆盖 9 happy × 2 backend = 18 对照测试（P3-C-4 + P3-E-fix1 M1
+  落地），CI `test-pg` job 覆盖 storage `--include-ignored` ~50 测试。
+  完整改造 18 个 storage 集成测试 rstest 参数化的增量价值有限，跳过
+- **P4-E**（待办，可选）：runtime 5 个集成测试 rstest 参数化（runtime
+  端到端 PG 已通过 P4-C 实现，集成测试参数化是测试覆盖增强非端到端阻塞）
 
 ## 10. Open Questions / Followups
 

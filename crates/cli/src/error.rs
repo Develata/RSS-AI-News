@@ -36,6 +36,18 @@ pub enum CliError {
          abort them with `reindex --abort <id>` first; ids: {job_ids:?}"
     )]
     MigrateBlockedByRunningReindex { job_ids: Vec<i64>, count: usize },
+    /// codex P4 评审 MEDIUM-2 修复：`migrate check` 检测到代码内嵌 migration
+    /// 与数据库 `_sqlx_migrations` 表存在 drift（有未应用的版本号）。归为
+    /// RuntimeError → exit 1（操作前提不满足，CI / 部署脚本据此触发 migrate run）。
+    #[error(
+        "migrate check: {count} pending migration version(s) — run `migrate run` to apply; \
+         pending: {pending:?}, applied: {applied_count}",
+        count = pending.len()
+    )]
+    MigrateCheckPending {
+        pending: Vec<i64>,
+        applied_count: usize,
+    },
     /// cli-semantics §4.8 line 287: `--target` 在非 `--abort` 模式下必填。
     /// clap 通过 `required_unless_present` 保证；这是兜底，正常分支不会触发。
     #[error("reindex requires --target unless --abort is given")]
@@ -61,6 +73,7 @@ impl CliError {
             Self::ReindexAbortInvalidJobId { .. } => "reindex_abort_invalid_job_id",
             Self::ReindexTargetRequired => "reindex_target_required",
             Self::MigrateBlockedByRunningReindex { .. } => "migrate_blocked_by_running_reindex",
+            Self::MigrateCheckPending { .. } => "migrate_check_pending",
             Self::ReplayArtifactNotFound { .. } => "replay_artifact_not_found",
             Self::PublishRecordNotFound { .. } => "publish_record_not_found",
             Self::PublishConflict { .. } => "publish_conflict",
@@ -83,6 +96,7 @@ impl CliError {
             | Self::DryRunNotImplemented
             | Self::IngestSourceFilterNotImplemented
             | Self::MigrateBlockedByRunningReindex { .. }
+            | Self::MigrateCheckPending { .. }
             | Self::ReplayArtifactNotFound { .. }
             | Self::PublishRecordNotFound { .. }
             | Self::PublishConflict { .. } => ExitCode::RuntimeError,
@@ -110,6 +124,14 @@ impl CliError {
                 "migrate run blocked: {count} reindex job(s) still active — \
                  abort them with `reindex --abort <id>` first; ids: {job_ids:?}"
             ),
+            Self::MigrateCheckPending {
+                pending,
+                applied_count,
+            } => format!(
+                "migrate check: {} pending migration version(s) — run `migrate run` to apply; \
+                 pending: {pending:?}, applied: {applied_count}",
+                pending.len()
+            ),
             Self::ReplayArtifactNotFound { kind, key } => {
                 format!("replay artifact not found: {kind}/{key}")
             }
@@ -127,7 +149,9 @@ impl CliError {
             Self::DoctorFailed => "doctor",
             Self::DryRunNotImplemented | Self::IngestSourceFilterNotImplemented => "ingest",
             Self::ReindexAbortInvalidJobId { .. } | Self::ReindexTargetRequired => "reindex",
-            Self::MigrateBlockedByRunningReindex { .. } => "migrate",
+            Self::MigrateBlockedByRunningReindex { .. } | Self::MigrateCheckPending { .. } => {
+                "migrate"
+            }
             Self::ReplayArtifactNotFound { .. } => "replay",
             Self::PublishRecordNotFound { .. } | Self::PublishConflict { .. } => "publish",
             _ => "unknown",

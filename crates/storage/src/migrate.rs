@@ -30,3 +30,22 @@ async fn run_postgres_migrations(pool: &PgPool) -> Result<(), StorageError> {
         .await
         .map_err(|error| StorageError::Migration(error.to_string()))
 }
+
+/// codex P4 评审 MEDIUM-2 修复：返回当前 backend 内嵌 migration 集合的所有版本号
+/// （从 `sqlx::migrate!` 宏编译期解析的 `migrations/sqlite|postgres` 目录），
+/// 让 `cli migrate check` 能与 `_sqlx_migrations` 表对比检测 pending drift。
+///
+/// `sqlx::migrate!` 必须在 caller 处展开（宏路径相对 CARGO_MANIFEST_DIR），所以
+/// 该 helper 必须留在 storage crate；cli 通过本函数获取版本号清单。
+pub fn embedded_migration_versions(pool: &StoragePool) -> Vec<i64> {
+    match pool {
+        StoragePool::Sqlite(_) => sqlx::migrate!("../../migrations/sqlite")
+            .iter()
+            .map(|m| m.version)
+            .collect(),
+        StoragePool::Postgres(_) => sqlx::migrate!("../../migrations/postgres")
+            .iter()
+            .map(|m| m.version)
+            .collect(),
+    }
+}

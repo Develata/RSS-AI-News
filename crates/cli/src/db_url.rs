@@ -18,8 +18,8 @@
 
 use std::path::Path;
 
-use rss_ai_news_config::{DatabaseDriver, LoadedConfig};
-use rss_ai_news_storage::{StorageError, StoragePool};
+use rss_ai_news_config::{ConfigError, DatabaseDriver, Diagnostic, DiagnosticReport, LoadedConfig};
+use rss_ai_news_storage::StoragePool;
 
 use crate::error::CliError;
 
@@ -44,7 +44,8 @@ pub fn resolve_storage_url_parts(
     match (driver, url_env) {
         (DatabaseDriver::Sqlite, Some(url)) => {
             if StoragePool::is_postgres_url(url) {
-                return Err(mismatch(
+                return Err(driver_url_mismatch(
+                    "database.driver",
                     "driver=sqlite but DATABASE_URL has postgres scheme",
                 ));
             }
@@ -58,22 +59,28 @@ pub fn resolve_storage_url_parts(
         }
         (DatabaseDriver::Postgres, Some(url)) => {
             if !StoragePool::is_postgres_url(url) {
-                return Err(mismatch(
+                return Err(driver_url_mismatch(
+                    "database.driver",
                     "driver=postgres but DATABASE_URL is not postgres scheme",
                 ));
             }
             Ok(url.to_string())
         }
-        (DatabaseDriver::Postgres, None) => {
-            Err(CliError::Storage(StorageError::UnsupportedBackend(
-                "driver=postgres requires DATABASE_URL (env or .env file)".into(),
-            )))
-        }
+        (DatabaseDriver::Postgres, None) => Err(driver_url_mismatch(
+            "env.database_url",
+            "driver=postgres requires DATABASE_URL (env or .env file)",
+        )),
     }
 }
 
-fn mismatch(msg: &str) -> CliError {
-    CliError::Storage(StorageError::UnsupportedBackend(msg.into()))
+/// codex P4 评审 MEDIUM-1 修复：driver/URL 错配应走 `ConfigError::ValidationFailed`
+/// （exit 78），而不是 `StorageError::UnsupportedBackend` 包装成 RuntimeError
+/// （exit 1）。设计 storage-multi-dialect §5.4 显式规定走 `DiagnosticReport`
+/// 通路，与 README 退出码表对齐。
+fn driver_url_mismatch(field_path: &str, message: &str) -> CliError {
+    CliError::Config(ConfigError::ValidationFailed {
+        report: DiagnosticReport::new(vec![Diagnostic::new("env", field_path, message)]),
+    })
 }
 
 #[cfg(test)]
@@ -104,9 +111,10 @@ mod tests {
             &sqlite_path(),
         )
         .unwrap_err();
+        // codex P4 fix1.M1：driver/URL 错配走 ConfigError exit 78
         assert!(matches!(
             err,
-            CliError::Storage(StorageError::UnsupportedBackend(_))
+            CliError::Config(ConfigError::ValidationFailed { .. })
         ));
     }
 
@@ -135,7 +143,7 @@ mod tests {
                 .unwrap_err();
         assert!(matches!(
             err,
-            CliError::Storage(StorageError::UnsupportedBackend(_))
+            CliError::Config(ConfigError::ValidationFailed { .. })
         ));
     }
 
@@ -144,10 +152,12 @@ mod tests {
         let err =
             resolve_storage_url_parts(DatabaseDriver::Postgres, None, &sqlite_path()).unwrap_err();
         match err {
-            CliError::Storage(StorageError::UnsupportedBackend(msg)) => {
+            CliError::Config(ConfigError::ValidationFailed { report }) => {
+                let msg = report.diagnostics[0].message.clone();
                 assert!(msg.contains("DATABASE_URL"));
+                assert_eq!(report.diagnostics[0].field_path, "env.database_url");
             }
-            other => panic!("expected UnsupportedBackend, got {other:?}"),
+            other => panic!("expected Config::ValidationFailed, got {other:?}"),
         }
     }
 
