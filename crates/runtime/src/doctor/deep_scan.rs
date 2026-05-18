@@ -1,7 +1,6 @@
-use sqlx::{Row, SqlitePool};
+use rss_ai_news_storage::{StorageError, StoragePool};
+use sqlx::Row;
 use time::OffsetDateTime;
-
-use rss_ai_news_storage::StorageError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InvariantId {
@@ -64,13 +63,22 @@ pub struct DeepScanReport {
     pub results: Vec<InvariantResult>,
 }
 
-pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
+/// W11-P4-C2：deep_scan 双轨化。
+///
+/// 关键 SQL 改造：所有 `'literal' || some_bigint_col` 在 PG 上需 `CAST(... AS TEXT)`
+/// 显式转换（PG 严格类型，`text || bigint` 报 "operator does not exist"），
+/// SQLite 动态类型本来无需 cast 但能接受 `CAST(... AS TEXT)`。两边统一用
+/// `CAST(... AS TEXT)` 跨方言等价。
+///
+/// 占位符 `$1` 跨方言（SQLite 也支持）。
+pub async fn run(pool: &StoragePool) -> Result<DeepScanReport, StorageError> {
     let specs = [
         Spec {
             id: InvariantId::I1,
             select: r#"
                 SELECT fe.id AS primary_id,
-                       'feed_entry_id=' || fe.id || ' article_id=' || COALESCE(CAST(fe.article_id AS TEXT), 'NULL') AS message
+                       'feed_entry_id=' || CAST(fe.id AS TEXT) || ' article_id=' ||
+                       COALESCE(CAST(fe.article_id AS TEXT), 'NULL') AS message
                 FROM feed_entries fe
                 WHERE fe.state = 'persisted'
                   AND (fe.article_id IS NULL
@@ -82,7 +90,7 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
             id: InvariantId::I2,
             select: r#"
                 SELECT a.id AS primary_id,
-                       'article_id=' || a.id || ' state=' || a.state AS message
+                       'article_id=' || CAST(a.id AS TEXT) || ' state=' || a.state AS message
                 FROM articles a
                 WHERE a.state = 'ai_pending'
                   AND NOT EXISTS (SELECT 1 FROM article_ai_results aar WHERE aar.article_id = a.id)
@@ -93,7 +101,7 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
             id: InvariantId::I3,
             select: r#"
                 SELECT a.id AS primary_id,
-                       'article_id=' || a.id || ' state=' || a.state AS message
+                       'article_id=' || CAST(a.id AS TEXT) || ' state=' || a.state AS message
                 FROM articles a
                 WHERE a.state = 'ai_done'
                   AND NOT EXISTS (
@@ -107,7 +115,7 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
             id: InvariantId::I4,
             select: r#"
                 SELECT a.id AS primary_id,
-                       'article_id=' || a.id || ' state=' || a.state AS message
+                       'article_id=' || CAST(a.id AS TEXT) || ' state=' || a.state AS message
                 FROM articles a
                 WHERE a.state = 'ready_for_publish'
                   AND NOT EXISTS (
@@ -127,8 +135,9 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
             id: InvariantId::I4APrime,
             select: r#"
                 SELECT pi.id AS primary_id,
-                       'publish_item_id=' || pi.id || ' article_id=' || pi.article_id ||
-                       ' article_ai_result_id=' || pi.article_ai_result_id AS message
+                       'publish_item_id=' || CAST(pi.id AS TEXT) ||
+                       ' article_id=' || CAST(pi.article_id AS TEXT) ||
+                       ' article_ai_result_id=' || CAST(pi.article_ai_result_id AS TEXT) AS message
                 FROM publish_items pi
                 WHERE pi.article_ai_result_id IS NOT NULL
                   AND NOT EXISTS (
@@ -144,7 +153,8 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
             id: InvariantId::I4BPrime,
             select: r#"
                 SELECT pi.id AS primary_id,
-                       'publish_item_id=' || pi.id || ' article_id=' || pi.article_id AS message
+                       'publish_item_id=' || CAST(pi.id AS TEXT) ||
+                       ' article_id=' || CAST(pi.article_id AS TEXT) AS message
                 FROM publish_items pi
                 WHERE pi.article_ai_result_id IS NULL
                   AND EXISTS (
@@ -158,7 +168,7 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
             id: InvariantId::I5,
             select: r#"
                 SELECT a.id AS primary_id,
-                       'article_id=' || a.id || ' state=' || a.state AS message
+                       'article_id=' || CAST(a.id AS TEXT) || ' state=' || a.state AS message
                 FROM articles a
                 WHERE a.state = 'published'
                   AND NOT EXISTS (
@@ -174,7 +184,8 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
             id: InvariantId::I6,
             select: r#"
                 SELECT pr.id AS primary_id,
-                       'publish_record_id=' || pr.id || ' article_id=' || a.id ||
+                       'publish_record_id=' || CAST(pr.id AS TEXT) ||
+                       ' article_id=' || CAST(a.id AS TEXT) ||
                        ' article.state=' || a.state AS message
                 FROM publish_records pr
                 JOIN publish_items pi ON pi.publish_record_id = pr.id
@@ -188,8 +199,9 @@ pub async fn run(pool: &SqlitePool) -> Result<DeepScanReport, StorageError> {
             id: InvariantId::I8,
             select: r#"
                 SELECT aar.id AS primary_id,
-                       'article_ai_result_id=' || aar.id || ' article_id=' || aar.article_id ||
-                       ' lease_expires_at=' || aar.lease_expires_at AS message
+                       'article_ai_result_id=' || CAST(aar.id AS TEXT) ||
+                       ' article_id=' || CAST(aar.article_id AS TEXT) ||
+                       ' lease_expires_at=' || COALESCE(CAST(aar.lease_expires_at AS TEXT), 'NULL') AS message
                 FROM article_ai_results aar
                 WHERE aar.state = 'running'
                   AND aar.lease_expires_at IS NOT NULL
@@ -217,30 +229,56 @@ struct Spec {
 }
 
 async fn run_spec(
-    pool: &SqlitePool,
+    pool: &StoragePool,
     spec: Spec,
     now: OffsetDateTime,
 ) -> Result<InvariantResult, StorageError> {
     let count_sql = format!("SELECT COUNT(*) FROM ({}) AS violations", spec.select);
-    let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
-    for _ in 0..spec.now_binds {
-        count_q = count_q.bind(now);
-    }
-    let total_count = count_q.fetch_one(pool).await.map_err(StorageError::from)?;
-
     let select_sql = format!("{} LIMIT 50", spec.select);
-    let mut select_q = sqlx::query(&select_sql);
-    for _ in 0..spec.now_binds {
-        select_q = select_q.bind(now);
-    }
-    let rows = select_q.fetch_all(pool).await.map_err(StorageError::from)?;
-    let violations = rows
-        .into_iter()
-        .map(|row| ViolationRow {
-            primary_id: row.get::<i64, _>("primary_id"),
-            message: row.get::<String, _>("message"),
-        })
-        .collect();
+
+    let (total_count, violations) = match pool {
+        StoragePool::Sqlite(p) => {
+            let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
+            for _ in 0..spec.now_binds {
+                count_q = count_q.bind(now);
+            }
+            let total_count = count_q.fetch_one(p).await.map_err(StorageError::from)?;
+            let mut select_q = sqlx::query(&select_sql);
+            for _ in 0..spec.now_binds {
+                select_q = select_q.bind(now);
+            }
+            let rows = select_q.fetch_all(p).await.map_err(StorageError::from)?;
+            let violations: Vec<ViolationRow> = rows
+                .into_iter()
+                .map(|row| ViolationRow {
+                    primary_id: row.get::<i64, _>("primary_id"),
+                    message: row.get::<String, _>("message"),
+                })
+                .collect();
+            (total_count, violations)
+        }
+        StoragePool::Postgres(p) => {
+            let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
+            for _ in 0..spec.now_binds {
+                count_q = count_q.bind(now);
+            }
+            let total_count = count_q.fetch_one(p).await.map_err(StorageError::from)?;
+            let mut select_q = sqlx::query(&select_sql);
+            for _ in 0..spec.now_binds {
+                select_q = select_q.bind(now);
+            }
+            let rows = select_q.fetch_all(p).await.map_err(StorageError::from)?;
+            let violations: Vec<ViolationRow> = rows
+                .into_iter()
+                .map(|row| ViolationRow {
+                    primary_id: row.get::<i64, _>("primary_id"),
+                    message: row.get::<String, _>("message"),
+                })
+                .collect();
+            (total_count, violations)
+        }
+    };
+
     Ok(InvariantResult {
         id: spec.id,
         violations,

@@ -12,7 +12,9 @@ macro_rules! happy_path_test {
         #[tokio::test]
         async fn $name() {
             let pool = make_pool().await;
-            let report = run(&pool).await.expect("deep scan");
+            let report = run(&rss_ai_news_storage::StoragePool::Sqlite(pool.clone()))
+                .await
+                .expect("deep scan");
             assert_eq!(violations(&report, $id), 0);
         }
     };
@@ -34,7 +36,9 @@ async fn i4_violation_ready_for_publish_with_non_keep_ai_row() {
     let article_id = insert_article(&pool, "ready_for_publish").await;
     insert_ai_result(&pool, article_id, "filtered", None, None).await;
 
-    let report = run(&pool).await.expect("deep scan");
+    let report = run(&rss_ai_news_storage::StoragePool::Sqlite(pool.clone()))
+        .await
+        .expect("deep scan");
 
     assert_eq!(violations(&report, InvariantId::I4), 1);
 }
@@ -47,7 +51,9 @@ async fn i4a_prime_violation_publish_item_bound_to_non_keep_ai_result() {
     let publish_record_id = insert_publish_record(&pool, "snapshot_frozen").await;
     insert_publish_item(&pool, publish_record_id, article_id, Some(ai_result_id)).await;
 
-    let report = run(&pool).await.expect("deep scan");
+    let report = run(&rss_ai_news_storage::StoragePool::Sqlite(pool.clone()))
+        .await
+        .expect("deep scan");
 
     assert_eq!(violations(&report, InvariantId::I4APrime), 1);
 }
@@ -60,7 +66,9 @@ async fn i4b_prime_violation_passthrough_publish_item_with_ai_row() {
     let publish_record_id = insert_publish_record(&pool, "snapshot_frozen").await;
     insert_publish_item(&pool, publish_record_id, article_id, None).await;
 
-    let report = run(&pool).await.expect("deep scan");
+    let report = run(&rss_ai_news_storage::StoragePool::Sqlite(pool.clone()))
+        .await
+        .expect("deep scan");
 
     assert_eq!(violations(&report, InvariantId::I4BPrime), 1);
 }
@@ -73,7 +81,9 @@ async fn i6_violation_successful_publish_record_with_unpublished_article() {
     let publish_record_id = insert_publish_record(&pool, "published_remote").await;
     insert_publish_item(&pool, publish_record_id, article_id, Some(ai_result_id)).await;
 
-    let report = run(&pool).await.expect("deep scan");
+    let report = run(&rss_ai_news_storage::StoragePool::Sqlite(pool.clone()))
+        .await
+        .expect("deep scan");
 
     assert_eq!(violations(&report, InvariantId::I6), 1);
 }

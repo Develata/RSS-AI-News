@@ -153,17 +153,28 @@ pub async fn run(cli: &Cli, args: &ReplayArgs) -> Result<ReplayCommandSummary, C
 }
 
 async fn html_diff(
-    pool: &sqlx::SqlitePool,
+    pool: &rss_ai_news_storage::StoragePool,
     canonical_link: &str,
     replay_hash: &str,
     replay_word_count: u32,
 ) -> Result<Value, CliError> {
-    let row = sqlx::query_as::<_, (String, i64, String)>(
-        "SELECT title, word_count, content_hash FROM articles WHERE canonical_link = ? LIMIT 1",
-    )
-    .bind(canonical_link)
-    .fetch_optional(pool)
-    .await
+    // W11-P4-C2：`?` → `$1` 跨方言占位符 + StoragePool match 分发。
+    let sql =
+        "SELECT title, word_count, content_hash FROM articles WHERE canonical_link = $1 LIMIT 1";
+    let row = match pool {
+        rss_ai_news_storage::StoragePool::Sqlite(p) => {
+            sqlx::query_as::<_, (String, i64, String)>(sql)
+                .bind(canonical_link)
+                .fetch_optional(p)
+                .await
+        }
+        rss_ai_news_storage::StoragePool::Postgres(p) => {
+            sqlx::query_as::<_, (String, i64, String)>(sql)
+                .bind(canonical_link)
+                .fetch_optional(p)
+                .await
+        }
+    }
     .map_err(rss_ai_news_storage::StorageError::from)?;
     Ok(match row {
         Some((title, word_count, content_hash)) => json!({

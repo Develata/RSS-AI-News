@@ -21,6 +21,7 @@ sqlx.workspace = true
 fs2.workspace = true
 time.workspace = true
 rss-ai-news-config.workspace = true
+rss-ai-news-storage.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

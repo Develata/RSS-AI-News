@@ -12,6 +12,7 @@ use rss_ai_news_observability::health::{
     disk_check::DiskSpaceCheck, github_check::GitHubPingCheck,
     migration_check::MigrationVersionCheck, openai_check::OpenAiPingCheck,
 };
+use rss_ai_news_storage::StoragePool;
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use tempfile::TempDir;
 use wiremock::{
@@ -28,7 +29,8 @@ async fn config_check_reports_ok() {
 #[tokio::test]
 async fn database_check_reports_ok() {
     let pool = memory_pool().await;
-    let check = DatabaseConnectivityCheck::new(pool);
+    // W11-P4-C2：health check 入口接 StoragePool
+    let check = DatabaseConnectivityCheck::new(StoragePool::Sqlite(pool));
     assert!(matches!(check.run().await, CheckOutcome::Ok(_)));
 }
 
@@ -36,7 +38,7 @@ async fn database_check_reports_ok() {
 async fn database_check_reports_fail_for_closed_pool() {
     let pool = memory_pool().await;
     pool.close().await;
-    let check = DatabaseConnectivityCheck::new(pool);
+    let check = DatabaseConnectivityCheck::new(StoragePool::Sqlite(pool));
     assert!(matches!(check.run().await, CheckOutcome::Fail(_)));
 }
 
@@ -52,7 +54,7 @@ async fn migration_check_reports_ok_when_migration_table_has_version() {
         .await
         .expect("insert migration");
 
-    let check = MigrationVersionCheck::new(pool);
+    let check = MigrationVersionCheck::new(StoragePool::Sqlite(pool));
     assert!(matches!(check.run().await, CheckOutcome::Ok(_)));
 }
 

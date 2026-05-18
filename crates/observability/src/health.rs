@@ -3,8 +3,9 @@ use std::{path::PathBuf, sync::Arc};
 use async_trait::async_trait;
 use reqwest::Client;
 use rss_ai_news_config::LoadedConfig;
+use rss_ai_news_storage::StoragePool;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::Row;
 use time::OffsetDateTime;
 
 use crate::redact::{redact_authorization_header, redact_url_userinfo};
@@ -92,11 +93,11 @@ pub mod db_check {
     use super::*;
 
     pub struct DatabaseConnectivityCheck {
-        pool: SqlitePool,
+        pool: StoragePool,
     }
 
     impl DatabaseConnectivityCheck {
-        pub fn new(pool: SqlitePool) -> Self {
+        pub fn new(pool: StoragePool) -> Self {
             Self { pool }
         }
     }
@@ -108,13 +109,23 @@ pub mod db_check {
         }
 
         async fn run(&self) -> CheckOutcome {
-            match sqlx::query_scalar::<_, i64>("SELECT 1")
-                .fetch_one(&self.pool)
-                .await
-            {
-                Ok(1) => CheckOutcome::Ok("SQLite reachable".to_string()),
+            // W11-P4-C2：双轨化。`SELECT 1` 跨方言等价。
+            let result = match &self.pool {
+                StoragePool::Sqlite(p) => {
+                    sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(p).await
+                }
+                StoragePool::Postgres(p) => {
+                    sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(p).await
+                }
+            };
+            let backend = match &self.pool {
+                StoragePool::Sqlite(_) => "SQLite",
+                StoragePool::Postgres(_) => "PostgreSQL",
+            };
+            match result {
+                Ok(1) => CheckOutcome::Ok(format!("{backend} reachable")),
                 Ok(value) => CheckOutcome::Fail(format!("unexpected SELECT 1 result: {value}")),
-                Err(error) => CheckOutcome::Fail(format!("SQLite query failed: {error}")),
+                Err(error) => CheckOutcome::Fail(format!("{backend} query failed: {error}")),
             }
         }
     }
@@ -124,12 +135,12 @@ pub mod migration_check {
     use super::*;
 
     pub struct MigrationVersionCheck {
-        pool: SqlitePool,
+        pool: StoragePool,
         expected_version: i64,
     }
 
     impl MigrationVersionCheck {
-        pub fn new(pool: SqlitePool) -> Self {
+        pub fn new(pool: StoragePool) -> Self {
             Self {
                 pool,
                 expected_version: 1,
@@ -144,10 +155,24 @@ pub mod migration_check {
         }
 
         async fn run(&self) -> CheckOutcome {
-            let result =
-                sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(version) FROM _sqlx_migrations")
-                    .fetch_one(&self.pool)
-                    .await;
+            // W11-P4-C2：_sqlx_migrations 是 sqlx 框架表，SQLite/PG 同名同字段。
+            // PG `MAX(version)` decode `Option<i64>` 也工作（_sqlx_migrations.version BIGINT）。
+            let result = match &self.pool {
+                StoragePool::Sqlite(p) => {
+                    sqlx::query_scalar::<_, Option<i64>>(
+                        "SELECT MAX(version) FROM _sqlx_migrations",
+                    )
+                    .fetch_one(p)
+                    .await
+                }
+                StoragePool::Postgres(p) => {
+                    sqlx::query_scalar::<_, Option<i64>>(
+                        "SELECT MAX(version) FROM _sqlx_migrations",
+                    )
+                    .fetch_one(p)
+                    .await
+                }
+            };
             match result {
                 Ok(Some(version)) if version >= self.expected_version => {
                     CheckOutcome::Ok(format!("{version:04} (up to date)"))
@@ -445,11 +470,11 @@ pub mod lease_check {
     use super::*;
 
     pub struct ExpiredLeaseCheck {
-        pool: SqlitePool,
+        pool: StoragePool,
     }
 
     impl ExpiredLeaseCheck {
-        pub fn new(pool: SqlitePool) -> Self {
+        pub fn new(pool: StoragePool) -> Self {
             Self { pool }
         }
     }
@@ -461,12 +486,23 @@ pub mod lease_check {
         }
 
         async fn run(&self) -> CheckOutcome {
-            let result = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM article_ai_results WHERE state = 'running' AND lease_expires_at < ?",
-            )
-            .bind(OffsetDateTime::now_utc())
-            .fetch_one(&self.pool)
-            .await;
+            // W11-P4-C2：`?` → `$1` 跨方言占位符（SQLite 也支持 $N）。
+            let sql = "SELECT COUNT(*) FROM article_ai_results WHERE state = 'running' AND lease_expires_at < $1";
+            let now = OffsetDateTime::now_utc();
+            let result = match &self.pool {
+                StoragePool::Sqlite(p) => {
+                    sqlx::query_scalar::<_, i64>(sql)
+                        .bind(now)
+                        .fetch_one(p)
+                        .await
+                }
+                StoragePool::Postgres(p) => {
+                    sqlx::query_scalar::<_, i64>(sql)
+                        .bind(now)
+                        .fetch_one(p)
+                        .await
+                }
+            };
             match result {
                 Ok(0) => CheckOutcome::Ok("0 expired leases".to_string()),
                 Ok(count) => CheckOutcome::Warn(format!("{count} expired leases pending reclaim")),
@@ -480,11 +516,11 @@ pub mod backlog_check {
     use super::*;
 
     pub struct FailedBacklogCheck {
-        pool: SqlitePool,
+        pool: StoragePool,
     }
 
     impl FailedBacklogCheck {
-        pub fn new(pool: SqlitePool) -> Self {
+        pub fn new(pool: StoragePool) -> Self {
             Self { pool }
         }
     }
@@ -496,22 +532,27 @@ pub mod backlog_check {
         }
 
         async fn run(&self) -> CheckOutcome {
-            let row = sqlx::query(
-                r#"
+            // W11-P4-C2：3 个 COUNT(*) 标量子查询跨方言等价；PG/SQLite
+            // 都返 BIGINT/INT64，decode i64 OK；row.get::<i64, _> 跨方言通用。
+            let sql = r#"
                 SELECT
                     (SELECT COUNT(*) FROM feed_entries WHERE state = 'failed') AS failed_entries,
                     (SELECT COUNT(*) FROM article_ai_results WHERE state = 'permanent_failed') AS failed_ai,
                     (SELECT COUNT(*) FROM publish_records WHERE state = 'permanent_failed') AS failed_publish
-                "#,
-            )
-            .fetch_one(&self.pool)
-            .await;
-
-            match row {
-                Ok(row) => {
-                    let count: i64 = row.get::<i64, _>("failed_entries")
-                        + row.get::<i64, _>("failed_ai")
-                        + row.get::<i64, _>("failed_publish");
+                "#;
+            let result: Result<(i64, i64, i64), sqlx::Error> = match &self.pool {
+                StoragePool::Sqlite(p) => sqlx::query(sql)
+                    .fetch_one(p)
+                    .await
+                    .map(|row| (row.get(0), row.get(1), row.get(2))),
+                StoragePool::Postgres(p) => sqlx::query(sql)
+                    .fetch_one(p)
+                    .await
+                    .map(|row| (row.get(0), row.get(1), row.get(2))),
+            };
+            match result {
+                Ok((e, a, p)) => {
+                    let count = e + a + p;
                     CheckOutcome::Info(format!("{count} permanently failed entries"))
                 }
                 Err(error) => CheckOutcome::Fail(format!("failed backlog query failed: {error}")),

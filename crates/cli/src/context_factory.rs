@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use reqwest::Client;
 use rss_ai_news_ai::{AiClient, AiClientConfig, AiError, AiResponse, AiTask, OpenAiCompatClient};
-use rss_ai_news_config::{self as config, DatabaseDriver, LoadedConfig};
+use rss_ai_news_config::{self as config, LoadedConfig};
 use rss_ai_news_domain::SecretString;
 use rss_ai_news_extractor::{ContentStrategy, ReqwestHtmlFetcher};
 use rss_ai_news_feed::ReqwestFeedFetcher;
@@ -12,9 +12,8 @@ use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
     ArticleAiResultRepo, ArticleRepo, FeedEntryRepo, FeedSourceRepo, PublishItemRepo,
     PublishRecordRepo, RawArtifactRepo, ReindexJobRepo, RuleVersionRepo, RuleVersionRepository,
-    RunEventRepo, StorageError, StoragePool, build_sqlite_pool, run_migrations,
+    RunEventRepo, StoragePool, run_migrations,
 };
-use sqlx::SqlitePool;
 
 use crate::{db_url::resolve_storage_url, error::CliError};
 
@@ -131,57 +130,54 @@ pub async fn build_run_context(
 }
 
 pub struct ReplayDeps {
-    pub pool: SqlitePool,
+    /// W11-P4-C2：StoragePool 替代 SqlitePool；replay.rs 内部按 backend match。
+    pub pool: StoragePool,
     pub artifact_repo: Arc<dyn rss_ai_news_storage::RawArtifactRepository>,
     pub article_repo: Arc<dyn rss_ai_news_storage::ArticleRepository>,
     pub feed_entry_repo: Arc<dyn rss_ai_news_storage::FeedEntryRepository>,
 }
 
 pub async fn build_replay_deps(cli: &crate::args::Cli) -> Result<ReplayDeps, CliError> {
+    // W11-P4-C2：原 require_sqlite_driver 拦截已移除。replay 的 artifact /
+    // article / feed_entry repo 在 P3-C/E 全部双轨化；html_diff SQL 已升 $1。
     let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
-    require_sqlite_driver(&loaded)?;
     let app = &loaded.app;
+    let url = resolve_storage_url(&loaded)?;
     let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
-    let pool = build_sqlite_pool(
-        &app.database.sqlite_path,
-        app.database.max_connections,
-        busy_timeout_ms,
-    )
-    .await
-    .map_err(CliError::Storage)?;
-    run_migrations(&StoragePool::Sqlite(pool.clone()))
+    let pool = StoragePool::build(&url, app.database.max_connections, busy_timeout_ms)
         .await
         .map_err(CliError::Storage)?;
+    run_migrations(&pool).await.map_err(CliError::Storage)?;
 
     Ok(ReplayDeps {
         pool: pool.clone(),
-        artifact_repo: Arc::new(RawArtifactRepo::new(pool.clone())),
-        article_repo: Arc::new(ArticleRepo::new(pool.clone())),
-        feed_entry_repo: Arc::new(FeedEntryRepo::new(pool)),
+        artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
+        article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
+        feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool)),
     })
 }
 
 pub struct DoctorDeps {
     pub loaded: Arc<LoadedConfig>,
-    pub pool: SqlitePool,
+    /// W11-P4-C2：StoragePool 替代 SqlitePool；4 个 health-check + deep_scan
+    /// 在本期已全部双轨化。
+    pub pool: StoragePool,
     pub http_client: Client,
 }
 
 pub async fn build_doctor_deps(cli: &crate::args::Cli) -> Result<DoctorDeps, CliError> {
+    // W11-P4-C2：原 require_sqlite_driver 拦截已移除；observability::health.rs
+    // 4 个 check（DatabaseConnectivity / MigrationVersion / ExpiredLease /
+    // FailedBacklog）+ runtime::doctor::deep_scan 已全部接 &StoragePool。
     let loaded = Arc::new(config::load(&cli.config_dir, None, cli.to_cli_overrides())?);
-    require_sqlite_driver(&loaded)?;
     let app = &loaded.app;
+    let url = resolve_storage_url(&loaded)?;
     let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
-    let pool = build_sqlite_pool(
-        &app.database.sqlite_path,
-        app.database.max_connections,
-        busy_timeout_ms,
-    )
-    .await
-    .map_err(CliError::Storage)?;
-    let storage = StoragePool::Sqlite(pool.clone());
-    run_migrations(&storage).await.map_err(CliError::Storage)?;
-    ensure_default_rule_version(&storage, &loaded.config_sha256)
+    let pool = StoragePool::build(&url, app.database.max_connections, busy_timeout_ms)
+        .await
+        .map_err(CliError::Storage)?;
+    run_migrations(&pool).await.map_err(CliError::Storage)?;
+    ensure_default_rule_version(&pool, &loaded.config_sha256)
         .await
         .map_err(CliError::Storage)?;
     let http_client = Client::builder()
@@ -216,17 +212,6 @@ async fn ensure_default_rule_version(
         config_sha256,
     )
     .await?;
-    Ok(())
-}
-
-/// W11-P3-A-fix1.H1：driver=postgres 时拒绝 build_*_deps，引导用户走 cli migrate
-/// 或回退 sqlite。仅 `cli migrate` 子命令对 PG 放行（参见 commands/migrate.rs）。
-fn require_sqlite_driver(loaded: &LoadedConfig) -> Result<(), CliError> {
-    if loaded.app.database.driver == DatabaseDriver::Postgres {
-        return Err(CliError::Storage(StorageError::UnsupportedBackend(
-            "postgres repo path is P3+; only `cli migrate` may currently target postgres".into(),
-        )));
-    }
     Ok(())
 }
 
