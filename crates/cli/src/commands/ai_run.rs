@@ -71,7 +71,7 @@ pub async fn run(cli: &Cli, args: &AiRunArgs) -> Result<AiRunCommandSummary, Cli
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let category = select_category(cli, &categories)?;
     let started = Instant::now();
-    let (_pool, ctx) = build_run_context("ai-run", &loaded).await?;
+    let ctx = build_run_context("ai-run", &loaded).await?;
 
     // F15-3: 生产读路径走 active_rule_or_register（先读 active，无则 seed
     // 首版）。直接 get_or_create 会被 partial unique index 误判（同 kind

@@ -16,30 +16,29 @@ use rss_ai_news_storage::{
 };
 use sqlx::SqlitePool;
 
-use crate::error::CliError;
+use crate::{db_url::resolve_storage_url, error::CliError};
 
+/// W11-P4-C：cli/runtime PG 端到端入口。
+///
+/// 按 [`docs/design/storage-multi-dialect.md`] §5.4 通过 [`resolve_storage_url`]
+/// 解析 `driver` + `DATABASE_URL`，[`StoragePool::build`] 按 URL scheme 路由到
+/// `StoragePool::{Sqlite, Postgres}`。所有 10 个 repo 通过
+/// `new_with_storage(StoragePool)` 入口注入，业务方法内部按 backend `match`
+/// 分发（P3-C/E 已实装）。
+///
+/// 返回值不再含 pool（原 `_pool` 在 7 个调用点均未使用），让签名直接反映
+/// "这里只构造 ctx" 的语义。
 pub async fn build_run_context(
     stage: &str,
     loaded: &LoadedConfig,
-) -> Result<(SqlitePool, Arc<RunContext>), CliError> {
-    // W11-P3-A-fix1.H1：driver=postgres + 非 migrate 子命令 → 启动期 fail-fast。
-    // 设计 storage-multi-dialect §6.1 P2/P3 阶段边界：repo 业务方法 PG 路径
-    // 仍是 require_sqlite stub（P3-C 后逐 repo 迁出），此时跑 run/ingest/ai-run/
-    // publish/doctor 会在第一个 repo 调用时炸；不如启动期就明确拒绝，引导
-    // 用户切到 sqlite 或等 P3-C+ 发布。
-    require_sqlite_driver(loaded)?;
+) -> Result<Arc<RunContext>, CliError> {
     let app = Arc::new(loaded.app.clone());
+    let url = resolve_storage_url(loaded)?;
     let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
-    let pool = build_sqlite_pool(
-        &app.database.sqlite_path,
-        app.database.max_connections,
-        busy_timeout_ms,
-    )
-    .await
-    .map_err(CliError::Storage)?;
-    run_migrations(&StoragePool::Sqlite(pool.clone()))
+    let pool = StoragePool::build(&url, app.database.max_connections, busy_timeout_ms)
         .await
         .map_err(CliError::Storage)?;
+    run_migrations(&pool).await.map_err(CliError::Storage)?;
     ensure_default_rule_version(&pool, &loaded.config_sha256)
         .await
         .map_err(CliError::Storage)?;
@@ -115,20 +114,20 @@ pub async fn build_run_context(
             ai_client,
             publish_target_local,
             publish_target_remote,
-            feed_source_repo: Arc::new(FeedSourceRepo::new(pool.clone())),
-            feed_entry_repo: Arc::new(FeedEntryRepo::new(pool.clone())),
-            article_repo: Arc::new(ArticleRepo::new(pool.clone())),
-            ai_result_repo: Arc::new(ArticleAiResultRepo::new(pool.clone())),
-            publish_record_repo: Arc::new(PublishRecordRepo::new(pool.clone())),
-            publish_item_repo: Arc::new(PublishItemRepo::new(pool.clone())),
-            artifact_repo: Arc::new(RawArtifactRepo::new(pool.clone())),
-            event_repo: Arc::new(RunEventRepo::new(pool.clone())),
-            rule_version_repo: Arc::new(RuleVersionRepo::new(pool.clone())),
-            reindex_job_repo: Arc::new(ReindexJobRepo::new(pool.clone())),
+            feed_source_repo: Arc::new(FeedSourceRepo::new_with_storage(pool.clone())),
+            feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool.clone())),
+            article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
+            ai_result_repo: Arc::new(ArticleAiResultRepo::new_with_storage(pool.clone())),
+            publish_record_repo: Arc::new(PublishRecordRepo::new_with_storage(pool.clone())),
+            publish_item_repo: Arc::new(PublishItemRepo::new_with_storage(pool.clone())),
+            artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
+            event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+            rule_version_repo: Arc::new(RuleVersionRepo::new_with_storage(pool.clone())),
+            reindex_job_repo: Arc::new(ReindexJobRepo::new_with_storage(pool)),
         },
     );
 
-    Ok((pool, Arc::new(ctx)))
+    Ok(Arc::new(ctx))
 }
 
 pub struct ReplayDeps {
@@ -180,10 +179,9 @@ pub async fn build_doctor_deps(cli: &crate::args::Cli) -> Result<DoctorDeps, Cli
     )
     .await
     .map_err(CliError::Storage)?;
-    run_migrations(&StoragePool::Sqlite(pool.clone()))
-        .await
-        .map_err(CliError::Storage)?;
-    ensure_default_rule_version(&pool, &loaded.config_sha256)
+    let storage = StoragePool::Sqlite(pool.clone());
+    run_migrations(&storage).await.map_err(CliError::Storage)?;
+    ensure_default_rule_version(&storage, &loaded.config_sha256)
         .await
         .map_err(CliError::Storage)?;
     let http_client = Client::builder()
@@ -207,10 +205,10 @@ pub async fn build_doctor_deps(cli: &crate::args::Cli) -> Result<DoctorDeps, Cli
 /// 生产场景读现有 `kind='config'` active 行；首次部署 / 测试 fixture seed
 /// 一个 active 首版，tag 显式标 `cli-default`。详见 storage-multi-dialect §2.5。
 async fn ensure_default_rule_version(
-    pool: &SqlitePool,
+    pool: &StoragePool,
     config_sha256: &str,
 ) -> Result<(), rss_ai_news_storage::StorageError> {
-    let repo = RuleVersionRepo::new(pool.clone());
+    let repo = RuleVersionRepo::new_with_storage(pool.clone());
     repo.active_rule_or_register(
         "config",
         "cli-default",

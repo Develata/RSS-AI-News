@@ -71,7 +71,7 @@ pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, C
     let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let started = Instant::now();
-    let (_pool, ctx) = build_run_context("ingest", &loaded).await?;
+    let ctx = build_run_context("ingest", &loaded).await?;
 
     let ingest_flow = IngestFlow::new(ctx.clone(), categories);
     let ingest_summary = ingest_flow.run(IngestOptions::default()).await;

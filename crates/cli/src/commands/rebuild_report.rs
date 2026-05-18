@@ -45,7 +45,7 @@ pub async fn run(
 ) -> Result<RebuildReportCommandSummary, CliError> {
     let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
-    let (_pool, ctx) = build_run_context("rebuild-report", &loaded).await?;
+    let ctx = build_run_context("rebuild-report", &loaded).await?;
 
     let record = if let Some(id) = args.publish_id {
         ctx.publish_record_repo

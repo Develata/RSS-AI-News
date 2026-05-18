@@ -75,7 +75,7 @@ pub async fn run(cli: &Cli, args: &BackfillArgs) -> Result<BackfillCommandSummar
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let date_from = parse_date_start(args.date_from.as_deref())?;
     let date_to = parse_date_start(args.date_to.as_deref())?;
-    let (_pool, ctx) = build_run_context("backfill", &loaded).await?;
+    let ctx = build_run_context("backfill", &loaded).await?;
     let flow = BackfillFlow::new(ctx.clone());
 
     match args.target {
