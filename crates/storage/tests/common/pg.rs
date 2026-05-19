@@ -11,9 +11,13 @@
 //!   （per-test 拉容器成本不可接受）。容器在测试进程退出时随 `OnceCell`
 //!   静态生命周期一同 drop，PG 服务器随之停止 —— 残留 schema 自然消失。
 //!
-//! - **per-process 共享 admin pool**：通过 [`PG_ADMIN_POOL`] `OnceCell`
-//!   缓存，连默认 `public` schema，仅用于 `CREATE SCHEMA` / `DROP SCHEMA`，
-//!   不参与测试业务。
+//! - **per-call admin pool**：每次 [`make_pg_test_pool`] 通过
+//!   [`build_admin_pool`] fresh build 一个 `max=2` 的 admin pool（连
+//!   默认 `public` schema），绑定到当前 `PgTestContext`；ctx drop 时
+//!   PgPool 引用计数归零自动 close。W11-P4-fix4 之前是 `OnceCell` 全局
+//!   共享，但跨 `#[tokio::test]` runtime drop 会 abort detached cleanup
+//!   task 并漏 connection，CI `--test-threads=1` 上累积漏光 → 30s acquire
+//!   超时；per-call 后漏只影响当前 ctx，不再污染后续测试。
 //!
 //! - **per-test 独立 schema + 独立 pool**：每个测试调
 //!   [`make_pg_test_pool`] 拿一个 `PgTestContext`，内含：
@@ -71,8 +75,9 @@ static PG_CONTAINER: OnceCell<ContainerAsync<Postgres>> = OnceCell::const_new();
 // `--test-threads=1` 跑 ~10+ 测试后 8 个 admin connection 漏光 → 后续测试
 // CREATE SCHEMA 30s acquire 超时（W11-P4 首次 push 触发，本地 multi-thread
 // 默认运行时不复现）。改 per-call：每次 `make_pg_test_pool` 自己 build
-// admin pool(max=1) → CREATE SCHEMA → close，连接归还 PG，新 runtime 干净
-// 拿新连接。`PgTestContext` 仍持有 admin pool clone 给 Drop / cleanup 用。
+// admin pool(max=2) → CREATE SCHEMA，pool clone 存入 ctx；ctx drop 时
+// PgPool 引用计数归零自动 close。漏 connection 只影响当前 ctx，不再
+// 跨测试累积污染。
 
 /// per-process schema 名 counter，与 PID + nanos 叠加；与 sqlite fixture 同模式。
 static SCHEMA_COUNTER: AtomicUsize = AtomicUsize::new(0);
