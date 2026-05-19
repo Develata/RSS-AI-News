@@ -111,6 +111,74 @@ cargo run -- --config-dir configs validate-config
 cargo run -- --config-dir configs run
 ```
 
+## 第一次使用 Walkthrough
+
+下面这套步骤覆盖从 clone 到产出首份报告的全流程，建议第一次使用时严格按顺序跑一遍。
+
+### Step 1：准备产物目录
+
+```bash
+mkdir -p data output logs
+```
+
+- `data/`：SQLite 数据库 + artifact 原文缓存。
+- `output/`：本地发布的 Markdown 报告。
+- `logs/`：`--log-file` 写入的日志（可选）。
+
+### Step 2：填写最小配置
+
+```bash
+cp .env.example .env
+cp configs/app.toml.example configs/app.toml
+cp configs/categories/ai.toml.example configs/categories/ai.toml
+```
+
+`.env` 至少写：
+
+```dotenv
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://api.openai.com/v1
+```
+
+`configs/categories/ai.toml` 至少保留 1 个 `[[sources]]` enabled = true 的 feed。
+
+### Step 3：校验配置
+
+```bash
+rss-ai-news --config-dir configs validate-config
+```
+
+这一步不连库、不发请求，只解析配置。成功后再继续，避免后续命令在更深的位置才报配置错。
+
+### Step 4：初始化数据库
+
+```bash
+rss-ai-news --config-dir configs migrate run
+rss-ai-news --config-dir configs migrate check
+```
+
+`migrate run` 幂等，重复执行只 apply 新增迁移。`migrate check` 不写库，仅断言迁移已对齐。
+
+### Step 5：跑一次完整流程
+
+```bash
+rss-ai-news --config-dir configs run --max-batches 1
+```
+
+`--max-batches 1` 让首跑只抓一批，便于快速验证管线通路；产物：
+
+- `data/rss-ai-news.db` 中累积新的 feed entries / articles
+- `output/archive/<category_key>/<YYYY-MM-DD>.md`（默认本地发布；`archive/` 前缀目前 hardcode）
+- stderr 打印结构化日志 + 最终结果摘要
+
+如果想确认整体健康：
+
+```bash
+rss-ai-news --config-dir configs doctor
+```
+
+`doctor` 退出码非 0 时按提示修复后再上调度器。
+
 ## 常用命令
 
 ### 校验配置
@@ -174,7 +242,45 @@ rss-ai-news --config-dir configs doctor
 rss-ai-news --config-dir configs doctor --deep
 ```
 
-`doctor` 检查配置、数据库、外部依赖和 artifact 状态。`--deep` 会额外扫描数据库不变量，数据量大时会更慢。
+`doctor` 检查配置、数据库、外部依赖和 artifact 状态。`--deep` 会额外扫描数据库不变量，数据量大时会更慢（大型 PG 库可能 10s+）。
+
+`--output-format json` 时输出形如：
+
+```json
+{
+  "status": "ok",
+  "checks": [
+    { "name": "config", "status": "ok" },
+    { "name": "database", "status": "ok", "driver": "sqlite" },
+    { "name": "artifact_store", "status": "ok" }
+  ]
+}
+```
+
+调度脚本可用 `jq '.status'` 判定健康，再决定要不要发邮件。
+
+### 日志与排查
+
+默认日志走 stderr，pretty 格式。排查问题时常用组合：
+
+```bash
+# debug 级别 + JSON 格式，写文件便于 grep / jq
+rss-ai-news --config-dir configs \
+  --log-level debug --log-format json --log-file logs/ingest.log \
+  ingest --batch-size 10
+
+# 在另一终端：
+tail -f logs/ingest.log | jq 'select(.level=="ERROR" or .level=="WARN")'
+```
+
+`--log-format json` 输出 sqlx / reqwest / 业务模块的 structured fields，方便定位 feed url / article_id 维度的失败。
+
+启用 Prometheus `/metrics`（W11 仅暴露空 registry，业务 counter / histogram 接入留 v0.2）：
+
+```bash
+rss-ai-news --config-dir configs --metrics-bind 127.0.0.1:9090 run &
+curl http://127.0.0.1:9090/metrics
+```
 
 ### 重新生成报告
 
@@ -266,9 +372,9 @@ sqlite_path = "data/rss-ai-news.db"
 ```toml
 [database]
 driver = "postgres"
-sqlite_path = "data/rss-ai-news.db"
+sqlite_path = "data/rss-ai-news.db"   # 占位字段，driver=postgres 时被忽略
 max_connections = 8
-busy_timeout_ms = 5000
+busy_timeout_ms = 5000                # 占位字段，driver=postgres 时被忽略
 ```
 
 `.env`：
@@ -284,7 +390,12 @@ rss-ai-news --config-dir configs migrate run
 rss-ai-news --config-dir configs migrate check
 ```
 
-SQLite 与 PostgreSQL 使用不同迁移目录，但共享迁移编号。
+切 PG 时几个常见坑：
+
+- `driver = "postgres"` 必须配 `DATABASE_URL`，缺则 exit 78 ConfigError；URL 必须是 `postgres://` 或 `postgresql://` schema。
+- W11 起 SQLite / PostgreSQL 走两套迁移目录，但共享版本号。从 SQLite 迁出已有数据需要走 `replay` + 手动导入（非自动 schema dump，参见 `docs/design/storage-multi-dialect.md`）。
+- `max_connections=8` 是 SQLite 设置；PG pool 上限由 sqlx 内部 `PgPoolOptions::max_connections(env-tunable)` 控制，开发期不必动。
+- 长跑过 SQLite WAL 后切回去之前，记得 `VACUUM` 一次，或者 backup 后重建 db 文件。
 
 ## 调度示例
 
@@ -301,6 +412,27 @@ SQLite 与 PostgreSQL 使用不同迁移目录，但共享迁移编号。
 ```
 
 调度器只需要重复调用 `run`。重复执行是预期用法；发布记录带幂等键，已完成的发布不会被静默覆盖。
+
+## 输出目录结构
+
+跑过 `run` 后预期看到：
+
+```text
+data/
+  rss-ai-news.db                          # SQLite 数据库（driver=postgres 时此文件不会被创建）
+output/
+  archive/
+    <category_key>/
+      <YYYY-MM-DD>.md                     # 本地发布的 Markdown 报告
+logs/
+  *.log                                   # --log-file 指定时生成
+```
+
+注意：
+
+- v0.1.0 **raw artifact 全部走数据库 inline（SQLite BLOB / PG BYTEA）**，不落本地文件；`[artifact].file_storage_dir` 字段是 v0.2 large-payload 外置存储预留，当前未消费。`replay` 命令直接从 `raw_artifacts` 表读。
+- `rebuild-report` 从数据库 `publish_record` / `publish_item` 表重渲染，不需要本地 snapshot 文件；删 `output/<category>/<date>.md` 不会影响重渲，只是看不到旧产物对比。
+- Docker 部署时挂 `data/`（含 db + 未来 artifact 外置存储）+ `output/` 两个 volume 即可。
 
 ## 全局参数
 
@@ -323,6 +455,20 @@ rss-ai-news [global flags] <command>
 | `--metrics-bind <addr>` | 启动 Prometheus `/metrics` 端点，例如 `127.0.0.1:9090` |
 
 注意：全局 `--dry-run` 当前不是所有命令都支持。需要预演重建规则时优先使用 `reindex --dry-run`。
+
+## 按场景选择子命令
+
+| 我想做什么 | 用哪个命令 |
+|---|---|
+| 第一次部署，验证配置能跑通 | `validate-config` → `migrate run` → `run --max-batches 1` |
+| 调度器每日跑一次完整流程 | `run`（不带 `--max-batches`） |
+| 只想抓 feed 不想花钱跑 AI | 临时 `[ai].enabled = false` + `ingest` |
+| 改了 source 列表想立刻拉新源 | `ingest` 单独跑一次 |
+| 报告生成异常想看 raw feed / html | `replay --kind {feed\|html\|ai} --key <artifact_key>`（或 `--id <i64>`） |
+| 改了去重 / 评分规则要重算历史 | `reindex --target {link_hash\|content_hash\|categories\|all} --dry-run` 先看影响面，再去掉 `--dry-run` 真跑 |
+| 数据库刚导入历史，想补正文 / AI | `backfill --target extract` / `backfill --target ai` |
+| 想重发同一天报告做版本对比 | `rebuild-report --date YYYY-MM-DD --output <新文件>` |
+| 调度器报错时定位是配置还是网络 | `doctor` 看 status；exit 78 = 配置；exit 1 = 运行期 |
 
 ## 子命令速查
 
@@ -403,6 +549,47 @@ rss-ai-news --config-dir configs publish --date 2026-05-18 --force
 ```
 
 `--force` 不会删除旧发布记录，而是生成新的发布 key。
+
+### PG 连不上 / `PoolTimedOut`
+
+按顺序排查：
+
+1. `psql "$DATABASE_URL" -c 'SELECT 1'` 是否能连通；不能则先解决网络/防火墙/凭证。
+2. `migrate run` 报 `PoolTimedOut` 通常是连接被中间件（如 PgBouncer transaction mode）拒了；本项目要求 session mode。
+3. 用 `--log-level debug` 跑，日志会输出 sqlx connect error 详情，但**不会泄露密码**。
+
+### `ai-run` 跑得很慢
+
+每篇文章 1 次 OpenAI 调用，默认 `[ai].request_timeout_seconds = 60` 较保守。优化方向：
+
+- 调大 `--ai-batch-size`（命令行单次批 size），同时让 `[ai.rate_limit].requests_per_minute` 留够预算。
+- 换更快的模型（`[ai].model`，例如 `gpt-4o-mini` 替成更轻量的）。
+- 减小 `[ai].max_input_chars` 让 prompt 更短，减少 token 耗时。
+- 关闭 `[ai].enabled` 后只跑 `ingest`，待集中处理时再批量 `ai-run`。
+
+### `--metrics-bind` 端口被占
+
+`/metrics` 服务在 CLI 进程内起。同一调度时段若两个实例并发跑会冲突；要么换端口、要么用 `0.0.0.0:0` 让 OS 分配，要么干脆不暴露（W11 该 endpoint 是空 registry，业务侧 counter 尚未接入，移除 `--metrics-bind` 不会丢可观测性）。
+
+### `docker run` 找不到 `/app/configs/categories/ai.toml`
+
+容器内默认工作目录是 `/app`，`-v "$PWD/configs:/app/configs:ro"` 把宿主机 `configs/` 挂进去；如果本地目录结构不是 `configs/categories/*.toml`，请相应调整 mount 路径或 `--config-dir`。
+
+## 当前版本状态（v0.1.0）
+
+已实装：
+
+- SQLite 与 PostgreSQL 双方言存储（参见 `docs/design/storage-multi-dialect.md`）。
+- 10 个 CLI 子命令（含 `doctor` / `replay` / `reindex --dry-run`）。
+- 双 backend `doctor` / `replay`。
+- Prometheus `/metrics` HTTP endpoint（空 registry 占位，业务 counter 接入留 v0.2）。
+- 双 GitHub Actions CI job：`cargo test`（默认 SQLite）+ `test (postgres)`（service container + `--test-threads=1`）。
+
+v0.2 follow-up：
+
+- 全局 `--dry-run` 全子命令覆盖（v0.1.0 仅 `reindex --dry-run`，其他子命令带 `--dry-run` 返 `DryRunNotImplemented` exit 1）。
+- 业务侧 metrics counter / histogram 全栈接入。
+- `replay` 输出格式扩展（v0.1.0 主要面向开发期诊断）。
 
 ## 更多文档
 
