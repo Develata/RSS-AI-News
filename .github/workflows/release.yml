@@ -1,0 +1,68 @@
+name: release
+
+# 触发：push tag v*（如 v0.1.0 / v0.1.1 / v1.0.0）。
+# 由 `git push origin <tag>` 或在 GitHub Releases 页面创建 release 触发。
+#
+# 不触发于 branch push / PR —— release 必须经过显式 tag。
+on:
+  push:
+    tags: ['v*']
+
+# GITHUB_TOKEN 默认 contents:read packages:none；publish-image 需要 packages:write。
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # 与 ci.yml 保持一致；bump 时同步两处。
+  RUST_TOOLCHAIN: "1.94.0"
+  # GHCR 镜像名：ghcr.io/<owner>/<repo>。docker/metadata-action 会自动 lowercase
+  # github.repository（`Develata/RSS-AI-News` -> `develata/rss-ai-news`）。
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  publish-image:
+    name: publish runtime image to GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v4
+
+      # 登录 GHCR：用 GITHUB_TOKEN，无需额外 secret。
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 自动生成 tag 集：
+      #   - v0.1.0   -> 0.1.0
+      #   - v0.1.0   -> 0.1
+      #   - v0.1.0   -> latest
+      #   - v0.1.0-rc1 -> 0.1.0-rc1（不打 latest / 不打 0.1）
+      # 注意：release workflow 触发于 `on: push tags`，此时 github.ref 是
+      # refs/tags/...，`{{is_default_branch}}` 永远 false，不能依赖它管
+      # latest；改用「tag 内不含 '-'」判定正式 release。
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref, '-') }}
+            type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
+
+      # 复用 ci.yml docker-build job 的 buildx cache（scope=runtime），避免
+      # release 重新编译整个 Rust workspace。
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: runtime
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=runtime
+          cache-to: type=gha,mode=max,scope=runtime
