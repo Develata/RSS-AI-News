@@ -64,9 +64,15 @@ use tokio::sync::OnceCell;
 /// 进程级 PG 容器单例。`OnceCell` 静态生命周期保证容器活到进程退出。
 static PG_CONTAINER: OnceCell<ContainerAsync<Postgres>> = OnceCell::const_new();
 
-/// 进程级 admin pool 单例，连默认 `public` schema，仅做 CREATE / DROP SCHEMA。
-/// 与业务 pool 隔离，避免 search_path 切换污染。
-static PG_ADMIN_POOL: OnceCell<PgPool> = OnceCell::const_new();
+// W11-P4-fix4: 原 `PG_ADMIN_POOL: OnceCell<PgPool>` 跨 `#[tokio::test]` runtime
+// 共享有 latent bug —— 每个 `#[tokio::test]` 默认 `current_thread` runtime；
+// runtime drop 时会 abort `Drop::drop` 里 `handle.spawn` 出去的 detached
+// `DROP SCHEMA ... CASCADE` task，被 abort 时连接没归还 admin pool；CI 串行
+// `--test-threads=1` 跑 ~10+ 测试后 8 个 admin connection 漏光 → 后续测试
+// CREATE SCHEMA 30s acquire 超时（W11-P4 首次 push 触发，本地 multi-thread
+// 默认运行时不复现）。改 per-call：每次 `make_pg_test_pool` 自己 build
+// admin pool(max=1) → CREATE SCHEMA → close，连接归还 PG，新 runtime 干净
+// 拿新连接。`PgTestContext` 仍持有 admin pool clone 给 Drop / cleanup 用。
 
 /// per-process schema 名 counter，与 PID + nanos 叠加；与 sqlite fixture 同模式。
 static SCHEMA_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -184,7 +190,7 @@ impl Drop for PgTestContext {
 /// 不暴露错误：fixture 失败即测试失败，statically `expect` 简化测试主体。
 pub async fn make_pg_test_pool() -> PgTestContext {
     let endpoint = pg_endpoint().await;
-    let admin = pg_admin_pool(&endpoint).await;
+    let admin = build_admin_pool(&endpoint).await;
 
     let schema = next_schema_name();
 
@@ -246,23 +252,24 @@ async fn pg_endpoint() -> PgEndpoint {
     PgEndpoint { host, port }
 }
 
-/// admin pool 单例，连默认 `public` schema，不嵌入 search_path 选项。
-/// `max_connections=8` 给多并发 PG 测试同时 CREATE/DROP SCHEMA 留余量
-/// （codex P3-E-fix1 M2 + cargo test 默认并发执行多个 #[tokio::test] 时，
-/// 多个 PgTestContext::cleanup 可能并发跑 DROP SCHEMA；max=1 会让它们排队
-/// 等到超时）。
-async fn pg_admin_pool(endpoint: &PgEndpoint) -> PgPool {
-    PG_ADMIN_POOL
-        .get_or_init(|| async {
-            let url = format!(
-                "postgres://postgres:postgres@{host}:{port}/postgres",
-                host = endpoint.host,
-                port = endpoint.port,
-            );
-            build_pg_pool(&url, 8).await.expect("build admin pg pool")
-        })
-        .await
-        .clone()
+/// admin pool（per-call）：连默认 `public` schema，仅给当前 `PgTestContext`
+/// 跑 CREATE SCHEMA + 后续 cleanup 的 DROP SCHEMA 用。
+///
+/// W11-P4-fix4：原方案是 `OnceCell<PgPool>` 全局共享，跨多个
+/// `#[tokio::test]`（每个一个 current_thread runtime）累积漏连接 →
+/// CI `--test-threads=1` 上 admin pool acquire 30s 超时。改 per-call 后，
+/// 每个 ctx 独占一个 admin pool（max=2，留 CREATE+DROP 各占 1 的余量），
+/// ctx Drop 时 PgPool 引用计数归零自动 close —— 下一个测试新建 fresh pool，
+/// 不会继承上一个 runtime 的连接残骸。
+///
+/// 代价：每个测试多 ~50-100ms admin pool build；CI 上 ~40 个测试 ~4s 总额。
+async fn build_admin_pool(endpoint: &PgEndpoint) -> PgPool {
+    let url = format!(
+        "postgres://postgres:postgres@{host}:{port}/postgres",
+        host = endpoint.host,
+        port = endpoint.port,
+    );
+    build_pg_pool(&url, 2).await.expect("build admin pg pool")
 }
 
 fn next_schema_name() -> String {
