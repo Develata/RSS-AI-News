@@ -57,9 +57,9 @@ pub async fn run() -> ExitCode {
 
     // F15-14 W9-F2: --metrics-bind 非空时启动 prometheus `/metrics` 后台
     // 服务。recorder Arc 移入 spawned task；task 在进程退出时随 tokio
-    // runtime drop 而退出。当前业务代码尚未接入 counter_inc / histogram_observe
-    // （T901 line 350 metrics 注册仍为 [ ]），server 暂时只暴露空 registry，
-    // 给后续 instrumentation 留好 plumbing。
+    // runtime drop 而退出。CLI 自建 recorder 已就绪 + 暴露空 registry；
+    // 业务侧 counter_inc / histogram_observe 接入是独立追踪项（与 task T901
+    // metrics 注册解耦——T901 已勾完，业务 instrumentation 留 v0.2+ follow-up）。
     spawn_metrics_server(&cli.metrics_bind);
 
     let mut writer = OutputWriter::new(OutputFormat::from(cli.output_format));

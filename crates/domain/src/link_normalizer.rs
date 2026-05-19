@@ -42,15 +42,21 @@ pub fn normalize_link(raw: &str) -> Result<NormalizedLink, LinkNormalizeError> {
         scheme => return Err(LinkNormalizeError::UnsupportedScheme(scheme.to_string())),
     }
 
-    // url::Url::set_{username,password} 在 cannot-be-a-base URL 上返 Err。
-    // 上面 scheme 匹配已过滤 http/https 之外的方案，这两个**必然**是
-    // schemes-with-authority，set_* 在该不变量下不能失败。`.expect` 让违反
-    // 假设时立即 panic（W11-P4-fix2.H2 lint：`let _ = result` 已 deny，
-    // 改 `.expect` 表达"理论不可能 + 失败必 panic"——比静默丢错更显式）。
+    // codex P4-fix2 评审 HIGH-1：`Url::parse` 接受 `http:///tmp/foo` 这类
+    // **无 host** URL；`set_username` / `set_password` 在无/空 host 时返 Err。
+    // 上一版 `.expect(...)` 会让 ingest 进程在遇到畸形 feed link 时 panic。
+    // 显式要求 host 非空，否则归类 InvalidUrl（与 `Url::parse` 失败同语义）。
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err(LinkNormalizeError::InvalidUrl(raw.to_string()));
+    }
+
+    // 现在 host 非空 + scheme 是 http/https → 必是 schemes-with-authority，
+    // setter 不能再失败。但仍把 setter 失败映射成 InvalidUrl 兜底（用户
+    // 错误而非 panic），与上面同语义。
     url.set_username("")
-        .expect("http/https URL must allow set_username; checked above");
+        .map_err(|()| LinkNormalizeError::InvalidUrl(raw.to_string()))?;
     url.set_password(None)
-        .expect("http/https URL must allow set_password; checked above");
+        .map_err(|()| LinkNormalizeError::InvalidUrl(raw.to_string()))?;
     url.set_fragment(None);
 
     normalize_path(&mut url);
@@ -209,6 +215,33 @@ mod tests {
         assert!(matches!(err, LinkNormalizeError::InvalidUrl(_)));
         assert!(!err.is_retryable());
         assert_eq!(err.error_kind(), "invalid_url");
+    }
+
+    // codex P4-fix2 HIGH-1 回归保护：上一版 `.expect(...)` 在 `set_username`
+    // / `set_password` 失败时会 panic。现版本走 `map_err(|()| InvalidUrl)?`
+    // + host_str 预检，对任意 http/https 类畸形输入只能返 Ok / InvalidUrl /
+    // UnsupportedScheme，绝不 panic。本测试穷举可疑边界输入做 panic-safety
+    // 保护，覆盖比单点断言更稳。
+    #[test]
+    fn never_panics_on_malformed_inputs() {
+        let candidates = [
+            "http:///foo",
+            "http://:80/foo",
+            "http://@host/foo",
+            "http://./foo",
+            "https:///",
+            "http:foo",
+            "http://[::]/foo",
+            "http://user:pass@host/foo",
+            "",
+        ];
+        for raw in candidates {
+            match normalize_link(raw) {
+                Ok(_)
+                | Err(LinkNormalizeError::InvalidUrl(_))
+                | Err(LinkNormalizeError::UnsupportedScheme(_)) => {}
+            }
+        }
     }
 
     #[test]

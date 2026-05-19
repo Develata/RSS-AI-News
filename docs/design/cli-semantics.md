@@ -395,7 +395,12 @@ Reindex completed: 12834 rows in 142s
 }
 ```
 
-### 5.3 `--dry-run` 输出
+### 5.3 `--dry-run` 输出（v0.2 设计稿；v0.1.0 仅 `reindex --dry-run`）
+
+> **v0.1.0 实装边界**：仅 `reindex --dry-run` 完整实装（见 §4.8）；
+> 全局 `--dry-run` 应用到 `ingest` / `ai-run` / `publish` 等子命令时返回
+> `DryRunNotImplemented`（exit 1）。本节文本描述的 `[DRY RUN] Would ...`
+> 输出格式属 v0.2 follow-up，作为未来实装时的契约稿保留。
 
 `--dry-run` 模式下，所有写操作替换为"将要执行"的描述：
 
