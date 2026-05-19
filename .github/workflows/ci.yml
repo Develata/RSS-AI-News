@@ -188,10 +188,37 @@ jobs:
           tags: rss-ai-news:debug
           cache-from: type=gha,scope=debug
           cache-to: type=gha,mode=max,scope=debug
+      - name: build scheduler image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: scheduler
+          push: false
+          load: true
+          tags: rss-ai-news:scheduler
+          cache-from: type=gha,scope=runtime
+          cache-to: type=gha,mode=max,scope=scheduler
       - name: smoke run --help (runtime)
         run: docker run --rm rss-ai-news:runtime --help
       - name: smoke run --help (debug)
         run: docker run --rm rss-ai-news:debug --help
+      # scheduler 入口是 supercronic 长驻；smoke 用一个永不到期的 cron
+      # 表达式启动 5s 后强制停。能起即视为通过（验证 supercronic 安装 +
+      # entrypoint script 解析 + USER appuser 权限正常）。
+      - name: smoke scheduler boot
+        run: |
+          docker run --rm -d --name scheduler-smoke \
+            -e RSS_CRON_SCHEDULE='0 0 1 1 *' \
+            -e RSS_CRON_COMMAND='--help' \
+            rss-ai-news:scheduler
+          sleep 3
+          docker logs scheduler-smoke
+          if ! docker ps --filter name=scheduler-smoke --filter status=running -q | grep -q .; then
+            echo "::error::scheduler container exited unexpectedly"
+            exit 1
+          fi
+          docker stop scheduler-smoke
       # validate-config 不需要外部凭据；只需要示例 config 触发 W3 fail-fast 校验。
       # 容器启动 + 配置加载 + 错误退出码 78 (ConfigError) 一并被 smoke 覆盖。
       - name: prepare smoke config

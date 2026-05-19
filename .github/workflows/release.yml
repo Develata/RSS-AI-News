@@ -23,7 +23,7 @@ env:
 
 jobs:
   publish-image:
-    name: publish runtime image to GHCR
+    name: publish runtime + scheduler images to GHCR
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -37,7 +37,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 自动生成 tag 集：
+      # 自动生成 runtime image tag 集：
       #   - v0.1.0   -> 0.1.0
       #   - v0.1.0   -> 0.1
       #   - v0.1.0   -> latest
@@ -45,7 +45,7 @@ jobs:
       # 注意：release workflow 触发于 `on: push tags`，此时 github.ref 是
       # refs/tags/...，`{{is_default_branch}}` 永远 false，不能依赖它管
       # latest；改用「tag 内不含 '-'」判定正式 release。
-      - id: meta
+      - id: meta-runtime
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_NAME }}
@@ -56,13 +56,42 @@ jobs:
 
       # 复用 ci.yml docker-build job 的 buildx cache（scope=runtime），避免
       # release 重新编译整个 Rust workspace。
-      - uses: docker/build-push-action@v7
+      - name: build + push runtime image
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
           target: runtime
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta-runtime.outputs.tags }}
+          labels: ${{ steps.meta-runtime.outputs.labels }}
           cache-from: type=gha,scope=runtime
           cache-to: type=gha,mode=max,scope=runtime
+
+      # scheduler image tag 集（runtime 镜像之上叠一层 supercronic +
+      # entrypoint，用于「常驻容器内置 cron 周期触发 single-shot CLI」
+      # 部署模式）。flavor suffix 让所有 tag 自动加 `-scheduler`：
+      #   - v0.1.0   -> 0.1.0-scheduler / 0.1-scheduler / latest-scheduler
+      #   - v0.1.0-rc1 -> 0.1.0-rc1-scheduler（不打 latest-scheduler）
+      - id: meta-scheduler
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          flavor: |
+            suffix=-scheduler,onlatest=true
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref, '-') }}
+            type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
+
+      - name: build + push scheduler image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: scheduler
+          push: true
+          tags: ${{ steps.meta-scheduler.outputs.tags }}
+          labels: ${{ steps.meta-scheduler.outputs.labels }}
+          cache-from: type=gha,scope=runtime
+          cache-to: type=gha,mode=max,scope=scheduler

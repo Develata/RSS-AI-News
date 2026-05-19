@@ -1,0 +1,69 @@
+# Scheduler 部署参考 compose —— 1panel 风格。
+#
+# 模式：常驻容器内置 supercronic，按 RSS_CRON_SCHEDULE 周期触发底层
+# `rss-ai-news <RSS_CRON_COMMAND>` single-shot CLI。
+#
+# 与 single-shot 部署（用 `docker compose run --rm` + 宿主 cron）相比的取舍：
+#   优点：容器在 1panel 面板里持续 Running，状态 / log / 重启策略走 docker 原生
+#   优点：cron 表达式 + 触发命令通过环境变量配置，部署后改环境即可调整调度
+#   缺点：多一个 supercronic 进程占资源（极小，~5MB）；cron job 失败的可见性
+#         比 1panel 计划任务面板略弱（要靠 `docker logs` 看）
+#
+# 使用方式：
+#   1. 复制本文件到服务器 /opt/1panel/apps/rss-ai-news/docker-compose.yml
+#   2. 同目录建 .env（参考下方 README）
+#   3. `docker compose up -d` 启动；首次需要先 migrate（见下）
+#
+# 注意：本 compose 仅启动 scheduler 长驻容器；首次 migrate / 手动 doctor
+# 仍建议用一次性 `docker compose run --rm` + runtime image：
+#   docker compose -f docker-compose.runtime-cli.yml --profile cli run \
+#     --rm rss-ai-news --config-dir /app/configs migrate run
+# 或者直接：
+#   docker run --rm --env-file .env \
+#     -v "$(pwd)/configs:/app/configs:ro" \
+#     -v "$(pwd)/data:/app/data" \
+#     ghcr.io/develata/rss-ai-news:0.1.0 \
+#     --config-dir /app/configs migrate run
+
+networks:
+  1panel-network:
+    external: true
+
+services:
+  rss-ai-news-scheduler:
+    container_name: rss-ai-news-scheduler
+    # scheduler image：runtime 之上叠了一层 supercronic + entrypoint。
+    # 与 runtime 镜像版本对齐：发版时 release workflow 同步推两个 image。
+    image: ghcr.io/develata/rss-ai-news:0.1.0-scheduler
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 容器内时区——cron 表达式按此时区解析
+      - TZ=${TIME_ZONE:-Asia/Shanghai}
+      # PostgreSQL 连接（推荐）；走 SQLite 时不填、并把 configs/app.toml
+      # 的 [database].driver 改回 "sqlite"
+      - DATABASE_URL=${DATABASE_URL}
+      # AI 凭据
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL}
+      # RSSHub 占位符；如果 categories/*.toml 没用 {RSSHUB} 可留空
+      - RSSHUB_BASE_URL=${RSSHUB_BASE_URL:-}
+      # 发布到 GitHub 用的 PAT（contents:write on target repo）
+      - GITHUB_TOKEN=${GH_PUBLISH_TOKEN:-}
+      # 调度配置 —— 改这里就能调节奏，无需重 build 镜像
+      - RSS_CRON_SCHEDULE=${RSS_CRON_SCHEDULE:-15 8 * * *}
+      - RSS_CRON_COMMAND=${RSS_CRON_COMMAND:-run}
+    labels:
+      createdBy: Apps
+    networks:
+      - 1panel-network
+    volumes:
+      # 配置只读挂载
+      - ./configs:/app/configs:ro
+      # data：SQLite 模式下放 db 文件；PG 模式下基本不写（artifact 走 DB inline）
+      - ./data:/app/data
+      # output：本地发布的 Markdown 报告（github_owner 留空时启用）
+      - ./output:/app/output
+      # logs：--log-file 指定时生成；scheduler 模式下默认走 stdout
+      - ./logs:/app/logs

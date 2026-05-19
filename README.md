@@ -413,6 +413,40 @@ rss-ai-news --config-dir configs migrate check
 
 调度器只需要重复调用 `run`。重复执行是预期用法；发布记录带幂等键，已完成的发布不会被静默覆盖。
 
+### scheduler 镜像（一体化部署）
+
+除了 runtime 镜像 + 宿主 cron 的搭配外，发版同时推一个 **scheduler 镜像**：
+
+```
+ghcr.io/develata/rss-ai-news:<version>            # runtime（single-shot CLI）
+ghcr.io/develata/rss-ai-news:<version>-scheduler  # scheduler（常驻 + 内置 cron）
+```
+
+scheduler 镜像在 runtime 之上叠了一层 [supercronic](https://github.com/aptible/supercronic)：容器持续 Running，内部按 `RSS_CRON_SCHEDULE` 周期触发 `rss-ai-news <RSS_CRON_COMMAND>`。底层 binary 仍是 single-shot（blueprint §14 硬约束）；只是把「调度」职责从宿主搬进容器。
+
+适用场景：在 1panel / Portainer 这类面板里希望容器一直 Running、不接外部 cron 的环境。一份 compose 参考见 `docker/docker-compose.scheduler.yml`。最少 `.env` 配置：
+
+```dotenv
+TIME_ZONE=Asia/Shanghai
+DATABASE_URL=postgres://user:pass@host:5432/dbname
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://api.openai.com/v1
+RSS_CRON_SCHEDULE=15 8 * * *       # 每天 08:15
+RSS_CRON_COMMAND=run               # 完整 ingest -> ai-run -> publish
+```
+
+`docker compose up -d` 启动后，`docker logs -f rss-ai-news-scheduler` 看每次 cron 触发的输出。修改 `RSS_CRON_SCHEDULE` / `RSS_CRON_COMMAND` 后 `docker compose up -d` 重建容器即生效，**不需要重 build 镜像**。
+
+首次 migrate / 手动 doctor 仍建议用 runtime 镜像一次性跑（避免动 scheduler 容器调度节奏）：
+
+```bash
+docker run --rm --env-file .env \
+  -v "$(pwd)/configs:/app/configs:ro" \
+  -v "$(pwd)/data:/app/data" \
+  ghcr.io/develata/rss-ai-news:0.1.0 \
+  --config-dir /app/configs migrate run
+```
+
 ## 输出目录结构
 
 跑过 `run` 后预期看到：

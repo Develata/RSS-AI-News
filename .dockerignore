@@ -9,6 +9,9 @@ data/
 README*
 LICENSE*
 docker/
+# scheduler 镜像（Dockerfile stage 5）需要这个 entrypoint script 进 build
+# context；其他 docker/ 下的 Dockerfile / compose 不需要打包。
+!docker/scheduler-entrypoint.sh
 .env
 .env.*
 .gitignore

@@ -108,3 +108,53 @@ USER appuser
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/rss-ai-news"]
 CMD ["--help"]
+
+############################
+# Stage 5: scheduler image (常驻容器 + 内置 cron 周期触发 single-shot CLI)
+############################
+# 设计意图：保持 binary 自身 single-shot 不变（blueprint §14 硬约束），
+# 在外层套一个 supercronic（github.com/aptible/supercronic）按 crontab
+# 表达式周期触发 `rss-ai-news <subcommand>`。supercronic 相比 cron 的优势：
+#   - 非 root 友好（继承 appuser），不需要 setuid
+#   - cron job 的 stdout/stderr 直接透传到 supercronic 自身的 stdout，
+#     `docker logs` 可见，无需 syslog
+#   - 单 binary 部署，零运行时依赖
+FROM runtime AS scheduler
+
+USER root
+
+ARG SUPERCRONIC_VERSION=0.2.30
+# SHA1 checksum 来源：https://github.com/aptible/supercronic/releases/tag/v0.2.30
+# （supercronic 官方 release 用 sha1sum 校验，不是 sha256）
+ARG SUPERCRONIC_SHA1_AMD64=9f27ad28c5c57cd133325b2a66bba69ba2235799
+ARG SUPERCRONIC_SHA1_ARM64=d5e02aa760b3d434bc7b991777aa89ef4a503e49
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates wget; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) sc_arch=amd64; sc_sha=$SUPERCRONIC_SHA1_AMD64;; \
+        arm64) sc_arch=arm64; sc_sha=$SUPERCRONIC_SHA1_ARM64;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1;; \
+    esac; \
+    wget -q -O /usr/local/bin/supercronic \
+        "https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-${sc_arch}"; \
+    echo "${sc_sha}  /usr/local/bin/supercronic" | sha1sum -c -; \
+    chmod +x /usr/local/bin/supercronic; \
+    apt-get purge -y wget; \
+    apt-get autoremove -y; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY docker/scheduler-entrypoint.sh /usr/local/bin/scheduler-entrypoint.sh
+RUN chmod +x /usr/local/bin/scheduler-entrypoint.sh
+
+USER appuser
+
+# 默认 cron 表达式：每天 08:15（基于 container TZ）；可被 env 覆盖。
+# RSS_CRON_COMMAND 默认 "run"（等价于 ingest -> ai-run -> publish 完整流程）。
+ENV RSS_CRON_SCHEDULE="15 8 * * *" \
+    RSS_CRON_COMMAND="run"
+
+ENTRYPOINT ["/usr/local/bin/scheduler-entrypoint.sh"]
+CMD []
