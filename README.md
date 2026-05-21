@@ -437,6 +437,23 @@ RSS_CRON_COMMAND=run               # 完整 ingest -> ai-run -> publish
 
 `docker compose up -d` 启动后，`docker logs -f rss-ai-news-scheduler` 看每次 cron 触发的输出。修改 `RSS_CRON_SCHEDULE` / `RSS_CRON_COMMAND` 后 `docker compose up -d` 重建容器即生效，**不需要重 build 镜像**。
 
+#### 多行 crontab（分离抓取与推送节奏）
+
+需要「一天多次抓取、推送只一次」之类的分离节奏时，挂一个 supercronic 兼容的 crontab 文件到 `/app/crontab`。entrypoint 检测到该文件非空就直接用它，自动忽略 `RSS_CRON_SCHEDULE` / `RSS_CRON_COMMAND`。
+
+宿主放 `./crontab`：
+
+```cron
+# 每 3 小时抓取 + AI 评分
+0 */3 * * * sh -c '/usr/local/bin/rss-ai-news --config-dir /app/configs ingest && /usr/local/bin/rss-ai-news --config-dir /app/configs ai-run'
+# 每天 21:30 推送当日报
+30 21 * * * /usr/local/bin/rss-ai-news --config-dir /app/configs publish
+```
+
+compose 里取消注释 `./crontab:/app/crontab:ro` 那行，`docker compose up -d` 重建即可。覆盖默认路径用 `RSS_CRONTAB_FILE` 环境变量。
+
+`publish` 对 `(category, date, render_version)` 是幂等的——同日多次推送只走 `init: already_exists:published_*`，**不会重复 commit 到 GitHub**。但需要注意：第一次 publish 之后新抓的文章不会自动并入当日报告，所以 publish 应安排在最后一次抓取之后。
+
 首次 migrate / 手动 doctor 仍建议用 runtime 镜像一次性跑（避免动 scheduler 容器调度节奏）：
 
 ```bash

@@ -51,9 +51,16 @@ services:
       - RSSHUB_BASE_URL=${RSSHUB_BASE_URL:-}
       # 发布到 GitHub 用的 PAT（contents:write on target repo）
       - GITHUB_TOKEN=${GH_PUBLISH_TOKEN:-}
-      # 调度配置 —— 改这里就能调节奏，无需重 build 镜像
+      # 调度配置 —— 单行模式：改这两个 env 就能调节奏。
+      # 多行模式（推荐用于"多次抓取 + 每天一次推送"等分离节奏）请挂
+      # ./crontab 到 /app/crontab，entrypoint 检测到非空文件即自动使用，
+      # 此时下面这两个 env 被忽略。crontab 文件示例：
+      #   0 */3 * * * sh -c '/usr/local/bin/rss-ai-news --config-dir /app/configs ingest && /usr/local/bin/rss-ai-news --config-dir /app/configs ai-run'
+      #   30 21 * * * /usr/local/bin/rss-ai-news --config-dir /app/configs publish
       - RSS_CRON_SCHEDULE=${RSS_CRON_SCHEDULE:-15 8 * * *}
       - RSS_CRON_COMMAND=${RSS_CRON_COMMAND:-run}
+      # 可选：自定义 crontab 路径（默认 /app/crontab）
+      # - RSS_CRONTAB_FILE=/app/crontab
     labels:
       createdBy: Apps
     networks:
@@ -67,3 +74,5 @@ services:
       - ./output:/app/output
       # logs：--log-file 指定时生成；scheduler 模式下默认走 stdout
       - ./logs:/app/logs
+      # 可选：多行 crontab 文件（取消注释并保证 ./crontab 存在）
+      # - ./crontab:/app/crontab:ro
