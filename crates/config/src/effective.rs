@@ -73,7 +73,7 @@ mod tests {
         app::{
             AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, DatabaseConfig, DatabaseDriver,
             DedupConfig, ExtractorConfig, HttpConfig, LeaseConfig, ObservabilityConfig,
-            PublishConfig, RetentionPolicy, RetryConfig, RuntimeConfig,
+            PublishConfig, PublishTemplateConfig, RetentionPolicy, RetryConfig, RuntimeConfig,
         },
         category::{AiOverride, CategoryConfig, CategoryMeta, PublishOverride},
         env::EnvConfig,
@@ -156,6 +156,7 @@ mod tests {
                     github_branch: "main".to_string(),
                     github_path_prefix: "archive".to_string(),
                     local_output_dir: "output".into(),
+                    template: PublishTemplateConfig::default(),
                     include_unscored,
                     max_items_per_report: NonZeroU32::new(global_max_items)
                         .expect("test: global_max_items must be non-zero"),

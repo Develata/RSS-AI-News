@@ -209,6 +209,22 @@ include_unscored = false
 max_items_per_report = 30
 min_importance_score = 30
 
+[publish.template]
+path_template = "{{CATEGORY_KEY}}/{{YYYY}}/{{YYYYMMDD}}.md"
+frontmatter_template = "---\ntitle: {{date}}\ndate: {{date}}\nexcerpt: {{excerpt_yaml}}\n---\n"
+report_template = "{{frontmatter}}\n# {{title_md}}\n{{excerpt_block}}\n{{items}}"
+item_template = '''
+## {{item_title_md}}{{score_badge}}
+
+{{tags_block}}- **Source:** `{{source_code}}` | [阅读原文]({{url_md}})
+
+> [摘要]  
+{{summary_blockquote}}
+
+---
+
+'''
+
 [dedup]
 enable_link_dedup = true
 enable_content_dedup = true

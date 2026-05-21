@@ -91,10 +91,7 @@ pub async fn run(
         .rebuild(RebuildReportOptions {
             publish_record_id: record.id,
             category_display_name: category.category.display_name.clone(),
-            report_title: format!(
-                "{} 日报 {}",
-                category.category.display_name, record.report_date
-            ),
+            report_title: format!("{} {}", category.category.display_name, record.report_date),
             generated_at_override: None,
         })
         .await?;

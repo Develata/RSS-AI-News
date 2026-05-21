@@ -168,7 +168,7 @@ rss-ai-news --config-dir configs run --max-batches 1
 `--max-batches 1` 让首跑只抓一批，便于快速验证管线通路；产物：
 
 - `data/rss-ai-news.db` 中累积新的 feed entries / articles
-- `output/archive/<category_key>/<YYYY-MM-DD>.md`（默认本地发布；`archive/` 前缀目前 hardcode）
+- `output/<rendered-path>.md`，路径由 `[publish.template].path_template` 渲染决定；默认示例为 `output/AI_ML/2026/20260518.md`
 - stderr 打印结构化日志 + 最终结果摘要
 
 如果想确认整体健康：
@@ -292,6 +292,8 @@ rss-ai-news --config-dir configs --category ai rebuild-report --date 2026-05-18 
 
 ## 配置说明
 
+> **完整字段定义、默认值理由、effective 覆盖规则**：见 [`docs/design/config-schema.md`](docs/design/config-schema.md)。该文档逐字段给出语义、作用阶段、与状态机的关系（例如 `ai.enabled × include_unscored` 真值表、`[http]` 并发预算分配、`[runtime].max_batches_per_run` 作用边界）。本节只覆盖文件分工、常用环境变量、最常调字段和典型场景——遇到 README 没讲到的字段，去 `config-schema.md` 查。
+
 项目使用三类配置文件：
 
 | 文件 | 用途 | 是否提交到 git |
@@ -331,7 +333,7 @@ local_output_dir = "output"
 github_owner = "your-name-or-org"
 github_repo = "your-repo"
 github_branch = "main"
-github_path_prefix = "archive"
+github_path_prefix = "docs/news"
 local_output_dir = "output"
 ```
 
@@ -342,6 +344,82 @@ GITHUB_TOKEN=ghp_...
 ```
 
 `--local-only` 可以临时强制只写本地，不校验 GitHub token。
+
+远端最终路径按下面规则拼接：
+
+```text
+<github_path_prefix>/<[publish.template].path_template 渲染结果>
+```
+
+例如：
+
+```toml
+[category]
+key = "ai_ml"
+display_name = "科技新闻"
+
+[publish]
+github_path_prefix = "docs/news"
+
+[publish.template]
+path_template = "{CATEGORY_KEY}/{YYYY}/{YYYYMMDD}.md"
+```
+
+发布 `2026-01-03` 时，远端路径为：
+
+```text
+docs/news/AI_ML/2026/20260103.md
+```
+
+### 发布路径与 Markdown 模板
+
+`[publish.template]` 是必填配置段，用于控制报告路径和 Markdown 输出。示例配置默认是 VitePress 风格：
+
+```toml
+[publish.template]
+path_template = "{CATEGORY_KEY}/{YYYY}/{YYYYMMDD}.md"
+frontmatter_template = """
+---
+title: {date}
+date: {date}
+excerpt: {excerpt_yaml}
+---
+"""
+report_template = """
+{frontmatter}
+# {title_md}
+{excerpt_block}
+{items}
+"""
+item_template = """
+## {item_title_md}{score_badge}
+
+{tags_block}- **Source:** `{source_code}` | [阅读原文]({url_md})
+
+> [摘要]
+{summary_blockquote}
+
+---
+
+"""
+```
+
+常用占位符：
+
+| 模板字段 | 可用占位符 |
+|---|---|
+| `path_template` | `{category_key}`、`{CATEGORY_KEY}`、`{date}`、`{YYYY}`、`{MM}`、`{DD}`、`{YYYYMMDD}` |
+| `frontmatter_template` | `{title}`、`{title_yaml}`、`{date}`、`{YYYY}`、`{MM}`、`{DD}`、`{YYYYMMDD}`、`{excerpt}`、`{excerpt_yaml}` |
+| `report_template` | `{frontmatter}`、`{title}`、`{title_md}`、`{date}`、`{YYYY}`、`{MM}`、`{DD}`、`{YYYYMMDD}`、`{category_key}`、`{CATEGORY_KEY}`、`{category_display_name}`、`{category_display_name_md}`、`{excerpt}`、`{excerpt_yaml}`、`{excerpt_block}`、`{items}`、`{generated_at}` |
+| `item_template` | `{item_title}`、`{item_title_md}`、`{score}`、`{score_badge}`、`{tags}`、`{tags_block}`、`{source}`、`{source_md}`、`{source_code}`、`{url}`、`{url_md}`、`{summary}`、`{summary_inline}`、`{summary_blockquote}` |
+
+校验规则：
+
+- `path_template` 必须渲染为相对路径，不能包含 `..`、反斜杠或绝对路径。
+- `path_template` 必须包含分类占位符和日期占位符，避免不同分类或日期互相覆盖。
+- `report_template` 必须包含 `{items}`。
+- `item_template` 必须包含标题和摘要占位符。
+- 未知占位符或未闭合 `{...}` 会在 `validate-config` 阶段失败。
 
 ### 关闭 AI 后直通发布
 
@@ -356,6 +434,49 @@ include_unscored = true
 ```
 
 此模式下 `run` 会跳过 `ai-run`，`publish` 使用未评分文章生成报告。若 `include_unscored = false`，关闭 AI 后不会产生发布候选。
+
+### 常调字段速查
+
+`app.toml` 字段中实际部署时最常碰到的字段，按 section 分组。每项的完整语义、与状态机/并发模型的关系见 `docs/design/config-schema.md` 对应小节。
+
+**网络与并发（`[http]`）**
+
+| 字段 | 默认 | 何时调 |
+|---|---|---|
+| `timeout_seconds` | `30` | feed 源响应慢、超时较多时调到 `60`–`90`；过大会拖慢失败感知 |
+| `concurrent_feeds` | `10` | ingest 阶段最大并发拉 feed 数；源很多（>50）时往上调，注意 RSSHub 等共享后端的限流 |
+| `concurrent_fetches` | `5` | extract 阶段并发抓详情页；目标站点能承受时可调到 `10`+ |
+
+**AI 调用（`[ai]` / `[ai.rate_limit]`）**
+
+| 字段 | 默认 | 何时调 |
+|---|---|---|
+| `model` | `"gpt-4o-mini"` | 按你的 OpenAI 兼容 API 实际可用模型填；模型 ID 不存在会跑时报错 |
+| `max_input_chars` | `8000` | 单篇文章送入 AI 前的字符截断；越大成本越高，越小可能丢上下文 |
+| `request_timeout_seconds` | `60` | 慢模型 / 长输入要调到 `120`+；过短会让 AI 阶段大量 `timeout` 重试 |
+| `ai.rate_limit.requests_per_minute` | `60` | 按你的 API tier 调；超出会被 governor 排队，不会丢请求 |
+
+**发布筛选（`[publish]`）**
+
+| 字段 | 默认 | 何时调 |
+|---|---|---|
+| `max_items_per_report` | `30` | 单份日报最多条数；摘要式分类调小（10–15），全量归档调大 |
+| `min_importance_score` | `30` | AI 路径下入选门槛（0–100）；想看更少更精调 `50`+；`0` 表示"显式无下限"（与不写不同，详见 config-schema §4.1） |
+| `include_unscored` | `false` | 关闭 AI 直通发布模式必须 `true`；AI 开启时该字段无效（详见 config-schema §4.1 真值表） |
+| `template.path_template` | `"{CATEGORY_KEY}/{YYYY}/{YYYYMMDD}.md"` | 控制本地输出与 GitHub 远端相对路径；远端还会再加 `github_path_prefix` |
+
+**运行边界（`[runtime]` / `[artifact]`）**
+
+| 字段 | 默认 | 何时调 |
+|---|---|---|
+| `runtime.max_batches_per_run` | `10` | 单次 run 处理批次上限；积压多想一次清空时用 `--max-batches=0` 临时覆盖（仅 ingest/ai-run/run 三个子命令支持），不要直接改默认 |
+| `artifact.retention_policy` | `"on_failure"` | 排错期改 `"always"`，让所有 raw artifact 都进 `raw_artifacts` 表供 `replay` 取；恢复后改回 `"on_failure"` 控成本 |
+
+**未列出但需要知道的**：
+
+- `[database].driver` —— `"sqlite"` 与 `"postgres"` 切换的所有影响（见 [`docs/design/storage-multi-dialect.md`](docs/design/storage-multi-dialect.md)）
+- `[publish].github_owner` / `github_repo` —— 空字符串触发本地发布模式，详见上文「本地发布与远端发布」
+- `[category.publish_override]` —— 分类级覆盖 `[publish]` 全局默认，按字段独立生效（详见 config-schema §4.5）
 
 ## 数据库
 
@@ -472,11 +593,15 @@ docker run --rm --env-file .env \
 data/
   rss-ai-news.db                          # SQLite 数据库（driver=postgres 时此文件不会被创建）
 output/
-  archive/
-    <category_key>/
-      <YYYY-MM-DD>.md                     # 本地发布的 Markdown 报告
+  <rendered-path>.md                      # 由 [publish.template].path_template 渲染
 logs/
   *.log                                   # --log-file 指定时生成
+```
+
+默认示例模板下，`category.key = "ai_ml"` 且报告日期为 `2026-01-03` 时，本地路径为：
+
+```text
+output/AI_ML/2026/20260103.md
 ```
 
 注意：
@@ -626,12 +751,28 @@ rss-ai-news --config-dir configs publish --date 2026-05-18 --force
 
 容器内默认工作目录是 `/app`，`-v "$PWD/configs:/app/configs:ro"` 把宿主机 `configs/` 挂进去；如果本地目录结构不是 `configs/categories/*.toml`，请相应调整 mount 路径或 `--config-dir`。
 
+### `validate-config` 报模板占位符错误
+
+`[publish.template]` 只支持上文列出的占位符。常见错误：
+
+- 写成 `{titel_md}`、`{summary_blockqoute}` 这类拼写错误。
+- 模板里有未闭合的 `{` 或多余的 `}`。
+- `path_template` 没有包含分类或日期，可能导致报告互相覆盖。
+- `path_template` 包含 `../`、反斜杠或绝对路径。
+
+修正后重新执行：
+
+```bash
+rss-ai-news --config-dir configs validate-config
+```
+
 ## 当前版本状态（v0.1.0）
 
 已实装：
 
 - SQLite 与 PostgreSQL 双方言存储（参见 `docs/design/storage-multi-dialect.md`）。
 - 10 个 CLI 子命令（含 `doctor` / `replay` / `reindex --dry-run`）。
+- 可配置发布路径与 Markdown 模板（`[publish.template]`）。
 - 双 backend `doctor` / `replay`。
 - Prometheus `/metrics` HTTP endpoint（空 registry 占位，业务 counter 接入留 v0.2）。
 - 双 GitHub Actions CI job：`cargo test`（默认 SQLite）+ `test (postgres)`（service container + `--test-threads=1`）。

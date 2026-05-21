@@ -134,7 +134,7 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
     }
 
     let display_name = category.category.display_name.clone();
-    let title = format!("{display_name} 日报 {date}");
+    let title = format!("{display_name} {date}");
     let generated_at = OffsetDateTime::now_utc();
     let mut items = 0;
     let mut local_path = None;

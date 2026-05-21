@@ -16,7 +16,7 @@ pub mod version;
 pub use app::{
     AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, DatabaseConfig, DatabaseDriver,
     DedupConfig, ExtractorConfig, HttpConfig, LeaseConfig, ObservabilityConfig, PublishConfig,
-    RetentionPolicy, RetryConfig, RuntimeConfig,
+    PublishTemplateConfig, RetentionPolicy, RetryConfig, RuntimeConfig,
 };
 pub use category::{AiOverride, CategoryConfig, CategoryMeta, PublishOverride, SourceConfig};
 pub use effective::EffectiveConfig;

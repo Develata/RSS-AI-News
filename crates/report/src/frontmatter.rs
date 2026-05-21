@@ -1,25 +1,23 @@
 /// 极简 YAML frontmatter（手写，不引 yaml crate）。
-/// 字段：title / date / category / generated_at（ISO8601 UTC）。
-pub fn build_frontmatter(
-    title: &str,
-    report_date: &str,
-    category_key: &str,
-    generated_at: time::OffsetDateTime,
-) -> String {
-    use time::format_description::well_known::Iso8601;
-    let generated_iso = generated_at.format(&Iso8601::DEFAULT).unwrap_or_default();
+/// 字段：title / date / excerpt。
+pub fn build_frontmatter(title: &str, report_date: &str, excerpt: &str) -> String {
     format!(
-        "---\ntitle: {}\ndate: {}\ncategory: {}\ngenerated_at: {}\n---\n",
+        "---\ntitle: {}\ndate: {}\nexcerpt: {}\n---\n",
         yaml_escape(title),
         report_date,
-        category_key,
-        generated_iso,
+        yaml_escape(excerpt),
     )
 }
 
-fn yaml_escape(value: &str) -> String {
-    if value.contains([':', '#', '\n', '\'', '"']) {
-        format!("\"{}\"", value.replace('"', "\\\""))
+pub(crate) fn yaml_escape(value: &str) -> String {
+    if value.contains([':', '#', '\n', '\r', '\t', '\'', '"', '\\']) {
+        let escaped = value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t");
+        format!("\"{escaped}\"")
     } else {
         value.to_string()
     }

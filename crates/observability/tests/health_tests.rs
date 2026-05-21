@@ -174,6 +174,7 @@ fn app_config() -> AppConfig {
             github_branch: "main".to_string(),
             github_path_prefix: "archive".to_string(),
             local_output_dir: "output".into(),
+            template: rss_ai_news_config::PublishTemplateConfig::default(),
             include_unscored: false,
             max_items_per_report: NonZeroU32::new(30).expect("test default non-zero"),
             min_importance_score: Score0To100::try_new(30).expect("test default in range"),

@@ -140,6 +140,7 @@ mod tests {
                 github_branch: "main".to_string(),
                 github_path_prefix: "archive".to_string(),
                 local_output_dir: "output".into(),
+                template: PublishTemplateConfig::default(),
                 include_unscored: false,
                 max_items_per_report: NonZeroU32::new(30).expect("test default non-zero"),
                 min_importance_score: Score0To100::try_new(30).expect("test default in range"),
@@ -354,6 +355,97 @@ mod tests {
             &EnvConfig::default(),
         )
         .expect_err("structural checks still enforce schema_version");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
+    fn path_template_parent_dir_fails() {
+        let mut app = app(false);
+        app.publish.template.path_template = "../{YYYYMMDD}.md".to_string();
+        let err = run_structural_checks(
+            &app,
+            &[category("ai", "https://example.test/feed")],
+            &EnvConfig::default(),
+        )
+        .expect_err("path template must stay inside publish root");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
+    fn path_template_backslash_fails() {
+        let mut app = app(false);
+        app.publish.template.path_template = r"{CATEGORY_KEY}\{YYYYMMDD}.md".to_string();
+        let err = run_structural_checks(
+            &app,
+            &[category("ai", "https://example.test/feed")],
+            &EnvConfig::default(),
+        )
+        .expect_err("path template must use slash separators");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
+    fn path_template_without_date_fails() {
+        let mut app = app(false);
+        app.publish.template.path_template = "{CATEGORY_KEY}/latest.md".to_string();
+        let err = run_structural_checks(
+            &app,
+            &[category("ai", "https://example.test/feed")],
+            &EnvConfig::default(),
+        )
+        .expect_err("path template must distinguish report dates");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
+    fn path_template_accepts_split_date_tokens() {
+        let mut app = app(false);
+        app.publish.template.path_template = "{CATEGORY_KEY}/{YYYY}/{MM}/{DD}.md".to_string();
+        run_structural_checks(
+            &app,
+            &[category("ai", "https://example.test/feed")],
+            &EnvConfig::default(),
+        )
+        .expect("split date path tokens distinguish report dates");
+    }
+
+    #[test]
+    fn report_template_without_items_fails() {
+        let mut app = app(false);
+        app.publish.template.report_template = "{frontmatter}\n# {title_md}\n".to_string();
+        let err = run_structural_checks(
+            &app,
+            &[category("ai", "https://example.test/feed")],
+            &EnvConfig::default(),
+        )
+        .expect_err("report template must include items");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
+    fn template_unknown_placeholder_fails() {
+        let mut app = app(false);
+        app.publish.template.report_template = "{frontmatter}\n# {titel_md}\n{items}".to_string();
+        let err = run_structural_checks(
+            &app,
+            &[category("ai", "https://example.test/feed")],
+            &EnvConfig::default(),
+        )
+        .expect_err("unknown template placeholder must fail fast");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
+    fn template_unmatched_brace_fails() {
+        let mut app = app(false);
+        app.publish.template.item_template =
+            "## {item_title_md}\n\n{summary_blockquote".to_string();
+        let err = run_structural_checks(
+            &app,
+            &[category("ai", "https://example.test/feed")],
+            &EnvConfig::default(),
+        )
+        .expect_err("unmatched template brace must fail fast");
         assert!(matches!(err, ConfigError::ValidationFailed { .. }));
     }
 

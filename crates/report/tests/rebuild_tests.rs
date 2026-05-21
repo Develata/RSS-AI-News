@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rss_ai_news_report::{RenderConfig, ReportError, rebuild_markdown, render_markdown};
+use rss_ai_news_report::{
+    RenderConfig, RenderTemplates, ReportError, rebuild_markdown, render_markdown,
+};
 use rss_ai_news_storage::{
     PublishItemRepo, PublishItemRepository, PublishRecordRepo, StoragePool, build_sqlite_pool,
     run_migrations,
@@ -192,5 +194,6 @@ fn render_config() -> RenderConfig {
         category_display_name: "AI".to_string(),
         report_title: "Daily AI".to_string(),
         generated_at: OffsetDateTime::from_unix_timestamp(0).unwrap(),
+        templates: RenderTemplates::default(),
     }
 }

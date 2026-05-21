@@ -72,6 +72,7 @@ pub struct PublishConfig {
     pub github_branch: String,
     pub github_path_prefix: String,
     pub local_output_dir: PathBuf,
+    pub template: PublishTemplateConfig,
     pub include_unscored: bool,
     /// Global default for `[publish] max_items_per_report`. Categories may
     /// override per-field via `[category.publish_override]`. NonZeroU32 makes
@@ -83,6 +84,43 @@ pub struct PublishConfig {
     /// path: not applied (see §4.5). Score0To100 enforces the 0-100 invariant
     /// at toml deserialization. See `docs/design/config-schema.md` §357-358.
     pub min_importance_score: Score0To100,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct PublishTemplateConfig {
+    pub path_template: String,
+    pub frontmatter_template: String,
+    pub report_template: String,
+    pub item_template: String,
+}
+
+impl PublishTemplateConfig {
+    pub fn default_path_template() -> String {
+        "{CATEGORY_KEY}/{YYYY}/{YYYYMMDD}.md".to_string()
+    }
+
+    pub fn default_frontmatter_template() -> String {
+        "---\ntitle: {date}\ndate: {date}\nexcerpt: {excerpt_yaml}\n---\n".to_string()
+    }
+
+    pub fn default_report_template() -> String {
+        "{frontmatter}\n# {title_md}\n{excerpt_block}\n{items}".to_string()
+    }
+
+    pub fn default_item_template() -> String {
+        "## {item_title_md}{score_badge}\n\n{tags_block}- **Source:** `{source_code}` | [阅读原文]({url_md})\n\n> [摘要]  \n{summary_blockquote}\n\n---\n\n".to_string()
+    }
+}
+
+impl Default for PublishTemplateConfig {
+    fn default() -> Self {
+        Self {
+            path_template: Self::default_path_template(),
+            frontmatter_template: Self::default_frontmatter_template(),
+            report_template: Self::default_report_template(),
+            item_template: Self::default_item_template(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -241,6 +279,21 @@ local_output_dir = "out"
 include_unscored = false
 max_items_per_report = 1
 min_importance_score = 30
+[publish.template]
+path_template = "{CATEGORY_KEY}/{YYYY}/{YYYYMMDD}.md"
+frontmatter_template = "---\ntitle: {date}\ndate: {date}\nexcerpt: {excerpt_yaml}\n---\n"
+report_template = "{frontmatter}\n# {title_md}\n{excerpt_block}\n{items}"
+item_template = '''
+## {item_title_md}{score_badge}
+
+{tags_block}- **Source:** `{source_code}` | [阅读原文]({url_md})
+
+> [摘要]  
+{summary_blockquote}
+
+---
+
+'''
 [dedup]
 enable_link_dedup = true
 enable_content_dedup = true

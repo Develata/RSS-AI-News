@@ -80,6 +80,7 @@ mod tests {
                 github_branch: "main".to_string(),
                 github_path_prefix: "archive".to_string(),
                 local_output_dir: "output".into(),
+                template: PublishTemplateConfig::default(),
                 include_unscored: false,
                 max_items_per_report: NonZeroU32::new(30).unwrap(),
                 min_importance_score: Score0To100::try_new(30).unwrap(),

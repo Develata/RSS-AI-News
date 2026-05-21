@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rss_ai_news_domain::dto::publish::RenderedReport;
-use rss_ai_news_report::{RenderConfig, rebuild_markdown};
+use rss_ai_news_report::{RenderConfig, RenderTemplates, rebuild_markdown};
 use time::OffsetDateTime;
 
 use crate::context::RunContext;
@@ -47,6 +47,7 @@ impl RebuildReportFlow {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
             generated_at,
+            templates: render_templates_from_ctx(&self.ctx),
         };
         Ok(rebuild_markdown(
             self.ctx.publish_record_repo.as_ref(),
@@ -55,5 +56,15 @@ impl RebuildReportFlow {
             &render_config,
         )
         .await?)
+    }
+}
+
+fn render_templates_from_ctx(ctx: &RunContext) -> RenderTemplates {
+    let template = &ctx.app.publish.template;
+    RenderTemplates {
+        path_template: template.path_template.clone(),
+        frontmatter_template: template.frontmatter_template.clone(),
+        report_template: template.report_template.clone(),
+        item_template: template.item_template.clone(),
     }
 }

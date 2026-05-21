@@ -5,8 +5,8 @@ use rss_ai_news_domain::Score0To100;
 use rss_ai_news_domain::dto::publish::PublishRequest;
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_report::{
-    RenderConfig, ReportError, SelectionConfig, SnapshotConfig, freeze as snapshot_freeze,
-    load_candidates, to_storage_items,
+    RenderConfig, RenderTemplates, ReportError, SelectionConfig, SnapshotConfig,
+    freeze as snapshot_freeze, load_candidates, to_storage_items,
 };
 use rss_ai_news_storage::{
     ClaimRequest, FreezeSnapshotOutcome, FreezeSnapshotStatus, NewPublishRecord,
@@ -141,6 +141,16 @@ pub enum PublishRemoteStatus {
 
 pub struct PublishFlow {
     ctx: Arc<RunContext>,
+}
+
+fn render_templates_from_ctx(ctx: &RunContext) -> RenderTemplates {
+    let template = &ctx.app.publish.template;
+    RenderTemplates {
+        path_template: template.path_template.clone(),
+        frontmatter_template: template.frontmatter_template.clone(),
+        report_template: template.report_template.clone(),
+        item_template: template.item_template.clone(),
+    }
 }
 
 impl PublishFlow {
@@ -521,6 +531,7 @@ impl PublishFlow {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
             generated_at: opts.generated_at,
+            templates: render_templates_from_ctx(&self.ctx),
         };
         if let Err(error) = rss_ai_news_report::rebuild_markdown(
             self.ctx.publish_record_repo.as_ref(),
@@ -627,6 +638,7 @@ impl PublishFlow {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
             generated_at: opts.generated_at,
+            templates: render_templates_from_ctx(&self.ctx),
         };
         let report = match rss_ai_news_report::rebuild_markdown(
             self.ctx.publish_record_repo.as_ref(),
@@ -937,6 +949,7 @@ impl PublishFlow {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
             generated_at: opts.generated_at,
+            templates: render_templates_from_ctx(&self.ctx),
         };
         let report = match rss_ai_news_report::rebuild_markdown(
             self.ctx.publish_record_repo.as_ref(),
