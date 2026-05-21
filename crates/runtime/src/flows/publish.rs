@@ -238,6 +238,23 @@ impl PublishFlow {
     }
 
     pub async fn freeze(&self, opts: PublishFreezeOptions) -> PublishFreezeOutcome {
+        self.freeze_record_inner(None, opts).await
+    }
+
+    pub async fn freeze_record(
+        &self,
+        publish_record_id: i64,
+        opts: PublishFreezeOptions,
+    ) -> PublishFreezeOutcome {
+        self.freeze_record_inner(Some(publish_record_id), opts)
+            .await
+    }
+
+    async fn freeze_record_inner(
+        &self,
+        publish_record_id: Option<i64>,
+        opts: PublishFreezeOptions,
+    ) -> PublishFreezeOutcome {
         let emitter = RunEventEmitter {
             run_id: &self.ctx.run_id,
             stage: "publish",
@@ -266,12 +283,18 @@ impl PublishFlow {
             batch_size: 1,
             max_attempts: self.ctx.app.retry.publish_max_attempts,
         };
-        let claimed = match self
-            .ctx
-            .publish_record_repo
-            .claim_pending_for_freeze(&claim)
-            .await
-        {
+        let claimed_result = if let Some(publish_record_id) = publish_record_id {
+            self.ctx
+                .publish_record_repo
+                .claim_publish_by_ids(&claim, PublishState::Pending, &[publish_record_id])
+                .await
+        } else {
+            self.ctx
+                .publish_record_repo
+                .claim_pending_for_freeze(&claim)
+                .await
+        };
+        let claimed = match claimed_result {
             Ok(claimed) => claimed,
             Err(error) => {
                 tracing::error!("claim publish records failed: {error}");
@@ -511,6 +534,23 @@ impl PublishFlow {
     }
 
     pub async fn render(&self, opts: PublishRenderOptions) -> PublishRenderOutcome {
+        self.render_record_inner(None, opts).await
+    }
+
+    pub async fn render_record(
+        &self,
+        publish_record_id: i64,
+        opts: PublishRenderOptions,
+    ) -> PublishRenderOutcome {
+        self.render_record_inner(Some(publish_record_id), opts)
+            .await
+    }
+
+    async fn render_record_inner(
+        &self,
+        publish_record_id: Option<i64>,
+        opts: PublishRenderOptions,
+    ) -> PublishRenderOutcome {
         let emitter = RunEventEmitter {
             run_id: &self.ctx.run_id,
             stage: "publish",
@@ -528,12 +568,18 @@ impl PublishFlow {
             batch_size: 1,
             max_attempts: self.ctx.app.retry.publish_max_attempts,
         };
-        let claimed = match self
-            .ctx
-            .publish_record_repo
-            .claim_frozen_for_render(&claim)
-            .await
-        {
+        let claimed_result = if let Some(publish_record_id) = publish_record_id {
+            self.ctx
+                .publish_record_repo
+                .claim_publish_by_ids(&claim, PublishState::SnapshotFrozen, &[publish_record_id])
+                .await
+        } else {
+            self.ctx
+                .publish_record_repo
+                .claim_frozen_for_render(&claim)
+                .await
+        };
+        let claimed = match claimed_result {
             Ok(claimed) => claimed,
             Err(error) => {
                 tracing::error!("claim frozen for render failed: {error}");
@@ -614,6 +660,23 @@ impl PublishFlow {
     }
 
     pub async fn store_local(&self, opts: PublishStoreLocalOptions) -> PublishStoreLocalOutcome {
+        self.store_local_record_inner(None, opts).await
+    }
+
+    pub async fn store_local_record(
+        &self,
+        publish_record_id: i64,
+        opts: PublishStoreLocalOptions,
+    ) -> PublishStoreLocalOutcome {
+        self.store_local_record_inner(Some(publish_record_id), opts)
+            .await
+    }
+
+    async fn store_local_record_inner(
+        &self,
+        publish_record_id: Option<i64>,
+        opts: PublishStoreLocalOptions,
+    ) -> PublishStoreLocalOutcome {
         let emitter = RunEventEmitter {
             run_id: &self.ctx.run_id,
             stage: "publish",
@@ -631,12 +694,18 @@ impl PublishFlow {
             batch_size: 1,
             max_attempts: self.ctx.app.retry.publish_max_attempts,
         };
-        let claimed = match self
-            .ctx
-            .publish_record_repo
-            .claim_rendered_for_local_store(&claim)
-            .await
-        {
+        let claimed_result = if let Some(publish_record_id) = publish_record_id {
+            self.ctx
+                .publish_record_repo
+                .claim_publish_by_ids(&claim, PublishState::Rendered, &[publish_record_id])
+                .await
+        } else {
+            self.ctx
+                .publish_record_repo
+                .claim_rendered_for_local_store(&claim)
+                .await
+        };
+        let claimed = match claimed_result {
             Ok(claimed) => claimed,
             Err(error) => {
                 tracing::error!("claim rendered for local store failed: {error}");

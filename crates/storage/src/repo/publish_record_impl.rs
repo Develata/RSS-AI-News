@@ -105,12 +105,22 @@ impl PublishRecordRepository for PublishRecordRepo {
         request: &ClaimRequest,
         ids: &[i64],
     ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+        self.claim_publish_by_ids(request, PublishState::StoredLocal, ids)
+            .await
+    }
+
+    async fn claim_publish_by_ids(
+        &self,
+        request: &ClaimRequest,
+        state: PublishState,
+        ids: &[i64],
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         match self.storage_pool() {
-            StoragePool::Sqlite(p) => sqlite_claim_local_by_ids(p, request, ids).await,
-            StoragePool::Postgres(p) => pg_claim_local_by_ids(p, request, ids).await,
+            StoragePool::Sqlite(p) => sqlite_claim_by_ids(p, request, state.as_str(), ids).await,
+            StoragePool::Postgres(p) => pg_claim_by_ids(p, request, state.as_str(), ids).await,
         }
     }
 
@@ -342,9 +352,10 @@ async fn sqlite_reclaim_expired_leases(
     Ok(result.rows_affected())
 }
 
-async fn sqlite_claim_local_by_ids(
+async fn sqlite_claim_by_ids(
     pool: &SqlitePool,
     request: &ClaimRequest,
+    state: &str,
     ids: &[i64],
 ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
     let mut builder = QueryBuilder::<Sqlite>::new("UPDATE publish_records SET lease_owner = ");
@@ -354,7 +365,9 @@ async fn sqlite_claim_local_by_ids(
         .push_bind(request.lease_expires_at)
         .push(", attempt_count = attempt_count + 1, updated_at = ")
         .push_bind(request.now)
-        .push(" WHERE state = 'stored_local' AND id IN (");
+        .push(" WHERE state = ")
+        .push_bind(state)
+        .push(" AND id IN (");
     {
         let mut separated = builder.separated(", ");
         for id in ids {
@@ -548,9 +561,10 @@ async fn pg_reclaim_expired_leases(
     Ok(result.rows_affected())
 }
 
-async fn pg_claim_local_by_ids(
+async fn pg_claim_by_ids(
     pool: &PgPool,
     request: &ClaimRequest,
+    state: &str,
     ids: &[i64],
 ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
     let mut builder = QueryBuilder::<Postgres>::new("UPDATE publish_records SET lease_owner = ");
@@ -560,7 +574,9 @@ async fn pg_claim_local_by_ids(
         .push_bind(request.lease_expires_at)
         .push(", attempt_count = attempt_count + 1, updated_at = ")
         .push_bind(request.now)
-        .push(" WHERE state = 'stored_local' AND id IN (");
+        .push(" WHERE state = ")
+        .push_bind(state)
+        .push(" AND id IN (");
     {
         let mut separated = builder.separated(", ");
         for id in ids {

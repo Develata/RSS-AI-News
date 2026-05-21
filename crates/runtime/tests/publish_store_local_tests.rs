@@ -39,6 +39,28 @@ async fn store_local_with_no_remote_target_publishes_locally_and_promotes_articl
 }
 
 #[tokio::test]
+async fn store_local_record_claims_requested_rendered_record_not_older_one() {
+    let (_dir, pool) = make_test_pool().await;
+    let rendered_at = fixed_time();
+    let stale_id = seed_rendered_publish_record(&pool, None, rendered_at).await;
+    let record_id = seed_rendered_publish_record(&pool, None, rendered_at).await;
+    let output_dir = tempfile::tempdir().unwrap();
+    let flow = flow(
+        pool.clone(),
+        Arc::new(LocalFsTarget::new(output_dir.path().to_path_buf())),
+    );
+
+    let outcome = flow
+        .store_local_record(record_id, store_opts(rendered_at))
+        .await;
+
+    assert_eq!(outcome.publish_record_id, record_id);
+    assert_eq!(outcome.status, PublishStoreLocalStatus::PublishedLocal);
+    assert_record_state(&pool, stale_id, "rendered").await;
+    assert_record_state(&pool, record_id, "published_local").await;
+}
+
+#[tokio::test]
 async fn store_local_with_remote_target_advances_to_stored_local_without_promoting_articles() {
     let (_dir, pool) = make_test_pool().await;
     let rendered_at = fixed_time();

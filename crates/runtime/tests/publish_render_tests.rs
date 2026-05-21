@@ -33,6 +33,21 @@ async fn render_advances_snapshot_frozen_to_rendered_when_items_exist() {
 }
 
 #[tokio::test]
+async fn render_record_claims_requested_snapshot_not_older_one() {
+    let (_dir, pool) = make_test_pool().await;
+    let stale_id = seed_snapshot_frozen_publish_record(&pool, None).await;
+    let record_id = seed_snapshot_frozen_publish_record(&pool, None).await;
+    let flow = flow(pool.clone());
+
+    let outcome = flow.render_record(record_id, render_opts()).await;
+
+    assert_eq!(outcome.publish_record_id, record_id);
+    assert_eq!(outcome.status, PublishRenderStatus::Rendered);
+    assert_record_state(&pool, stale_id, "snapshot_frozen").await;
+    assert_record_state(&pool, record_id, "rendered").await;
+}
+
+#[tokio::test]
 async fn render_returns_nothing_to_claim_when_no_snapshot_frozen_records() {
     let (_dir, pool) = make_test_pool().await;
     let flow = flow(pool);

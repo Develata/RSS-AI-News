@@ -79,6 +79,50 @@ async fn freeze_with_ai_path_inserts_publish_items_and_advances_record_to_snapsh
 }
 
 #[tokio::test]
+async fn freeze_record_claims_requested_pending_record_not_older_one() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flow(pool.clone());
+    let render = insert_config_rule(&pool).await;
+    let policy = insert_config_rule(&pool).await;
+    let stale_id = match flow
+        .init(PublishInitOptions {
+            category_key: "stale".to_string(),
+            report_date: "2026-04-27".to_string(),
+            target_timezone: "Asia/Shanghai".to_string(),
+            render_version: render,
+            selection_policy_version: policy,
+            remote_target: None,
+        })
+        .await
+        .unwrap()
+    {
+        PublishInitOutcome::Created { publish_record_id } => publish_record_id,
+        PublishInitOutcome::AlreadyExists { .. } => panic!("stale key should be unique"),
+    };
+    let publish_record_id = init_record(&flow, &pool).await;
+    seed_ai_succeeded_article(
+        &pool,
+        "ai",
+        "runtime-ai-by-id",
+        "Title",
+        "body",
+        "summary",
+        88,
+        1,
+    )
+    .await;
+
+    let outcome = flow
+        .freeze_record(publish_record_id, freeze_opts(true, false))
+        .await;
+
+    assert_eq!(outcome.publish_record_id, publish_record_id);
+    assert_eq!(outcome.status, PublishFreezeStatus::Frozen);
+    assert_record_state(&pool, stale_id, "pending").await;
+    assert_record_state(&pool, publish_record_id, "snapshot_frozen").await;
+}
+
+#[tokio::test]
 async fn freeze_with_ai_off_passthrough_promotes_persisted_articles_in_same_tx() {
     let (_dir, pool) = make_test_pool().await;
     let flow = flow(pool.clone());

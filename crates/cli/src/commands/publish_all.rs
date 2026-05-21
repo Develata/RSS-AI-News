@@ -161,14 +161,17 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishAllCommandSumma
                     )))
                 })?;
             let freeze = flow
-                .freeze(PublishFreezeOptions {
-                    category_key: category.category.key.clone(),
-                    max_items: effective.max_items_per_report,
-                    min_importance_score: effective.min_importance_score,
-                    include_unscored: effective.include_unscored,
-                    ai_enabled: effective.ai_enabled,
-                    excerpt_max_chars: 240,
-                })
+                .freeze_record(
+                    publish_record_id,
+                    PublishFreezeOptions {
+                        category_key: category.category.key.clone(),
+                        max_items: effective.max_items_per_report,
+                        min_importance_score: effective.min_importance_score,
+                        include_unscored: effective.include_unscored,
+                        ai_enabled: effective.ai_enabled,
+                        excerpt_max_chars: 240,
+                    },
+                )
                 .await;
             stages.push(stage("freeze", &format!("{:?}", freeze.status)));
             items = freeze.item_count;
@@ -187,11 +190,14 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishAllCommandSumma
         }
         if matches!(state.as_str(), "pending" | "snapshot_frozen") {
             let render = flow
-                .render(PublishRenderOptions {
-                    category_display_name: display_name.clone(),
-                    report_title: title.clone(),
-                    generated_at,
-                })
+                .render_record(
+                    publish_record_id,
+                    PublishRenderOptions {
+                        category_display_name: display_name.clone(),
+                        report_title: title.clone(),
+                        generated_at,
+                    },
+                )
                 .await;
             stages.push(stage("render", &format!("{:?}", render.status)));
             if !matches!(render.status, PublishRenderStatus::Rendered) {
@@ -209,11 +215,14 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishAllCommandSumma
         }
         if matches!(state.as_str(), "pending" | "snapshot_frozen" | "rendered") {
             let store = flow
-                .store_local(PublishStoreLocalOptions {
-                    category_display_name: display_name.clone(),
-                    report_title: title.clone(),
-                    generated_at,
-                })
+                .store_local_record(
+                    publish_record_id,
+                    PublishStoreLocalOptions {
+                        category_display_name: display_name.clone(),
+                        report_title: title.clone(),
+                        generated_at,
+                    },
+                )
                 .await;
             stages.push(stage("store_local", &format!("{:?}", store.status)));
             items = items.max(store.item_count);
