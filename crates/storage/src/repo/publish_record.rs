@@ -131,6 +131,11 @@ pub trait PublishRecordRepository: Send + Sync {
         &self,
         request: &ClaimRequest,
     ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
+    async fn claim_local_for_remote_publish_by_ids(
+        &self,
+        request: &ClaimRequest,
+        ids: &[i64],
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
     async fn release_advance(
         &self,
         id: i64,

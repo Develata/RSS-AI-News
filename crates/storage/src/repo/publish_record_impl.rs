@@ -5,7 +5,7 @@
 //! 路径在 PG 加 `FOR UPDATE SKIP LOCKED`（§6.4 契约）。
 
 use async_trait::async_trait;
-use sqlx::{PgPool, SqlitePool};
+use sqlx::{PgPool, Postgres, QueryBuilder, Sqlite, SqlitePool};
 use time::OffsetDateTime;
 
 use crate::{ClaimRequest, StorageError, StoragePool, classify_db_error};
@@ -97,6 +97,20 @@ impl PublishRecordRepository for PublishRecordRepo {
         match self.storage_pool() {
             StoragePool::Sqlite(p) => claim_publish_sqlite(p, request, "stored_local").await,
             StoragePool::Postgres(p) => claim_publish_pg(p, request, "stored_local").await,
+        }
+    }
+
+    async fn claim_local_for_remote_publish_by_ids(
+        &self,
+        request: &ClaimRequest,
+        ids: &[i64],
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self.storage_pool() {
+            StoragePool::Sqlite(p) => sqlite_claim_local_by_ids(p, request, ids).await,
+            StoragePool::Postgres(p) => pg_claim_local_by_ids(p, request, ids).await,
         }
     }
 
@@ -328,6 +342,40 @@ async fn sqlite_reclaim_expired_leases(
     Ok(result.rows_affected())
 }
 
+async fn sqlite_claim_local_by_ids(
+    pool: &SqlitePool,
+    request: &ClaimRequest,
+    ids: &[i64],
+) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+    let mut builder = QueryBuilder::<Sqlite>::new("UPDATE publish_records SET lease_owner = ");
+    builder
+        .push_bind(&request.owner)
+        .push(", lease_expires_at = ")
+        .push_bind(request.lease_expires_at)
+        .push(", attempt_count = attempt_count + 1, updated_at = ")
+        .push_bind(request.now)
+        .push(" WHERE state = 'stored_local' AND id IN (");
+    {
+        let mut separated = builder.separated(", ");
+        for id in ids {
+            separated.push_bind(id);
+        }
+    }
+    builder
+        .push(") AND (lease_expires_at IS NULL OR lease_expires_at < ")
+        .push_bind(request.now)
+        .push(") AND attempt_count < ")
+        .push_bind(i64::from(request.max_attempts))
+        .push(" RETURNING id, idempotency_key, category_key, report_date, target_timezone, ")
+        .push("render_version, selection_policy_version, state, remote_target, attempt_count");
+
+    builder
+        .build_query_as::<ClaimedPublishRecord>()
+        .fetch_all(pool)
+        .await
+        .map_err(StorageError::from)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn sqlite_release_terminal_advance(
     pool: &SqlitePool,
@@ -498,6 +546,40 @@ async fn pg_reclaim_expired_leases(
         .await
         .map_err(StorageError::from)?;
     Ok(result.rows_affected())
+}
+
+async fn pg_claim_local_by_ids(
+    pool: &PgPool,
+    request: &ClaimRequest,
+    ids: &[i64],
+) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+    let mut builder = QueryBuilder::<Postgres>::new("UPDATE publish_records SET lease_owner = ");
+    builder
+        .push_bind(&request.owner)
+        .push(", lease_expires_at = ")
+        .push_bind(request.lease_expires_at)
+        .push(", attempt_count = attempt_count + 1, updated_at = ")
+        .push_bind(request.now)
+        .push(" WHERE state = 'stored_local' AND id IN (");
+    {
+        let mut separated = builder.separated(", ");
+        for id in ids {
+            separated.push_bind(id);
+        }
+    }
+    builder
+        .push(") AND (lease_expires_at IS NULL OR lease_expires_at < ")
+        .push_bind(request.now)
+        .push(") AND attempt_count < ")
+        .push_bind(i64::from(request.max_attempts))
+        .push(" RETURNING id, idempotency_key, category_key, report_date, target_timezone, ")
+        .push("render_version, selection_policy_version, state, remote_target, attempt_count");
+
+    builder
+        .build_query_as::<ClaimedPublishRecord>()
+        .fetch_all(pool)
+        .await
+        .map_err(StorageError::from)
 }
 
 #[allow(clippy::too_many_arguments)]

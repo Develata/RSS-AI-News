@@ -25,7 +25,7 @@ use serde::Serialize;
 
 use crate::{
     args::{AiRunArgs, Cli, IngestArgs, PublishArgs, RunArgs},
-    commands::{ai_run, ingest, publish},
+    commands::{ai_run, ingest, publish_all},
     error::CliError,
     exit_code::ExitCode,
     output::{CommandSummary, RenderedError},
@@ -47,7 +47,7 @@ pub struct StageFailure {
 pub struct RunCommandSummary {
     pub ingest: Option<ingest::IngestCommandSummary>,
     pub ai_run: Option<ai_run::AiRunCommandSummary>,
-    pub publish: Option<publish::PublishCommandSummary>,
+    pub publish: Option<publish_all::PublishAllCommandSummary>,
     pub stage_failures: Vec<StageFailure>,
     /// `Some(reason)` iff the ai-run stage was deliberately skipped per
     /// §4.11 (e.g. `ai.enabled=false`). Distinguishes the "skipped" branch
@@ -123,8 +123,8 @@ impl CommandSummary for RunCommandSummary {
         match &self.publish {
             Some(publish) => writeln!(
                 writer,
-                "  Publish record:          {}",
-                publish.publish_record_id
+                "  Publish records:         {}",
+                publish.categories.len()
             )?,
             None => writeln!(writer, "  Publish:                 skipped or failed")?,
         }
@@ -226,7 +226,7 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
                 }
             }
         };
-        let publish_summary = match publish::run(cli, &publish_args).await {
+        let publish_summary = match publish_all::run(cli, &publish_args).await {
             Ok(summary) => Some(summary),
             Err(err) => {
                 record_stage_failure(&mut stage_failures, "publish", &err);

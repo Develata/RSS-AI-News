@@ -38,6 +38,18 @@ fn status_500_maps_to_retryable_api_error() {
 }
 
 #[test]
+fn status_409_maps_to_retryable_api_error() {
+    let error = classify_github_status(409, "reference update conflict".to_string(), None);
+
+    assert!(matches!(
+        &error,
+        PublishError::GitHubApiError { status: 409, message }
+            if message == "reference update conflict"
+    ));
+    assert!(error.is_retryable());
+}
+
+#[test]
 fn status_422_maps_to_permanent_api_error() {
     let error = classify_github_status(422, "validation failed".to_string(), None);
 

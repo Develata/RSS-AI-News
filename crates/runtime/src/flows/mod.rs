@@ -22,9 +22,11 @@ pub use ingest::{
 };
 pub use publish::{
     PublishFlow, PublishFreezeOptions, PublishFreezeOutcome, PublishFreezeStatus,
-    PublishInitOptions, PublishInitOutcome, PublishRemoteOptions, PublishRemoteOutcome,
-    PublishRemoteStatus, PublishRenderOptions, PublishRenderOutcome, PublishRenderStatus,
-    PublishStoreLocalOptions, PublishStoreLocalOutcome, PublishStoreLocalStatus,
+    PublishInitOptions, PublishInitOutcome, PublishRemoteBatchItemOptions,
+    PublishRemoteBatchOptions, PublishRemoteBatchOutcome, PublishRemoteOptions,
+    PublishRemoteOutcome, PublishRemoteStatus, PublishRenderOptions, PublishRenderOutcome,
+    PublishRenderStatus, PublishStoreLocalOptions, PublishStoreLocalOutcome,
+    PublishStoreLocalStatus,
 };
 pub use rebuild_report::{RebuildReportFlow, RebuildReportOptions};
 pub use reindex::{

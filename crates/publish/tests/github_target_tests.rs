@@ -72,6 +72,91 @@ async fn update_existing_file_sends_existing_sha() {
 }
 
 #[tokio::test]
+async fn publish_many_creates_one_commit_for_multiple_reports() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": { "sha": "head-sha" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/commits/head-sha"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tree": { "sha": "base-tree-sha" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/git/trees"))
+        .and(body_json(json!({
+            "base_tree": "base-tree-sha",
+            "tree": [
+                {
+                    "path": "reports/tech/2026-04-29.md",
+                    "mode": "100644",
+                    "type": "blob",
+                    "content": "# hello\n"
+                },
+                {
+                    "path": "reports/ai/2026-04-29.md",
+                    "mode": "100644",
+                    "type": "blob",
+                    "content": "# ai\n"
+                }
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "sha": "new-tree-sha"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/git/commits"))
+        .and(body_json(json!({
+            "message": "auto: publish 2 reports",
+            "tree": "new-tree-sha",
+            "parents": ["head-sha"]
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "sha": "batch-commit-sha"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/repos/owner/repo/git/refs/heads/main"))
+        .and(body_json(json!({
+            "sha": "batch-commit-sha",
+            "force": false
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": { "sha": "batch-commit-sha" }
+        })))
+        .mount(&server)
+        .await;
+    let target = target(&server);
+
+    let batch = target
+        .publish_many(&[sample_report(), second_report()])
+        .await
+        .unwrap();
+
+    assert_eq!(batch.commit_sha.as_deref(), Some("batch-commit-sha"));
+    assert_eq!(batch.artifacts.len(), 2);
+    assert!(
+        batch
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.commit_sha.as_deref() == Some("batch-commit-sha"))
+    );
+    assert_eq!(
+        batch.artifacts[1].remote_target.as_deref(),
+        Some("github://owner/repo/main/reports/ai/2026-04-29.md")
+    );
+}
+
+#[tokio::test]
 async fn auth_failure_maps_to_github_auth_failed() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -177,5 +262,15 @@ fn sample_report() -> RenderedReport {
         report_date: "2026-04-29".to_string(),
         markdown_content: "# hello\n".to_string(),
         relative_path: "tech/2026-04-29.md".to_string(),
+    }
+}
+
+fn second_report() -> RenderedReport {
+    RenderedReport {
+        publish_record_id: 2,
+        category_key: "ai".to_string(),
+        report_date: "2026-04-29".to_string(),
+        markdown_content: "# ai\n".to_string(),
+        relative_path: "ai/2026-04-29.md".to_string(),
     }
 }

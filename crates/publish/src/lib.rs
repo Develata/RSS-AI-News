@@ -8,4 +8,4 @@ pub mod target;
 pub use error::PublishError;
 pub use github::{GitHubTarget, GitHubTargetConfig};
 pub use local::LocalFsTarget;
-pub use target::{PublishTarget, PublishedArtifact};
+pub use target::{PublishTarget, PublishedArtifact, PublishedBatchArtifact};

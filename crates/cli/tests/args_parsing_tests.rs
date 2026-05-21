@@ -83,6 +83,26 @@ async fn args_parsing_parses_publish_with_local_only_and_force() {
 }
 
 #[tokio::test]
+async fn args_parsing_parses_publish_all_with_shared_publish_args() {
+    let cli = Cli::try_parse_from([
+        "rss-ai-news",
+        "publish-all",
+        "--date",
+        "2026-04-30",
+        "--force",
+    ])
+    .expect("parse");
+    match cli.command {
+        Command::PublishAll(args) => {
+            assert_eq!(args.date.as_deref(), Some("2026-04-30"));
+            assert!(!args.local_only);
+            assert!(args.force);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn args_parsing_parses_doctor_with_deep() {
     let cli = Cli::try_parse_from(["rss-ai-news", "doctor", "--deep"]).expect("parse");
     match cli.command {
@@ -245,6 +265,7 @@ async fn args_parsing_help_lists_all_top_level_subcommands() {
         "ingest",
         "ai-run",
         "publish",
+        "publish-all",
         "doctor",
         "replay",
         "backfill",

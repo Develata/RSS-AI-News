@@ -7,8 +7,13 @@ use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_domain::dto::feed::FeedFetchRequest;
 use rss_ai_news_domain::dto::publish::RenderedReport;
 use rss_ai_news_feed::{FeedError, FeedFetcher};
-use rss_ai_news_publish::{LocalFsTarget, PublishError, PublishTarget, PublishedArtifact};
-use rss_ai_news_runtime::{PublishFlow, PublishRemoteOptions, PublishRemoteStatus};
+use rss_ai_news_publish::{
+    LocalFsTarget, PublishError, PublishTarget, PublishedArtifact, PublishedBatchArtifact,
+};
+use rss_ai_news_runtime::{
+    PublishFlow, PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRemoteOptions,
+    PublishRemoteStatus,
+};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
@@ -35,6 +40,42 @@ async fn publish_remote_succeeds_promotes_articles() {
     assert_record_state(&pool, record_id, "published_remote").await;
     assert_record_remote_fields(&pool, record_id).await;
     assert_referenced_articles_state(&pool, record_id, "published").await;
+}
+
+#[tokio::test]
+async fn publish_remote_batch_succeeds_with_one_commit_for_multiple_records() {
+    let (_dir, pool) = make_test_pool().await;
+    let first_id = seed_stored_local_publish_record(&pool).await;
+    let second_id = seed_stored_local_publish_record(&pool).await;
+    let flow = flow(pool.clone(), Some(Arc::new(MockBatchSuccessTarget)));
+
+    let outcome = flow
+        .publish_remote_batch(PublishRemoteBatchOptions {
+            items: vec![
+                batch_item(first_id, "AI", "Daily AI"),
+                batch_item(second_id, "ML", "Daily ML"),
+            ],
+        })
+        .await;
+
+    assert_eq!(outcome.commit_sha.as_deref(), Some("batch-commit-sha"));
+    assert_eq!(outcome.items.len(), 2);
+    assert!(
+        outcome
+            .items
+            .iter()
+            .all(|item| item.status == PublishRemoteStatus::PublishedRemote)
+    );
+    assert!(
+        outcome
+            .items
+            .iter()
+            .all(|item| item.commit_sha.as_deref() == Some("batch-commit-sha"))
+    );
+    for record_id in [first_id, second_id] {
+        assert_record_state(&pool, record_id, "published_remote").await;
+        assert_referenced_articles_state(&pool, record_id, "published").await;
+    }
 }
 
 #[tokio::test]
@@ -222,6 +263,19 @@ fn remote_opts() -> PublishRemoteOptions {
     }
 }
 
+fn batch_item(
+    publish_record_id: i64,
+    category_display_name: &str,
+    report_title: &str,
+) -> PublishRemoteBatchItemOptions {
+    PublishRemoteBatchItemOptions {
+        publish_record_id,
+        category_display_name: category_display_name.to_string(),
+        report_title: report_title.to_string(),
+        generated_at: fixed_time(),
+    }
+}
+
 fn fixed_time() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(0).unwrap()
 }
@@ -235,6 +289,39 @@ impl PublishTarget for MockSuccessTarget {
             local_path: None,
             commit_sha: Some("remote-commit-sha".to_string()),
             remote_target: Some("github://owner/repo/main/reports/ai.md".to_string()),
+        })
+    }
+}
+
+struct MockBatchSuccessTarget;
+
+#[async_trait]
+impl PublishTarget for MockBatchSuccessTarget {
+    async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        Ok(PublishedArtifact {
+            local_path: None,
+            commit_sha: Some("single-commit-sha".to_string()),
+            remote_target: Some(format!("github://owner/repo/main/{}", report.relative_path)),
+        })
+    }
+
+    async fn publish_many(
+        &self,
+        reports: &[RenderedReport],
+    ) -> Result<PublishedBatchArtifact, PublishError> {
+        Ok(PublishedBatchArtifact {
+            commit_sha: Some("batch-commit-sha".to_string()),
+            artifacts: reports
+                .iter()
+                .map(|report| PublishedArtifact {
+                    local_path: None,
+                    commit_sha: Some("batch-commit-sha".to_string()),
+                    remote_target: Some(format!(
+                        "github://owner/repo/main/{}",
+                        report.relative_path
+                    )),
+                })
+                .collect(),
         })
     }
 }

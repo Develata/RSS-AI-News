@@ -8,7 +8,7 @@ use rss_ai_news_domain::{SecretString, dto::publish::RenderedReport};
 use serde_json::{Value, json};
 
 use crate::error::PublishError;
-use crate::target::{PublishTarget, PublishedArtifact};
+use crate::target::{PublishTarget, PublishedArtifact, PublishedBatchArtifact};
 
 /// GitHub remote-target configuration. The `token` field is a
 /// [`SecretString`] so its raw value is redacted by the type's own
@@ -102,9 +102,242 @@ impl PublishTarget for GitHubTarget {
             remote_target: Some(self.remote_target_url(&final_path)),
         })
     }
+
+    async fn publish_many(
+        &self,
+        reports: &[RenderedReport],
+    ) -> Result<PublishedBatchArtifact, PublishError> {
+        if reports.is_empty() {
+            return Ok(PublishedBatchArtifact {
+                artifacts: Vec::new(),
+                commit_sha: None,
+            });
+        }
+        if reports.len() == 1 {
+            let artifact = self.publish(&reports[0]).await?;
+            return Ok(PublishedBatchArtifact {
+                commit_sha: artifact.commit_sha.clone(),
+                artifacts: vec![artifact],
+            });
+        }
+
+        let mut tree_entries = Vec::with_capacity(reports.len());
+        let mut artifacts = Vec::with_capacity(reports.len());
+        for report in reports {
+            let final_path = self.join_path(&report.relative_path)?;
+            tree_entries.push(json!({
+                "path": final_path,
+                "mode": "100644",
+                "type": "blob",
+                "content": report.markdown_content,
+            }));
+            artifacts.push(PublishedArtifact {
+                local_path: None,
+                commit_sha: None,
+                remote_target: Some(self.remote_target_url(&final_path)),
+            });
+        }
+
+        let (head_commit_sha, base_tree_sha) = self.head_commit_and_tree().await?;
+        let tree_sha = self.create_tree(&base_tree_sha, tree_entries).await?;
+        let commit_message = format!(
+            "{} {} reports",
+            self.cfg.commit_message_prefix,
+            reports.len()
+        );
+        let commit_sha = self
+            .create_commit(&commit_message, &tree_sha, &head_commit_sha)
+            .await?;
+        self.update_branch_ref(&commit_sha).await?;
+
+        for artifact in &mut artifacts {
+            artifact.commit_sha = Some(commit_sha.clone());
+        }
+        Ok(PublishedBatchArtifact {
+            artifacts,
+            commit_sha: Some(commit_sha),
+        })
+    }
 }
 
 impl GitHubTarget {
+    async fn get_json(&self, route: &str) -> Result<Value, PublishError> {
+        let response = self
+            .client
+            ._get(route)
+            .await
+            .map_err(classify::classify_octocrab_error)?;
+        let status = response.status().as_u16();
+        let reset_epoch = response
+            .headers()
+            .get("X-RateLimit-Reset")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<i64>().ok());
+        let body = self
+            .client
+            .body_to_string(response)
+            .await
+            .map_err(classify::classify_octocrab_error)?;
+
+        if !(200..300).contains(&status) {
+            return Err(classify::classify_github_status(
+                status,
+                response_message(status, &body),
+                reset_epoch,
+            ));
+        }
+
+        parse_json_value(status, &body)
+    }
+
+    async fn post_json(&self, route: &str, body: &Value) -> Result<Value, PublishError> {
+        let response = self
+            .client
+            ._post(route, Some(body))
+            .await
+            .map_err(classify::classify_octocrab_error)?;
+        let status = response.status().as_u16();
+        let reset_epoch = response
+            .headers()
+            .get("X-RateLimit-Reset")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<i64>().ok());
+        let body = self
+            .client
+            .body_to_string(response)
+            .await
+            .map_err(classify::classify_octocrab_error)?;
+
+        if !(200..300).contains(&status) {
+            return Err(classify::classify_github_status(
+                status,
+                response_message(status, &body),
+                reset_epoch,
+            ));
+        }
+
+        parse_json_value(status, &body)
+    }
+
+    async fn patch_json(&self, route: &str, body: &Value) -> Result<Value, PublishError> {
+        let response = self
+            .client
+            ._patch(route, Some(body))
+            .await
+            .map_err(classify::classify_octocrab_error)?;
+        let status = response.status().as_u16();
+        let reset_epoch = response
+            .headers()
+            .get("X-RateLimit-Reset")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<i64>().ok());
+        let body = self
+            .client
+            .body_to_string(response)
+            .await
+            .map_err(classify::classify_octocrab_error)?;
+
+        if !(200..300).contains(&status) {
+            return Err(classify::classify_github_status(
+                status,
+                response_message(status, &body),
+                reset_epoch,
+            ));
+        }
+
+        parse_json_value(status, &body)
+    }
+
+    async fn head_commit_and_tree(&self) -> Result<(String, String), PublishError> {
+        let ref_route = format!(
+            "/repos/{}/{}/git/ref/heads/{}",
+            self.cfg.owner, self.cfg.repo, self.cfg.branch
+        );
+        let head = self.get_json(&ref_route).await?;
+        let head_commit_sha = head
+            .get("object")
+            .and_then(|object| object.get("sha"))
+            .and_then(|sha| sha.as_str())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| PublishError::GitHubApiError {
+                status: 502,
+                message: "missing object.sha in GitHub ref response".to_string(),
+            })?;
+
+        let commit_route = format!(
+            "/repos/{}/{}/git/commits/{}",
+            self.cfg.owner, self.cfg.repo, head_commit_sha
+        );
+        let commit = self.get_json(&commit_route).await?;
+        let base_tree_sha = commit
+            .get("tree")
+            .and_then(|tree| tree.get("sha"))
+            .and_then(|sha| sha.as_str())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| PublishError::GitHubApiError {
+                status: 502,
+                message: "missing tree.sha in GitHub commit response".to_string(),
+            })?;
+        Ok((head_commit_sha, base_tree_sha))
+    }
+
+    async fn create_tree(
+        &self,
+        base_tree_sha: &str,
+        tree_entries: Vec<Value>,
+    ) -> Result<String, PublishError> {
+        let route = format!("/repos/{}/{}/git/trees", self.cfg.owner, self.cfg.repo);
+        let body = json!({
+            "base_tree": base_tree_sha,
+            "tree": tree_entries,
+        });
+        let value = self.post_json(&route, &body).await?;
+        value
+            .get("sha")
+            .and_then(|sha| sha.as_str())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| PublishError::GitHubApiError {
+                status: 502,
+                message: "missing sha in GitHub tree response".to_string(),
+            })
+    }
+
+    async fn create_commit(
+        &self,
+        message: &str,
+        tree_sha: &str,
+        parent_commit_sha: &str,
+    ) -> Result<String, PublishError> {
+        let route = format!("/repos/{}/{}/git/commits", self.cfg.owner, self.cfg.repo);
+        let body = json!({
+            "message": message,
+            "tree": tree_sha,
+            "parents": [parent_commit_sha],
+        });
+        let value = self.post_json(&route, &body).await?;
+        value
+            .get("sha")
+            .and_then(|sha| sha.as_str())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| PublishError::GitHubApiError {
+                status: 502,
+                message: "missing sha in GitHub commit response".to_string(),
+            })
+    }
+
+    async fn update_branch_ref(&self, commit_sha: &str) -> Result<(), PublishError> {
+        let route = format!(
+            "/repos/{}/{}/git/refs/heads/{}",
+            self.cfg.owner, self.cfg.repo, self.cfg.branch
+        );
+        let body = json!({
+            "sha": commit_sha,
+            "force": false,
+        });
+        self.patch_json(&route, &body).await?;
+        Ok(())
+    }
+
     async fn existing_sha(&self, final_path: &str) -> Result<Option<String>, PublishError> {
         let route = format!(
             "/repos/{}/{}/contents/{}?ref={}",

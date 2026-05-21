@@ -25,7 +25,7 @@ impl ClassifiedError for PublishError {
                     | std::io::ErrorKind::TimedOut
             ),
             Self::InvalidPath(_) | Self::GitHubAuthFailed(_) => false,
-            Self::GitHubApiError { status, .. } => *status >= 500,
+            Self::GitHubApiError { status, .. } => *status == 409 || *status >= 500,
             Self::GitHubRateLimit { .. } => true,
         }
     }

@@ -109,6 +109,7 @@ pub enum Command {
     Ingest(IngestArgs),
     AiRun(AiRunArgs),
     Publish(PublishArgs),
+    PublishAll(PublishArgs),
     Doctor(DoctorArgs),
     Replay(ReplayArgs),
     Backfill(BackfillArgs),

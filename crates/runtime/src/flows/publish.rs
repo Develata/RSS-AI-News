@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use rss_ai_news_domain::Score0To100;
 use rss_ai_news_domain::dto::publish::PublishRequest;
 use rss_ai_news_domain::error::ClassifiedError;
+use rss_ai_news_publish::PublishError;
 use rss_ai_news_report::{
     RenderConfig, RenderTemplates, ReportError, SelectionConfig, SnapshotConfig,
     freeze as snapshot_freeze, load_candidates, to_storage_items,
@@ -89,6 +91,19 @@ pub struct PublishRemoteOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct PublishRemoteBatchItemOptions {
+    pub publish_record_id: i64,
+    pub category_display_name: String,
+    pub report_title: String,
+    pub generated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishRemoteBatchOptions {
+    pub items: Vec<PublishRemoteBatchItemOptions>,
+}
+
+#[derive(Debug, Clone)]
 pub struct PublishRenderOutcome {
     pub publish_record_id: i64,
     pub status: PublishRenderStatus,
@@ -119,6 +134,12 @@ pub struct PublishRemoteOutcome {
     pub item_count: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct PublishRemoteBatchOutcome {
+    pub items: Vec<PublishRemoteOutcome>,
+    pub commit_sha: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishStoreLocalStatus {
     StoredLocal,
@@ -141,6 +162,13 @@ pub enum PublishRemoteStatus {
 
 pub struct PublishFlow {
     ctx: Arc<RunContext>,
+}
+
+struct PreparedRemote {
+    publish_record_id: i64,
+    report: rss_ai_news_domain::dto::publish::RenderedReport,
+    promote_article_ids: Vec<i64>,
+    item_count: u32,
 }
 
 fn render_templates_from_ctx(ctx: &RunContext) -> RenderTemplates {
@@ -1162,6 +1190,384 @@ impl PublishFlow {
                 remote_target: artifact.remote_target,
                 item_count,
             },
+        }
+    }
+
+    pub async fn publish_remote_batch(
+        &self,
+        opts: PublishRemoteBatchOptions,
+    ) -> PublishRemoteBatchOutcome {
+        let emitter = RunEventEmitter {
+            run_id: &self.ctx.run_id,
+            stage: "publish",
+            repo: self.ctx.event_repo.as_ref(),
+        };
+        let target = match self.ctx.publish_target_remote.as_ref() {
+            Some(target) => Arc::clone(target),
+            None => {
+                tracing::warn!(
+                    "publish_remote_batch called without publish_target_remote configured"
+                );
+                return PublishRemoteBatchOutcome {
+                    commit_sha: None,
+                    items: opts
+                        .items
+                        .into_iter()
+                        .map(|item| PublishRemoteOutcome {
+                            publish_record_id: item.publish_record_id,
+                            status: PublishRemoteStatus::MissingTarget,
+                            commit_sha: None,
+                            remote_target: None,
+                            item_count: 0,
+                        })
+                        .collect(),
+                };
+            }
+        };
+        if opts.items.is_empty() {
+            return PublishRemoteBatchOutcome {
+                items: Vec::new(),
+                commit_sha: None,
+            };
+        }
+
+        let now = OffsetDateTime::now_utc();
+        let owner = build_owner_id();
+        let ids = opts
+            .items
+            .iter()
+            .map(|item| item.publish_record_id)
+            .collect::<Vec<_>>();
+        let claim = ClaimRequest {
+            owner: owner.clone(),
+            now,
+            lease_expires_at: lease_expires_at(
+                now,
+                Duration::seconds(self.ctx.app.lease.publish_duration_seconds as i64),
+            ),
+            batch_size: ids.len() as u32,
+            max_attempts: self.ctx.app.retry.publish_max_attempts,
+        };
+        let claimed = match self
+            .ctx
+            .publish_record_repo
+            .claim_local_for_remote_publish_by_ids(&claim, &ids)
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                tracing::error!("claim local publish records by ids failed: {error}");
+                return PublishRemoteBatchOutcome {
+                    commit_sha: None,
+                    items: opts
+                        .items
+                        .into_iter()
+                        .map(|item| PublishRemoteOutcome {
+                            publish_record_id: item.publish_record_id,
+                            status: PublishRemoteStatus::Failed {
+                                error_kind: error.error_kind().to_string(),
+                            },
+                            commit_sha: None,
+                            remote_target: None,
+                            item_count: 0,
+                        })
+                        .collect(),
+                };
+            }
+        };
+        let claimed_by_id = claimed
+            .into_iter()
+            .map(|claimed| (claimed.id, claimed))
+            .collect::<HashMap<_, _>>();
+
+        let mut prepared = Vec::new();
+        let mut outcomes = Vec::with_capacity(opts.items.len());
+        for item in opts.items {
+            let claimed = match claimed_by_id.get(&item.publish_record_id) {
+                Some(claimed) => claimed,
+                None => {
+                    outcomes.push(PublishRemoteOutcome {
+                        publish_record_id: item.publish_record_id,
+                        status: PublishRemoteStatus::NothingToClaim,
+                        commit_sha: None,
+                        remote_target: None,
+                        item_count: 0,
+                    });
+                    continue;
+                }
+            };
+
+            emitter
+                .emit(
+                    "publish_started",
+                    "info",
+                    Some("publish_record"),
+                    Some(claimed.id),
+                    "remote batch publish item started",
+                    Some(json!({ "phase": "publish_remote_batch" })),
+                )
+                .await;
+
+            let render_config = RenderConfig {
+                category_display_name: item.category_display_name,
+                report_title: item.report_title,
+                generated_at: item.generated_at,
+                templates: render_templates_from_ctx(&self.ctx),
+            };
+            let report = match rss_ai_news_report::rebuild_markdown(
+                self.ctx.publish_record_repo.as_ref(),
+                self.ctx.publish_item_repo.as_ref(),
+                claimed.id,
+                &render_config,
+            )
+            .await
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    self.release_report_error(claimed.id, &owner, &error, now, &emitter)
+                        .await;
+                    outcomes.push(PublishRemoteOutcome {
+                        publish_record_id: claimed.id,
+                        status: PublishRemoteStatus::Failed {
+                            error_kind: error.error_kind().to_string(),
+                        },
+                        commit_sha: None,
+                        remote_target: None,
+                        item_count: 0,
+                    });
+                    continue;
+                }
+            };
+
+            let items = match self
+                .ctx
+                .publish_item_repo
+                .list_by_publish_record(claimed.id)
+                .await
+            {
+                Ok(items) => items,
+                Err(error) => {
+                    if let Err(persist_err) = self
+                        .ctx
+                        .publish_record_repo
+                        .release_permanent_failure(
+                            claimed.id,
+                            &owner,
+                            &error.to_string(),
+                            error.error_kind(),
+                            now,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            publish_record_id = claimed.id,
+                            phase = "publish_remote_batch.list_items",
+                            ?persist_err,
+                            "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
+                        );
+                    }
+                    outcomes.push(PublishRemoteOutcome {
+                        publish_record_id: claimed.id,
+                        status: PublishRemoteStatus::Failed {
+                            error_kind: error.error_kind().to_string(),
+                        },
+                        commit_sha: None,
+                        remote_target: None,
+                        item_count: 0,
+                    });
+                    continue;
+                }
+            };
+            let item_count = items.len() as u32;
+            prepared.push(PreparedRemote {
+                publish_record_id: claimed.id,
+                report,
+                promote_article_ids: items.into_iter().map(|item| item.article_id).collect(),
+                item_count,
+            });
+        }
+
+        if prepared.is_empty() {
+            return PublishRemoteBatchOutcome {
+                items: outcomes,
+                commit_sha: None,
+            };
+        }
+
+        let reports = prepared
+            .iter()
+            .map(|item| item.report.clone())
+            .collect::<Vec<_>>();
+        let batch = match target.publish_many(&reports).await {
+            Ok(batch) if batch.artifacts.len() == prepared.len() => batch,
+            Ok(batch) => {
+                let error = PublishError::GitHubApiError {
+                    status: 502,
+                    message: format!(
+                        "publish_many returned {} artifacts for {} reports",
+                        batch.artifacts.len(),
+                        prepared.len()
+                    ),
+                };
+                self.release_publish_error_for_prepared(&prepared, &owner, &error, now, &emitter)
+                    .await;
+                for item in prepared {
+                    outcomes.push(PublishRemoteOutcome {
+                        publish_record_id: item.publish_record_id,
+                        status: PublishRemoteStatus::Failed {
+                            error_kind: error.error_kind().to_string(),
+                        },
+                        commit_sha: None,
+                        remote_target: None,
+                        item_count: item.item_count,
+                    });
+                }
+                return PublishRemoteBatchOutcome {
+                    items: outcomes,
+                    commit_sha: None,
+                };
+            }
+            Err(error) => {
+                self.release_publish_error_for_prepared(&prepared, &owner, &error, now, &emitter)
+                    .await;
+                for item in prepared {
+                    outcomes.push(PublishRemoteOutcome {
+                        publish_record_id: item.publish_record_id,
+                        status: PublishRemoteStatus::Failed {
+                            error_kind: error.error_kind().to_string(),
+                        },
+                        commit_sha: None,
+                        remote_target: None,
+                        item_count: item.item_count,
+                    });
+                }
+                return PublishRemoteBatchOutcome {
+                    items: outcomes,
+                    commit_sha: None,
+                };
+            }
+        };
+
+        for (item, artifact) in prepared.into_iter().zip(batch.artifacts.into_iter()) {
+            let extras = PublishAdvanceExtras {
+                local_path: None,
+                remote_target: artifact.remote_target.clone(),
+                commit_sha: artifact.commit_sha.clone(),
+            };
+            let status = match self
+                .ctx
+                .publish_record_repo
+                .release_terminal_advance_with_articles(
+                    item.publish_record_id,
+                    &owner,
+                    PublishState::StoredLocal,
+                    PublishState::PublishedRemote,
+                    PublishTimestampField::RemotePublishedAt,
+                    item.promote_article_ids,
+                    extras,
+                    now,
+                )
+                .await
+            {
+                Ok(TerminalAdvanceOutcome {
+                    status: TerminalAdvanceStatus::Advanced,
+                }) => {
+                    emitter
+                        .emit(
+                            "publish_succeeded",
+                            "info",
+                            Some("publish_record"),
+                            Some(item.publish_record_id),
+                            "published remotely in batch",
+                            Some(json!({
+                                "phase": "publish_remote_batch",
+                                "commit_sha": artifact.commit_sha.as_deref(),
+                                "remote_target": artifact.remote_target.as_deref(),
+                                "item_count": item.item_count
+                            })),
+                        )
+                        .await;
+                    PublishRemoteStatus::PublishedRemote
+                }
+                Ok(TerminalAdvanceOutcome {
+                    status: TerminalAdvanceStatus::PublishRecordConflict,
+                }) => PublishRemoteStatus::Conflicted,
+                Ok(TerminalAdvanceOutcome {
+                    status: TerminalAdvanceStatus::ArticleStateConflict { article_id },
+                }) => PublishRemoteStatus::ArticleConflict { article_id },
+                Err(error) => PublishRemoteStatus::Failed {
+                    error_kind: error.error_kind().to_string(),
+                },
+            };
+            outcomes.push(PublishRemoteOutcome {
+                publish_record_id: item.publish_record_id,
+                status,
+                commit_sha: artifact.commit_sha,
+                remote_target: artifact.remote_target,
+                item_count: item.item_count,
+            });
+        }
+
+        PublishRemoteBatchOutcome {
+            items: outcomes,
+            commit_sha: batch.commit_sha,
+        }
+    }
+
+    async fn release_publish_error_for_prepared(
+        &self,
+        prepared: &[PreparedRemote],
+        owner: &str,
+        error: &PublishError,
+        now: OffsetDateTime,
+        emitter: &RunEventEmitter<'_>,
+    ) {
+        for item in prepared {
+            let release_result = if error.is_retryable() {
+                self.ctx
+                    .publish_record_repo
+                    .release_retryable_failure(
+                        item.publish_record_id,
+                        owner,
+                        &error.display_user(),
+                        error.error_kind(),
+                        now,
+                    )
+                    .await
+            } else {
+                self.ctx
+                    .publish_record_repo
+                    .release_permanent_failure(
+                        item.publish_record_id,
+                        owner,
+                        &error.display_user(),
+                        error.error_kind(),
+                        now,
+                    )
+                    .await
+            };
+            if let Err(persist_err) = release_result {
+                tracing::warn!(
+                    publish_record_id = item.publish_record_id,
+                    phase = "publish_remote_batch.target_publish",
+                    retryable = error.is_retryable(),
+                    ?persist_err,
+                    "release_*_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
+                );
+            }
+            emitter
+                .emit(
+                    "publish_failed",
+                    "error",
+                    Some("publish_record"),
+                    Some(item.publish_record_id),
+                    &error.display_user(),
+                    Some(json!({
+                        "phase": "publish_remote_batch",
+                        "error_kind": error.error_kind()
+                    })),
+                )
+                .await;
         }
     }
 

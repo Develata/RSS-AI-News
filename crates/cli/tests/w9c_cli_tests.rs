@@ -4,6 +4,7 @@ use rss_ai_news_cli::{
         backfill::{BackfillCommandSummary, parse_date_start, sha256_hex},
         migrate::MigrateCommandSummary,
         publish::{PublishCommandSummary, PublishStageOutcome},
+        publish_all::{PublishAllCategorySummary, PublishAllCommandSummary},
         rebuild_report::RebuildReportCommandSummary,
         reindex::{ReindexCommandSummary, ReindexMode, ReindexTargetOutcome},
         replay::ReplayCommandSummary,
@@ -97,7 +98,7 @@ fn run_summary_pretty_renders() {
 #[test]
 fn run_summary_serializes_nested_publish() {
     let value = serde_json::to_value(run_summary()).unwrap();
-    assert_eq!(value["publish"]["publish_record_id"], 7);
+    assert_eq!(value["publish"]["categories"][0]["publish_record_id"], 7);
 }
 
 #[test]
@@ -193,6 +194,28 @@ fn publish_summary() -> PublishCommandSummary {
     }
 }
 
+fn publish_all_summary() -> PublishAllCommandSummary {
+    PublishAllCommandSummary {
+        date: "2026-05-01".to_string(),
+        render_version: 5,
+        mode: "local".to_string(),
+        categories: vec![PublishAllCategorySummary {
+            category: "ai".to_string(),
+            publish_record_id: 7,
+            items: 2,
+            local_path: Some("output/ai.md".to_string()),
+            commit_sha: None,
+            remote_target: None,
+            stages: vec![PublishStageOutcome {
+                stage: "init".to_string(),
+                status: "created".to_string(),
+            }],
+        }],
+        commit_sha: None,
+        forced: false,
+    }
+}
+
 fn rebuild_summary() -> RebuildReportCommandSummary {
     RebuildReportCommandSummary {
         publish_record_id: 7,
@@ -272,7 +295,7 @@ fn run_summary() -> RunCommandSummary {
             duration_seconds: 1.0,
         }),
         ai_run: Some(ai_summary()),
-        publish: Some(publish_summary()),
+        publish: Some(publish_all_summary()),
         stage_failures: Vec::new(),
         ai_run_skip_reason: None,
         overall_duration_seconds: 2.0,

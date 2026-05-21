@@ -11,6 +11,7 @@ pub mod doctor;
 pub mod ingest;
 pub mod migrate;
 pub mod publish;
+pub mod publish_all;
 pub mod rebuild_report;
 pub mod reindex;
 pub mod replay;
@@ -41,6 +42,12 @@ pub async fn dispatch(cli: Cli, writer: &mut OutputWriter) -> Result<ExitCode, C
             let summary = publish::run(&cli, args).await?;
             writer
                 .emit_success("publish", &summary)
+                .map_err(CliError::Io)?;
+        }
+        Command::PublishAll(args) => {
+            let summary = publish_all::run(&cli, args).await?;
+            writer
+                .emit_success("publish-all", &summary)
                 .map_err(CliError::Io)?;
         }
         Command::Doctor(args) => {
