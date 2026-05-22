@@ -39,6 +39,30 @@ async fn store_local_with_no_remote_target_publishes_locally_and_promotes_articl
 }
 
 #[tokio::test]
+async fn store_local_uses_category_path_template_override() {
+    let (_dir, pool) = make_test_pool().await;
+    let rendered_at = fixed_time();
+    let record_id = seed_rendered_publish_record(&pool, None, rendered_at).await;
+    let output_dir = tempfile::tempdir().unwrap();
+    let flow = flow(
+        pool,
+        Arc::new(LocalFsTarget::new(output_dir.path().to_path_buf())),
+    );
+    let mut opts = store_opts(rendered_at);
+    opts.path_template = Some("custom/math/{YYYYMMDD}.md".to_string());
+
+    let outcome = flow.store_local(opts).await;
+
+    assert_eq!(outcome.publish_record_id, record_id);
+    let local_path = outcome.local_path.expect("local path should be set");
+    assert!(
+        local_path
+            .replace('\\', "/")
+            .ends_with("custom/math/20260428.md")
+    );
+}
+
+#[tokio::test]
 async fn store_local_record_claims_requested_rendered_record_not_older_one() {
     let (_dir, pool) = make_test_pool().await;
     let rendered_at = fixed_time();
@@ -212,6 +236,7 @@ fn store_opts(generated_at: OffsetDateTime) -> PublishStoreLocalOptions {
         category_display_name: "AI".to_string(),
         report_title: "Daily AI".to_string(),
         generated_at,
+        path_template: None,
     }
 }
 

@@ -10,6 +10,7 @@ pub struct EffectiveConfig<'a> {
     pub include_unscored: bool,
     pub max_items_per_report: NonZeroU32,
     pub min_importance_score: Score0To100,
+    pub path_template: String,
     pub model: String,
     pub max_input_chars: u32,
     /// Empty when the category does not provide a prompt; runtime decides fallback behavior.
@@ -48,6 +49,11 @@ impl LoadedConfig {
             min_importance_score: publish_override
                 .and_then(|override_| override_.min_importance_score)
                 .unwrap_or(self.app.publish.min_importance_score),
+            path_template: publish_override
+                .and_then(|override_| override_.path_template.as_ref())
+                .filter(|path_template| !path_template.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| self.app.publish.template.path_template.clone()),
             model: ai_override
                 .and_then(|override_| override_.model.as_ref())
                 .filter(|model| !model.trim().is_empty())
@@ -218,6 +224,7 @@ mod tests {
                         .map(|v| NonZeroU32::new(v).expect("test: override_max_items non-zero")),
                     min_importance_score: override_min_score,
                     include_unscored: category_override,
+                    path_template: None,
                 }),
                 sources: vec![],
             }],
@@ -329,5 +336,18 @@ mod tests {
         let config = loaded_with_publish_globals(false, None, None, 30, 30, None, Some(score(0)));
         let effective = config.effective_for_category("ai").unwrap();
         assert_eq!(effective.min_importance_score.get(), 0);
+    }
+
+    #[test]
+    fn path_template_override_takes_precedence_over_global() {
+        let mut config = loaded(false, None, None);
+        config.categories[0]
+            .publish_override
+            .as_mut()
+            .unwrap()
+            .path_template = Some("custom/ai/{YYYYMMDD}.md".to_string());
+
+        let effective = config.effective_for_category("ai").unwrap();
+        assert_eq!(effective.path_template, "custom/ai/{YYYYMMDD}.md");
     }
 }

@@ -135,6 +135,15 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
 
     let display_name = category.category.display_name.clone();
     let title = format!("{display_name} {date}");
+    let effective = loaded
+        .effective_for_category(&category.category.key)
+        .ok_or_else(|| {
+            CliError::Runtime(RuntimeError::Config(format!(
+                "category {} not found in loaded config",
+                category.category.key
+            )))
+        })?;
+    let path_template = Some(effective.path_template.clone());
     let generated_at = OffsetDateTime::now_utc();
     let mut items = 0;
     let mut local_path = None;
@@ -142,14 +151,6 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
     let mut remote_target = None;
 
     if matches!(state.as_str(), "pending") {
-        let effective = loaded
-            .effective_for_category(&category.category.key)
-            .ok_or_else(|| {
-                CliError::Runtime(RuntimeError::Config(format!(
-                    "category {} not found in loaded config",
-                    category.category.key
-                )))
-            })?;
         let freeze = flow
             .freeze(PublishFreezeOptions {
                 category_key: category.category.key.clone(),
@@ -185,6 +186,7 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
                 category_display_name: display_name.clone(),
                 report_title: title.clone(),
                 generated_at,
+                path_template: path_template.clone(),
             })
             .await;
         stages.push(stage("render", &format!("{:?}", render.status)));
@@ -210,6 +212,7 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
                 category_display_name: display_name.clone(),
                 report_title: title.clone(),
                 generated_at,
+                path_template: path_template.clone(),
             })
             .await;
         stages.push(stage("store_local", &format!("{:?}", store.status)));
@@ -245,6 +248,7 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
                 category_display_name: display_name,
                 report_title: title,
                 generated_at,
+                path_template,
             })
             .await;
         stages.push(stage("publish_remote", &format!("{:?}", remote.status)));

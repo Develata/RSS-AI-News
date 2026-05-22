@@ -260,6 +260,7 @@ fn remote_opts() -> PublishRemoteOptions {
         category_display_name: "AI".to_string(),
         report_title: "Daily AI".to_string(),
         generated_at: fixed_time(),
+        path_template: None,
     }
 }
 
@@ -273,6 +274,7 @@ fn batch_item(
         category_display_name: category_display_name.to_string(),
         report_title: report_title.to_string(),
         generated_at: fixed_time(),
+        path_template: None,
     }
 }
 

@@ -105,6 +105,7 @@ fn render_opts() -> PublishRenderOptions {
         category_display_name: "AI".to_string(),
         report_title: "Daily AI".to_string(),
         generated_at: OffsetDateTime::from_unix_timestamp(0).unwrap(),
+        path_template: None,
     }
 }
 

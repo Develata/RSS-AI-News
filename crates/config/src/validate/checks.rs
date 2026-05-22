@@ -1,4 +1,7 @@
-use std::{collections::HashSet, path::Component};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Component,
+};
 
 use url::Url;
 
@@ -28,6 +31,7 @@ pub(super) fn collect_general_checks(
 
     collect_category_checks(report, categories, env);
     collect_app_value_checks(report, app);
+    collect_cross_category_path_collisions(report, app, categories);
 }
 
 pub(super) fn collect_env_checks(
@@ -136,6 +140,42 @@ fn collect_category_checks(
                 format!("duplicate category key {:?}", category.category.key),
             ));
         }
+        if let Some(path_template) = category
+            .publish_override
+            .as_ref()
+            .and_then(|override_| override_.path_template.as_ref())
+        {
+            let field_path = "category.publish_override.path_template";
+            if path_template.trim().is_empty() {
+                report.push(Diagnostic::new(
+                    source_file.clone(),
+                    field_path,
+                    "must not be empty",
+                ));
+            }
+            validate_path_template(
+                report,
+                source_file.clone(),
+                field_path,
+                path_template,
+                false,
+            );
+            validate_template_placeholders(
+                report,
+                source_file.clone(),
+                field_path,
+                path_template,
+                &[
+                    "category_key",
+                    "CATEGORY_KEY",
+                    "date",
+                    "YYYY",
+                    "MM",
+                    "DD",
+                    "YYYYMMDD",
+                ],
+            );
+        }
 
         let mut source_keys = HashSet::new();
         for (index, source) in category.sources.iter().enumerate() {
@@ -226,9 +266,16 @@ fn collect_app_value_checks(report: &mut DiagnosticReport, app: &AppConfig) {
             report.push(Diagnostic::new("app.toml", field_path, "must not be empty"));
         }
     }
-    validate_path_template(report, &app.publish.template.path_template);
+    validate_path_template(
+        report,
+        "app.toml",
+        "publish.template.path_template",
+        &app.publish.template.path_template,
+        true,
+    );
     validate_template_placeholders(
         report,
+        "app.toml",
         "publish.template.path_template",
         &app.publish.template.path_template,
         &[
@@ -243,6 +290,7 @@ fn collect_app_value_checks(report: &mut DiagnosticReport, app: &AppConfig) {
     );
     validate_template_placeholders(
         report,
+        "app.toml",
         "publish.template.frontmatter_template",
         &app.publish.template.frontmatter_template,
         &[
@@ -259,6 +307,7 @@ fn collect_app_value_checks(report: &mut DiagnosticReport, app: &AppConfig) {
     );
     validate_template_placeholders(
         report,
+        "app.toml",
         "publish.template.report_template",
         &app.publish.template.report_template,
         &[
@@ -283,6 +332,7 @@ fn collect_app_value_checks(report: &mut DiagnosticReport, app: &AppConfig) {
     );
     validate_template_placeholders(
         report,
+        "app.toml",
         "publish.template.item_template",
         &app.publish.template.item_template,
         &[
@@ -305,18 +355,85 @@ fn collect_app_value_checks(report: &mut DiagnosticReport, app: &AppConfig) {
     validate_required_template_tokens(report, app);
 }
 
-fn validate_path_template(report: &mut DiagnosticReport, template: &str) {
+/// 跨分类 path collision pass。
+///
+/// 全局 `[publish.template].path_template` 强制含 `{category_key}` /
+/// `{CATEGORY_KEY}` 占位符，所以走全局模板的分类天然不会互相覆盖。
+/// 分类级 `[category.publish_override].path_template` 放松了这一约束
+/// （`validate_path_template(require_category_token=false)`），允许写死路径，
+/// 但前提是 **调用方保证不同分类不会渲染出同一路径**。本 pass 用样本日期
+/// 渲染每个分类的 effective path_template，对结果做 `\` → `/` 归一化后查
+/// 重，把"配置合法但运行时会互相覆盖"的情况在 validate 阶段拦下。
+fn collect_cross_category_path_collisions(
+    report: &mut DiagnosticReport,
+    app: &AppConfig,
+    categories: &[CategoryConfig],
+) {
+    let global = app.publish.template.path_template.as_str();
+    // BTreeMap 让 Diagnostic 顺序与 category_key 字典序一致，便于回归测试。
+    let mut bucket: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for category in categories {
+        let template = category
+            .publish_override
+            .as_ref()
+            .and_then(|override_| override_.path_template.as_deref())
+            .filter(|template| !template.trim().is_empty())
+            .unwrap_or(global);
+        let rendered = render_path_template_sample(template, &category.category.key);
+        bucket
+            .entry(rendered)
+            .or_default()
+            .push(category.category.key.clone());
+    }
+    for (path, mut keys) in bucket {
+        if keys.len() > 1 {
+            keys.sort();
+            report.push(Diagnostic::new(
+                "categories/*.toml",
+                "category.publish_override.path_template",
+                format!(
+                    "rendered path {path:?} collides across categories {keys:?}: \
+                    include {{category_key}} or {{CATEGORY_KEY}} in path_template, \
+                    or give each affected category a distinct prefix"
+                ),
+            ));
+        }
+    }
+}
+
+/// 用样本日期与真实 category_key 渲染 path_template，复用与 `validate_path_template`
+/// 内一致的占位符集。这里使用真实 category_key（不是 fixed "ai_ml"），因为
+/// collision 检查要看不同分类渲染出来是否分得开。
+fn render_path_template_sample(template: &str, category_key: &str) -> String {
+    template
+        .replace("{category_key}", category_key)
+        .replace("{CATEGORY_KEY}", &category_key.to_ascii_uppercase())
+        .replace("{date}", "2026-01-03")
+        .replace("{YYYY}", "2026")
+        .replace("{MM}", "01")
+        .replace("{DD}", "03")
+        .replace("{YYYYMMDD}", "20260103")
+        .replace('\\', "/")
+}
+
+fn validate_path_template(
+    report: &mut DiagnosticReport,
+    source: impl Into<String> + Clone,
+    field_path: &str,
+    template: &str,
+    require_category_token: bool,
+) {
     if template.contains('\\') {
         report.push(Diagnostic::new(
-            "app.toml",
-            "publish.template.path_template",
+            source.clone(),
+            field_path,
             "must use '/' separators, not '\\'",
         ));
     }
     if template.contains("..") {
         report.push(Diagnostic::new(
-            "app.toml",
-            "publish.template.path_template",
+            source.clone(),
+            field_path,
             "must not contain '..'",
         ));
     }
@@ -336,8 +453,8 @@ fn validate_path_template(report: &mut DiagnosticReport, template: &str) {
             .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
     {
         report.push(Diagnostic::new(
-            "app.toml",
-            "publish.template.path_template",
+            source.clone(),
+            field_path,
             "must render to a relative path inside the publish root",
         ));
     }
@@ -346,15 +463,18 @@ fn validate_path_template(report: &mut DiagnosticReport, template: &str) {
         || (template.contains("{YYYY}") && template.contains("{MM}") && template.contains("{DD}"));
     if !has_date_token {
         report.push(Diagnostic::new(
-            "app.toml",
-            "publish.template.path_template",
+            source.clone(),
+            field_path,
             "must include {date}, {YYYYMMDD}, or {YYYY}+{MM}+{DD} to avoid overwriting reports from different days",
         ));
     }
-    if !template.contains("{category_key}") && !template.contains("{CATEGORY_KEY}") {
+    if require_category_token
+        && !template.contains("{category_key}")
+        && !template.contains("{CATEGORY_KEY}")
+    {
         report.push(Diagnostic::new(
-            "app.toml",
-            "publish.template.path_template",
+            source,
+            field_path,
             "must include {category_key} or {CATEGORY_KEY} to avoid cross-category overwrites",
         ));
     }
@@ -403,6 +523,7 @@ fn validate_required_template_tokens(report: &mut DiagnosticReport, app: &AppCon
 
 fn validate_template_placeholders(
     report: &mut DiagnosticReport,
+    source: impl Into<String> + Clone,
     field_path: &str,
     template: &str,
     allowed: &[&str],
@@ -414,7 +535,7 @@ fn validate_template_placeholders(
         if ch != '{' {
             if ch == '}' {
                 report.push(Diagnostic::new(
-                    "app.toml",
+                    source.clone(),
                     field_path,
                     "unmatched '}' in template",
                 ));
@@ -429,7 +550,7 @@ fn validate_template_placeholders(
             .map(|offset| index + 1 + offset)
         else {
             report.push(Diagnostic::new(
-                "app.toml",
+                source.clone(),
                 field_path,
                 "unmatched '{' in template",
             ));
@@ -439,7 +560,7 @@ fn validate_template_placeholders(
         let name = &template[start_byte + 1..end_byte];
         if name.is_empty() || !allowed.contains(&name) {
             report.push(Diagnostic::new(
-                "app.toml",
+                source.clone(),
                 field_path,
                 format!("unknown template placeholder {{{name}}}"),
             ));

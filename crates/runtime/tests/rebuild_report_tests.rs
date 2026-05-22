@@ -34,6 +34,7 @@ async fn rebuild_returns_byte_equal_markdown_to_original_render() {
             category_display_name: "AI".to_string(),
             report_title: "Daily AI".to_string(),
             generated_at: rendered_at,
+            path_template: None,
         })
         .await;
     let path = stored.local_path.expect("local path should be set");
@@ -71,6 +72,7 @@ async fn rebuild_without_generated_at_override_falls_back_to_record_rendered_at_
             category_display_name: "AI".to_string(),
             report_title: "Daily AI".to_string(),
             generated_at: rendered_at,
+            path_template: None,
         })
         .await;
     let path = stored.local_path.expect("local path should be set");

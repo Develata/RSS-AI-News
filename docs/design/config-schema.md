@@ -240,6 +240,9 @@ effective_publish.min_importance_score =
 
 effective_publish.include_unscored =
     category.publish_override.include_unscored.unwrap_or(publish.include_unscored)
+
+effective_publish.path_template =
+    category.publish_override.path_template.unwrap_or(publish.template.path_template)
 ```
 
 关键约束：
@@ -250,6 +253,7 @@ effective_publish.include_unscored =
     - `min_importance_score`：直通路径无 AI score，**不参与过滤**（即使分类显式覆盖也无效）
     - `max_items_per_report`：**仍生效**（限制报告规模与 AI 路径独立）
     - `include_unscored`：见 §4.1 真值表；只决定 `persisted` 是否进入候选
+- **路径模板覆盖**：`path_template` 控制本地输出与远端相对路径。全局模板必须包含分类占位符和日期占位符；分类级覆盖可以省略分类占位符，但仍必须包含日期占位符，且调用方必须保证不同分类不会写到同一路径。
 
 `runtime::publish::freeze` 在构造 [`PublishRequest`](./internal-dto-contracts.md#51-publishrequest) 前完成上述合并，把 effective 值写入 DTO；DTO 的 `max_items` / `min_importance_score` 是必填非 Option，因此**必须**在 freeze 阶段消解 `None`。
 
@@ -279,6 +283,7 @@ model = ""                               # 空则沿用全局
 max_items_per_report = 30                # NonZeroU32；省略 → 继承 publish.max_items_per_report
 min_importance_score = 30                # 0-100；显式 0 = 无下限（≠ 缺省）；省略 → 继承 publish.min_importance_score；ai.enabled=false 直通路径下不参与过滤
 include_unscored = false                 # 显式 false ≠ 缺省；省略 → 继承 publish.include_unscored；AI 关闭时是否仍发布
+path_template = "ai/{YYYY}/{YYYYMMDD}.md" # 可选；省略 → 继承 publish.template.path_template；必须是相对路径并包含日期占位符
 
 # === 订阅源列表 ===
 [[sources]]
@@ -390,7 +395,8 @@ CategoryConfig
 ├── publish_override: Option<PublishOverride>
 │   ├── max_items_per_report: Option<NonZeroU32>  # None = 继承全局；Some(n) = 显式覆盖
 │   ├── min_importance_score: Option<Score0To100> # None = 继承全局；Some(0) = 显式无下限
-│   └── include_unscored: Option<bool>            # None = 继承全局；Some(false) = 显式禁用
+│   ├── include_unscored: Option<bool>            # None = 继承全局；Some(false) = 显式禁用
+│   └── path_template: Option<String>             # None = 继承 publish.template.path_template
 └── sources: Vec<SourceConfig>
 
 SourceConfig

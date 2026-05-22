@@ -371,6 +371,30 @@ path_template = "{CATEGORY_KEY}/{YYYY}/{YYYYMMDD}.md"
 docs/news/AI_ML/2026/20260103.md
 ```
 
+如果需要每个板块单独指定目录，可以在对应分类里覆盖路径模板：
+
+```toml
+[category.publish_override]
+path_template = "math/{YYYY}/{YYYYMMDD}.md"
+```
+
+在上面的全局 `github_path_prefix = "docs/news"` 下，`math_research` 会发布到：
+
+```text
+docs/news/math/2026/20260103.md
+```
+
+如果每个分类要完全控制仓库内路径，可以把全局前缀置空，并在每个分类的
+`path_template` 写完整相对路径：
+
+```toml
+[publish]
+github_path_prefix = ""
+
+[category.publish_override]
+path_template = "docs/math/{YYYY}/{YYYYMMDD}.md"
+```
+
 ### 发布路径与 Markdown 模板
 
 `[publish.template]` 是必填配置段，用于控制报告路径和 Markdown 输出。示例配置默认是 VitePress 风格：
@@ -416,7 +440,8 @@ item_template = """
 校验规则：
 
 - `path_template` 必须渲染为相对路径，不能包含 `..`、反斜杠或绝对路径。
-- `path_template` 必须包含分类占位符和日期占位符，避免不同分类或日期互相覆盖。
+- 全局 `[publish.template].path_template` 必须包含分类占位符和日期占位符，避免不同分类或日期互相覆盖。
+- 分类级 `[category.publish_override].path_template` 可以省略分类占位符，但仍必须包含日期占位符；`validate-config` 会以样本日期渲染所有分类的 effective path_template 并查重，发现跨分类重复就报错（即使语法合法）。
 - `report_template` 必须包含 `{items}`。
 - `item_template` 必须包含标题和摘要占位符。
 - 未知占位符或未闭合 `{...}` 会在 `validate-config` 阶段失败。

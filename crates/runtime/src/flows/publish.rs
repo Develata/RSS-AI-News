@@ -75,6 +75,7 @@ pub struct PublishRenderOptions {
     pub category_display_name: String,
     pub report_title: String,
     pub generated_at: OffsetDateTime,
+    pub path_template: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +83,7 @@ pub struct PublishStoreLocalOptions {
     pub category_display_name: String,
     pub report_title: String,
     pub generated_at: OffsetDateTime,
+    pub path_template: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +91,7 @@ pub struct PublishRemoteOptions {
     pub category_display_name: String,
     pub report_title: String,
     pub generated_at: OffsetDateTime,
+    pub path_template: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +100,7 @@ pub struct PublishRemoteBatchItemOptions {
     pub category_display_name: String,
     pub report_title: String,
     pub generated_at: OffsetDateTime,
+    pub path_template: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,10 +176,13 @@ struct PreparedRemote {
     item_count: u32,
 }
 
-fn render_templates_from_ctx(ctx: &RunContext) -> RenderTemplates {
+fn render_templates_from_ctx(ctx: &RunContext, path_template: Option<&str>) -> RenderTemplates {
     let template = &ctx.app.publish.template;
     RenderTemplates {
-        path_template: template.path_template.clone(),
+        path_template: path_template
+            .filter(|path_template| !path_template.trim().is_empty())
+            .unwrap_or(&template.path_template)
+            .to_string(),
         frontmatter_template: template.frontmatter_template.clone(),
         report_template: template.report_template.clone(),
         item_template: template.item_template.clone(),
@@ -616,7 +623,7 @@ impl PublishFlow {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
             generated_at: opts.generated_at,
-            templates: render_templates_from_ctx(&self.ctx),
+            templates: render_templates_from_ctx(&self.ctx, opts.path_template.as_deref()),
         };
         if let Err(error) = rss_ai_news_report::rebuild_markdown(
             self.ctx.publish_record_repo.as_ref(),
@@ -746,7 +753,7 @@ impl PublishFlow {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
             generated_at: opts.generated_at,
-            templates: render_templates_from_ctx(&self.ctx),
+            templates: render_templates_from_ctx(&self.ctx, opts.path_template.as_deref()),
         };
         let report = match rss_ai_news_report::rebuild_markdown(
             self.ctx.publish_record_repo.as_ref(),
@@ -1057,7 +1064,7 @@ impl PublishFlow {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
             generated_at: opts.generated_at,
-            templates: render_templates_from_ctx(&self.ctx),
+            templates: render_templates_from_ctx(&self.ctx, opts.path_template.as_deref()),
         };
         let report = match rss_ai_news_report::rebuild_markdown(
             self.ctx.publish_record_repo.as_ref(),
@@ -1392,7 +1399,7 @@ impl PublishFlow {
                 category_display_name: item.category_display_name,
                 report_title: item.report_title,
                 generated_at: item.generated_at,
-                templates: render_templates_from_ctx(&self.ctx),
+                templates: render_templates_from_ctx(&self.ctx, item.path_template.as_deref()),
             };
             let report = match rss_ai_news_report::rebuild_markdown(
                 self.ctx.publish_record_repo.as_ref(),

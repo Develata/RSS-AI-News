@@ -16,6 +16,7 @@ model = ""
 max_items_per_report = 30
 min_importance_score = 30
 include_unscored = false
+# path_template = "ai/{YYYY}/{YYYYMMDD}.md"
 
 [[sources]]
 key = "openai-blog"

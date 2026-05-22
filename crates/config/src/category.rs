@@ -35,6 +35,9 @@ pub struct PublishOverride {
     /// 值（W2-B-1：旧实现把 `try_new` 失败折叠为继承默认，掩盖配置错误）。
     pub min_importance_score: Option<Score0To100>,
     pub include_unscored: Option<bool>,
+    /// Optional per-category report path template. When present, it overrides
+    /// `[publish.template].path_template` for local and remote publishing.
+    pub path_template: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

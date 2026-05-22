@@ -99,7 +99,7 @@ mod tests {
     use super::*;
     use crate::{
         app::*,
-        category::{CategoryMeta, SourceConfig},
+        category::{CategoryMeta, PublishOverride, SourceConfig},
     };
     use rss_ai_news_domain::Score0To100;
     use rss_ai_news_domain::state::FeedKind;
@@ -408,6 +408,119 @@ mod tests {
             &EnvConfig::default(),
         )
         .expect("split date path tokens distinguish report dates");
+    }
+
+    #[test]
+    fn category_path_template_can_omit_category_token() {
+        let app = app(false);
+        let mut category = category("ai", "https://example.test/feed");
+        category.publish_override = Some(PublishOverride {
+            max_items_per_report: None,
+            min_importance_score: None,
+            include_unscored: None,
+            path_template: Some("custom/ai/{YYYY}/{YYYYMMDD}.md".to_string()),
+        });
+
+        run_structural_checks(&app, &[category], &EnvConfig::default())
+            .expect("category-specific path already separates categories");
+    }
+
+    #[test]
+    fn category_path_template_still_requires_date_token() {
+        let app = app(false);
+        let mut category = category("ai", "https://example.test/feed");
+        category.publish_override = Some(PublishOverride {
+            max_items_per_report: None,
+            min_importance_score: None,
+            include_unscored: None,
+            path_template: Some("custom/ai/latest.md".to_string()),
+        });
+
+        let err = run_structural_checks(&app, &[category], &EnvConfig::default())
+            .expect_err("category path template must distinguish report dates");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
+    fn cross_category_path_collision_fails_when_overrides_collapse_to_same_path() {
+        // 两个分类用相同的硬编码 path_template（合法形式：含日期 token，不含 category token），
+        // 渲染出的样本路径完全相同 → 必须被 validate 拦下，否则运行时会互相覆盖。
+        let app = app(false);
+        let mut a = category("ai", "https://example.test/a");
+        a.publish_override = Some(PublishOverride {
+            max_items_per_report: None,
+            min_importance_score: None,
+            include_unscored: None,
+            path_template: Some("shared/{YYYYMMDD}.md".to_string()),
+        });
+        let mut b = category("ml", "https://example.test/b");
+        b.publish_override = Some(PublishOverride {
+            max_items_per_report: None,
+            min_importance_score: None,
+            include_unscored: None,
+            path_template: Some("shared/{YYYYMMDD}.md".to_string()),
+        });
+
+        let err = run_structural_checks(&app, &[a, b], &EnvConfig::default())
+            .expect_err("path collision across categories must be a validate-time error");
+        match err {
+            ConfigError::ValidationFailed { report } => {
+                let rendered = format!("{report:?}");
+                assert!(
+                    rendered.contains("collides across categories")
+                        && rendered.contains("ai")
+                        && rendered.contains("ml"),
+                    "diagnostic should name both colliding categories: {rendered}"
+                );
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cross_category_path_with_category_token_does_not_collide() {
+        // 即使两个分类都启用了 override，只要 path_template 含 {category_key}/{CATEGORY_KEY}
+        // 占位符，渲染出的路径会因 key 不同而自然分离，不应触发 collision。
+        let app = app(false);
+        let mut a = category("ai", "https://example.test/a");
+        a.publish_override = Some(PublishOverride {
+            max_items_per_report: None,
+            min_importance_score: None,
+            include_unscored: None,
+            path_template: Some("custom/{category_key}/{YYYYMMDD}.md".to_string()),
+        });
+        let mut b = category("ml", "https://example.test/b");
+        b.publish_override = Some(PublishOverride {
+            max_items_per_report: None,
+            min_importance_score: None,
+            include_unscored: None,
+            path_template: Some("custom/{category_key}/{YYYYMMDD}.md".to_string()),
+        });
+
+        run_structural_checks(&app, &[a, b], &EnvConfig::default())
+            .expect("{category_key} token must keep distinct categories on distinct paths");
+    }
+
+    #[test]
+    fn cross_category_collision_detected_when_only_one_category_has_override() {
+        // 边界场景：一个分类继承全局模板（含 {CATEGORY_KEY}，渲染出 "AI/.../..." 大写），
+        // 另一个分类用 override 写死成与之同形的路径。collision 检查必须能跨"全局 vs 覆盖"
+        // 路径来源比对。
+        let app = app(false);
+        // 全局默认 path_template = "{CATEGORY_KEY}/{YYYY}/{YYYYMMDD}.md"
+        // ai 继承 → 渲染为 "AI/2026/20260103.md"
+        let a = category("ai", "https://example.test/a");
+        let mut b = category("ml", "https://example.test/b");
+        b.publish_override = Some(PublishOverride {
+            max_items_per_report: None,
+            min_importance_score: None,
+            include_unscored: None,
+            path_template: Some("AI/{YYYY}/{YYYYMMDD}.md".to_string()),
+        });
+
+        let err = run_structural_checks(&app, &[a, b], &EnvConfig::default())
+            .expect_err("collision across global-fallback vs override paths must be caught");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
     }
 
     #[test]
