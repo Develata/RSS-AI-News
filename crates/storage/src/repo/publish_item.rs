@@ -53,12 +53,16 @@ pub trait PublishItemRepository: Send + Sync {
         &self,
         category_key: &str,
         min_importance_score: i32,
+        published_since: OffsetDateTime,
+        published_until: OffsetDateTime,
         max_items: NonZeroU32,
     ) -> Result<Vec<PublishCandidateRow>, StorageError>;
 
     async fn select_ai_off_passthrough_candidates(
         &self,
         category_key: &str,
+        published_since: OffsetDateTime,
+        published_until: OffsetDateTime,
         max_items: NonZeroU32,
     ) -> Result<Vec<PublishCandidateRow>, StorageError>;
 
@@ -127,8 +131,10 @@ JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
 JOIN feed_sources fs ON fs.id = fe.source_id
 WHERE a.state = 'ready_for_publish'
   AND fs.category_key = $2
+  AND COALESCE(fe.published_at, fe.discovered_at) >= $3
+  AND COALESCE(fe.published_at, fe.discovered_at) <= $4
 ORDER BY aar.importance_score DESC, a.created_at DESC, a.id ASC
-LIMIT $3
+LIMIT $5
 "#;
 
 /// PG 上 `NULL AS article_ai_result_id` / `NULL AS importance_score` 需要显式 cast，
@@ -151,11 +157,13 @@ JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
 JOIN feed_sources fs ON fs.id = fe.source_id
 WHERE fs.category_key = $1
   AND a.state IN ('persisted', 'ready_for_publish')
+  AND COALESCE(fe.published_at, fe.discovered_at) >= $2
+  AND COALESCE(fe.published_at, fe.discovered_at) <= $3
   AND NOT EXISTS (
       SELECT 1 FROM article_ai_results aar WHERE aar.article_id = a.id
   )
 ORDER BY a.created_at DESC, a.id ASC
-LIMIT $2
+LIMIT $4
 "#;
 
 const SELECT_AI_OFF_PASSTHROUGH_PG_SQL: &str = r#"
@@ -174,11 +182,13 @@ JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
 JOIN feed_sources fs ON fs.id = fe.source_id
 WHERE fs.category_key = $1
   AND a.state IN ('persisted', 'ready_for_publish')
+  AND COALESCE(fe.published_at, fe.discovered_at) >= $2
+  AND COALESCE(fe.published_at, fe.discovered_at) <= $3
   AND NOT EXISTS (
       SELECT 1 FROM article_ai_results aar WHERE aar.article_id = a.id
   )
 ORDER BY a.created_at DESC, a.id ASC
-LIMIT $2
+LIMIT $4
 "#;
 
 const PROMOTE_ARTICLE_READY_FOR_PUBLISH_SQL: &str = r#"
@@ -226,15 +236,32 @@ impl PublishItemRepository for PublishItemRepo {
         &self,
         category_key: &str,
         min_importance_score: i32,
+        published_since: OffsetDateTime,
+        published_until: OffsetDateTime,
         max_items: NonZeroU32,
     ) -> Result<Vec<PublishCandidateRow>, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlite_select_ai_path_candidates(p, category_key, min_importance_score, max_items)
-                    .await
+                sqlite_select_ai_path_candidates(
+                    p,
+                    category_key,
+                    min_importance_score,
+                    published_since,
+                    published_until,
+                    max_items,
+                )
+                .await
             }
             StoragePool::Postgres(p) => {
-                pg_select_ai_path_candidates(p, category_key, min_importance_score, max_items).await
+                pg_select_ai_path_candidates(
+                    p,
+                    category_key,
+                    min_importance_score,
+                    published_since,
+                    published_until,
+                    max_items,
+                )
+                .await
             }
         }
     }
@@ -242,14 +269,30 @@ impl PublishItemRepository for PublishItemRepo {
     async fn select_ai_off_passthrough_candidates(
         &self,
         category_key: &str,
+        published_since: OffsetDateTime,
+        published_until: OffsetDateTime,
         max_items: NonZeroU32,
     ) -> Result<Vec<PublishCandidateRow>, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlite_select_ai_off_passthrough_candidates(p, category_key, max_items).await
+                sqlite_select_ai_off_passthrough_candidates(
+                    p,
+                    category_key,
+                    published_since,
+                    published_until,
+                    max_items,
+                )
+                .await
             }
             StoragePool::Postgres(p) => {
-                pg_select_ai_off_passthrough_candidates(p, category_key, max_items).await
+                pg_select_ai_off_passthrough_candidates(
+                    p,
+                    category_key,
+                    published_since,
+                    published_until,
+                    max_items,
+                )
+                .await
             }
         }
     }
@@ -305,11 +348,15 @@ async fn sqlite_select_ai_path_candidates(
     pool: &SqlitePool,
     category_key: &str,
     min_importance_score: i32,
+    published_since: OffsetDateTime,
+    published_until: OffsetDateTime,
     max_items: NonZeroU32,
 ) -> Result<Vec<PublishCandidateRow>, StorageError> {
     sqlx::query_as::<_, PublishCandidateRow>(SELECT_AI_PATH_CANDIDATES_SQL)
         .bind(min_importance_score)
         .bind(category_key)
+        .bind(published_since)
+        .bind(published_until)
         .bind(i64::from(max_items.get()))
         .fetch_all(pool)
         .await
@@ -319,10 +366,14 @@ async fn sqlite_select_ai_path_candidates(
 async fn sqlite_select_ai_off_passthrough_candidates(
     pool: &SqlitePool,
     category_key: &str,
+    published_since: OffsetDateTime,
+    published_until: OffsetDateTime,
     max_items: NonZeroU32,
 ) -> Result<Vec<PublishCandidateRow>, StorageError> {
     sqlx::query_as::<_, PublishCandidateRow>(SELECT_AI_OFF_PASSTHROUGH_SQLITE_SQL)
         .bind(category_key)
+        .bind(published_since)
+        .bind(published_until)
         .bind(i64::from(max_items.get()))
         .fetch_all(pool)
         .await
@@ -415,11 +466,15 @@ async fn pg_select_ai_path_candidates(
     pool: &PgPool,
     category_key: &str,
     min_importance_score: i32,
+    published_since: OffsetDateTime,
+    published_until: OffsetDateTime,
     max_items: NonZeroU32,
 ) -> Result<Vec<PublishCandidateRow>, StorageError> {
     sqlx::query_as::<_, PublishCandidateRow>(SELECT_AI_PATH_CANDIDATES_SQL)
         .bind(min_importance_score)
         .bind(category_key)
+        .bind(published_since)
+        .bind(published_until)
         .bind(i64::from(max_items.get()))
         .fetch_all(pool)
         .await
@@ -429,10 +484,14 @@ async fn pg_select_ai_path_candidates(
 async fn pg_select_ai_off_passthrough_candidates(
     pool: &PgPool,
     category_key: &str,
+    published_since: OffsetDateTime,
+    published_until: OffsetDateTime,
     max_items: NonZeroU32,
 ) -> Result<Vec<PublishCandidateRow>, StorageError> {
     sqlx::query_as::<_, PublishCandidateRow>(SELECT_AI_OFF_PASSTHROUGH_PG_SQL)
         .bind(category_key)
+        .bind(published_since)
+        .bind(published_until)
         .bind(i64::from(max_items.get()))
         .fetch_all(pool)
         .await

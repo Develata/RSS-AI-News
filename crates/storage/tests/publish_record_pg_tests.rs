@@ -396,7 +396,12 @@ async fn pg_select_ai_off_passthrough_handles_null_columns() {
     seed_article(&ctx, "hash-passthrough", "uid-passthrough", "persisted").await;
 
     let rows = item_repo
-        .select_ai_off_passthrough_candidates("ai", NonZeroU32::new(10).unwrap())
+        .select_ai_off_passthrough_candidates(
+            "ai",
+            time::OffsetDateTime::UNIX_EPOCH,
+            time::OffsetDateTime::now_utc() + time::Duration::days(365),
+            NonZeroU32::new(10).unwrap(),
+        )
         .await
         .expect("pg select_ai_off_passthrough_candidates");
     assert_eq!(rows.len(), 1);

@@ -13,6 +13,14 @@ const LIMIT_10: NonZeroU32 = match NonZeroU32::new(10) {
     None => unreachable!(),
 };
 
+fn since_all() -> OffsetDateTime {
+    OffsetDateTime::UNIX_EPOCH
+}
+
+fn until_future() -> OffsetDateTime {
+    OffsetDateTime::now_utc() + Duration::days(365)
+}
+
 #[tokio::test]
 async fn select_ai_path_returns_only_ready_for_publish_with_keep_and_min_score() {
     let (_dir, pool) = make_test_pool().await;
@@ -23,7 +31,7 @@ async fn select_ai_path_returns_only_ready_for_publish_with_keep_and_min_score()
     seed_ai_article(&pool, "ai", "persisted", "persisted", 99, 1).await;
 
     let rows = repo
-        .select_ai_path_candidates("ai", 50, LIMIT_10)
+        .select_ai_path_candidates("ai", 50, since_all(), until_future(), LIMIT_10)
         .await
         .expect("selection should succeed");
 
@@ -43,7 +51,7 @@ async fn select_ai_path_orders_by_score_desc_then_created_at_desc() {
     set_article_created_at(&pool, newer, OffsetDateTime::now_utc()).await;
 
     let ids = repo
-        .select_ai_path_candidates("ai", 0, LIMIT_10)
+        .select_ai_path_candidates("ai", 0, since_all(), until_future(), LIMIT_10)
         .await
         .expect("selection should succeed")
         .into_iter()
@@ -61,7 +69,7 @@ async fn select_ai_path_filters_by_category_key() {
     seed_ai_article(&pool, "ml", "ml-cat", "ready_for_publish", 95, 1).await;
 
     let rows = repo
-        .select_ai_path_candidates("ai", 0, LIMIT_10)
+        .select_ai_path_candidates("ai", 0, since_all(), until_future(), LIMIT_10)
         .await
         .expect("selection should succeed");
 
@@ -71,13 +79,51 @@ async fn select_ai_path_filters_by_category_key() {
 }
 
 #[tokio::test]
+async fn select_ai_path_filters_out_candidates_older_than_published_since() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = PublishItemRepo::new(pool.clone());
+    let fresh = seed_ai_article(&pool, "ai", "fresh", "ready_for_publish", 80, 1).await;
+    let stale = seed_ai_article(&pool, "ai", "stale", "ready_for_publish", 95, 1).await;
+    let cutoff = OffsetDateTime::now_utc() - Duration::hours(48);
+    set_feed_entry_published_at(&pool, fresh, cutoff + Duration::hours(1)).await;
+    set_feed_entry_published_at(&pool, stale, cutoff - Duration::seconds(1)).await;
+
+    let rows = repo
+        .select_ai_path_candidates("ai", 0, cutoff, until_future(), LIMIT_10)
+        .await
+        .expect("selection should succeed");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].article_id, fresh);
+}
+
+#[tokio::test]
+async fn select_ai_path_filters_out_candidates_newer_than_published_until() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = PublishItemRepo::new(pool.clone());
+    let current = seed_ai_article(&pool, "ai", "current", "ready_for_publish", 80, 1).await;
+    let future = seed_ai_article(&pool, "ai", "future", "ready_for_publish", 95, 1).await;
+    let until = OffsetDateTime::now_utc();
+    set_feed_entry_published_at(&pool, current, until - Duration::seconds(1)).await;
+    set_feed_entry_published_at(&pool, future, until + Duration::seconds(1)).await;
+
+    let rows = repo
+        .select_ai_path_candidates("ai", 0, since_all(), until, LIMIT_10)
+        .await
+        .expect("selection should succeed");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].article_id, current);
+}
+
+#[tokio::test]
 async fn select_ai_off_passthrough_returns_persisted_articles_without_any_ai_row() {
     let (_dir, pool) = make_test_pool().await;
     let repo = PublishItemRepo::new(pool.clone());
     let article = seed_passthrough_article(&pool, "ai", "direct", "persisted").await;
 
     let rows = repo
-        .select_ai_off_passthrough_candidates("ai", LIMIT_10)
+        .select_ai_off_passthrough_candidates("ai", since_all(), until_future(), LIMIT_10)
         .await
         .expect("selection should succeed");
 
@@ -87,6 +133,44 @@ async fn select_ai_off_passthrough_returns_persisted_articles_without_any_ai_row
     assert_eq!(rows[0].importance_score, None);
     assert_eq!(rows[0].summary, "summary direct");
     assert_eq!(rows[0].tags_json, "[]");
+}
+
+#[tokio::test]
+async fn select_ai_off_passthrough_filters_out_candidates_older_than_published_since() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = PublishItemRepo::new(pool.clone());
+    let fresh = seed_passthrough_article(&pool, "ai", "fresh-direct", "persisted").await;
+    let stale = seed_passthrough_article(&pool, "ai", "stale-direct", "persisted").await;
+    let cutoff = OffsetDateTime::now_utc() - Duration::hours(48);
+    set_feed_entry_published_at(&pool, fresh, cutoff + Duration::hours(1)).await;
+    set_feed_entry_published_at(&pool, stale, cutoff - Duration::seconds(1)).await;
+
+    let rows = repo
+        .select_ai_off_passthrough_candidates("ai", cutoff, until_future(), LIMIT_10)
+        .await
+        .expect("selection should succeed");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].article_id, fresh);
+}
+
+#[tokio::test]
+async fn select_ai_off_passthrough_filters_out_candidates_newer_than_published_until() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = PublishItemRepo::new(pool.clone());
+    let current = seed_passthrough_article(&pool, "ai", "current-direct", "persisted").await;
+    let future = seed_passthrough_article(&pool, "ai", "future-direct", "persisted").await;
+    let until = OffsetDateTime::now_utc();
+    set_feed_entry_published_at(&pool, current, until - Duration::seconds(1)).await;
+    set_feed_entry_published_at(&pool, future, until + Duration::seconds(1)).await;
+
+    let rows = repo
+        .select_ai_off_passthrough_candidates("ai", since_all(), until, LIMIT_10)
+        .await
+        .expect("selection should succeed");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].article_id, current);
 }
 
 #[tokio::test]
@@ -100,7 +184,7 @@ async fn select_ai_off_passthrough_excludes_articles_with_filtered_or_permanent_
     insert_ai_row(&pool, failed, "permanent_failed", None, 1).await;
 
     let rows = repo
-        .select_ai_off_passthrough_candidates("ai", LIMIT_10)
+        .select_ai_off_passthrough_candidates("ai", since_all(), until_future(), LIMIT_10)
         .await
         .expect("selection should succeed");
 
@@ -262,4 +346,25 @@ async fn set_article_created_at(pool: &SqlitePool, article_id: i64, created_at: 
         .execute(pool)
         .await
         .expect("article timestamp should update");
+}
+
+async fn set_feed_entry_published_at(
+    pool: &SqlitePool,
+    article_id: i64,
+    published_at: OffsetDateTime,
+) {
+    sqlx::query(
+        r#"
+        UPDATE feed_entries
+        SET published_at = ?
+        WHERE id = (
+            SELECT origin_feed_entry_id FROM articles WHERE id = ?
+        )
+        "#,
+    )
+    .bind(published_at)
+    .bind(article_id)
+    .execute(pool)
+    .await
+    .expect("feed entry timestamp should update");
 }

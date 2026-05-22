@@ -101,6 +101,7 @@ github_path_prefix = "archive"
 local_output_dir = "output"
 max_items_per_report = 30                # 单次报告最大入选数；映射 NonZeroU32（必须 ≥ 1）；可被 [category.publish_override] 按字段覆盖（见 §4.5）
 min_importance_score = 30                # 0-100，AI 路径下的发布门槛；0 表示"显式无下限"，与缺省语义不同；可被 [category.publish_override] 按字段覆盖；ai.enabled=false 直通路径下不参与过滤
+candidate_window_hours = 48              # 发布候选时间窗口；按 COALESCE(feed.published_at, feed.discovered_at) 过滤 [now-Nh, now]；0 = 不限制下界，仍排除未来时间
 include_unscored = false                 # 直通发布开关；语义见下方 ai.enabled × include_unscored 真值表；可被 [category.publish_override] 按字段覆盖
 
 # === 去重 ===

@@ -38,6 +38,7 @@ pub struct PublishFreezeOptions {
     pub min_importance_score: Score0To100,
     pub include_unscored: bool,
     pub ai_enabled: bool,
+    pub candidate_window_hours: u32,
     pub excerpt_max_chars: usize,
 }
 
@@ -178,6 +179,14 @@ fn render_templates_from_ctx(ctx: &RunContext) -> RenderTemplates {
         frontmatter_template: template.frontmatter_template.clone(),
         report_template: template.report_template.clone(),
         item_template: template.item_template.clone(),
+    }
+}
+
+fn published_since(now: OffsetDateTime, window_hours: u32) -> OffsetDateTime {
+    if window_hours == 0 {
+        OffsetDateTime::UNIX_EPOCH
+    } else {
+        now - Duration::hours(i64::from(window_hours))
     }
 }
 
@@ -334,6 +343,8 @@ impl PublishFlow {
             target_timezone: claimed.target_timezone.clone(),
             render_version_id: claimed.render_version,
             selection_policy_version_id: claimed.selection_policy_version,
+            published_since: published_since(now, opts.candidate_window_hours),
+            published_until: now,
             max_items: opts.max_items,
             min_importance_score: opts.min_importance_score,
             include_unscored: opts.include_unscored,

@@ -17,14 +17,21 @@ pub async fn load_candidates(
         repo.select_ai_path_candidates(
             &request.category_key,
             i32::from(request.min_importance_score.get()),
+            request.published_since,
+            request.published_until,
             request.max_items,
         )
         .await
         .map_err(|error| ReportError::RenderFailed(error.to_string()))?
     } else if request.include_unscored {
-        repo.select_ai_off_passthrough_candidates(&request.category_key, request.max_items)
-            .await
-            .map_err(|error| ReportError::RenderFailed(error.to_string()))?
+        repo.select_ai_off_passthrough_candidates(
+            &request.category_key,
+            request.published_since,
+            request.published_until,
+            request.max_items,
+        )
+        .await
+        .map_err(|error| ReportError::RenderFailed(error.to_string()))?
     } else {
         return Ok(Vec::new());
     };

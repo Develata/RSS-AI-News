@@ -157,6 +157,7 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
                 min_importance_score: effective.min_importance_score,
                 include_unscored: effective.include_unscored,
                 ai_enabled: effective.ai_enabled,
+                candidate_window_hours: loaded.app.publish.candidate_window_hours,
                 excerpt_max_chars: 240,
             })
             .await;

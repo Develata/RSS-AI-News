@@ -145,6 +145,7 @@ pub fn app_config(retention_policy: RetentionPolicy, concurrent_feeds: u32) -> A
             include_unscored: false,
             max_items_per_report: NonZeroU32::new(30).expect("test default non-zero"),
             min_importance_score: Score0To100::try_new(30).expect("test default in range"),
+            candidate_window_hours: 48,
         },
         dedup: DedupConfig {
             enable_link_dedup: true,

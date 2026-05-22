@@ -462,6 +462,7 @@ include_unscored = true
 |---|---|---|
 | `max_items_per_report` | `30` | 单份日报最多条数；摘要式分类调小（10–15），全量归档调大 |
 | `min_importance_score` | `30` | AI 路径下入选门槛（0–100）；想看更少更精调 `50`+；`0` 表示"显式无下限"（与不写不同，详见 config-schema §4.1） |
+| `candidate_window_hours` | `48` | 发布候选只取 `[now-Nh, now]`，按 `published_at`，缺失时退回 `discovered_at`；`0` 表示不限制下界，仍排除未来时间 |
 | `include_unscored` | `false` | 关闭 AI 直通发布模式必须 `true`；AI 开启时该字段无效（详见 config-schema §4.1 真值表） |
 | `template.path_template` | `"{CATEGORY_KEY}/{YYYY}/{YYYYMMDD}.md"` | 控制本地输出与 GitHub 远端相对路径；远端还会再加 `github_path_prefix` |
 

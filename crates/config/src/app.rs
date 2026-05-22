@@ -84,6 +84,16 @@ pub struct PublishConfig {
     /// path: not applied (see §4.5). Score0To100 enforces the 0-100 invariant
     /// at toml deserialization. See `docs/design/config-schema.md` §357-358.
     pub min_importance_score: Score0To100,
+    /// Sliding candidate window for publish selection, in hours. `0` disables
+    /// the window for manual backfills.
+    #[serde(default = "PublishConfig::default_candidate_window_hours")]
+    pub candidate_window_hours: u32,
+}
+
+impl PublishConfig {
+    const fn default_candidate_window_hours() -> u32 {
+        48
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]

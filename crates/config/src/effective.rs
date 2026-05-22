@@ -162,6 +162,7 @@ mod tests {
                         .expect("test: global_max_items must be non-zero"),
                     min_importance_score: Score0To100::try_new(global_min_score)
                         .expect("test: global_min_score must be 0..=100"),
+                    candidate_window_hours: 48,
                 },
                 dedup: DedupConfig {
                     enable_link_dedup: true,

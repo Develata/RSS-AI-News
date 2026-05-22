@@ -182,6 +182,8 @@ PublishRequest
 ├── target_timezone: String             # IANA tz
 ├── render_version_id: i64
 ├── selection_policy_version_id: i64
+├── published_since: OffsetDateTime      # 发布候选窗口下界；由 runtime 根据 [publish].candidate_window_hours 计算
+├── published_until: OffsetDateTime      # 发布候选窗口上界；通常为 freeze 阶段的同一个 now
 ├── max_items: NonZeroU32               # effective publish 值（见 config §4.5）
 ├── min_importance_score: Score0To100   # effective publish 值；见 §6.5；ai.enabled=false 时不参与过滤（详见 config §4.5）
 ├── include_unscored: bool              # effective publish 值

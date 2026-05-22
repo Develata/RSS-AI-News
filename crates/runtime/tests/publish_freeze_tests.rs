@@ -218,6 +218,7 @@ fn freeze_opts(ai_enabled: bool, include_unscored: bool) -> PublishFreezeOptions
         min_importance_score: Score0To100::try_new(50).unwrap(),
         include_unscored,
         ai_enabled,
+        candidate_window_hours: 48,
         excerpt_max_chars: 100,
     }
 }
