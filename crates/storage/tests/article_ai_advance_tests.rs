@@ -204,13 +204,19 @@ async fn setup_claimed_ai_result(
         .expect("pending AI result should insert");
     let owner = format!("owner-{model_id}");
     let claimed = repo
-        .claim_pending(&ClaimRequest {
-            owner: owner.clone(),
-            now: OffsetDateTime::now_utc(),
-            lease_expires_at: lease_expires_at(OffsetDateTime::now_utc(), Duration::seconds(60)),
-            batch_size: 1,
-            max_attempts: 3,
-        })
+        .claim_pending(
+            &ClaimRequest {
+                owner: owner.clone(),
+                now: OffsetDateTime::now_utc(),
+                lease_expires_at: lease_expires_at(
+                    OffsetDateTime::now_utc(),
+                    Duration::seconds(60),
+                ),
+                batch_size: 1,
+                max_attempts: 3,
+            },
+            "ai",
+        )
         .await
         .expect("AI result should be claimed");
     assert_eq!(claimed.len(), 1);

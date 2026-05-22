@@ -63,6 +63,26 @@ async fn task_gen_skips_articles_already_advanced() {
 }
 
 #[tokio::test]
+async fn task_gen_only_scans_requested_category() {
+    let (_dir, pool) = make_test_pool().await;
+    let ai_article = seed_persisted_article(&pool, "ai-task-gen-cat-ai", "ai title", "body").await;
+    let other_article =
+        seed_persisted_article(&pool, "ai-task-gen-cat-other", "other title", "body").await;
+    set_article_category(&pool, other_article, "other").await;
+    let client = Arc::new(MockAiClient::default());
+    let flow = flow(pool.clone(), client);
+
+    let summary = flow.task_gen(&opts_for_category("other")).await;
+
+    assert_eq!(summary.scanned, 1);
+    assert_eq!(summary.inserted, 1);
+    assert_eq!(article_state(&pool, ai_article).await, "persisted");
+    assert_eq!(article_state(&pool, other_article).await, "ai_pending");
+    assert_eq!(ai_result_count_by_article(&pool, ai_article).await, 0);
+    assert_eq!(ai_result_count_by_article(&pool, other_article).await, 1);
+}
+
+#[tokio::test]
 async fn process_succeeds_high_score_advances_article_to_ready_for_publish() {
     let (_dir, pool) = make_test_pool().await;
     let article_id = seed_persisted_article(&pool, "ai-process-1", "title", "body").await;
@@ -154,6 +174,31 @@ async fn process_writes_ai_raw_response_artifact_before_release() {
 }
 
 #[tokio::test]
+async fn process_only_claims_requested_category() {
+    let (_dir, pool) = make_test_pool().await;
+    let ai_article = seed_persisted_article(&pool, "ai-process-cat-ai", "ai title", "body").await;
+    let other_article =
+        seed_persisted_article(&pool, "ai-process-cat-other", "other title", "body").await;
+    set_article_category(&pool, other_article, "other").await;
+    let client = Arc::new(MockAiClient::default());
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    flow.task_gen(&opts_for_category("ai")).await;
+    flow.task_gen(&opts_for_category("other")).await;
+    let ai_result_id = ai_result_id_by_article(&pool, ai_article).await;
+    let other_result_id = ai_result_id_by_article(&pool, other_article).await;
+    client.insert_success(ai_result_id, output_json(80)).await;
+
+    let summary = flow.process_ai_tasks(&opts_for_category("ai")).await;
+
+    assert_eq!(summary.claimed, 1);
+    assert_eq!(summary.succeeded, 1);
+    assert_eq!(article_state(&pool, ai_article).await, "ready_for_publish");
+    assert_eq!(ai_result_state(&pool, ai_result_id).await, "succeeded");
+    assert_eq!(article_state(&pool, other_article).await, "ai_pending");
+    assert_eq!(ai_result_state(&pool, other_result_id).await, "pending");
+}
+
+#[tokio::test]
 async fn process_releases_retryable_on_5xx_error() {
     let (_dir, pool) = make_test_pool().await;
     let article_id = seed_persisted_article(&pool, "ai-process-5", "title", "body").await;
@@ -235,6 +280,10 @@ fn flow(pool: SqlitePool, ai_client: Arc<MockAiClient>) -> AiRunFlow {
 }
 
 fn opts() -> AiRunOptions {
+    opts_for_category("ai")
+}
+
+fn opts_for_category(category_key: &str) -> AiRunOptions {
     AiRunOptions {
         task_gen_batch_size: 10,
         process_batch_size: 10,
@@ -246,7 +295,7 @@ fn opts() -> AiRunOptions {
         temperature: 0.0,
         min_importance_score: Score0To100::try_new(30).expect("0..=100"),
         max_batches: 0,
-        category_key: "ai".to_string(),
+        category_key: category_key.to_string(),
         prompt_version: 1,
         output_schema_version: 1,
     }
@@ -354,4 +403,32 @@ async fn ai_result_state_by_article(pool: &SqlitePool, article_id: i64) -> Optio
         .fetch_optional(pool)
         .await
         .expect("AI result state should be readable")
+}
+
+async fn ai_result_count_by_article(pool: &SqlitePool, article_id: i64) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM article_ai_results WHERE article_id = ?")
+        .bind(article_id)
+        .fetch_one(pool)
+        .await
+        .expect("AI result count should be readable")
+}
+
+async fn set_article_category(pool: &SqlitePool, article_id: i64, category_key: &str) {
+    sqlx::query(
+        r#"
+        UPDATE feed_sources
+        SET category_key = ?
+        WHERE id = (
+            SELECT fe.source_id
+            FROM feed_entries fe
+            JOIN articles a ON a.origin_feed_entry_id = fe.id
+            WHERE a.id = ?
+        )
+        "#,
+    )
+    .bind(category_key)
+    .bind(article_id)
+    .execute(pool)
+    .await
+    .expect("article source category should update");
 }

@@ -81,6 +81,7 @@ pub trait ArticleAiResultRepository: Send + Sync {
     async fn claim_pending(
         &self,
         request: &ClaimRequest,
+        category_key: &str,
     ) -> Result<Vec<ClaimedAiResult>, StorageError>;
     async fn release_success(
         &self,
@@ -164,12 +165,17 @@ SET state = 'running',
     started_at = COALESCE(started_at, $3),
     updated_at = $4
 WHERE id IN (
-    SELECT id FROM article_ai_results
-    WHERE state = 'pending'
-      AND (lease_expires_at IS NULL OR lease_expires_at < $5)
-      AND attempt_count < $6
-    ORDER BY id ASC
-    LIMIT $7
+    SELECT aar.id
+    FROM article_ai_results aar
+    JOIN articles a ON a.id = aar.article_id
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE aar.state = 'pending'
+      AND (aar.lease_expires_at IS NULL OR aar.lease_expires_at < $5)
+      AND aar.attempt_count < $6
+      AND fs.category_key = $7
+    ORDER BY aar.id ASC
+    LIMIT $8
 )
 RETURNING id, article_id, prompt_version, output_schema_version, model_id
 "#;
@@ -183,12 +189,17 @@ SET state = 'running',
     started_at = COALESCE(started_at, $3),
     updated_at = $4
 WHERE id IN (
-    SELECT id FROM article_ai_results
-    WHERE state = 'pending'
-      AND (lease_expires_at IS NULL OR lease_expires_at < $5)
-      AND attempt_count < $6
-    ORDER BY id ASC
-    LIMIT $7
+    SELECT aar.id
+    FROM article_ai_results aar
+    JOIN articles a ON a.id = aar.article_id
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE aar.state = 'pending'
+      AND (aar.lease_expires_at IS NULL OR aar.lease_expires_at < $5)
+      AND aar.attempt_count < $6
+      AND fs.category_key = $7
+    ORDER BY aar.id ASC
+    LIMIT $8
     FOR UPDATE SKIP LOCKED
 )
 RETURNING id, article_id, prompt_version, output_schema_version, model_id
@@ -259,10 +270,11 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
     async fn claim_pending(
         &self,
         request: &ClaimRequest,
+        category_key: &str,
     ) -> Result<Vec<ClaimedAiResult>, StorageError> {
         match &self.pool {
-            StoragePool::Sqlite(p) => sqlite_claim_pending(p, request).await,
-            StoragePool::Postgres(p) => pg_claim_pending(p, request).await,
+            StoragePool::Sqlite(p) => sqlite_claim_pending(p, request, category_key).await,
+            StoragePool::Postgres(p) => pg_claim_pending(p, request, category_key).await,
         }
     }
 
@@ -412,6 +424,7 @@ async fn sqlite_insert_pending(
 async fn sqlite_claim_pending(
     pool: &SqlitePool,
     request: &ClaimRequest,
+    category_key: &str,
 ) -> Result<Vec<ClaimedAiResult>, StorageError> {
     sqlx::query_as::<_, ClaimedAiResult>(CLAIM_AI_PENDING_SQLITE_SQL)
         .bind(&request.owner)
@@ -420,6 +433,7 @@ async fn sqlite_claim_pending(
         .bind(request.now)
         .bind(request.now)
         .bind(i64::from(request.max_attempts))
+        .bind(category_key)
         .bind(i64::from(request.batch_size))
         .fetch_all(pool)
         .await
@@ -685,6 +699,7 @@ async fn pg_insert_pending(pool: &PgPool, item: &NewAiResult) -> Result<Option<i
 async fn pg_claim_pending(
     pool: &PgPool,
     request: &ClaimRequest,
+    category_key: &str,
 ) -> Result<Vec<ClaimedAiResult>, StorageError> {
     sqlx::query_as::<_, ClaimedAiResult>(CLAIM_AI_PENDING_PG_SQL)
         .bind(&request.owner)
@@ -693,6 +708,7 @@ async fn pg_claim_pending(
         .bind(request.now)
         .bind(request.now)
         .bind(i64::from(request.max_attempts))
+        .bind(category_key)
         .bind(i64::from(request.batch_size))
         .fetch_all(pool)
         .await

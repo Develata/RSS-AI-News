@@ -66,6 +66,7 @@ pub trait ArticleRepository: Send + Sync {
     /// task_gen 候选：按 id 升序扫描 `state='persisted'` 的 article。
     async fn list_persisted_for_ai_task_gen(
         &self,
+        category_key: &str,
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
@@ -147,11 +148,15 @@ WHERE id = $1
 "#;
 
 const LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL: &str = r#"
-SELECT id AS article_id, title, body_text, origin_feed_entry_id
-FROM articles
-WHERE state = 'persisted' AND id > $1
-ORDER BY id ASC
-LIMIT $2
+SELECT a.id AS article_id, a.title, a.body_text, a.origin_feed_entry_id
+FROM articles a
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE a.state = 'persisted'
+  AND a.id > $1
+  AND fs.category_key = $2
+ORDER BY a.id ASC
+LIMIT $3
 "#;
 
 const LIST_ARTICLES_IN_WINDOW_FOR_BACKFILL_SQL: &str = r#"
@@ -206,15 +211,16 @@ impl ArticleRepository for ArticleRepo {
 
     async fn list_persisted_for_ai_task_gen(
         &self,
+        category_key: &str,
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlite_list_persisted_for_ai_task_gen(p, batch_size, after_id).await
+                sqlite_list_persisted_for_ai_task_gen(p, category_key, batch_size, after_id).await
             }
             StoragePool::Postgres(p) => {
-                pg_list_persisted_for_ai_task_gen(p, batch_size, after_id).await
+                pg_list_persisted_for_ai_task_gen(p, category_key, batch_size, after_id).await
             }
         }
     }
@@ -333,11 +339,13 @@ async fn sqlite_find_by_id(pool: &SqlitePool, id: i64) -> Result<Option<Article>
 
 async fn sqlite_list_persisted_for_ai_task_gen(
     pool: &SqlitePool,
+    category_key: &str,
     batch_size: u32,
     after_id: i64,
 ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
     sqlx::query_as::<_, ArticleAiTaskCandidateRow>(LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL)
         .bind(after_id)
+        .bind(category_key)
         .bind(i64::from(batch_size))
         .fetch_all(pool)
         .await
@@ -480,11 +488,13 @@ async fn pg_find_by_id(pool: &PgPool, id: i64) -> Result<Option<Article>, Storag
 
 async fn pg_list_persisted_for_ai_task_gen(
     pool: &PgPool,
+    category_key: &str,
     batch_size: u32,
     after_id: i64,
 ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
     sqlx::query_as::<_, ArticleAiTaskCandidateRow>(LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL)
         .bind(after_id)
+        .bind(category_key)
         .bind(i64::from(batch_size))
         .fetch_all(pool)
         .await

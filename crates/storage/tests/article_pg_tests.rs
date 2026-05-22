@@ -215,7 +215,7 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
 
     // batch_size=2 + after_id=0 → 拿 ids[0..2]
     let page1 = repo
-        .list_persisted_for_ai_task_gen(2, 0)
+        .list_persisted_for_ai_task_gen("ai", 2, 0)
         .await
         .expect("pg list page1");
     assert_eq!(page1.len(), 2);
@@ -224,7 +224,7 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
 
     // after_id=ids[1] → 拿 ids[2..]
     let page2 = repo
-        .list_persisted_for_ai_task_gen(2, ids[1])
+        .list_persisted_for_ai_task_gen("ai", 2, ids[1])
         .await
         .expect("pg list page2");
     assert_eq!(page2.len(), 1);

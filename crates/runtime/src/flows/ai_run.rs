@@ -134,7 +134,7 @@ impl AiRunFlow {
         let candidates = match self
             .ctx
             .article_repo
-            .list_persisted_for_ai_task_gen(opts.task_gen_batch_size.max(1), 0)
+            .list_persisted_for_ai_task_gen(&opts.category_key, opts.task_gen_batch_size.max(1), 0)
             .await
         {
             Ok(candidates) => candidates,
@@ -260,16 +260,19 @@ impl AiRunFlow {
             let claimed = match self
                 .ctx
                 .ai_result_repo
-                .claim_pending(&ClaimRequest {
-                    owner: owner.clone(),
-                    now,
-                    lease_expires_at: lease_expires_at(
+                .claim_pending(
+                    &ClaimRequest {
+                        owner: owner.clone(),
                         now,
-                        Duration::seconds(self.ctx.app.lease.ai_duration_seconds as i64),
-                    ),
-                    batch_size: opts.process_batch_size.max(1),
-                    max_attempts: opts.max_attempts,
-                })
+                        lease_expires_at: lease_expires_at(
+                            now,
+                            Duration::seconds(self.ctx.app.lease.ai_duration_seconds as i64),
+                        ),
+                        batch_size: opts.process_batch_size.max(1),
+                        max_attempts: opts.max_attempts,
+                    },
+                    &opts.category_key,
+                )
                 .await
             {
                 Ok(claimed) => claimed,

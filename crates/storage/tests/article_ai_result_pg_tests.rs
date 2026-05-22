@@ -144,13 +144,16 @@ async fn pg_insert_pending_then_claim_then_release_success() {
 
     let now = OffsetDateTime::now_utc();
     let claimed = repo
-        .claim_pending(&ClaimRequest {
-            owner: "worker-A".to_string(),
-            now,
-            lease_expires_at: lease_expires(now),
-            batch_size: 4,
-            max_attempts: 3,
-        })
+        .claim_pending(
+            &ClaimRequest {
+                owner: "worker-A".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 4,
+                max_attempts: 3,
+            },
+            "ai",
+        )
         .await
         .expect("pg claim_pending");
     assert_eq!(claimed.len(), 1);
@@ -216,13 +219,16 @@ async fn pg_claim_pending_skips_explicitly_locked_row() {
     let now = OffsetDateTime::now_utc();
     let claimed = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        repo.claim_pending(&ClaimRequest {
-            owner: "worker-B".to_string(),
-            now,
-            lease_expires_at: lease_expires(now),
-            batch_size: 1,
-            max_attempts: 3,
-        }),
+        repo.claim_pending(
+            &ClaimRequest {
+                owner: "worker-B".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 1,
+                max_attempts: 3,
+            },
+            "ai",
+        ),
     )
     .await
     .expect("claim_pending must return within 5s (else SKIP LOCKED regressed)")
@@ -373,13 +379,16 @@ async fn pg_release_success_and_advance_keep_ready_for_publish() {
 
     // claim 拿 lease
     let _ = repo
-        .claim_pending(&ClaimRequest {
-            owner: "w".to_string(),
-            now,
-            lease_expires_at: lease_expires(now),
-            batch_size: 4,
-            max_attempts: 3,
-        })
+        .claim_pending(
+            &ClaimRequest {
+                owner: "w".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 4,
+                max_attempts: 3,
+            },
+            "ai",
+        )
         .await
         .unwrap();
 
@@ -434,13 +443,16 @@ async fn pg_release_success_and_advance_filtered_publish_skipped() {
         .unwrap();
     let ai_result_id = advance_outcome.ai_result_id.unwrap();
     let _ = repo
-        .claim_pending(&ClaimRequest {
-            owner: "w".to_string(),
-            now,
-            lease_expires_at: lease_expires(now),
-            batch_size: 4,
-            max_attempts: 3,
-        })
+        .claim_pending(
+            &ClaimRequest {
+                owner: "w".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 4,
+                max_attempts: 3,
+            },
+            "ai",
+        )
         .await
         .unwrap();
 

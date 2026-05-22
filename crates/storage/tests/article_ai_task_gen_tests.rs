@@ -29,7 +29,7 @@ async fn list_persisted_filters_state_persisted_orders_by_id() {
 
     let repo = ArticleRepo::new(pool);
     let candidates = repo
-        .list_persisted_for_ai_task_gen(10, 0)
+        .list_persisted_for_ai_task_gen("ai", 10, 0)
         .await
         .expect("list should succeed");
 
@@ -62,7 +62,7 @@ async fn list_persisted_paginates_by_after_id() {
 
     let repo = ArticleRepo::new(pool);
     let candidates = repo
-        .list_persisted_for_ai_task_gen(1, first)
+        .list_persisted_for_ai_task_gen("ai", 1, first)
         .await
         .expect("list should succeed");
 
@@ -70,7 +70,7 @@ async fn list_persisted_paginates_by_after_id() {
     assert_eq!(candidates[0].article_id, second);
 
     let candidates = repo
-        .list_persisted_for_ai_task_gen(10, second)
+        .list_persisted_for_ai_task_gen("ai", 10, second)
         .await
         .expect("list should succeed");
     assert_eq!(
@@ -99,9 +99,49 @@ async fn list_persisted_returns_empty_when_no_candidates() {
 
     let repo = ArticleRepo::new(pool);
     let candidates = repo
-        .list_persisted_for_ai_task_gen(10, 0)
+        .list_persisted_for_ai_task_gen("ai", 10, 0)
         .await
         .expect("list should succeed");
 
     assert!(candidates.is_empty());
+}
+
+#[tokio::test]
+async fn list_persisted_filters_by_category_key() {
+    let (_dir, pool) = make_test_pool().await;
+    let rule_id = insert_rule(&pool, "extractor", "extractor-task-gen-4", "sha-task-gen-4").await;
+    let ai_source = seed_source(&pool).await;
+    let other_source = seed_source(&pool).await;
+    sqlx::query("UPDATE feed_sources SET category_key = 'math' WHERE id = ?")
+        .bind(other_source)
+        .execute(&pool)
+        .await
+        .expect("source category should update");
+    let ai_entry = insert_feed_entry(&pool, ai_source, "uid-ai", "link-hash-ai").await;
+    let other_entry = insert_feed_entry(&pool, other_source, "uid-math", "link-hash-math").await;
+    let ai_article = insert_article(&pool, "content-hash-ai", ai_entry, rule_id)
+        .await
+        .expect("ai article should insert");
+    let other_article = insert_article(&pool, "content-hash-math", other_entry, rule_id)
+        .await
+        .expect("math article should insert");
+
+    let repo = ArticleRepo::new(pool);
+    let candidates = repo
+        .list_persisted_for_ai_task_gen("math", 10, 0)
+        .await
+        .expect("list should succeed");
+
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.article_id)
+            .collect::<Vec<_>>(),
+        vec![other_article]
+    );
+    assert!(
+        !candidates
+            .iter()
+            .any(|candidate| candidate.article_id == ai_article)
+    );
 }
