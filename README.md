@@ -817,6 +817,7 @@ v0.2 follow-up：
 - [状态机](./docs/design/state-machine.md)
 - [错误模型与可观测性](./docs/design/error-and-observability.md)
 - [Replay 与 Artifact](./docs/design/replay-and-artifacts.md)
+- [本地开发：pre-commit hook 启用](./.githooks/README.md)
 - [文档总览](./docs/README.md)
 
 ## License
