@@ -126,8 +126,13 @@ impl PublishTarget for GitHubTarget {
         // base_tree_sha 已过期，必须重新走 head_commit_and_tree → create_tree →
         // create_commit → update_branch_ref 整套。重试上限 2 次（首次 + 1 retry），
         // 仍失败则透传 422 让上层 publish_record retry/lease 接管。
+        //
+        // 关于 unreachable! 末尾：循环里 Ok 直接 return；非 retryable Err 也直接
+        // return；只有 retryable Err 且 attempt < MAX_ATTEMPTS 走 continue。最后
+        // 一轮 attempt == MAX_ATTEMPTS 时 retry guard 短路为 false，retryable Err
+        // 也会落到默认 `Err(error) => return Err(error)`。因此循环正常结束（无
+        // return）的路径不存在。
         const MAX_ATTEMPTS: u32 = 2;
-        let mut last_error: Option<PublishError> = None;
         for attempt in 1..=MAX_ATTEMPTS {
             match self.publish_many_atomic(reports).await {
                 Ok(batch) => {
@@ -145,13 +150,15 @@ impl PublishTarget for GitHubTarget {
                         ?error,
                         "branch advanced concurrently; retrying publish_many from fresh HEAD"
                     );
-                    last_error = Some(error);
-                    continue;
                 }
                 Err(error) => return Err(error),
             }
         }
-        Err(last_error.expect("loop must produce at least one error before exiting"))
+        unreachable!(
+            "publish_many retry loop is bounded by MAX_ATTEMPTS and every arm returns on \
+             the last attempt; reaching this point implies the retry guard semantics were \
+             broken"
+        )
     }
 }
 

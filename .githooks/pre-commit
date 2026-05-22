@@ -17,8 +17,15 @@ set -euo pipefail
 
 # 仅在 staged 改动涉及 Rust 源 / Cargo manifests / cargo config 时触发。
 # 纯文档或脚本 commit 直接放行，避免 1-2 分钟等待。
+#
+# regex 说明：
+#   \.rs$                          —— 任意 *.rs
+#   (^|/)Cargo\.(toml|lock)$       —— 根目录或 workspace 子 crate 的 Cargo.toml / Cargo.lock
+#   (^|/)\.cargo/config\.toml$     —— 根或子 .cargo/config.toml
+# 不能写 ^Cargo\.… 因为 workspace 子 crate 的路径形如 crates/<x>/Cargo.toml，
+# 行首是 crates/ 而不是 Cargo.toml；漏了它意味着加依赖时 hook 不触发。
 if ! git diff --cached --name-only --diff-filter=ACMR \
-    | grep -qE '\.rs$|^Cargo\.(toml|lock)$|\.cargo/config\.toml$'; then
+    | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$|(^|/)\.cargo/config\.toml$'; then
     exit 0
 fi
 
