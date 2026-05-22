@@ -1,0 +1,4 @@
+# 强制 LF 行结尾的文件：避免 Windows clone 时 CRLF 污染 shell 解释。
+# bash 在 MSYS2 / WSL 下对 CRLF 极其敏感（`set -euo pipefail` 会因 CRLF 失败）。
+.githooks/pre-commit text eol=lf
+docker/scheduler-entrypoint.sh text eol=lf

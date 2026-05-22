@@ -123,6 +123,58 @@ async fn freeze_record_claims_requested_pending_record_not_older_one() {
 }
 
 #[tokio::test]
+async fn freeze_record_isolates_two_concurrent_pending_records_by_id() {
+    // 回归：9080223 修复的 race —— 之前 publish-all 串行 freeze 时第二个分类的
+    // freeze 调 claim_pending_for_freeze() 会按状态扫表抢任意 pending record，
+    // 可能反向抢到上一个分类还未完成的那条。修复后 freeze_record(id) 必须严格
+    // 按 id 命中目标 record，不会跨抢同 state 的其它 record。本测试断言两条同
+    // state pending 记录在双向调用下各自只被对应 id 推进，且 items 分配只属于
+    // 自己的 category。
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flow(pool.clone());
+    let render = insert_config_rule(&pool).await;
+    let policy = insert_config_rule(&pool).await;
+    let id_a = init_for_category(&flow, "ai", "2026-04-28", render, policy).await;
+    let id_b = init_for_category(&flow, "ml", "2026-04-28", render, policy).await;
+    let (article_a, _) =
+        seed_ai_succeeded_article(&pool, "ai", "concurrent-ai", "TA", "ba", "sa", 88, 1).await;
+    let (article_b, _) =
+        seed_ai_succeeded_article(&pool, "ml", "concurrent-ml", "TB", "bb", "sb", 88, 1).await;
+
+    let outcome_a = flow
+        .freeze_record(id_a, freeze_opts_for_category("ai"))
+        .await;
+    assert_eq!(outcome_a.publish_record_id, id_a);
+    assert_eq!(outcome_a.status, PublishFreezeStatus::Frozen);
+    assert_record_state(&pool, id_a, "snapshot_frozen").await;
+    assert_record_state(&pool, id_b, "pending").await;
+
+    let outcome_b = flow
+        .freeze_record(id_b, freeze_opts_for_category("ml"))
+        .await;
+    assert_eq!(outcome_b.publish_record_id, id_b);
+    assert_eq!(outcome_b.status, PublishFreezeStatus::Frozen);
+    assert_record_state(&pool, id_a, "snapshot_frozen").await;
+    assert_record_state(&pool, id_b, "snapshot_frozen").await;
+
+    let item_repo = PublishItemRepo::new(pool.clone());
+    let items_a = item_repo.list_by_publish_record(id_a).await.unwrap();
+    let items_b = item_repo.list_by_publish_record(id_b).await.unwrap();
+    assert_eq!(
+        items_a.len(),
+        1,
+        "record A should hold ai-side article only"
+    );
+    assert_eq!(
+        items_b.len(),
+        1,
+        "record B should hold ml-side article only"
+    );
+    assert_eq!(items_a[0].article_id, article_a);
+    assert_eq!(items_b[0].article_id, article_b);
+}
+
+#[tokio::test]
 async fn freeze_with_ai_off_passthrough_promotes_persisted_articles_in_same_tx() {
     let (_dir, pool) = make_test_pool().await;
     let flow = flow(pool.clone());
@@ -218,6 +270,44 @@ fn freeze_opts(ai_enabled: bool, include_unscored: bool) -> PublishFreezeOptions
         min_importance_score: Score0To100::try_new(50).unwrap(),
         include_unscored,
         ai_enabled,
+        candidate_window_hours: 48,
+        excerpt_max_chars: 100,
+    }
+}
+
+async fn init_for_category(
+    flow: &PublishFlow,
+    category_key: &str,
+    report_date: &str,
+    render_version: i64,
+    selection_policy_version: i64,
+) -> i64 {
+    let outcome = flow
+        .init(PublishInitOptions {
+            category_key: category_key.to_string(),
+            report_date: report_date.to_string(),
+            target_timezone: "Asia/Shanghai".to_string(),
+            render_version,
+            selection_policy_version,
+            remote_target: None,
+        })
+        .await
+        .expect("init should succeed");
+    match outcome {
+        PublishInitOutcome::Created { publish_record_id } => publish_record_id,
+        PublishInitOutcome::AlreadyExists { .. } => {
+            panic!("init key should be unique for {category_key} on {report_date}")
+        }
+    }
+}
+
+fn freeze_opts_for_category(category_key: &str) -> PublishFreezeOptions {
+    PublishFreezeOptions {
+        category_key: category_key.to_string(),
+        max_items: NonZeroU32::new(10).unwrap(),
+        min_importance_score: Score0To100::try_new(50).unwrap(),
+        include_unscored: false,
+        ai_enabled: true,
         candidate_window_hours: 48,
         excerpt_max_chars: 100,
     }

@@ -121,6 +121,58 @@ impl PublishTarget for GitHubTarget {
             });
         }
 
+        // PATCH refs/heads/<branch> with force=false 在另一个 push 抢先落到分支时
+        // 会以 422 "Update is not a fast forward" 失败。此时之前抓的
+        // base_tree_sha 已过期，必须重新走 head_commit_and_tree → create_tree →
+        // create_commit → update_branch_ref 整套。重试上限 2 次（首次 + 1 retry），
+        // 仍失败则透传 422 让上层 publish_record retry/lease 接管。
+        const MAX_ATTEMPTS: u32 = 2;
+        let mut last_error: Option<PublishError> = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.publish_many_atomic(reports).await {
+                Ok(batch) => {
+                    if attempt > 1 {
+                        tracing::info!(
+                            attempt,
+                            "publish_many succeeded after concurrent-update retry"
+                        );
+                    }
+                    return Ok(batch);
+                }
+                Err(error) if is_branch_concurrently_updated(&error) && attempt < MAX_ATTEMPTS => {
+                    tracing::warn!(
+                        attempt,
+                        ?error,
+                        "branch advanced concurrently; retrying publish_many from fresh HEAD"
+                    );
+                    last_error = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error.expect("loop must produce at least one error before exiting"))
+    }
+}
+
+fn is_branch_concurrently_updated(error: &PublishError) -> bool {
+    match error {
+        PublishError::GitHubApiError {
+            status: 422,
+            message,
+        } => {
+            let lower = message.to_lowercase();
+            lower.contains("fast forward") || lower.contains("not a fast-forward")
+        }
+        _ => false,
+    }
+}
+
+impl GitHubTarget {
+    async fn publish_many_atomic(
+        &self,
+        reports: &[RenderedReport],
+    ) -> Result<PublishedBatchArtifact, PublishError> {
         let mut tree_entries = Vec::with_capacity(reports.len());
         let mut artifacts = Vec::with_capacity(reports.len());
         for report in reports {
@@ -158,9 +210,7 @@ impl PublishTarget for GitHubTarget {
             commit_sha: Some(commit_sha),
         })
     }
-}
 
-impl GitHubTarget {
     async fn get_json(&self, route: &str) -> Result<Value, PublishError> {
         let response = self
             .client

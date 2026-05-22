@@ -157,6 +157,124 @@ async fn publish_many_creates_one_commit_for_multiple_reports() {
 }
 
 #[tokio::test]
+async fn publish_many_retries_once_after_non_fast_forward_then_succeeds() {
+    let server = MockServer::start().await;
+    // GET ref / GET commit / POST tree / POST commit 在两次尝试里都正常返回。
+    // GitHub 在 lost-update 时只有 PATCH refs 会以 422 失败；前面四步对每次
+    // 重试都重新调用，因此响应需要支持多次匹配（wiremock 默认即可）。
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": { "sha": "head-sha" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/commits/head-sha"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tree": { "sha": "base-tree-sha" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/git/trees"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "sha": "new-tree-sha"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/git/commits"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "sha": "batch-commit-sha"
+        })))
+        .mount(&server)
+        .await;
+    // wiremock 按 mount 顺序逆序匹配；先 mount 200 fallback，再 mount up_to_1
+    // 的 422，使第一次 PATCH 命中 422，第二次回落到 200。
+    Mock::given(method("PATCH"))
+        .and(path("/repos/owner/repo/git/refs/heads/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": { "sha": "batch-commit-sha" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/repos/owner/repo/git/refs/heads/main"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "message": "Update is not a fast forward"
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let target = target(&server);
+
+    let batch = target
+        .publish_many(&[sample_report(), second_report()])
+        .await
+        .unwrap();
+
+    assert_eq!(batch.commit_sha.as_deref(), Some("batch-commit-sha"));
+    assert_eq!(batch.artifacts.len(), 2);
+}
+
+#[tokio::test]
+async fn publish_many_surfaces_422_after_max_retries() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": { "sha": "head-sha" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/commits/head-sha"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tree": { "sha": "base-tree-sha" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/git/trees"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "sha": "new-tree-sha"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/git/commits"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "sha": "batch-commit-sha"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/repos/owner/repo/git/refs/heads/main"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "message": "Update is not a fast forward"
+        })))
+        .mount(&server)
+        .await;
+    let target = target(&server);
+
+    let error = target
+        .publish_many(&[sample_report(), second_report()])
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        PublishError::GitHubApiError { status: 422, message }
+            if message.to_lowercase().contains("fast forward")
+    ));
+    // 422 lost-update 在 PublishError::is_retryable 中不属于 retryable
+    // (只有 409 / 5xx / rate-limit 才是)，因此一旦透传到上层，会触发
+    // publish_record 的 fail-fast / lease 路径，而不是无限重试。
+    assert!(!error.is_retryable());
+}
+
+#[tokio::test]
 async fn auth_failure_maps_to_github_auth_failed() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

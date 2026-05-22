@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# RSS-AI-News pre-commit hook
+#
+# 对 staged 改动跑 `cargo fmt --all -- --check` + `cargo clippy --workspace
+# --all-targets --jobs 1 -- -D warnings`，匹配 CI 的硬门槛（feedback_rust_fmt）。
+#
+# 启用（仓库根执行一次）：
+#     git config core.hooksPath .githooks
+#
+# 单次跳过（仅在紧急情况下，例如 docs-only commit 误触）：
+#     git commit --no-verify
+#
+# 跳过 clippy（保留 fmt 检查，适合频繁迭代）：
+#     PRE_COMMIT_SKIP_CLIPPY=1 git commit ...
+
+set -euo pipefail
+
+# 仅在 staged 改动涉及 Rust 源 / Cargo manifests / cargo config 时触发。
+# 纯文档或脚本 commit 直接放行，避免 1-2 分钟等待。
+if ! git diff --cached --name-only --diff-filter=ACMR \
+    | grep -qE '\.rs$|^Cargo\.(toml|lock)$|\.cargo/config\.toml$'; then
+    exit 0
+fi
+
+echo "[pre-commit] cargo fmt --all -- --check ..."
+if ! cargo fmt --all -- --check; then
+    echo
+    echo "[pre-commit] fmt check failed. run:"
+    echo "  cargo fmt --all"
+    echo "then re-stage and re-commit."
+    exit 1
+fi
+
+if [ "${PRE_COMMIT_SKIP_CLIPPY:-0}" = "1" ]; then
+    echo "[pre-commit] PRE_COMMIT_SKIP_CLIPPY=1; skipping clippy."
+    exit 0
+fi
+
+echo "[pre-commit] cargo clippy --workspace --all-targets --jobs 1 -- -D warnings ..."
+if ! cargo clippy --workspace --all-targets --jobs 1 -- -D warnings; then
+    echo
+    echo "[pre-commit] clippy failed. fix warnings (or justify with #[allow(...)]) and re-stage."
+    echo "if you really need to bypass clippy for this commit:"
+    echo "  PRE_COMMIT_SKIP_CLIPPY=1 git commit ..."
+    exit 1
+fi
+
+echo "[pre-commit] ok."
