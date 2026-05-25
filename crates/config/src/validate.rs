@@ -200,6 +200,7 @@ mod tests {
                 display_name: "Source".to_string(),
                 feed_url: feed_url.to_string(),
                 feed_kind: FeedKind::Rss,
+                rsshub_access_key: None,
                 priority: 10,
                 enabled: true,
             }],

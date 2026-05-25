@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use rss_ai_news_config::RetentionPolicy;
+use rss_ai_news_domain::SecretString;
 use rss_ai_news_domain::dto::feed::FeedFetchRequest;
 use rss_ai_news_domain::link_normalizer::normalize_link;
 use rss_ai_news_feed::fetcher::RawFeedFetch;
@@ -125,7 +126,8 @@ async fn existing_source_is_synced_from_current_config_before_fetch() {
     .expect("seed stale source error");
 
     let mut category = category_with_sources(&["s1"]);
-    category.sources[0].feed_url = "http://rsshub:1200/s1.xml?key=test-key".to_string();
+    category.sources[0].feed_url = "http://rsshub:1200/s1.xml".to_string();
+    category.sources[0].rsshub_access_key = Some(SecretString::new("test-key"));
     let flow = flow(
         pool.clone(),
         RetentionPolicy::Always,
@@ -144,7 +146,7 @@ async fn existing_source_is_synced_from_current_config_before_fetch() {
     .expect("source should be readable");
 
     assert_eq!(summary.sources_succeeded, 1);
-    assert_eq!(source_row.0, "http://rsshub:1200/s1.xml?key=test-key");
+    assert_eq!(source_row.0, "http://rsshub:1200/s1.xml");
     assert_eq!(source_row.1, 0);
     assert_eq!(source_row.2, None);
 }

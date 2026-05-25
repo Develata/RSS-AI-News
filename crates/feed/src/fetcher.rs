@@ -86,9 +86,12 @@ impl ReqwestFeedFetcher {
 #[async_trait]
 impl FeedFetcher for ReqwestFeedFetcher {
     async fn fetch_raw(&self, request: &FeedFetchRequest) -> Result<RawFeedFetch, FeedError> {
-        let feed_url = Url::parse(&request.feed_url).map_err(|_| FeedError::InvalidUrl {
+        let mut feed_url = Url::parse(&request.feed_url).map_err(|_| FeedError::InvalidUrl {
             url: request.feed_url.clone(),
         })?;
+        if let Some(access_key) = &request.rsshub_access_key {
+            append_query_param_if_missing(&mut feed_url, "key", access_key.expose_secret().trim());
+        }
 
         let mut builder = self
             .client
@@ -139,6 +142,13 @@ impl FeedFetcher for ReqwestFeedFetcher {
             raw_payload_bytes: Some(body.to_vec()),
         })
     }
+}
+
+fn append_query_param_if_missing(url: &mut Url, key: &str, value: &str) {
+    if value.is_empty() || url.query_pairs().any(|(name, _)| name == key) {
+        return;
+    }
+    url.query_pairs_mut().append_pair(key, value);
 }
 
 async fn read_limited_body(

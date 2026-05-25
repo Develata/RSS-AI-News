@@ -7,7 +7,8 @@ use crate::{
     AppConfig, CategoryConfig, CliOverrides, ConfigError, EnvConfig, compute_config_sha256, env,
     validate,
 };
-use rss_ai_news_domain::state::FeedKind;
+use rss_ai_news_domain::{SecretString, state::FeedKind};
+use url::Url;
 
 type CategoryTomlContents = Vec<(String, String)>;
 type LoadedCategories = (Vec<CategoryConfig>, CategoryTomlContents);
@@ -141,42 +142,52 @@ fn expand_env_placeholders(categories: &mut [CategoryConfig], env: &EnvConfig) {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.trim_end_matches('/').to_string());
-    let rsshub_access_key = env
-        .rsshub_access_key
-        .as_ref()
-        .map(rss_ai_news_domain::SecretString::expose_secret)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
 
     for category in categories {
         for source in &mut category.sources {
             if let Some(base_url) = rsshub_base_url.as_deref() {
                 source.feed_url = source.feed_url.replace("{RSSHUB}", base_url);
             }
-            if source.feed_kind == FeedKind::RssHub
-                && let Some(access_key) = rsshub_access_key
-            {
-                append_query_param_if_missing(&mut source.feed_url, "key", access_key);
+            if source.feed_kind == FeedKind::RssHub {
+                let inline_access_key = strip_query_param(&mut source.feed_url, "key");
+                source.rsshub_access_key = inline_access_key
+                    .filter(|value| !value.trim().is_empty())
+                    .map(SecretString::new)
+                    .or_else(|| env.rsshub_access_key.clone());
             }
         }
     }
 }
 
-fn append_query_param_if_missing(url: &mut String, key: &str, value: &str) {
-    let query_start = url.find('?');
-    let fragment_start = url.find('#').unwrap_or(url.len());
-    let query = query_start.map(|start| &url[start + 1..fragment_start]);
-    if query.is_some_and(|query| {
-        query
-            .split('&')
-            .any(|part| part.split_once('=').is_some_and(|(name, _)| name == key) || part == key)
-    }) {
-        return;
+fn strip_query_param(raw_url: &mut String, key: &str) -> Option<String> {
+    let Ok(mut url) = Url::parse(raw_url) else {
+        return None;
+    };
+
+    let mut removed = None;
+    let mut kept = Vec::new();
+    for (name, value) in url.query_pairs() {
+        if name == key {
+            if removed.is_none() {
+                removed = Some(value.into_owned());
+            }
+        } else {
+            kept.push((name.into_owned(), value.into_owned()));
+        }
     }
 
-    let separator = if query_start.is_some() { '&' } else { '?' };
-    let insertion = format!("{separator}{key}={value}");
-    url.insert_str(fragment_start, &insertion);
+    removed.as_ref()?;
+
+    url.set_query(None);
+    if !kept.is_empty() {
+        let mut pairs = url.query_pairs_mut();
+        for (name, value) in kept {
+            pairs.append_pair(&name, &value);
+        }
+    }
+
+    *raw_url = url.to_string();
+    removed
 }
 
 fn read_required_file(path: &Path) -> Result<String, ConfigError> {
@@ -212,6 +223,7 @@ mod tests {
     use std::{fs, path::PathBuf, time::SystemTime};
 
     use crate::{CliOverrides, ConfigError, load, load_skip_env_checks};
+    use rss_ai_news_domain::SecretString;
 
     const APP_TOML_AI_ENABLED_RSSHUB_PLACEHOLDER: &str = r#"
 schema_version = "1"
@@ -411,19 +423,26 @@ enabled = true
 
         assert_eq!(
             loaded.categories[0].sources[0].feed_url,
-            "http://rsshub:1200/example?key=test-key"
+            "http://rsshub:1200/example"
+        );
+        assert_eq!(
+            loaded.categories[0].sources[0]
+                .rsshub_access_key
+                .as_ref()
+                .map(SecretString::expose_secret),
+            Some("test-key")
         );
     }
 
     #[test]
-    fn load_does_not_duplicate_existing_rsshub_access_key() {
+    fn load_strips_existing_rsshub_access_key_from_feed_url() {
         let ws = Workspace::new("rsshub-existing-key");
         ws.write_app(APP_TOML_AI_ENABLED_RSSHUB_PLACEHOLDER);
         ws.write_category(
             "ai",
             &CATEGORY_TOML_RSSHUB_PLACEHOLDER.replace(
                 r#"feed_url = "{RSSHUB}/example""#,
-                r#"feed_url = "{RSSHUB}/example?key=inline-key""#,
+                r#"feed_url = "{RSSHUB}/example?foo=1&key=inline-key#section""#,
             ),
         );
         let env_file = ws.env_file(
@@ -435,7 +454,14 @@ enabled = true
 
         assert_eq!(
             loaded.categories[0].sources[0].feed_url,
-            "http://rsshub:1200/example?key=inline-key"
+            "http://rsshub:1200/example?foo=1#section"
+        );
+        assert_eq!(
+            loaded.categories[0].sources[0]
+                .rsshub_access_key
+                .as_ref()
+                .map(SecretString::expose_secret),
+            Some("inline-key")
         );
     }
 

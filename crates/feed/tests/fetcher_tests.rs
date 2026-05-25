@@ -1,9 +1,10 @@
 use std::time::Duration;
 
+use rss_ai_news_domain::SecretString;
 use rss_ai_news_domain::dto::feed::FeedFetchRequest;
 use rss_ai_news_domain::state::FeedKind;
 use rss_ai_news_feed::{FeedError, FeedFetcher, ReqwestFeedFetcher};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const RSS_BODY: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -29,10 +30,32 @@ fn request(server: &MockServer, path: &str) -> FeedFetchRequest {
         source_key: "example".to_string(),
         feed_url: format!("{}{}", server.uri(), path),
         feed_kind: FeedKind::Rss,
+        rsshub_access_key: None,
         etag: None,
         last_modified: None,
         timeout: Duration::from_secs(2),
     }
+}
+
+#[tokio::test]
+async fn appends_rsshub_access_key_only_for_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/feed"))
+        .and(query_param("existing", "1"))
+        .and(query_param("key", "a&b=c"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(RSS_BODY))
+        .mount(&server)
+        .await;
+
+    let fetcher = ReqwestFeedFetcher::new(1024 * 1024).expect("fetcher should build");
+    let mut req = request(&server, "/feed?existing=1");
+    req.feed_kind = FeedKind::RssHub;
+    req.rsshub_access_key = Some(SecretString::new("a&b=c"));
+    let response = fetcher.fetch(&req).await.expect("fetch should succeed");
+
+    assert!(!response.entries.is_empty());
+    assert_eq!(req.feed_url, format!("{}/feed?existing=1", server.uri()));
 }
 
 #[tokio::test]

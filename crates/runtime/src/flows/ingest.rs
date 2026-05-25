@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use rss_ai_news_config::{CategoryConfig, SourceConfig};
+use rss_ai_news_domain::SecretString;
 use rss_ai_news_domain::dto::feed::{FeedEntryMeta, FeedFetchRequest};
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_domain::link_normalizer::normalize_link;
@@ -66,6 +67,7 @@ struct SourceTask {
     existing_last_modified: Option<String>,
     feed_url: String,
     feed_kind: FeedKind,
+    rsshub_access_key: Option<SecretString>,
 }
 
 pub struct IngestFlow {
@@ -298,6 +300,7 @@ impl IngestFlow {
             existing_last_modified: feed_source.last_modified,
             feed_url: feed_source.feed_url,
             feed_kind: feed_source.feed_kind,
+            rsshub_access_key: source.rsshub_access_key.clone(),
         })
     }
 
@@ -326,6 +329,7 @@ impl IngestFlow {
             source_key: task.source_key,
             feed_url: task.feed_url,
             feed_kind: task.feed_kind,
+            rsshub_access_key: task.rsshub_access_key,
             etag: task.existing_etag,
             last_modified: task.existing_last_modified,
             timeout: StdDuration::from_secs(ctx.app.http.timeout_seconds),

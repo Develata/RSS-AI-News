@@ -35,7 +35,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 # 如果某个 source 使用 {RSSHUB} 占位符，则必须填写
 RSSHUB_BASE_URL=https://rsshub.example.com
 
-# 如果 RSSHub 开启 ACCESS_KEY，可填写；rsshub 源会自动追加 ?key=...
+# 如果 RSSHub 开启 ACCESS_KEY，可填写；rsshub 源会在抓取时自动携带 ?key=...
 RSSHUB_ACCESS_KEY=
 ```
 
@@ -312,7 +312,7 @@ rss-ai-news --config-dir configs --category ai rebuild-report --date 2026-05-18 
 | `OPENAI_API_KEY` | `[ai].enabled = true` 时必填 |
 | `OPENAI_BASE_URL` | `[ai].enabled = true` 时必填；默认可用 `https://api.openai.com/v1` |
 | `RSSHUB_BASE_URL` | 任一订阅源使用 `{RSSHUB}` 占位符时必填 |
-| `RSSHUB_ACCESS_KEY` | 可选；设置后会给 `feed_kind = "rsshub"` 且未显式带 `key=` 的源自动追加访问 key |
+| `RSSHUB_ACCESS_KEY` | 可选；设置后会给 `feed_kind = "rsshub"` 的源在抓取时追加访问 key，不写入 `feed_sources.feed_url` |
 | `GITHUB_TOKEN` | 远端 GitHub 发布时必填 |
 | `DATABASE_URL` | 使用 PostgreSQL 时必填 |
 | `HTTP_PROXY` / `HTTPS_PROXY` | 需要进程级 HTTP 代理时填写 |
@@ -730,7 +730,7 @@ rss-ai-news --config-dir configs --output-format json run
 feed_url = "{RSSHUB}/huggingface/daily-papers"
 ```
 
-要么在 `.env` 中填写 `RSSHUB_BASE_URL`，要么把该 source 改成完整 URL 或禁用。若 RSSHub 开启了 `ACCESS_KEY`，推荐在 `.env` 填写 `RSSHUB_ACCESS_KEY`，配置文件中无需逐条写 `?key=...`。
+要么在 `.env` 中填写 `RSSHUB_BASE_URL`，要么把该 source 改成完整 URL 或禁用。若 RSSHub 开启了 `ACCESS_KEY`，推荐在 `.env` 填写 `RSSHUB_ACCESS_KEY`，配置文件中无需逐条写 `?key=...`；即使手写了 `key`，加载后也会从持久化 URL 中剥离，只在抓取请求中临时携带。
 
 ### `ai-run` 在关闭 AI 后返回配置错误
 

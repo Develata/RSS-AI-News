@@ -2,7 +2,10 @@
 
 use time::OffsetDateTime;
 
-use crate::state::{DedupDecision, FeedKind};
+use crate::{
+    SecretString,
+    state::{DedupDecision, FeedKind},
+};
 
 /// Request from runtime to feed crate: fetch a feed source.
 #[derive(Debug, Clone)]
@@ -12,6 +15,7 @@ pub struct FeedFetchRequest {
     pub source_key: String,
     pub feed_url: String,
     pub feed_kind: FeedKind,
+    pub rsshub_access_key: Option<SecretString>,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub timeout: std::time::Duration,
