@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use rss_ai_news_config::RetentionPolicy;
+use rss_ai_news_config::{RetentionPolicy, SourceSecrets};
 use rss_ai_news_domain::SecretString;
 use rss_ai_news_domain::dto::feed::FeedFetchRequest;
 use rss_ai_news_domain::link_normalizer::normalize_link;
@@ -127,13 +127,15 @@ async fn existing_source_is_synced_from_current_config_before_fetch() {
 
     let mut category = category_with_sources(&["s1"]);
     category.sources[0].feed_url = "http://rsshub:1200/s1.xml".to_string();
-    category.sources[0].rsshub_access_key = Some(SecretString::new("test-key"));
-    let flow = flow(
+    let mut source_secrets = SourceSecrets::default();
+    source_secrets.insert_rsshub_access_key("ai", "s1", SecretString::new("test-key"));
+    let flow = flow_with_source_secrets(
         pool.clone(),
         RetentionPolicy::Always,
         2,
         category,
         responses([(source_id, ok_payload(source_id, RSS_BODY))]),
+        source_secrets,
     );
 
     let summary = flow.run(IngestOptions::default()).await;
@@ -401,12 +403,30 @@ fn flow(
     category: rss_ai_news_config::CategoryConfig,
     responses: HashMap<i64, MockResponse>,
 ) -> IngestFlow {
+    flow_with_source_secrets(
+        pool,
+        retention_policy,
+        concurrent_feeds,
+        category,
+        responses,
+        SourceSecrets::default(),
+    )
+}
+
+fn flow_with_source_secrets(
+    pool: SqlitePool,
+    retention_policy: RetentionPolicy,
+    concurrent_feeds: u32,
+    category: rss_ai_news_config::CategoryConfig,
+    responses: HashMap<i64, MockResponse>,
+    source_secrets: SourceSecrets,
+) -> IngestFlow {
     let app = Arc::new(app_config(retention_policy, concurrent_feeds));
     let fetcher = Arc::new(MockFeedFetcher {
         responses: Mutex::new(responses),
     });
     let ctx = Arc::new(full_context("ingest", pool, app, fetcher));
-    IngestFlow::new(ctx, vec![category])
+    IngestFlow::with_source_secrets(ctx, vec![category], source_secrets)
 }
 
 fn responses(items: impl IntoIterator<Item = (i64, MockResponse)>) -> HashMap<i64, MockResponse> {

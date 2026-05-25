@@ -73,7 +73,8 @@ pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, C
     let started = Instant::now();
     let ctx = build_run_context("ingest", &loaded).await?;
 
-    let ingest_flow = IngestFlow::new(ctx.clone(), categories);
+    let ingest_flow =
+        IngestFlow::with_source_secrets(ctx.clone(), categories, loaded.source_secrets.clone());
     let ingest_summary = ingest_flow.run(IngestOptions::default()).await;
 
     let extract_summary = if args.skip_fetch {

@@ -589,7 +589,6 @@ pub fn category_with_sources(source_keys: &[&str]) -> CategoryConfig {
                 display_name: format!("Source {key}"),
                 feed_url: format!("https://example.com/{key}.xml"),
                 feed_kind: FeedKind::Rss,
-                rsshub_access_key: None,
                 priority: 10,
                 enabled: true,
             })

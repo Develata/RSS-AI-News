@@ -228,6 +228,7 @@ mod tests {
                 }),
                 sources: vec![],
             }],
+            source_secrets: crate::SourceSecrets::default(),
             config_sha256: String::new(),
             cli_overrides: CliOverrides::default(),
         }

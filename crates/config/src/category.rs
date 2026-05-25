@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-use rss_ai_news_domain::{Score0To100, SecretString, state::FeedKind};
+use rss_ai_news_domain::{Score0To100, state::FeedKind};
 use serde::Deserialize;
 
 #[derive(Clone, Debug)]
@@ -47,8 +47,6 @@ pub struct SourceConfig {
     pub feed_url: String,
     #[serde(deserialize_with = "deserialize_feed_kind")]
     pub feed_kind: FeedKind,
-    #[serde(skip)]
-    pub rsshub_access_key: Option<SecretString>,
     pub priority: u32,
     pub enabled: bool,
 }

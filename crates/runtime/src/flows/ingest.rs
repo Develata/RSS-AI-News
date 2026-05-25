@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
-use rss_ai_news_config::{CategoryConfig, SourceConfig};
+use rss_ai_news_config::{CategoryConfig, SourceConfig, SourceSecrets};
 use rss_ai_news_domain::SecretString;
 use rss_ai_news_domain::dto::feed::{FeedEntryMeta, FeedFetchRequest};
 use rss_ai_news_domain::error::ClassifiedError;
@@ -73,11 +73,24 @@ struct SourceTask {
 pub struct IngestFlow {
     ctx: Arc<RunContext>,
     categories: Vec<CategoryConfig>,
+    source_secrets: SourceSecrets,
 }
 
 impl IngestFlow {
     pub fn new(ctx: Arc<RunContext>, categories: Vec<CategoryConfig>) -> Self {
-        Self { ctx, categories }
+        Self::with_source_secrets(ctx, categories, SourceSecrets::default())
+    }
+
+    pub fn with_source_secrets(
+        ctx: Arc<RunContext>,
+        categories: Vec<CategoryConfig>,
+        source_secrets: SourceSecrets,
+    ) -> Self {
+        Self {
+            ctx,
+            categories,
+            source_secrets,
+        }
     }
 
     pub async fn run(&self, opts: IngestOptions) -> IngestSummary {
@@ -300,7 +313,10 @@ impl IngestFlow {
             existing_last_modified: feed_source.last_modified,
             feed_url: feed_source.feed_url,
             feed_kind: feed_source.feed_kind,
-            rsshub_access_key: source.rsshub_access_key.clone(),
+            rsshub_access_key: self
+                .source_secrets
+                .rsshub_access_key(&category.category.key, &source.key)
+                .cloned(),
         })
     }
 

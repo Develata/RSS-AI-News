@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -18,6 +19,7 @@ pub struct LoadedConfig {
     pub env: EnvConfig,
     pub app: AppConfig,
     pub categories: Vec<CategoryConfig>,
+    pub source_secrets: SourceSecrets,
     pub config_sha256: String,
     pub cli_overrides: CliOverrides,
 }
@@ -30,6 +32,28 @@ impl LoadedConfig {
                 .as_deref()
                 .is_none_or(|filter| category.category.key == filter)
         })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SourceSecrets {
+    rsshub_access_keys: BTreeMap<(String, String), SecretString>,
+}
+
+impl SourceSecrets {
+    pub fn insert_rsshub_access_key(
+        &mut self,
+        category_key: impl Into<String>,
+        source_key: impl Into<String>,
+        access_key: SecretString,
+    ) {
+        self.rsshub_access_keys
+            .insert((category_key.into(), source_key.into()), access_key);
+    }
+
+    pub fn rsshub_access_key(&self, category_key: &str, source_key: &str) -> Option<&SecretString> {
+        self.rsshub_access_keys
+            .get(&(category_key.to_string(), source_key.to_string()))
     }
 }
 
@@ -82,12 +106,13 @@ fn load_inner(
     }
 
     let config_sha256 = compute_config_sha256(&app_content, &category_contents);
-    expand_env_placeholders(&mut categories, &env);
+    let source_secrets = expand_env_placeholders(&mut categories, &env);
 
     Ok(LoadedConfig {
         env,
         app,
         categories,
+        source_secrets,
         config_sha256,
         cli_overrides,
     })
@@ -135,7 +160,8 @@ fn load_categories(categories_dir: &Path) -> Result<LoadedCategories, ConfigErro
     Ok((categories, contents))
 }
 
-fn expand_env_placeholders(categories: &mut [CategoryConfig], env: &EnvConfig) {
+fn expand_env_placeholders(categories: &mut [CategoryConfig], env: &EnvConfig) -> SourceSecrets {
+    let mut source_secrets = SourceSecrets::default();
     let rsshub_base_url = env
         .rsshub_base_url
         .as_deref()
@@ -150,13 +176,21 @@ fn expand_env_placeholders(categories: &mut [CategoryConfig], env: &EnvConfig) {
             }
             if source.feed_kind == FeedKind::RssHub {
                 let inline_access_key = strip_query_param(&mut source.feed_url, "key");
-                source.rsshub_access_key = inline_access_key
+                if let Some(access_key) = inline_access_key
                     .filter(|value| !value.trim().is_empty())
                     .map(SecretString::new)
-                    .or_else(|| env.rsshub_access_key.clone());
+                    .or_else(|| env.rsshub_access_key.clone())
+                {
+                    source_secrets.insert_rsshub_access_key(
+                        category.category.key.clone(),
+                        source.key.clone(),
+                        access_key,
+                    );
+                }
             }
         }
     }
+    source_secrets
 }
 
 fn strip_query_param(raw_url: &mut String, key: &str) -> Option<String> {
@@ -426,9 +460,9 @@ enabled = true
             "http://rsshub:1200/example"
         );
         assert_eq!(
-            loaded.categories[0].sources[0]
-                .rsshub_access_key
-                .as_ref()
+            loaded
+                .source_secrets
+                .rsshub_access_key("ai", "rsshub-source")
                 .map(SecretString::expose_secret),
             Some("test-key")
         );
@@ -457,9 +491,9 @@ enabled = true
             "http://rsshub:1200/example?foo=1#section"
         );
         assert_eq!(
-            loaded.categories[0].sources[0]
-                .rsshub_access_key
-                .as_ref()
+            loaded
+                .source_secrets
+                .rsshub_access_key("ai", "rsshub-source")
                 .map(SecretString::expose_secret),
             Some("inline-key")
         );

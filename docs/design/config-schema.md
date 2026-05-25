@@ -406,12 +406,11 @@ SourceConfig
 ├── display_name: String
 ├── feed_url: String                    # 配置文件中可含 {RSSHUB} 占位符；加载后为不含 RSSHub key 的 URL
 ├── feed_kind: FeedKind                 # enum { Rss, Atom, JsonFeed, RssHub }
-├── rsshub_access_key: Option<SecretString> # 运行时派生字段；不来自 TOML
 ├── priority: u32
 └── enabled: bool
 ```
 
-所有 Config 结构体使用 `#[derive(Clone, Debug, serde::Deserialize)]`。`config` crate 内部持有 `Arc<AppConfig>` 和 `Arc<Vec<CategoryConfig>>`，运行时不可变。
+所有 Config 结构体使用 `#[derive(Clone, Debug, serde::Deserialize)]`。RSSHub 访问密钥等运行时派生值存放在 `LoadedConfig.source_secrets`，不混入 TOML schema 对应的 `SourceConfig`。
 
 ## 9. CLI 覆盖点
 

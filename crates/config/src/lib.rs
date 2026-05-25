@@ -22,7 +22,7 @@ pub use category::{AiOverride, CategoryConfig, CategoryMeta, PublishOverride, So
 pub use effective::EffectiveConfig;
 pub use env::EnvConfig;
 pub use error::{ConfigError, Diagnostic, DiagnosticReport};
-pub use loader::{LoadedConfig, load, load_skip_env_checks};
+pub use loader::{LoadedConfig, SourceSecrets, load, load_skip_env_checks};
 pub use overrides::CliOverrides;
 pub use validate::{CommandFlags, CommandKind};
 pub use version::{ConfigVersionStore, ConfigVersionStoreError, compute_config_sha256};

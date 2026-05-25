@@ -200,7 +200,6 @@ mod tests {
                 display_name: "Source".to_string(),
                 feed_url: feed_url.to_string(),
                 feed_kind: FeedKind::Rss,
-                rsshub_access_key: None,
                 priority: 10,
                 enabled: true,
             }],
@@ -220,6 +219,7 @@ mod tests {
             env,
             app,
             categories,
+            source_secrets: crate::SourceSecrets::default(),
             config_sha256: String::new(),
             cli_overrides: crate::CliOverrides::default(),
         }
