@@ -63,7 +63,7 @@ trait ClassifiedError {
 | `ConnectionFailed` | true | `connection_failed` | DNS / TLS / 连接拒绝 |
 | `ParseFailed { reason }` | false | `feed_parse` | feed XML/JSON 格式错误 |
 | `TooLarge { bytes }` | false | `too_large` | 响应超过限额 |
-| `InvalidUrl` | false | `invalid_url` | URL 格式错误。**触发边界**：（a）`config` 校验在加载阶段已对 `sources[].feed_url` 做兜底 URL 解析，正常运行下不会到达 feed crate；（b）但 feed crate 仍在每次请求前对 `Url::parse` 结果防御，覆盖以下未被 config 校验完全拦截的场景：`{RSSHUB}` 占位符替换后产生非法 URL、测试代码或上游内部调用直接传入错误字符串、运行时配置热更换时尚未通过 `validate-config`。即使代码上看似冗余，仍应保留显式错误而非 panic |
+| `InvalidUrl` | false | `invalid_url` | URL 格式错误。**触发边界**：（a）`config` 校验在加载阶段已对 `sources[].feed_url` 做兜底 URL 解析，正常运行下不会到达 feed crate；（b）但 feed crate 仍在每次请求前对 `Url::parse` 结果防御，覆盖以下未被 config 校验完全拦截的场景：RSSHub base URL 占位符替换后产生非法 URL、测试代码或上游内部调用直接传入错误字符串、运行时配置热更换时尚未通过 `validate-config`。即使代码上看似冗余，仍应保留显式错误而非 panic |
 
 #### `ExtractorError`
 

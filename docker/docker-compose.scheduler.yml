@@ -47,7 +47,7 @@ services:
       # AI 凭据
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL}
-      # RSSHub 占位符；如果 categories/*.toml 没用 {RSSHUB} 可留空
+      # RSSHub 占位符；如果 categories/*.toml 没用 {RSSHUB}/{RSSHUB_BASE_URL} 可留空
       - RSSHUB_BASE_URL=${RSSHUB_BASE_URL:-}
       # 发布到 GitHub 用的 PAT（contents:write on target repo）
       - GITHUB_TOKEN=${GH_PUBLISH_TOKEN:-}

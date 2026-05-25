@@ -80,7 +80,7 @@ pub(super) fn collect_env_checks(
         report.push(Diagnostic::new(
             ".env",
             "RSSHUB_BASE_URL",
-            "required because at least one source uses {RSSHUB} placeholder",
+            "required because at least one source uses an RSSHub base URL placeholder",
         ));
     }
 }

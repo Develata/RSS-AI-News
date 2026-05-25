@@ -30,7 +30,7 @@ FeedFetchRequest
 ├── source_id: i64
 ├── category_key: String
 ├── source_key: String
-├── feed_url: String                    # 已替换 {RSSHUB} 后的 URL；不含 RSSHub key
+├── feed_url: String                    # 已替换 RSSHub base URL 占位符后的 URL；不含 RSSHub key
 ├── feed_kind: FeedKind
 ├── rsshub_access_key: Option<SecretString> # 抓取时临时追加；不持久化
 ├── etag: Option<String>

@@ -301,6 +301,23 @@ mod tests {
         )
         .expect_err("missing RSSHub base for alias fails");
         assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+        assert!(
+            err.to_string().contains("RSSHub base URL placeholder"),
+            "diagnostic should describe both supported placeholders: {err}"
+        );
+    }
+
+    #[test]
+    fn rsshub_base_url_placeholder_alias_with_base_url_is_valid() {
+        run_general_checks(
+            &app(false),
+            &[category("ai", "{RSSHUB_BASE_URL}/feed")],
+            &EnvConfig {
+                rsshub_base_url: Some("http://rsshub:1200/".to_string()),
+                ..EnvConfig::default()
+            },
+        )
+        .expect("RSSHUB_BASE_URL placeholder alias expands before URL validation");
     }
 
     #[test]

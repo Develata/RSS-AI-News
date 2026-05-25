@@ -71,7 +71,7 @@ pub fn load(
 /// only the database section and never call OpenAI / RSSHub. Structural checks
 /// (schema_version, category uniqueness, URL well-formedness, app value ranges)
 /// are still applied; only the "OPENAI_API_KEY required when ai.enabled" /
-/// "RSSHUB_BASE_URL required when {RSSHUB} placeholder used" gates are skipped.
+/// "RSSHUB_BASE_URL required when an RSSHub base URL placeholder is used" gates are skipped.
 pub fn load_skip_env_checks(
     config_dir: &Path,
     env_file: Option<&Path>,
