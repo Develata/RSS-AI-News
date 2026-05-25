@@ -13,6 +13,7 @@ pub struct EnvConfig {
     pub openai_base_url: Option<String>,
     pub github_token: Option<SecretString>,
     pub rsshub_base_url: Option<String>,
+    pub rsshub_access_key: Option<SecretString>,
     pub http_proxy: Option<String>,
     pub https_proxy: Option<String>,
     pub database_url: Option<String>,
@@ -26,6 +27,7 @@ pub fn load(env_file: Option<&Path>) -> Result<EnvConfig, ConfigError> {
         openai_base_url: value("OPENAI_BASE_URL", &file_values),
         github_token: secret("GITHUB_TOKEN", &file_values),
         rsshub_base_url: value("RSSHUB_BASE_URL", &file_values),
+        rsshub_access_key: secret("RSSHUB_ACCESS_KEY", &file_values),
         http_proxy: value("HTTP_PROXY", &file_values),
         https_proxy: value("HTTPS_PROXY", &file_values),
         database_url: value("DATABASE_URL", &file_values),
@@ -99,7 +101,7 @@ mod tests {
         path.push(format!("rss-ai-news-config-env-{unique}.env"));
         fs::write(
             &path,
-            "OPENAI_API_KEY=sk-test\nOPENAI_BASE_URL=https://api.example.test/v1\nHTTP_PROXY=\n",
+            "OPENAI_API_KEY=sk-test\nOPENAI_BASE_URL=https://api.example.test/v1\nRSSHUB_ACCESS_KEY=rsshub-secret\nHTTP_PROXY=\n",
         )
         .expect("write temp env file");
 
@@ -118,6 +120,13 @@ mod tests {
             Some("https://api.example.test/v1")
         );
         assert_eq!(config.http_proxy, None);
+        assert_eq!(
+            config
+                .rsshub_access_key
+                .as_ref()
+                .map(SecretString::expose_secret),
+            Some("rsshub-secret")
+        );
     }
 
     #[test]
@@ -129,6 +138,7 @@ mod tests {
         let config = EnvConfig {
             openai_api_key: Some(SecretString::new(secret)),
             github_token: Some(SecretString::new(secret)),
+            rsshub_access_key: Some(SecretString::new(secret)),
             ..EnvConfig::default()
         };
         let rendered = format!("{config:?}");

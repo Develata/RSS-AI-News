@@ -208,7 +208,37 @@ impl IngestFlow {
             .find_by_keys(&category.category.key, &source.key)
             .await?;
         let feed_source = if let Some(existing) = existing {
-            existing
+            let needs_sync = existing.display_name != source.display_name
+                || existing.feed_url != source.feed_url
+                || existing.feed_kind != source.feed_kind
+                || existing.status != FeedSourceStatus::Active
+                || existing.priority != i64::from(source.priority);
+            if needs_sync {
+                let endpoint_changed =
+                    existing.feed_url != source.feed_url || existing.feed_kind != source.feed_kind;
+                let mut updated = existing;
+                updated.display_name = source.display_name.clone();
+                updated.feed_url = source.feed_url.clone();
+                updated.feed_kind = source.feed_kind;
+                updated.status = FeedSourceStatus::Active;
+                updated.priority = i64::from(source.priority);
+                updated.updated_at = OffsetDateTime::now_utc();
+                if endpoint_changed {
+                    updated.etag = None;
+                    updated.last_modified = None;
+                    updated.consecutive_failures = 0;
+                    updated.last_error = None;
+                    updated.last_error_kind = None;
+                }
+                let id = self.ctx.feed_source_repo.upsert(&updated).await?;
+                self.ctx
+                    .feed_source_repo
+                    .find_by_id(id)
+                    .await?
+                    .expect("upserted feed source should be readable")
+            } else {
+                existing
+            }
         } else {
             // F15-fix6：与 F15-fix3 同类——`feed_sources.config_version` 必须指
             // 向 `kind='config'` 的 rule_versions 行。原硬编码 `config_version: 1`

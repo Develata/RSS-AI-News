@@ -44,6 +44,7 @@ GITHUB_TOKEN = "ghp_..."                 # GitHub 发布令牌
 
 # === 可选 ===
 RSSHUB_BASE_URL = "https://rsshub.example.com"  # RSSHub 实例地址
+RSSHUB_ACCESS_KEY = ""                          # RSSHub ACCESS_KEY，设置后自动追加到 rsshub 源
 HTTP_PROXY = ""                          # HTTP 代理
 HTTPS_PROXY = ""                         # HTTPS 代理
 DATABASE_URL = ""                        # 覆盖默认数据库路径（PG 场景必填）
@@ -55,6 +56,7 @@ DATABASE_URL = ""                        # 覆盖默认数据库路径（PG 场�
 - `OPENAI_BASE_URL`：当 `config.ai.enabled=true` 时必须是合法 URL；`ai.enabled=false` 时不校验
 - `GITHUB_TOKEN`：仅在 `publish` 命令执行**且**未指定 `--local-only` / 配置 `publish.github_owner` 非空时校验非空
 - `RSSHUB_BASE_URL`：若任一 category 的 source 使用了 `{RSSHUB}` 占位符，则必须非空
+- `RSSHUB_ACCESS_KEY`：可选；当 source 的 `feed_kind="rsshub"` 且 URL 未显式包含 `key=` 时，加载阶段自动追加为 `?key=...` 或 `&key=...`
 
 ## 4. `app.toml` Schema
 

@@ -271,7 +271,7 @@ run(run_id)
 
 | 类别 | 具体字段 |
 |---|---|
-| 环境变量 | `OPENAI_API_KEY`, `GITHUB_TOKEN`, `RSSHUB_BASE_URL` 的凭证参数部分 |
+| 环境变量 | `OPENAI_API_KEY`, `GITHUB_TOKEN`, `RSSHUB_BASE_URL` 的凭证参数部分，`RSSHUB_ACCESS_KEY` |
 | HTTP header | `Authorization`, `X-Api-Key`, `Cookie`, `Set-Cookie`, `Proxy-Authorization` |
 | 配置字段 | 任何名称以 `_token` / `_key` / `_secret` / `_password` 结尾的字段 |
 | URL 成分 | userinfo 部分（`https://user:pass@host/`）|

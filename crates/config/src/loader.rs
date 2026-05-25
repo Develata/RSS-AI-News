@@ -7,6 +7,7 @@ use crate::{
     AppConfig, CategoryConfig, CliOverrides, ConfigError, EnvConfig, compute_config_sha256, env,
     validate,
 };
+use rss_ai_news_domain::state::FeedKind;
 
 type CategoryTomlContents = Vec<(String, String)>;
 type LoadedCategories = (Vec<CategoryConfig>, CategoryTomlContents);
@@ -70,7 +71,7 @@ fn load_inner(
             reason: err.to_string(),
         })?;
 
-    let (categories, category_contents) = load_categories(&config_dir.join("categories"))?;
+    let (mut categories, category_contents) = load_categories(&config_dir.join("categories"))?;
 
     cli_overrides.apply_to_app(&mut app);
     if enforce_env_checks {
@@ -80,6 +81,7 @@ fn load_inner(
     }
 
     let config_sha256 = compute_config_sha256(&app_content, &category_contents);
+    expand_env_placeholders(&mut categories, &env);
 
     Ok(LoadedConfig {
         env,
@@ -130,6 +132,51 @@ fn load_categories(categories_dir: &Path) -> Result<LoadedCategories, ConfigErro
     }
 
     Ok((categories, contents))
+}
+
+fn expand_env_placeholders(categories: &mut [CategoryConfig], env: &EnvConfig) {
+    let rsshub_base_url = env
+        .rsshub_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_end_matches('/').to_string());
+    let rsshub_access_key = env
+        .rsshub_access_key
+        .as_ref()
+        .map(rss_ai_news_domain::SecretString::expose_secret)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    for category in categories {
+        for source in &mut category.sources {
+            if let Some(base_url) = rsshub_base_url.as_deref() {
+                source.feed_url = source.feed_url.replace("{RSSHUB}", base_url);
+            }
+            if source.feed_kind == FeedKind::RssHub
+                && let Some(access_key) = rsshub_access_key
+            {
+                append_query_param_if_missing(&mut source.feed_url, "key", access_key);
+            }
+        }
+    }
+}
+
+fn append_query_param_if_missing(url: &mut String, key: &str, value: &str) {
+    let query_start = url.find('?');
+    let fragment_start = url.find('#').unwrap_or(url.len());
+    let query = query_start.map(|start| &url[start + 1..fragment_start]);
+    if query.is_some_and(|query| {
+        query
+            .split('&')
+            .any(|part| part.split_once('=').is_some_and(|(name, _)| name == key) || part == key)
+    }) {
+        return;
+    }
+
+    let separator = if query_start.is_some() { '&' } else { '?' };
+    let insertion = format!("{separator}{key}={value}");
+    url.insert_str(fragment_start, &insertion);
 }
 
 fn read_required_file(path: &Path) -> Result<String, ConfigError> {
@@ -312,6 +359,12 @@ enabled = true
             fs::write(&path, "").expect("write empty env file");
             path
         }
+
+        fn env_file(&self, body: &str) -> PathBuf {
+            let path = self.root.join("test.env");
+            fs::write(&path, body).expect("write env file");
+            path
+        }
     }
 
     impl Drop for Workspace {
@@ -342,6 +395,48 @@ enabled = true
         let err = load(&ws.config_dir(), Some(&env_file), CliOverrides::default())
             .expect_err("full load still gates on env credentials");
         assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
+    fn load_expands_rsshub_placeholder_and_appends_access_key() {
+        let ws = Workspace::new("rsshub-expand");
+        ws.write_app(APP_TOML_AI_ENABLED_RSSHUB_PLACEHOLDER);
+        ws.write_category("ai", CATEGORY_TOML_RSSHUB_PLACEHOLDER);
+        let env_file = ws.env_file(
+            "OPENAI_API_KEY=sk-test\nOPENAI_BASE_URL=https://api.example.test/v1\nRSSHUB_BASE_URL=http://rsshub:1200/\nRSSHUB_ACCESS_KEY=test-key\n",
+        );
+
+        let loaded = load(&ws.config_dir(), Some(&env_file), CliOverrides::default())
+            .expect("config with RSSHub env loads");
+
+        assert_eq!(
+            loaded.categories[0].sources[0].feed_url,
+            "http://rsshub:1200/example?key=test-key"
+        );
+    }
+
+    #[test]
+    fn load_does_not_duplicate_existing_rsshub_access_key() {
+        let ws = Workspace::new("rsshub-existing-key");
+        ws.write_app(APP_TOML_AI_ENABLED_RSSHUB_PLACEHOLDER);
+        ws.write_category(
+            "ai",
+            &CATEGORY_TOML_RSSHUB_PLACEHOLDER.replace(
+                r#"feed_url = "{RSSHUB}/example""#,
+                r#"feed_url = "{RSSHUB}/example?key=inline-key""#,
+            ),
+        );
+        let env_file = ws.env_file(
+            "OPENAI_API_KEY=sk-test\nOPENAI_BASE_URL=https://api.example.test/v1\nRSSHUB_BASE_URL=http://rsshub:1200\nRSSHUB_ACCESS_KEY=env-key\n",
+        );
+
+        let loaded = load(&ws.config_dir(), Some(&env_file), CliOverrides::default())
+            .expect("config with inline RSSHub key loads");
+
+        assert_eq!(
+            loaded.categories[0].sources[0].feed_url,
+            "http://rsshub:1200/example?key=inline-key"
+        );
     }
 
     #[test]

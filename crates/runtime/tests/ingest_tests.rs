@@ -112,6 +112,44 @@ async fn single_source_304_marks_not_modified_no_entries() {
 }
 
 #[tokio::test]
+async fn existing_source_is_synced_from_current_config_before_fetch() {
+    let (_dir, pool) = make_test_pool().await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_id = insert_source(&pool, config_id, "s1", "{RSSHUB}/s1.xml").await;
+    sqlx::query(
+        "UPDATE feed_sources SET consecutive_failures = 3, last_error = 'Feed URL 无效', last_error_kind = 'invalid_url' WHERE id = ?",
+    )
+    .bind(source_id)
+    .execute(&pool)
+    .await
+    .expect("seed stale source error");
+
+    let mut category = category_with_sources(&["s1"]);
+    category.sources[0].feed_url = "http://rsshub:1200/s1.xml?key=test-key".to_string();
+    let flow = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category,
+        responses([(source_id, ok_payload(source_id, RSS_BODY))]),
+    );
+
+    let summary = flow.run(IngestOptions::default()).await;
+    let source_row: (String, i64, Option<String>) = sqlx::query_as(
+        "SELECT feed_url, consecutive_failures, last_error_kind FROM feed_sources WHERE id = ?",
+    )
+    .bind(source_id)
+    .fetch_one(&pool)
+    .await
+    .expect("source should be readable");
+
+    assert_eq!(summary.sources_succeeded, 1);
+    assert_eq!(source_row.0, "http://rsshub:1200/s1.xml?key=test-key");
+    assert_eq!(source_row.1, 0);
+    assert_eq!(source_row.2, None);
+}
+
+#[tokio::test]
 async fn single_source_5xx_marks_failed_writes_event() {
     let (_dir, pool) = make_test_pool().await;
     let config_id = insert_config_rule(&pool).await;
