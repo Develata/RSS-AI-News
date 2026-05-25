@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     AppConfig, CategoryConfig, CliOverrides, ConfigError, EnvConfig, compute_config_sha256, env,
-    validate,
+    rsshub, validate,
 };
 use rss_ai_news_domain::{SecretString, state::FeedKind};
 use url::Url;
@@ -172,7 +172,7 @@ fn expand_env_placeholders(categories: &mut [CategoryConfig], env: &EnvConfig) -
     for category in categories {
         for source in &mut category.sources {
             if let Some(base_url) = rsshub_base_url.as_deref() {
-                source.feed_url = source.feed_url.replace("{RSSHUB}", base_url);
+                source.feed_url = rsshub::expand_base_placeholders(&source.feed_url, base_url);
             }
             if source.feed_kind == FeedKind::RssHub {
                 let inline_access_key = strip_query_param(&mut source.feed_url, "key");
@@ -489,6 +489,37 @@ enabled = true
         assert_eq!(
             loaded.categories[0].sources[0].feed_url,
             "http://rsshub:1200/example?foo=1#section"
+        );
+        assert_eq!(
+            loaded
+                .source_secrets
+                .rsshub_access_key("ai", "rsshub-source")
+                .map(SecretString::expose_secret),
+            Some("inline-key")
+        );
+    }
+
+    #[test]
+    fn load_expands_rsshub_base_url_placeholder_alias() {
+        let ws = Workspace::new("rsshub-base-url-alias");
+        ws.write_app(APP_TOML_AI_ENABLED_RSSHUB_PLACEHOLDER);
+        ws.write_category(
+            "ai",
+            &CATEGORY_TOML_RSSHUB_PLACEHOLDER.replace(
+                r#"feed_url = "{RSSHUB}/example""#,
+                r#"feed_url = "{RSSHUB_BASE_URL}/example?key=inline-key""#,
+            ),
+        );
+        let env_file = ws.env_file(
+            "OPENAI_API_KEY=sk-test\nOPENAI_BASE_URL=https://api.example.test/v1\nRSSHUB_BASE_URL=http://rsshub:1200/\n",
+        );
+
+        let loaded = load(&ws.config_dir(), Some(&env_file), CliOverrides::default())
+            .expect("RSSHUB_BASE_URL placeholder alias loads");
+
+        assert_eq!(
+            loaded.categories[0].sources[0].feed_url,
+            "http://rsshub:1200/example"
         );
         assert_eq!(
             loaded

@@ -293,6 +293,17 @@ mod tests {
     }
 
     #[test]
+    fn rsshub_base_url_placeholder_alias_without_base_url_fails() {
+        let err = run_general_checks(
+            &app(false),
+            &[category("ai", "{RSSHUB_BASE_URL}/feed")],
+            &EnvConfig::default(),
+        )
+        .expect_err("missing RSSHub base for alias fails");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
     fn duplicate_category_key_fails() {
         let categories = vec![
             category("ai", "https://example.test/1"),

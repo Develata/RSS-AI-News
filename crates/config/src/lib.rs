@@ -13,6 +13,8 @@ pub mod overrides;
 pub mod validate;
 pub mod version;
 
+mod rsshub;
+
 pub use app::{
     AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, DatabaseConfig, DatabaseDriver,
     DedupConfig, ExtractorConfig, HttpConfig, LeaseConfig, ObservabilityConfig, PublishConfig,

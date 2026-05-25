@@ -6,7 +6,7 @@ use std::{
 use url::Url;
 
 use crate::{
-    AppConfig, CategoryConfig, Diagnostic, DiagnosticReport, EnvConfig, LoadedConfig,
+    AppConfig, CategoryConfig, Diagnostic, DiagnosticReport, EnvConfig, LoadedConfig, rsshub,
     validate::CommandFlags,
 };
 
@@ -74,7 +74,7 @@ pub(super) fn collect_env_checks(
     if categories
         .iter()
         .flat_map(|category| &category.sources)
-        .any(|source| source.feed_url.contains("{RSSHUB}"))
+        .any(|source| rsshub::has_base_placeholder(&source.feed_url))
         && is_blank(env.rsshub_base_url.as_deref())
     {
         report.push(Diagnostic::new(
@@ -585,13 +585,13 @@ fn validate_feed_url(
         return;
     }
 
-    let candidate = if feed_url.contains("{RSSHUB}") {
+    let candidate = if rsshub::has_base_placeholder(feed_url) {
         match env
             .rsshub_base_url
             .as_deref()
             .filter(|value| !value.trim().is_empty())
         {
-            Some(base_url) => feed_url.replace("{RSSHUB}", base_url.trim_end_matches('/')),
+            Some(base_url) => rsshub::expand_base_placeholders(feed_url, base_url),
             None => return,
         }
     } else {

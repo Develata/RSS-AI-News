@@ -55,7 +55,7 @@ DATABASE_URL = ""                        # 覆盖默认数据库路径（PG 场�
 - `OPENAI_API_KEY`：当 `config.ai.enabled=true` 时必须非空字符串；当 `ai.enabled=false` 时允许缺省或空字符串，且 `ai` crate 不构造 OpenAI client
 - `OPENAI_BASE_URL`：当 `config.ai.enabled=true` 时必须是合法 URL；`ai.enabled=false` 时不校验
 - `GITHUB_TOKEN`：仅在 `publish` 命令执行**且**未指定 `--local-only` / 配置 `publish.github_owner` 非空时校验非空
-- `RSSHUB_BASE_URL`：若任一 category 的 source 使用了 `{RSSHUB}` 占位符，则必须非空
+- `RSSHUB_BASE_URL`：若任一 category 的 source 使用了 `{RSSHUB}` 或 `{RSSHUB_BASE_URL}` 占位符，则必须非空
 - `RSSHUB_ACCESS_KEY`：可选；当 source 的 `feed_kind="rsshub"` 时，抓取阶段临时追加为 `?key=...` 或 `&key=...`，不写入 `feed_sources.feed_url`；若 source URL 已显式包含 `key=`，加载阶段会剥离该参数并转为运行时密钥
 
 ## 4. `app.toml` Schema
@@ -315,7 +315,7 @@ enabled = true
 | `category.key` 全局唯一 | 跨文件 | exit 78 |
 | `sources[].key` 分类内唯一 | 同一文件内 | exit 78 |
 | `sources[].feed_url` 非空合法 URL | 每条 source | exit 78 |
-| `{RSSHUB}` 占位符时 `RSSHUB_BASE_URL` 非空 | 关联检查 | exit 78 |
+| `{RSSHUB}` / `{RSSHUB_BASE_URL}` 占位符时 `RSSHUB_BASE_URL` 非空 | 关联检查 | exit 78 |
 | `publish.target_timezone` 是合法 IANA tz | app.toml | exit 78 |
 | `database.driver` 取值合法 | app.toml | exit 78 |
 | 数值范围合理（timeout > 0, retries >= 0 等）| 全局 | exit 78 |
@@ -336,7 +336,7 @@ enabled = true
 Configuration error:
   [app.toml] database.driver: expected one of "sqlite", "postgres", got "mysql"
   [categories/ai.toml] sources[1].feed_url: invalid URL "{RSSHUB}/invalid url"
-  [.env] RSSHUB_BASE_URL: required because categories/ai.toml uses {RSSHUB} placeholder
+  [.env] RSSHUB_BASE_URL: required because categories/ai.toml uses an RSSHub base URL placeholder
 ```
 
 ## 7. 版本责任
@@ -404,7 +404,7 @@ CategoryConfig
 SourceConfig
 ├── key: String
 ├── display_name: String
-├── feed_url: String                    # 配置文件中可含 {RSSHUB} 占位符；加载后为不含 RSSHub key 的 URL
+├── feed_url: String                    # 配置文件中可含 {RSSHUB}/{RSSHUB_BASE_URL} 占位符；加载后为不含 RSSHub key 的 URL
 ├── feed_kind: FeedKind                 # enum { Rss, Atom, JsonFeed, RssHub }
 ├── priority: u32
 └── enabled: bool
