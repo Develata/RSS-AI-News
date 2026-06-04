@@ -35,3 +35,32 @@
 
 每章末尾必须列出至少 3 个真实代码路径，作为契约 ↔ 实现的对照。这是 plan/ 跟代码同步的硬约束。
 路径过时时，由首先发现的人在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。
+
+## 链接格式约定（样板章 + 后续 13 章统一遵守）
+
+所有章节遵循以下相对路径写法，避免风格碎片化：
+
+| 目标类型 | 写法 | 示例 |
+|---|---|---|
+| 同目录其它章节 | `./NN-name.md` | `./01-feed.md` |
+| 上级文件 | `../xxx.md` | `../constitution.md` |
+| 上级目录 | `../xxx/`（带尾斜杠） | `../adr/`、`../map/` |
+| 上级目录中的具体文件 | `../xxx/yyy.md` | `../adr/0001-single-shot-cli-no-builtin-cron.md` |
+| 仓库代码文件 | `../../path/to/file.rs` | `../../crates/runtime/src/context.rs` |
+| 仓库代码目录 | `../../path/to/dir/`（带尾斜杠） | `../../crates/runtime/src/flows/` |
+
+## 向前引用占位约定
+
+plan/ 章节常常向前引用 `../adr/` 和 `../map/` 中尚未建立的文档（Phase C 才会写）。
+- 此类引用保留**完整目标路径**（如 `../adr/0001-xxx.md`），不去链接化
+- 在引用处加 `（建设中）` 标注
+- Phase C 完成后批量删除 `（建设中）` 标注
+
+例如：
+
+```markdown
+这是 [ADR-0001](../adr/0001-single-shot-cli-no-builtin-cron.md)（建设中）固化的边界。
+```
+
+向前引用同目录内**其它 plan 章节**（如 `./01-feed.md` 引用 `./02-extract.md`）不加占位标注，
+因为整个 Phase B1 阶段会一次性把 14 章建齐。
