@@ -67,22 +67,22 @@
 
 | 编号 | 文件 | 状态 |
 |---|---|---|
-| AC-P-01 | [feed-ingest.md](./pipelines/01-feed-ingest.md) | TBD |
-| AC-P-02 | [article-extract.md](./pipelines/02-article-extract.md) | TBD |
-| AC-P-03 | [ai-analysis.md](./pipelines/03-ai-analysis.md) | TBD |
-| AC-P-04 | [publish-local-and-github.md](./pipelines/04-publish-local-and-github.md) | TBD |
-| AC-P-05 | [multi-dialect-storage.md](./pipelines/05-multi-dialect-storage.md) | TBD |
-| AC-P-06 | [config-loading.md](./pipelines/06-config-loading.md) | TBD |
+| AC-P-01 | [feed-ingest.md](./pipelines/01-feed-ingest.md) | passing |
+| AC-P-02 | [article-extract.md](./pipelines/02-article-extract.md) | passing |
+| AC-P-03 | [ai-analysis.md](./pipelines/03-ai-analysis.md) | passing |
+| AC-P-04 | [publish-local-and-github.md](./pipelines/04-publish-local-and-github.md) | passing |
+| AC-P-05 | [multi-dialect-storage.md](./pipelines/05-multi-dialect-storage.md) | passing |
+| AC-P-06 | [config-loading.md](./pipelines/06-config-loading.md) | passing |
 
 ### commands/
 
 | 编号 | 文件 | 状态 |
 |---|---|---|
-| AC-C-01 | [replay.md](./commands/replay.md) | TBD |
-| AC-C-02 | [backfill.md](./commands/backfill.md) | TBD |
-| AC-C-03 | [reindex.md](./commands/reindex.md) | TBD |
-| AC-C-04 | [doctor.md](./commands/doctor.md) | TBD |
-| AC-C-05 | [validate-config.md](./commands/validate-config.md) | TBD |
-| AC-C-06 | [migrate.md](./commands/migrate.md) | TBD |
-| AC-C-07 | [rebuild-report.md](./commands/rebuild-report.md) | TBD |
-| AC-C-08 | [scheduler.md](./commands/scheduler.md) | TBD |
+| AC-C-01 | [replay.md](./commands/replay.md) | partial |
+| AC-C-02 | [backfill.md](./commands/backfill.md) | passing |
+| AC-C-03 | [reindex.md](./commands/reindex.md) | passing |
+| AC-C-04 | [doctor.md](./commands/doctor.md) | passing |
+| AC-C-05 | [validate-config.md](./commands/validate-config.md) | passing |
+| AC-C-06 | [migrate.md](./commands/migrate.md) | passing |
+| AC-C-07 | [rebuild-report.md](./commands/rebuild-report.md) | passing |
+| AC-C-08 | [scheduler.md](./commands/scheduler.md) | partial |
