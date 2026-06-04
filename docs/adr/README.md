@@ -47,14 +47,14 @@
 
 | 编号 | 标题 | 状态 |
 |---|---|---|
-| [0001](./0001-single-shot-cli-no-builtin-cron.md) | 单次执行 CLI，不内置 cron | TBD |
-| [0002](./0002-stage-driven-lease-claim.md) | 阶段驱动 + 租约领取 | TBD |
-| [0003](./0003-publish-snapshot-immutable.md) | 发布快照不可变 | TBD |
-| [0004](./0004-active-rule-resolver-partial-unique.md) | active_rule resolver + partial unique index | TBD |
-| [0005](./0005-storage-pool-dual-dialect.md) | StoragePool 双方言 enum | TBD |
-| [0006](./0006-postgres-go-real-no-shrink.md) | PostgreSQL 走实补不收缩 | TBD |
-| [0007](./0007-rsshub-secret-runtime-expansion.md) | RSSHub 占位符运行时展开 | TBD |
-| [0008](./0008-per-category-path-template.md) | 分类级 path_template 覆盖 | TBD |
+| [0001](./0001-single-shot-cli-no-builtin-cron.md) | 单次执行 CLI，不内置 cron | accepted |
+| [0002](./0002-stage-driven-lease-claim.md) | 阶段驱动 + 租约领取 | accepted |
+| [0003](./0003-publish-snapshot-immutable.md) | 发布快照不可变 | accepted |
+| [0004](./0004-active-rule-resolver-partial-unique.md) | active_rule resolver + partial unique index | accepted |
+| [0005](./0005-storage-pool-dual-dialect.md) | StoragePool 双方言 enum | accepted |
+| [0006](./0006-postgres-go-real-no-shrink.md) | PostgreSQL 走实补不收缩 | accepted |
+| [0007](./0007-rsshub-secret-runtime-expansion.md) | RSSHub 占位符运行时展开 | accepted |
+| [0008](./0008-per-category-path-template.md) | 分类级 path_template 覆盖 | accepted |
 
 ## 与其它目录的关系
 
