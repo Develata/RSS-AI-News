@@ -202,7 +202,7 @@ metrics 端口（`[observability].metrics_bind`）默认 `127.0.0.1:9090`，
 | 常驻 scheduler compose | [`docker/docker-compose.scheduler.yml`](../../docker/docker-compose.scheduler.yml) |
 | CI workflow | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) |
 | Release workflow | [`.github/workflows/release.yml`](../../.github/workflows/release.yml) |
-| 服务端参考配置 | [`server-configs/`](../../server-configs/) |
+| 分类配置模板（按需自建服务端配置） | [`configs/categories/ai.toml.example`](../../configs/categories/ai.toml.example) |
 | PostgreSQL 迁移 | [`migrations/postgres/`](../../migrations/postgres/) |
 
 代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。

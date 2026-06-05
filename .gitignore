@@ -4,6 +4,9 @@
 # CodeGraph 本机索引（tree-sitter 知识图谱，可随时重建）
 /.codegraph/
 
+# 本机私有服务端部署配置（按 configs/categories/*.example 自建，含个人 feed/prompt 偏好）
+/server-configs/
+
 # Claude Code 本机运行时状态（settings.local.json / scheduled_tasks.lock 等）
 .claude/
 .claude_tmp/
