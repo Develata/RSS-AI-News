@@ -56,7 +56,7 @@
 > 见 [`crates/cli/src/commands/replay.rs`](../../crates/cli/src/commands/replay.rs)。
 
 生命周期：`[artifact].ttl_days` 到期由清理任务回收（独立于状态机）。详见
-[../adr/0005-storage-pool-dual-dialect.md](../adr/0005-storage-pool-dual-dialect.md)周边讨论。
+[../adr/0005-storage-pool-dual-dialect.md](../adr/0005-storage-pool-dual-dialect.md) 周边讨论。
 
 ## 4. `replay` 子命令
 
@@ -185,4 +185,4 @@ exit code 详表见 [./11-error-and-recovery.md](./11-error-and-recovery.md)。
 | AI response parser | [`crates/ai/src/lib.rs`](../../crates/ai/src/lib.rs) |
 | Readability / Fallback 策略链 | [`crates/extractor/src/strategy.rs`](../../crates/extractor/src/strategy.rs) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。

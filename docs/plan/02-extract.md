@@ -190,4 +190,4 @@ allowed_content_types = ["text/html", "application/xhtml+xml"]
 | replay CLI | [`crates/cli/src/commands/replay.rs`](../../crates/cli/src/commands/replay.rs) |
 | 集成测试 | [`crates/runtime/tests/extract_tests.rs`](../../crates/runtime/tests/extract_tests.rs) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。

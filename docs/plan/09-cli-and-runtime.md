@@ -164,4 +164,4 @@ ULID 自动生成。
 | RunContext | [`crates/runtime/src/context.rs`](../../crates/runtime/src/context.rs) |
 | Flow 模块集合 | [`crates/runtime/src/flows/`](../../crates/runtime/src/flows/) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。

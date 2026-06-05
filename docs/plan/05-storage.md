@@ -241,4 +241,4 @@ CREATE TABLE run_events (
 | reindex Flow | [`crates/runtime/src/flows/reindex.rs`](../../crates/runtime/src/flows/reindex.rs) |
 | db url resolver | [`crates/cli/src/db_url.rs`](../../crates/cli/src/db_url.rs) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。

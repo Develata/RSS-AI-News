@@ -248,4 +248,4 @@ rss-ai-news rebuild-report --publish-record-id <id>
 | rebuild-report 入口 | [`crates/runtime/src/flows/rebuild_report.rs`](../../crates/runtime/src/flows/rebuild_report.rs) |
 | 集成测试 | [`crates/runtime/tests/publish_freeze_tests.rs`](../../crates/runtime/tests/publish_freeze_tests.rs) + [`crates/runtime/tests/rebuild_report_tests.rs`](../../crates/runtime/tests/rebuild_report_tests.rs) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。

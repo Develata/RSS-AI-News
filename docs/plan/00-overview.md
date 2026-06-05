@@ -157,5 +157,5 @@ crate 间依赖与公开导出见 [../map/modules.lisp](../map/modules.lisp)。
 | 配置 schema | [`crates/config/src/`](../../crates/config/src/) |
 | Workflow | [`.github/workflows/{ci,release}.yml`](../../.github/workflows/) |
 
-代码路径过时时，在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移，
+代码路径过时时，在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移，
 不在本章直接修改 — 本章是契约，按 [../README.md](../README.md) 中"文档真相源原则"小节演进。

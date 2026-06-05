@@ -199,4 +199,4 @@ single-shot CLI 没有"运行中"的状态。版本切换 = 下次调用用新�
 
 `doctor --deep` 不会自动校验本章；这些是设计期约束，由 code-review 与本章共同守护。
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。

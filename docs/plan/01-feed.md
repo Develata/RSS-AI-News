@@ -189,4 +189,4 @@ INSERT 前 SELECT `feed_entries WHERE link_hash = ? AND source_id != ?`（跨源
 | FeedEntryRepository | [`crates/storage/src/repo/feed_entry.rs`](../../crates/storage/src/repo/feed_entry.rs) |
 | 集成测试 | [`crates/runtime/tests/ingest_tests.rs`](../../crates/runtime/tests/ingest_tests.rs) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。

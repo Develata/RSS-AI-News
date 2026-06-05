@@ -211,4 +211,4 @@ assert_eq!(metrics.counter_total("ai_request_total", &[("category", "ai")]), 3);
 | doctor CLI | [`crates/cli/src/commands/doctor.rs`](../../crates/cli/src/commands/doctor.rs) |
 | WorkerGuard 持有点 | [`crates/cli/src/lib.rs`](../../crates/cli/src/lib.rs) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。

@@ -205,4 +205,4 @@ metrics 端口（`[observability].metrics_bind`）默认 `127.0.0.1:9090`，
 | 服务端参考配置 | [`server-configs/`](../../server-configs/) |
 | PostgreSQL 迁移 | [`migrations/postgres/`](../../migrations/postgres/) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。

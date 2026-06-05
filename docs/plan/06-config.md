@@ -238,4 +238,4 @@ diagnostic 列表渲染到 stderr。
 | config_sha256 | [`crates/config/src/version.rs`](../../crates/config/src/version.rs) |
 | validate-config CLI | [`crates/cli/src/commands/validate_config.rs`](../../crates/cli/src/commands/validate_config.rs) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。

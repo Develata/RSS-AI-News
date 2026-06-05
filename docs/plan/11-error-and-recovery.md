@@ -219,4 +219,4 @@ ignored_unit_patterns = "warn"
 | CI 扫描脚本 | [`.ci/check_swallowed_errors.sh`](../../.ci/check_swallowed_errors.sh) |
 | 豁免名单 | [`.ci/swallowed-error-allowlist.txt`](../../.ci/swallowed-error-allowlist.txt) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。
