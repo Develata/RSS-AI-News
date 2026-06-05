@@ -17,7 +17,7 @@
 **不覆盖**：
 - 业务状态机 → [./08-state-machines.md](./08-state-machines.md)
 - 状态转移内的具体 SQL → 各能力章
-- Migration 的运维细节 → [../operations/postgres-deployment.md](../operations/postgres-deployment.md)（建设中）
+- Migration 的运维细节 → [../operations/postgres-deployment.md](../operations/postgres-deployment.md)
 
 ## 2. 表关系一览
 
@@ -58,7 +58,7 @@ pub enum StoragePool {
 CLI `--db-path` 与 `app.toml` 的 `[database].url` 都经过 `cli::db_url::resolve_storage_url`
 完成 driver / URL 一致性校验，不一致 → exit 78 (`ConfigError`)。
 
-详见 [../adr/0005-storage-pool-dual-dialect.md](../adr/0005-storage-pool-dual-dialect.md)（建设中）。
+详见 [../adr/0005-storage-pool-dual-dialect.md](../adr/0005-storage-pool-dual-dialect.md)。
 
 ## 4. Repository Trait 模式
 
@@ -143,7 +143,7 @@ WHERE state IN ('fetching', 'extracting')
 | Partial unique index | `CREATE UNIQUE INDEX ... WHERE ...` | 同 |
 | Concurrency | `FOR UPDATE SKIP LOCKED` 不支持，用 `BEGIN IMMEDIATE` 串行 | `FOR UPDATE SKIP LOCKED` |
 
-详见 [../adr/0006-postgres-go-real-no-shrink.md](../adr/0006-postgres-go-real-no-shrink.md)（建设中）。
+详见 [../adr/0006-postgres-go-real-no-shrink.md](../adr/0006-postgres-go-real-no-shrink.md)。
 
 ## 7. Migration
 
@@ -189,7 +189,7 @@ pub async fn check(pool: &StoragePool) -> Result<MigrationStatus, StorageError>;
 - `categories` — 重算 article→category 关联（升级分类规则时）
 
 active rule resolver 保证 reindex 中途 `active_rule(kind)` 仍返回旧 active 行，不污染读路径。
-详见 [../adr/0004-active-rule-resolver-partial-unique.md](../adr/0004-active-rule-resolver-partial-unique.md)（建设中）。
+详见 [../adr/0004-active-rule-resolver-partial-unique.md](../adr/0004-active-rule-resolver-partial-unique.md)。
 
 ### 8.1 并发与失败恢复
 
@@ -241,4 +241,4 @@ CREATE TABLE run_events (
 | reindex Flow | [`crates/runtime/src/flows/reindex.rs`](../../crates/runtime/src/flows/reindex.rs) |
 | db url resolver | [`crates/cli/src/db_url.rs`](../../crates/cli/src/db_url.rs) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)（建设中）登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。

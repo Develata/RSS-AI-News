@@ -6,7 +6,7 @@
 3. CLI 壳到 Runtime Flow 的调度路径
 
 实际可执行的 CLI 用法 / 排障细节在 [../operations/cli-reference.md](../operations/cli-reference.md)
-（建设中）。本章只讲结构 + 契约。
+。本章只讲结构 + 契约。
 
 ## 1. CLI 命令树
 
@@ -164,4 +164,4 @@ ULID 自动生成。
 | RunContext | [`crates/runtime/src/context.rs`](../../crates/runtime/src/context.rs) |
 | Flow 模块集合 | [`crates/runtime/src/flows/`](../../crates/runtime/src/flows/) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)（建设中）登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。

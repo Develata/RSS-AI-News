@@ -60,4 +60,4 @@ CI `migrate` job 用 PG service container 端到端跑 migrate run。
 - 设计：[../../plan/05-storage.md](../../plan/05-storage.md) §7 migration
 - 多方言：[../pipelines/05-multi-dialect-storage.md](../pipelines/05-multi-dialect-storage.md)
 - 部署：[../../plan/12-deployment.md](../../plan/12-deployment.md) §首次 migrate
-- 决策（建设中）：`../../adr/0005-storage-pool-dual-dialect.md`
+- 决策：`../../adr/0005-storage-pool-dual-dialect.md`

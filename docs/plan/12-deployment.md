@@ -3,7 +3,7 @@
 本章详解部署形态：Docker multi-stage 镜像 / scheduler 容器 / GHCR 发布 / CI / PostgreSQL 部署切换。
 
 宪法 §1 锁定的 single-shot CLI 边界决定了部署不内置 cron，调度完全外化（详见
-[../adr/0001-single-shot-cli-no-builtin-cron.md](../adr/0001-single-shot-cli-no-builtin-cron.md)（建设中））。
+[../adr/0001-single-shot-cli-no-builtin-cron.md](../adr/0001-single-shot-cli-no-builtin-cron.md)）。
 
 ## 1. 边界
 
@@ -16,7 +16,7 @@
 - SQLite → PostgreSQL 切换路径
 
 **不覆盖**：
-- 本地开发（`cargo build` / `cargo test`）→ [../operations/local-dev.md](../operations/local-dev.md)（建设中）
+- 本地开发（`cargo build` / `cargo test`）→ [../operations/local-dev.md](../operations/local-dev.md)
 - 运维指令（`migrate` / `doctor` 怎么跑）→ [../operations/](../operations/)
 - 多方言 storage 内部 → [./05-storage.md](./05-storage.md)
 
@@ -167,15 +167,15 @@ driver = "postgres"
 4. 正常运行业务子命令
 
 **注意**：SQLite → PG 不是无损迁移；当前**没有**自动数据搬运工具，需手动 dump/restore
-或重新抓取。详见 [../adr/0006-postgres-go-real-no-shrink.md](../adr/0006-postgres-go-real-no-shrink.md)（建设中）：
+或重新抓取。详见 [../adr/0006-postgres-go-real-no-shrink.md](../adr/0006-postgres-go-real-no-shrink.md)：
 PostgreSQL 走"实补"路线（与 SQLite 字段对齐），**不收缩**。
 
 ## 8. 启动期 secret 校验
 
 容器启动时（任一 stage 任一 cron job）由 `validate-config` 守门：
-- `[ai].enabled=true` 缺 `OPENAI_API_KEY` → exit 2
-- `[publish].github_owner+repo` 非空缺 `GITHUB_TOKEN` → exit 2
-- source URL 含 RSSHub 占位符缺 `RSSHUB_BASE_URL` → exit 2
+- `[ai].enabled=true` 缺 `OPENAI_API_KEY` → exit 78（`ConfigError`）
+- `[publish].github_owner+repo` 非空缺 `GITHUB_TOKEN` → exit 78（`ConfigError`）
+- source URL 含 RSSHub 占位符缺 `RSSHUB_BASE_URL` → exit 78（`ConfigError`）
 
 详见 [./06-config.md](./06-config.md) §validate-config。
 
@@ -205,4 +205,4 @@ metrics 端口（`[observability].metrics_bind`）默认 `127.0.0.1:9090`，
 | 服务端参考配置 | [`server-configs/`](../../server-configs/) |
 | PostgreSQL 迁移 | [`migrations/postgres/`](../../migrations/postgres/) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)（建设中）登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。

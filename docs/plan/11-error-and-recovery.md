@@ -185,7 +185,7 @@ ignored_unit_patterns = "warn"
 
 `publish_records` 进入 `Rendered → StoredLocal → PublishedRemote` 是顺序状态。任一步失败：
 - `StoredLocal` 失败：record 转 `Failed`；不影响 GitHub
-- GitHub 推送 422 lost-update：retry 一次（详见 [../adr/0003-publish-snapshot-immutable.md](../adr/0003-publish-snapshot-immutable.md)（建设中））
+- GitHub 推送 422 lost-update：retry 一次（详见 [../adr/0003-publish-snapshot-immutable.md](../adr/0003-publish-snapshot-immutable.md)）
 - GitHub 推送最终失败：record 转 `Failed`；本地文件保留
 
 ### 7.4 backfill 作为人工恢复入口
@@ -219,4 +219,4 @@ ignored_unit_patterns = "warn"
 | CI 扫描脚本 | [`.ci/check_swallowed_errors.sh`](../../.ci/check_swallowed_errors.sh) |
 | 豁免名单 | [`.ci/swallowed-error-allowlist.txt`](../../.ci/swallowed-error-allowlist.txt) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)（建设中）登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。

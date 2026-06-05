@@ -20,7 +20,7 @@
 唯一例外：`ingest` / `ai-run` 内部的批次处理循环（处理当前批次直到 `pending` 清空或达到
 `batch_size * max_batches_per_run`），属于单次运行内的工作分片。
 
-**理由**：见 [../adr/0001-single-shot-cli-no-builtin-cron.md](../adr/0001-single-shot-cli-no-builtin-cron.md)（建设中）。
+**理由**：见 [../adr/0001-single-shot-cli-no-builtin-cron.md](../adr/0001-single-shot-cli-no-builtin-cron.md)。
 核心论点：可观测性按 run_id 切分、可恢复性依赖宿主重新调用、宿主调度器（cron / systemd /
 GHA / K8s CronJob）比自建调度器更稳定。
 
@@ -45,7 +45,7 @@ GHA / K8s CronJob）比自建调度器更稳定。
 - 必须保留 ca-certificates 更新通道
 - 稳定优先于极限压缩
 
-详见 [../adr/](../adr/) 中关于部署决策的 ADR（建设中）。
+详见 [../adr/](../adr/) 中关于部署决策的 ADR。
 
 ### 2.2 不默认 root 用户
 
@@ -199,4 +199,4 @@ single-shot CLI 没有"运行中"的状态。版本切换 = 下次调用用新�
 
 `doctor --deep` 不会自动校验本章；这些是设计期约束，由 code-review 与本章共同守护。
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)（建设中）登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。

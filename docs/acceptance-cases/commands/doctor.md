@@ -64,4 +64,4 @@ exit code：含 `Fail` → 1；其余（含 `Warn`）→ 0。
 
 - 设计：[../../plan/07-observability.md](../../plan/07-observability.md) §6 HealthCheck
 - 不变量：[../../plan/00-overview.md](../../plan/00-overview.md) §9 不变量
-- 部署运维（建设中）：`../../operations/troubleshooting.md`
+- 部署运维：`../../operations/troubleshooting.md`

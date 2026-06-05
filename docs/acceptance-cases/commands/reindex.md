@@ -85,5 +85,5 @@
 ## 相关文档
 
 - 设计：[../../plan/05-storage.md](../../plan/05-storage.md) §8 reindex
-- 决策（建设中）：`../../adr/0004-active-rule-resolver-partial-unique.md`
+- 决策：`../../adr/0004-active-rule-resolver-partial-unique.md`
 - 与 backfill 边界：[./backfill.md](./backfill.md)

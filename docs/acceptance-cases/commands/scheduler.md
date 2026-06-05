@@ -63,4 +63,4 @@ scheduler 镜像与 entrypoint 的验收**没有**专门的 Rust 测试；验收
 - 边界约束：[../../plan/13-non-goals.md](../../plan/13-non-goals.md) §不内置 cron
 - 入口脚本：[`docker/scheduler-entrypoint.sh`](../../../docker/scheduler-entrypoint.sh)
 - compose：[`docker/docker-compose.scheduler.yml`](../../../docker/docker-compose.scheduler.yml)
-- 决策（建设中）：`../../adr/0001-single-shot-cli-no-builtin-cron.md`
+- 决策：`../../adr/0001-single-shot-cli-no-builtin-cron.md`

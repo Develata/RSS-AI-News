@@ -91,4 +91,4 @@ SHA-256 指纹计算 → 多阶段校验（structural / general / command-specif
 - 设计：[../../plan/06-config.md](../../plan/06-config.md)
 - 错误模型：[../../plan/11-error-and-recovery.md](../../plan/11-error-and-recovery.md) §Exit Code
 - CLI surface：[../../plan/09-cli-and-runtime.md](../../plan/09-cli-and-runtime.md)
-- 决策（建设中）：`../../adr/0007-rsshub-secret-runtime-expansion.md`
+- 决策：`../../adr/0007-rsshub-secret-runtime-expansion.md`

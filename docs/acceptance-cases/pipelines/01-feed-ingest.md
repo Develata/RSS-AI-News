@@ -53,4 +53,4 @@
 - 设计：[../../plan/01-feed.md](../../plan/01-feed.md)
 - 状态机：[../../plan/08-state-machines.md](../../plan/08-state-machines.md)（FeedEntryState）
 - 配置：[../../plan/06-config.md](../../plan/06-config.md)（`[[sources]]` schema）
-- 决策（建设中）：`../../adr/0007-rsshub-secret-runtime-expansion.md`
+- 决策：`../../adr/0007-rsshub-secret-runtime-expansion.md`

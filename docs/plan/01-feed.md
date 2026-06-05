@@ -46,7 +46,7 @@ enabled = true
 占位符约束：
 - 配置 schema **不**接受裸 URL 中的密钥（避免持久化泄露）
 - 占位符展开仅在运行时进行，**不**写回 `feed_sources.feed_url`
-- 详见 [../adr/0007-rsshub-secret-runtime-expansion.md](../adr/0007-rsshub-secret-runtime-expansion.md)（建设中）
+- 详见 [../adr/0007-rsshub-secret-runtime-expansion.md](../adr/0007-rsshub-secret-runtime-expansion.md)
 
 ## 3. HTTP 抓取
 
@@ -189,4 +189,4 @@ INSERT 前 SELECT `feed_entries WHERE link_hash = ? AND source_id != ?`（跨源
 | FeedEntryRepository | [`crates/storage/src/repo/feed_entry.rs`](../../crates/storage/src/repo/feed_entry.rs) |
 | 集成测试 | [`crates/runtime/tests/ingest_tests.rs`](../../crates/runtime/tests/ingest_tests.rs) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)（建设中）登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。

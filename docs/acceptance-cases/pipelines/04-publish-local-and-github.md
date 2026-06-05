@@ -73,4 +73,4 @@
 - 设计：[../../plan/04-publish.md](../../plan/04-publish.md)
 - 状态机：[../../plan/08-state-machines.md](../../plan/08-state-machines.md)（PublishState）
 - 模板与 path：[../../plan/06-config.md](../../plan/06-config.md) §[publish.template]
-- 决策（建设中）：`../../adr/0003-publish-snapshot-immutable.md`、`../../adr/0008-per-category-path-template.md`
+- 决策：`../../adr/0003-publish-snapshot-immutable.md`、`../../adr/0008-per-category-path-template.md`

@@ -23,7 +23,7 @@ ready_for_publish (articles)
 
 **不覆盖**：
 - 选稿评分逻辑（在 AI 阶段判定 `articles.state=ready_for_publish` 时已决）→ [./03-ai.md](./03-ai.md)
-- 发布快照不可变契约 → [../adr/0003-publish-snapshot-immutable.md](../adr/0003-publish-snapshot-immutable.md)（建设中）
+- 发布快照不可变契约 → [../adr/0003-publish-snapshot-immutable.md](../adr/0003-publish-snapshot-immutable.md)
 
 ## 2. 选稿与冻结
 
@@ -141,7 +141,7 @@ path_template = "docs/zh-news/{category_key}/{report_date}.md"  # 覆盖全局
 ```
 
 `EffectiveConfig.path_template` 合并：category override > global fallback。
-详见 [./06-config.md](./06-config.md) + [../adr/0008-per-category-path-template.md](../adr/0008-per-category-path-template.md)（建设中）。
+详见 [./06-config.md](./06-config.md) + [../adr/0008-per-category-path-template.md](../adr/0008-per-category-path-template.md)。
 
 支持的占位符：`{category_key}` / `{CATEGORY_KEY}` / `{report_date}` / `{render_version}`。
 
@@ -248,4 +248,4 @@ rss-ai-news rebuild-report --publish-record-id <id>
 | rebuild-report 入口 | [`crates/runtime/src/flows/rebuild_report.rs`](../../crates/runtime/src/flows/rebuild_report.rs) |
 | 集成测试 | [`crates/runtime/tests/publish_freeze_tests.rs`](../../crates/runtime/tests/publish_freeze_tests.rs) + [`crates/runtime/tests/rebuild_report_tests.rs`](../../crates/runtime/tests/rebuild_report_tests.rs) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)（建设中）登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。

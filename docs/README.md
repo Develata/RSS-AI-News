@@ -70,5 +70,6 @@ docs/
 
 ## 与旧文档的关系
 
-旧 `docs/` 已归档至 `docs-backup/`（git mv 保留历史）。新结构落地稳定后，`docs-backup/` 将被删除。
-迁移映射见 [迁移计划](../docs-backup/) 与当前文档结构对照。
+旧 `docs/` 已归档至 `docs-backup/`（git mv 保留历史），目前处于**观察期**：新 docs/ 自包含、
+不依赖 docs-backup/；v0.4+ release 评审确认无遗漏后再单独 commit 删除。
+观察期内 docs-backup/ 只读、不再追加内容。

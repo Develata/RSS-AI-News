@@ -154,7 +154,7 @@ enabled = true
 
 每 source 还可单独配置 `rsshub_access_key`，落到 `SourceSecrets`（`loader::SourceSecrets`），
 不暴露到 `CategoryConfig.sources[i]` 字段，避免日志/Debug 泄漏。
-详见 [../adr/0007-rsshub-secret-runtime-expansion.md](../adr/0007-rsshub-secret-runtime-expansion.md)（建设中）。
+详见 [../adr/0007-rsshub-secret-runtime-expansion.md](../adr/0007-rsshub-secret-runtime-expansion.md)。
 
 ## 8. `[ai].enabled × [publish].include_unscored` 真值表
 
@@ -209,7 +209,7 @@ enabled = true
 
 `config_sha256` 写入 `rule_versions` 表，用于 `ConfigVersionStore::get_or_create_config_version`，
 向 reindex 流程关联具体配置快照。详见 [./05-storage.md](./05-storage.md) §8 与
-[../adr/0004-active-rule-resolver-partial-unique.md](../adr/0004-active-rule-resolver-partial-unique.md)（建设中）。
+[../adr/0004-active-rule-resolver-partial-unique.md](../adr/0004-active-rule-resolver-partial-unique.md)。
 
 > **已知缺口**：bootstrap rule 升 active 后真实 config sha 的替换路径，详见
 > Phase B1 结束前未关闭的 W10 后续设计任务。
@@ -238,4 +238,4 @@ diagnostic 列表渲染到 stderr。
 | config_sha256 | [`crates/config/src/version.rs`](../../crates/config/src/version.rs) |
 | validate-config CLI | [`crates/cli/src/commands/validate_config.rs`](../../crates/cli/src/commands/validate_config.rs) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)（建设中）登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。

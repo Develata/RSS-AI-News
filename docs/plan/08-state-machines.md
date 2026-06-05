@@ -17,7 +17,7 @@
 
 辅助状态轮（不在 4 状态机内，但同等重要）：
 
-- `ReindexJobState`：规则版本升级任务轮，见 [../adr/0004-active-rule-resolver-partial-unique.md](../adr/0004-active-rule-resolver-partial-unique.md)（建设中）
+- `ReindexJobState`：规则版本升级任务轮，见 [../adr/0004-active-rule-resolver-partial-unique.md](../adr/0004-active-rule-resolver-partial-unique.md)
 - `RuleVersionStatus`：`rule_versions` 的 pending / active / superseded 三态
 
 ## 2. 通用约定
@@ -186,7 +186,7 @@ retryable 失败**不**作为独立状态。语义上"暂时失败、稍后再�
 
 `SnapshotFrozen` 之后，`publish_items.frozen_*` 列**只读不改**。即使源 article 后续被
 `backfill ai` 改了 AI 结果，已冻结的 PublishItem 仍然引用旧值。这是
-[../adr/0003-publish-snapshot-immutable.md](../adr/0003-publish-snapshot-immutable.md)（建设中）固化的边界。
+[../adr/0003-publish-snapshot-immutable.md](../adr/0003-publish-snapshot-immutable.md)固化的边界。
 
 ### 6.3 重放语义
 
@@ -217,4 +217,4 @@ retryable 失败**不**作为独立状态。语义上"暂时失败、稍后再�
 | state-machine 契约测试 | `#[cfg(test)]` 模块在 [`crates/domain/src/state.rs`](../../crates/domain/src/state.rs) + 集成测试在 [`crates/runtime/tests/`](../../crates/runtime/tests/) |
 | doctor 深度扫描（不变量校验） | [`crates/cli/src/commands/doctor.rs`](../../crates/cli/src/commands/doctor.rs) |
 
-代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)（建设中）登记漂移。
+代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移。

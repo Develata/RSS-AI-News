@@ -48,4 +48,4 @@
 
 - 设计：[../../plan/10-replay-and-backfill.md](../../plan/10-replay-and-backfill.md) §rebuild-report
 - 模板：[../../plan/04-publish.md](../../plan/04-publish.md) §模板
-- 决策（建设中）：`../../adr/0003-publish-snapshot-immutable.md`
+- 决策：`../../adr/0003-publish-snapshot-immutable.md`

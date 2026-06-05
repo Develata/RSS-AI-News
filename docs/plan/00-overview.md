@@ -16,7 +16,7 @@ RSS-AI-News 是一个**单进程、一次性触发**的内容处理 CLI 管线�
 ```
 
 由外部调度器（Docker scheduler 镜像 / cron / systemd timer / GHA / K8s CronJob）按需触发。
-进程**不**内置 cron，**不**长期驻留。这是 [ADR-0001](../adr/0001-single-shot-cli-no-builtin-cron.md)（建设中）
+进程**不**内置 cron，**不**长期驻留。这是 [ADR-0001](../adr/0001-single-shot-cli-no-builtin-cron.md)
 固化的边界。
 
 ## 2. 本体对象
@@ -133,8 +133,8 @@ CLI 壳与 Runtime 的接缝点在 [`crates/runtime/src/context.rs`](../../crate
 | `publish` | 4 | local fs target + GitHub target、atomic batch、retry |
 | `observability` | 横向 | tracing 初始化、prometheus exporter、health probe |
 
-详细一图概览见 [../map/architecture.md](../map/architecture.md)（建设中）；
-crate 间依赖与公开导出见 [../map/modules.lisp](../map/modules.lisp)（建设中）。
+详细一图概览见 [../map/architecture.md](../map/architecture.md)；
+crate 间依赖与公开导出见 [../map/modules.lisp](../map/modules.lisp)。
 
 ## 8. 阅读后续章节的建议顺序
 
@@ -157,5 +157,5 @@ crate 间依赖与公开导出见 [../map/modules.lisp](../map/modules.lisp)（�
 | 配置 schema | [`crates/config/src/`](../../crates/config/src/) |
 | Workflow | [`.github/workflows/{ci,release}.yml`](../../.github/workflows/) |
 
-代码路径过时时，在 [../map/architecture-diff.md](../map/architecture-diff.md)（建设中）登记漂移，
+代码路径过时时，在 [../map/architecture-diff.md](../map/architecture-diff.md)登记漂移，
 不在本章直接修改 — 本章是契约，按 [../README.md](../README.md) 中"文档真相源原则"小节演进。

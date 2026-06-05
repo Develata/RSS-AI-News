@@ -66,4 +66,4 @@ CI `migrate` job 用 PG service container 端到端跑 PG 迁移 + 部分集成�
 
 - 设计：[../../plan/05-storage.md](../../plan/05-storage.md)
 - 部署切换：[../../plan/12-deployment.md](../../plan/12-deployment.md) §PostgreSQL 切换
-- 决策（建设中）：`../../adr/0002-stage-driven-lease-claim.md`、`../../adr/0004-active-rule-resolver-partial-unique.md`、`../../adr/0005-storage-pool-dual-dialect.md`、`../../adr/0006-postgres-go-real-no-shrink.md`
+- 决策：`../../adr/0002-stage-driven-lease-claim.md`、`../../adr/0004-active-rule-resolver-partial-unique.md`、`../../adr/0005-storage-pool-dual-dialect.md`、`../../adr/0006-postgres-go-real-no-shrink.md`
