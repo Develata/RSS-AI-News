@@ -178,7 +178,7 @@ check，汇总成 `CheckReport`，按 outcome 染色输出。
 
 - 全部 `Ok` 或仅 `Info` → exit 0
 - 含 `Warn` 不含 `Fail` → exit 0（仅输出 warning）
-- 含 `Fail` → exit 3（运行时错误，详见 [./11-error-and-recovery.md](./11-error-and-recovery.md)）
+- 含 `Fail` → exit 1（`DoctorFailed` → RuntimeError；详见 [./11-error-and-recovery.md](./11-error-and-recovery.md) §5）
 
 ### 6.1 显示侧redaction
 
