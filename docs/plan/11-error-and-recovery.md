@@ -108,20 +108,27 @@ trait ClassifiedError {
 
 ## 5. exit code 速查
 
-CLI 退出码遵循 sysexits.h 约定 + 业务扩展：
+CLI 退出码由 [`crates/cli/src/exit_code.rs`](../../crates/cli/src/exit_code.rs) 的 `ExitCode` enum 决定。
+当前实现仅 4 个值（最简单的可区分性原则；未来若需更细致再扩展）：
 
-| Code | 来源 | 含义 |
-|---|---|---|
-| 0 | 成功 | 全量成功，或含部分非致命跳过 |
-| 1 | 业务失败 | 全量失败 / 不可恢复 |
-| 64 | EX_USAGE | CLI 参数错（clap 自动） |
-| 65 | EX_DATAERR | 数据 / 协议错（如 schema drift） |
-| 74 | EX_IOERR | I/O 错（DB / 文件系统） |
-| 78 | EX_CONFIG | 配置错（schema / 必填缺失 / 非法值） |
+| Code | 变体 | 含义 |
+|---:|---|---|
+| `0` | `Success` | 全量成功；也含部分非致命跳过（如 `SnapshotEmpty` / 无候选） |
+| `1` | `RuntimeError` | 业务 / 运行时错误（含 `RuntimeError::*`、`DoctorFailed`、`MigrateCheckPending`、`ReplayArtifactNotFound`、`PublishRecordNotFound` 等所有非配置类失败） |
+| `2` | `UserError` | CLI 参数错（clap 解析失败 / 不合法 flag 组合 / `ReindexTargetRequired` 等） |
+| `78` | `ConfigError` | 配置错（sysexits `EX_CONFIG`）—— 所有 `ConfigError` 包括 `validate-config` 失败、`AiRunWhileDisabled` 等 |
 
-特殊：
-- `migrate` / `validate-config` 配置错返 **78**，便于 CI / Docker scheduler 区分"配置问题"vs"业务问题"
+特殊行为：
+- `migrate run` / `validate-config` / 任何 `ConfigError` → exit 78（CI / Docker scheduler 据此区分"配置问题"vs"业务问题"）
 - `reindex --dry-run` 即使数据有不一致也返 0（仅打印 plan，不写库）
+- `doctor` 任一 `Fail` outcome → `DoctorFailed` → exit 1（仅 `Warn` / `Ok` → exit 0）
+- `replay` 找不到 artifact → `ReplayArtifactNotFound` → exit 1
+- `rebuild-report` 找不到 publish_record → `PublishRecordNotFound` → exit 1
+
+> 注：早期蓝图曾设想 sysexits 全集（64 / 65 / 74 等），最终落地收敛到 4 个值以简化 CI / scheduler 适配；
+> 详见 [`crates/cli/src/exit_code.rs`](../../crates/cli/src/exit_code.rs) 与
+> [`crates/cli/src/error.rs::exit_code()`](../../crates/cli/src/error.rs)。
+> 运维侧速查表见 [../operations/cli-reference.md](../operations/cli-reference.md) §Exit Code。
 
 ## 6. "绝不静默吞错" 三层 enforcement
 

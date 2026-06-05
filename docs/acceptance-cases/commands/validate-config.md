@@ -3,7 +3,7 @@
 ## 功能描述
 
 加载 `.env` + `app.toml` + `categories/*.toml`，执行 structural / general / command-specific 三阶段校验。
-对合法 config 返回 exit 0；任何 ConfigError 返回 exit 2。
+对合法 config 返回 exit 0；任何 ConfigError 返回 exit 78。
 
 面向场景：CI 静态保险（避免坏 config 进入 main）、部署侧前置门禁、本地修改 config 自检。
 
@@ -22,15 +22,15 @@
 
 ### 失败条件（failure path）
 
-- `schema_version != "1"` → exit 2
-- `[ai].enabled=true` + 缺 `OPENAI_API_KEY` → exit 2
-- 远端 publish + 缺 `GITHUB_TOKEN`（无 `--local-only`） → exit 2
-- 重复分类 key → exit 2
-- 非法 `feed_url` → exit 2
-- `{RSSHUB}` / 别名 + 缺 `RSSHUB_BASE_URL` → exit 2
-- `path_template` 含 `..` / 反斜杠 / 无日期 token → exit 2
-- `report_template` 缺 `{items}` / 未知 placeholder / 大括号不匹配 → exit 2
-- 跨分类 path 冲突 → exit 2
+- `schema_version != "1"` → exit 78
+- `[ai].enabled=true` + 缺 `OPENAI_API_KEY` → exit 78
+- 远端 publish + 缺 `GITHUB_TOKEN`（无 `--local-only`） → exit 78
+- 重复分类 key → exit 78
+- 非法 `feed_url` → exit 78
+- `{RSSHUB}` / 别名 + 缺 `RSSHUB_BASE_URL` → exit 78
+- `path_template` 含 `..` / 反斜杠 / 无日期 token → exit 78
+- `report_template` 缺 `{items}` / 未知 placeholder / 大括号不匹配 → exit 78
+- 跨分类 path 冲突 → exit 78
 - `report` 一次性输出**全部** ConfigError（diagnostic 列表），不首错即停
 
 ## 测试覆盖

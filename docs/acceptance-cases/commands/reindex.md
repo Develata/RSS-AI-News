@@ -34,7 +34,7 @@
 - claim 时 lease 已被其它 worker 持有 → 不抢占
 - mark_failed 时保留 pending 新 rule_version + 不降级旧 active（避免读路径丢 active）
 - abort 终态任务 → idempotent noop
-- abort 缺失任务 → `NotFound` outcome（exit 3）
+- abort 缺失任务 → `NotFound` outcome（exit 1）
 
 ## 测试覆盖
 

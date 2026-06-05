@@ -27,7 +27,7 @@
 
 ### 失败条件（failure path）
 
-- DB 写失败透传为 `RuntimeError::Storage`，exit 3
+- DB 写失败透传为 `RuntimeError::Storage`，exit 1
 - 无候选时仍返回成功（examined=reset=0），exit 0
 - 与 `--target ai` 同时使用错的 `--model` 不被 args 阻拦（args 仅解析，业务由 prompt_versions 写入校验）
 

@@ -5,7 +5,7 @@
 汇总执行一组 `HealthCheck`：config / database / migrations / openai / github / rsshub / disk。
 默认 shallow；`--deep` 启用跨表不变量扫描（I4 / I4'a / I4'b / I6 等）。
 
-exit code：含 `Fail` → 3；其余（含 `Warn`）→ 0。
+exit code：含 `Fail` → 1；其余（含 `Warn`）→ 0。
 
 面向场景：部署后启动验证、CI smoke、问题排查第一站。
 
@@ -25,7 +25,7 @@ exit code：含 `Fail` → 3；其余（含 `Warn`）→ 0。
 
 ### 失败条件（failure path）
 
-- 任一 check 返回 `Fail` → exit 3
+- 任一 check 返回 `Fail` → exit 1
 - `--deep` 命中不变量违规 → `DoctorFailed` 错误
 - DB pool 已关闭 → fail
 - disk 最小空间无法满足 → fail

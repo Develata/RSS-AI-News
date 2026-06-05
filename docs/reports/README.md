@@ -9,7 +9,13 @@
 
 | 子目录 | 内容 | 当前文件 |
 |---|---|---|
-| [releases/](./releases/) | 每个 release tag 一份快照 | TBD: v0.1.0 / v0.2.0 / v0.3.0 |
+| [releases/](./releases/) | 每个 minor release tag 一份快照 | [v0.1.0](./releases/v0.1.0.md) / [v0.2.0](./releases/v0.2.0.md) / [v0.3.0](./releases/v0.3.0.md) / [v0.4.0](./releases/v0.4.0.md) |
+
+## 顶层文件
+
+| 文件 | 内容 |
+|---|---|
+| [legacy-lessons.md](./legacy-lessons.md) | 旧 Python 版 `rss-ai-news-py` 的事实现状、痛点与 Rust 版骨架反推（从 `docs-backup/design/python-legacy-lessons.md` 迁移） |
 
 ## release 快照固定结构
 

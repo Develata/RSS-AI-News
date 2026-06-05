@@ -26,8 +26,8 @@ migrate 是基础设施命令，**不**走完整 `validate-config`（不要求 O
 
 ### 失败条件（failure path）
 
-- `migrate check` 版本不一致 → exit 3 + diff 报告
-- DB 不可达 / 权限不足 → `StorageError`，exit 3
+- `migrate check` 版本不一致 → exit 1 + diff 报告
+- DB 不可达 / 权限不足 → `StorageError`，exit 1
 - migration 文件本身 SQL 错 → 失败回滚
 - partial unique index 在 0002 之后必须仍然成立（任何重复 active 必被 0002 修复或失败）
 

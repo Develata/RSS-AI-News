@@ -5,7 +5,7 @@
 `crates/config` 的三层加载（`.env` → `app.toml` → `categories/*.toml`）→ CLI overrides 合并 →
 SHA-256 指纹计算 → 多阶段校验（structural / general / command-specific）。
 
-所有 CLI 子命令在主流程开始前必须通过相应的校验门，校验失败一律以 exit code `2` 退出。
+所有 CLI 子命令在主流程开始前必须通过相应的校验门，校验失败一律以 exit code `78`（ConfigError，sysexits `EX_CONFIG`）退出。
 
 面向场景：每次 CLI 启动；显式 `validate-config` / `doctor` 子命令；CI 静态保险。
 

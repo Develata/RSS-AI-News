@@ -21,8 +21,8 @@
 
 ### 失败条件（failure path）
 
-- artifact 找不到 → `CliError::ReplayArtifactNotFound`，exit 3
-- artifact 命中但 `inline_body` 为空（文件后端） → `"file-backed artifacts not supported in W9c replay"`，exit 3（已知限制）
+- artifact 找不到 → `CliError::ReplayArtifactNotFound`，exit 1
+- artifact 命中但 `inline_body` 为空（文件后端） → `"file-backed artifacts not supported in W9c replay"`，exit 1（已知限制）
 - 既无 `--id` 也无 `--key` → `"replay requires either --id or --key"`
 
 ## 测试覆盖

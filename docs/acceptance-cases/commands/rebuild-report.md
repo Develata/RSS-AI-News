@@ -22,9 +22,9 @@
 
 ### 失败条件（failure path）
 
-- `publish_record_id` 不存在 → `CliError::PublishRecordNotFound`，exit 3
-- 远端 422 lost-update 重试达上限 → exit 3，本地文件仍已写
-- 远端 401 → `GithubAuthFailed`，exit 3
+- `publish_record_id` 不存在 → `CliError::PublishRecordNotFound`，exit 1
+- 远端 422 lost-update 重试达上限 → exit 1，本地文件仍已写
+- 远端 401 → `GithubAuthFailed`，exit 1
 
 ## 测试覆盖
 

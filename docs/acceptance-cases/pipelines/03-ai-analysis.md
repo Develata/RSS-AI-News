@@ -29,7 +29,7 @@ AI-off 直通模式跳过整段。
 - HTTP 5xx → ai_result release 为可重试，state 保持 Pending，attempt+1
 - 解析失败（缺字段 / 越界 / 非 JSON）→ ai_result → `PermanentFailed`（不可重试）
 - 解析阶段对 `score` 越界、`keep=true` 缺 `summary` 等做强校验，错误分类详见 [../../plan/03-ai.md](../../plan/03-ai.md)
-- `ai-run` 在 `[ai].enabled=false` 时直接返回 `ConfigError::AiRunWhileDisabled`（exit 2）
+- `ai-run` 在 `[ai].enabled=false` 时直接返回 `ConfigError::AiRunWhileDisabled`（exit 78）
 
 ## 测试覆盖
 
