@@ -1,5 +1,7 @@
 pub mod article;
 pub mod article_ai_result;
+mod article_ai_result_impl;
+mod article_ai_result_sql;
 pub mod feed_entry;
 pub mod feed_source;
 pub mod publish_item;
