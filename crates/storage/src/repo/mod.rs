@@ -8,6 +8,8 @@ mod publish_record_impl;
 mod publish_record_sql;
 pub mod raw_artifact;
 pub mod reindex_job;
+mod reindex_job_impl;
+mod reindex_job_sql;
 pub mod rule_version;
 pub mod run_event;
 
