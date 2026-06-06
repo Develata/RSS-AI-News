@@ -98,6 +98,12 @@ pub trait XxxRepository: Send + Sync {
 不支持时，才分裂为 `<NAME>_SQLITE_SQL` / `<NAME>_PG_SQL` 两条 const，由对应 `sqlite_*` /
 `pg_*` helper 各自引用。
 
+**实装层再分方言（仅当 `<obj>_impl.rs` 超 800 行）**：默认 `sqlite_*` 与 `pg_*` free fn
+同住 `<obj>_impl.rs`（与 `match &self.pool` 派发同文件，便于对照）。仅当实装层自身超
+800 行软上限时，才把它再拆为 `<obj>_impl.rs`（仅留 trait 派发）+ `<obj>_impl_sqlite.rs`
++ `<obj>_impl_pg.rs`（各持 `pub(super)` 方言 free fn，由派发层显式 `use` 调用）。命名用
+`_impl_sqlite` / `_impl_pg` 以与 `_sql.rs`（SQL 常量）区分。当前仅 `reindex_job` 适用。
+
 模板见 `publish_record{,_sql,_impl}.rs`；已套用：`reindex_job` / `article_ai_result` /
 `feed_entry` / `feed_source`。小对象（`article` / `publish_item` / `raw_artifact` /
 `rule_version` / `run_event`）仍单文件，无需强行三件套。
