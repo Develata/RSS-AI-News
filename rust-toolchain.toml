@@ -1,0 +1,7 @@
+# 与 CI（.github/workflows/{ci,release}.yml 的 RUST_TOOLCHAIN）对齐的工具链 pin。
+# 本机 cargo / rustfmt / clippy 与 PostToolUse 钩子据此统一走 1.94.0，
+# 消除 import 排序等 rustfmt 版本漂移，保证本地格式与 CI `cargo fmt --check` 一致。
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
