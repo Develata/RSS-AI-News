@@ -3,6 +3,8 @@ pub mod article_ai_result;
 mod article_ai_result_impl;
 mod article_ai_result_sql;
 pub mod feed_entry;
+mod feed_entry_impl;
+mod feed_entry_sql;
 pub mod feed_source;
 pub mod publish_item;
 pub mod publish_record;
