@@ -24,7 +24,7 @@
        :state active
        :notes "12 个子命令（ingest / ai-run / publish / publish-all / run / migrate / validate-config / doctor / replay / backfill / reindex / rebuild-report）。
                入口 crates/cli/src/lib.rs::run。args.rs 维护 clap derive 结构。
-               注意：cli 不直接拉 report，渲染发生在 runtime/flows/publish.rs 中调 report crate。
+               注意：cli 不直接拉 report，渲染发生在 runtime/flows/publish/ 中调 report crate。
                注意：没有独立的 `extract` 子命令 —— 抓正文与抓 feed 合并在 `ingest`、`run`、`replay --kind=html`、`backfill --target=extract` 等入口里。")
 
 (crate :id domain

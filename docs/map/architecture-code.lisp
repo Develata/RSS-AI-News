@@ -113,7 +113,7 @@
       :label "PublishFlow"
       :layer flow-coord
       :crate runtime
-      :path "crates/runtime/src/flows/publish.rs:168"
+      :path "crates/runtime/src/flows/publish/mod.rs:30"
       :kind struct
       :upstream (runtime-context)
       :downstream (report-crate publish-crate repo-publish-record repo-publish-item

@@ -60,7 +60,7 @@ ai-result 已更新），失去字节相等保证；如果"渲染"用进程内�
 ## Links
 
 - 设计：[../plan/04-publish.md](../plan/04-publish.md) §冻结快照
-- 实现：[`crates/runtime/src/flows/publish.rs`](../../crates/runtime/src/flows/publish.rs) 的 freeze 方法
+- 实现：[`crates/runtime/src/flows/publish/freeze.rs`](../../crates/runtime/src/flows/publish/freeze.rs) 的 freeze 方法
 - 重建：[`crates/runtime/src/flows/rebuild_report.rs`](../../crates/runtime/src/flows/rebuild_report.rs) + [`crates/report/src/`](../../crates/report/src/)
 - 验收：[../acceptance-cases/commands/rebuild-report.md](../acceptance-cases/commands/rebuild-report.md)、[../acceptance-cases/pipelines/04-publish-local-and-github.md](../acceptance-cases/pipelines/04-publish-local-and-github.md)
 - 关键测试：`rebuild_returns_byte_equal_markdown_to_original_render`（[`crates/runtime/tests/rebuild_report_tests.rs`](../../crates/runtime/tests/rebuild_report_tests.rs)）

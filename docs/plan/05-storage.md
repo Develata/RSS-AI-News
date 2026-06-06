@@ -77,7 +77,30 @@ pub trait XxxRepository: Send + Sync {
 }
 ```
 
-每个 trait 有两个生产实现：`SqliteXxxRepo` + `PgXxxRepo`，按 `StoragePool` 变体派发。
+每个 trait 由单个 `XxxRepo` struct 实现，内部持有 `StoragePool`；每个方法按
+`match &self.pool` 派发到 `sqlite_*` / `pg_*` 私有 free fn（见 §4.1）。
+
+### 4.1 文件组织约定（契约 / SQL / 实装 三件套）
+
+较大的 repo 对象按**三件套**拆到同名前缀的 3 个文件，保持单文件 ≤800 行、契约与实装解耦：
+
+| 文件 | 可见性 | 内容 |
+|---|---|---|
+| `<obj>.rs` | `pub mod` | 契约层：DTO struct/enum + `trait <Obj>Repository` + `<Obj>Repo` struct（`pub(super) pool: StoragePool`）+ 构造器 `new` / `new_with_storage` |
+| `<obj>_sql.rs` | `mod`（私有） | SQL 层：`pub(super) const ... SQL`，方言等价的字符串集中于此 |
+| `<obj>_impl.rs` | `mod`（私有） | 实装层：`#[async_trait] impl <Obj>Repository`（每方法 `match &self.pool` 派发）+ `sqlite_*` / `pg_*` 私有 free fn + row 解码 helper |
+
+`repo/mod.rs` 对每个三件套对象声明 `pub mod <obj>; mod <obj>_impl; mod <obj>_sql;`，
+并保持原 `pub use <obj>::{...}` 逐字不变——对外 API 与是否拆分无关。
+
+**何时分裂方言 SQL**：绝大多数 const 跨方言逐字等价，单条 `pub(super) const` 共享即可。
+仅当某条 SQL 在 PG 上需要 `FOR UPDATE SKIP LOCKED`（claim 子查询，§6.4 并发契约）而 SQLite
+不支持时，才分裂为 `<NAME>_SQLITE_SQL` / `<NAME>_PG_SQL` 两条 const，由对应 `sqlite_*` /
+`pg_*` helper 各自引用。
+
+模板见 `publish_record{,_sql,_impl}.rs`；已套用：`reindex_job` / `article_ai_result` /
+`feed_entry` / `feed_source`。小对象（`article` / `publish_item` / `raw_artifact` /
+`rule_version` / `run_event`）仍单文件，无需强行三件套。
 
 ## 5. claim + lease 模式
 
@@ -233,7 +256,7 @@ CREATE TABLE run_events (
 | 内容 | 路径 |
 |---|---|
 | StoragePool | [`crates/storage/src/lib.rs`](../../crates/storage/src/lib.rs) |
-| Repository trait（13 个文件） | [`crates/storage/src/repo/`](../../crates/storage/src/repo/) |
+| Repository（trait + SQL + 实装，较大对象拆三件套见 §4.1） | [`crates/storage/src/repo/`](../../crates/storage/src/repo/) |
 | SQLite migrations | [`migrations/sqlite/`](../../migrations/sqlite/) |
 | PostgreSQL migrations | [`migrations/postgres/`](../../migrations/postgres/) |
 | StorageError | [`crates/storage/src/error.rs`](../../crates/storage/src/error.rs) |

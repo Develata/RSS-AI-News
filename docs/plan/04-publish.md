@@ -27,7 +27,7 @@ ready_for_publish (articles)
 
 ## 2. 选稿与冻结
 
-由 `PublishFlow::freeze()` 在 [`crates/runtime/src/flows/publish.rs`](../../crates/runtime/src/flows/publish.rs) 编排。
+由 `PublishFlow::freeze()` 在 [`crates/runtime/src/flows/publish/freeze.rs`](../../crates/runtime/src/flows/publish/freeze.rs) 编排。
 
 ### 2.1 候选选取
 
@@ -238,7 +238,7 @@ rss-ai-news rebuild-report --publish-record-id <id>
 
 | 内容 | 路径 |
 |---|---|
-| Publish Flow | [`crates/runtime/src/flows/publish.rs`](../../crates/runtime/src/flows/publish.rs) |
+| Publish Flow | [`crates/runtime/src/flows/publish/mod.rs`](../../crates/runtime/src/flows/publish/mod.rs) |
 | publish_all CLI（atomic batch） | [`crates/cli/src/commands/publish_all.rs`](../../crates/cli/src/commands/publish_all.rs) |
 | PublishTarget trait | [`crates/publish/src/target.rs`](../../crates/publish/src/target.rs) |
 | LocalFsTarget | [`crates/publish/src/local.rs`](../../crates/publish/src/local.rs) |
