@@ -6,6 +6,8 @@ pub mod feed_entry;
 mod feed_entry_impl;
 mod feed_entry_sql;
 pub mod feed_source;
+mod feed_source_impl;
+mod feed_source_sql;
 pub mod publish_item;
 pub mod publish_record;
 mod publish_record_impl;
