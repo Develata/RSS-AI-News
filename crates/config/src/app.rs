@@ -51,6 +51,11 @@ pub struct HttpConfig {
 pub struct AiConfig {
     pub enabled: bool,
     pub model: String,
+    /// 失败回退模型链（W14-A）。主模型调用失败且错误"换模型可能有救"时，在同一次
+    /// 执行内按此顺序换 model 名重试。空 = 不回退（行为同历史）。元素经 effective 层
+    /// trim / 去空白 / 与主模型去重。见 docs/plan/14-ai-fallback.md。
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
     pub max_tokens: u32,
     pub temperature: f32,
     pub request_timeout_seconds: u64,

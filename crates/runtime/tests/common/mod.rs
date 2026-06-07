@@ -125,6 +125,7 @@ pub fn app_config(retention_policy: RetentionPolicy, concurrent_feeds: u32) -> A
         ai: AiConfig {
             enabled: true,
             model: "test-model".to_string(),
+            fallback_models: Vec::new(),
             max_tokens: 1024,
             temperature: 0.0,
             request_timeout_seconds: 5,

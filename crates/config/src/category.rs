@@ -24,6 +24,9 @@ pub struct AiOverride {
     pub prompt_template: Option<String>,
     pub max_input_chars: Option<u32>,
     pub model: Option<String>,
+    /// 板块失败回退链覆盖（W14-A）。`None` = 继承全局 `[ai].fallback_models`；
+    /// `Some([])` = 显式禁用回退；`Some(非空)` = 覆盖。见 docs/plan/14-ai-fallback.md。
+    pub fallback_models: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]

@@ -124,6 +124,7 @@ mod tests {
             ai: AiConfig {
                 enabled: ai_enabled,
                 model: "gpt-4o-mini".to_string(),
+                fallback_models: Vec::new(),
                 max_tokens: 4096,
                 temperature: 0.3,
                 request_timeout_seconds: 60,

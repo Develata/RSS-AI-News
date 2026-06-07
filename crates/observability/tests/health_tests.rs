@@ -159,6 +159,7 @@ fn app_config() -> AppConfig {
         ai: AiConfig {
             enabled: false,
             model: "gpt-test".to_string(),
+            fallback_models: Vec::new(),
             max_tokens: 1,
             temperature: 0.0,
             request_timeout_seconds: 1,

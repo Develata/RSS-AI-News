@@ -12,6 +12,9 @@ pub struct EffectiveConfig<'a> {
     pub min_importance_score: Score0To100,
     pub path_template: String,
     pub model: String,
+    /// 失败回退模型链（W14-A）。已 trim / 去空白 / 与 `model` 去重；空 = 不回退。
+    /// 折叠规则见 [`resolve_fallback_models`]，契约见 docs/plan/14-ai-fallback.md。
+    pub fallback_models: Vec<String>,
     pub max_input_chars: u32,
     /// Empty when the category does not provide a prompt; runtime decides fallback behavior.
     pub prompt_template: String,
@@ -30,6 +33,18 @@ impl LoadedConfig {
         // computed as `category.publish_override.X.unwrap_or(app.publish.X)`. The
         // global defaults live in [publish] section of app.toml; per-category overrides
         // are field-level (a missing override field inherits the global value).
+        //
+        // W14-A: 主模型先算出（fallback 去重需要它），再折叠 fallback 链。
+        let model = ai_override
+            .and_then(|override_| override_.model.as_ref())
+            .filter(|model| !model.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| self.app.ai.model.clone());
+        let fallback_models = resolve_fallback_models(
+            ai_override.and_then(|override_| override_.fallback_models.as_deref()),
+            &self.app.ai.fallback_models,
+            &model,
+        );
         Some(EffectiveConfig {
             category,
             ai_enabled: self.app.ai.enabled,
@@ -54,11 +69,8 @@ impl LoadedConfig {
                 .filter(|path_template| !path_template.trim().is_empty())
                 .cloned()
                 .unwrap_or_else(|| self.app.publish.template.path_template.clone()),
-            model: ai_override
-                .and_then(|override_| override_.model.as_ref())
-                .filter(|model| !model.trim().is_empty())
-                .cloned()
-                .unwrap_or_else(|| self.app.ai.model.clone()),
+            model,
+            fallback_models,
             max_input_chars: ai_override
                 .and_then(|override_| override_.max_input_chars)
                 .unwrap_or(self.app.ai.max_input_chars),
@@ -67,6 +79,27 @@ impl LoadedConfig {
                 .unwrap_or_default(),
         })
     }
+}
+
+/// 折叠 fallback 模型链（W14-A）。`override_`：板块覆盖
+/// （`None` = 继承全局 / `Some([])` = 禁用 / `Some(非空)` = 覆盖）；
+/// `global`：全局 `[ai].fallback_models`；`primary_model`：已折叠的主模型，用于去重。
+/// 返回 trim / 去空白 / 去主模型 / 链内去重后的有序链。
+fn resolve_fallback_models(
+    override_: Option<&[String]>,
+    global: &[String],
+    primary_model: &str,
+) -> Vec<String> {
+    let raw = override_.unwrap_or(global);
+    let primary = primary_model.trim();
+    let mut seen = std::collections::HashSet::new();
+    raw.iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+        .filter(|model| *model != primary)
+        .filter(|model| seen.insert(model.to_string()))
+        .map(|model| model.to_string())
+        .collect()
 }
 
 #[cfg(test)]
@@ -146,6 +179,7 @@ mod tests {
                 ai: AiConfig {
                     enabled: true,
                     model: "gpt-4o-mini".to_string(),
+                    fallback_models: Vec::new(),
                     max_tokens: 4096,
                     temperature: 0.3,
                     request_timeout_seconds: 60,
@@ -218,6 +252,7 @@ mod tests {
                     prompt_template: None,
                     max_input_chars: None,
                     model: model.map(str::to_string),
+                    fallback_models: None,
                 }),
                 publish_override: Some(PublishOverride {
                     max_items_per_report: override_max_items
@@ -283,6 +318,84 @@ mod tests {
                 .unwrap()
                 .model,
             "claude"
+        );
+    }
+
+    // ── W14-A: fallback 链折叠（resolve_fallback_models 三态 + 规范化）──────
+
+    #[test]
+    fn fallback_none_inherits_global() {
+        let global = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            super::resolve_fallback_models(None, &global, "primary"),
+            ["a", "b"]
+        );
+    }
+
+    #[test]
+    fn fallback_some_empty_disables() {
+        let global = vec!["a".to_string()];
+        let empty: Vec<String> = vec![];
+        assert!(super::resolve_fallback_models(Some(&empty), &global, "primary").is_empty());
+    }
+
+    #[test]
+    fn fallback_some_nonempty_overrides_global() {
+        let global = vec!["a".to_string()];
+        let over = vec!["x".to_string(), "y".to_string()];
+        assert_eq!(
+            super::resolve_fallback_models(Some(&over), &global, "primary"),
+            ["x", "y"]
+        );
+    }
+
+    #[test]
+    fn fallback_trims_dedups_and_drops_primary() {
+        let global = vec![
+            "  m1  ".to_string(),
+            "m1".to_string(),
+            String::new(),
+            "gpt".to_string(),
+            "m2".to_string(),
+        ];
+        // trim → "m1"/"m1" 去重，空白丢弃，"gpt"==primary 去除 → ["m1","m2"]
+        assert_eq!(
+            super::resolve_fallback_models(None, &global, "gpt"),
+            ["m1", "m2"]
+        );
+    }
+
+    #[test]
+    fn fallback_chain_flows_through_effective_for_category() {
+        let mut config = loaded(false, None, None);
+        config.app.ai.fallback_models = vec!["g1".to_string(), "g2".to_string()];
+        // None override → 继承全局
+        assert_eq!(
+            config.effective_for_category("ai").unwrap().fallback_models,
+            ["g1", "g2"]
+        );
+        // Some(非空) → 覆盖
+        config.categories[0]
+            .ai_override
+            .as_mut()
+            .unwrap()
+            .fallback_models = Some(vec!["c1".to_string()]);
+        assert_eq!(
+            config.effective_for_category("ai").unwrap().fallback_models,
+            ["c1"]
+        );
+        // Some([]) → 禁用
+        config.categories[0]
+            .ai_override
+            .as_mut()
+            .unwrap()
+            .fallback_models = Some(vec![]);
+        assert!(
+            config
+                .effective_for_category("ai")
+                .unwrap()
+                .fallback_models
+                .is_empty()
         );
     }
 

@@ -177,6 +177,22 @@ fn collect_category_checks(
             );
         }
 
+        if let Some(fallback_models) = category
+            .ai_override
+            .as_ref()
+            .and_then(|override_| override_.fallback_models.as_ref())
+        {
+            for (index, model) in fallback_models.iter().enumerate() {
+                if model.trim().is_empty() {
+                    report.push(Diagnostic::new(
+                        source_file.clone(),
+                        format!("category.ai_override.fallback_models[{index}]"),
+                        "must not be blank",
+                    ));
+                }
+            }
+        }
+
         let mut source_keys = HashSet::new();
         for (index, source) in category.sources.iter().enumerate() {
             if !source_keys.insert(source.key.clone()) {
@@ -241,6 +257,18 @@ fn collect_app_value_checks(report: &mut DiagnosticReport, app: &AppConfig) {
     ];
     for (field_path, value) in u32_checks {
         check_positive_u32(report, "app.toml", field_path, value);
+    }
+
+    // W14-A: fallback 链元素不得为空白（effective 层会静默 trim/去重，但空白元素
+    // 多半是配置笔误，fail-fast 报出而非默默丢弃）。
+    for (index, model) in app.ai.fallback_models.iter().enumerate() {
+        if model.trim().is_empty() {
+            report.push(Diagnostic::new(
+                "app.toml",
+                format!("ai.fallback_models[{index}]"),
+                "must not be blank",
+            ));
+        }
     }
 
     let template_checks = [
