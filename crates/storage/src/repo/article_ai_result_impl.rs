@@ -48,11 +48,16 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
         id: i64,
         owner: &str,
         outcome: AiSuccessOutcome,
+        effective_model_id: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
         match &self.pool {
-            StoragePool::Sqlite(p) => sqlite_release_success(p, id, owner, outcome, now).await,
-            StoragePool::Postgres(p) => pg_release_success(p, id, owner, outcome, now).await,
+            StoragePool::Sqlite(p) => {
+                sqlite_release_success(p, id, owner, outcome, effective_model_id, now).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_release_success(p, id, owner, outcome, effective_model_id, now).await
+            }
         }
     }
 
@@ -115,6 +120,7 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
         id: i64,
         owner: &str,
         outcome: AiSuccessOutcome,
+        effective_model_id: &str,
         article_id: i64,
         min_importance_score: i32,
         now: OffsetDateTime,
@@ -126,6 +132,7 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
                     id,
                     owner,
                     outcome,
+                    effective_model_id,
                     article_id,
                     min_importance_score,
                     now,
@@ -138,6 +145,7 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
                     id,
                     owner,
                     outcome,
+                    effective_model_id,
                     article_id,
                     min_importance_score,
                     now,
@@ -199,6 +207,7 @@ async fn sqlite_release_success(
     id: i64,
     owner: &str,
     outcome: AiSuccessOutcome,
+    effective_model_id: &str,
     now: OffsetDateTime,
 ) -> Result<bool, StorageError> {
     let state = if outcome.keep_decision == Some(false) {
@@ -218,6 +227,7 @@ async fn sqlite_release_success(
         .bind(outcome.tokens_out)
         .bind(outcome.cost_micro_usd)
         .bind(outcome.latency_ms)
+        .bind(effective_model_id)
         .bind(now)
         .bind(now)
         .bind(id)
@@ -321,6 +331,7 @@ async fn sqlite_release_success_and_advance(
     id: i64,
     owner: &str,
     outcome: AiSuccessOutcome,
+    effective_model_id: &str,
     article_id: i64,
     min_importance_score: i32,
     now: OffsetDateTime,
@@ -345,6 +356,7 @@ async fn sqlite_release_success_and_advance(
         .bind(outcome.tokens_out)
         .bind(outcome.cost_micro_usd)
         .bind(outcome.latency_ms)
+        .bind(effective_model_id)
         .bind(now)
         .bind(now)
         .bind(id)
@@ -474,6 +486,7 @@ async fn pg_release_success(
     id: i64,
     owner: &str,
     outcome: AiSuccessOutcome,
+    effective_model_id: &str,
     now: OffsetDateTime,
 ) -> Result<bool, StorageError> {
     let state = if outcome.keep_decision == Some(false) {
@@ -493,6 +506,7 @@ async fn pg_release_success(
         .bind(outcome.tokens_out)
         .bind(outcome.cost_micro_usd)
         .bind(outcome.latency_ms)
+        .bind(effective_model_id)
         .bind(now)
         .bind(now)
         .bind(id)
@@ -596,6 +610,7 @@ async fn pg_release_success_and_advance(
     id: i64,
     owner: &str,
     outcome: AiSuccessOutcome,
+    effective_model_id: &str,
     article_id: i64,
     min_importance_score: i32,
     now: OffsetDateTime,
@@ -620,6 +635,7 @@ async fn pg_release_success_and_advance(
         .bind(outcome.tokens_out)
         .bind(outcome.cost_micro_usd)
         .bind(outcome.latency_ms)
+        .bind(effective_model_id)
         .bind(now)
         .bind(now)
         .bind(id)

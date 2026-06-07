@@ -67,10 +67,11 @@ UPDATE article_ai_results
 SET state = $1, summary = $2, tags_json = $3, importance_score = $4,
     keep_decision = $5, raw_response_artifact_id = $6, tokens_in = $7,
     tokens_out = $8, cost_micro_usd = $9, latency_ms = $10,
+    effective_model_id = $11,
     lease_owner = NULL, lease_expires_at = NULL,
     last_error = NULL, last_error_kind = NULL,
-    completed_at = $11, updated_at = $12
-WHERE id = $13 AND lease_owner = $14
+    completed_at = $12, updated_at = $13
+WHERE id = $14 AND lease_owner = $15
 "#;
 
 pub(super) const RELEASE_AI_FAILURE_SQL: &str = r#"

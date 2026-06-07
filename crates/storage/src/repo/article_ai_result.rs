@@ -90,6 +90,7 @@ pub trait ArticleAiResultRepository: Send + Sync {
         id: i64,
         owner: &str,
         outcome: AiSuccessOutcome,
+        effective_model_id: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
     async fn release_retryable_failure(
@@ -123,6 +124,7 @@ pub trait ArticleAiResultRepository: Send + Sync {
         id: i64,
         owner: &str,
         outcome: AiSuccessOutcome,
+        effective_model_id: &str,
         article_id: i64,
         min_importance_score: i32,
         now: OffsetDateTime,

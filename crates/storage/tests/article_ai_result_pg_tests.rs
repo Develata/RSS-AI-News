@@ -161,7 +161,13 @@ async fn pg_insert_pending_then_claim_then_release_success() {
     assert_eq!(claimed[0].article_id, article_id);
 
     let released = repo
-        .release_success(id, "worker-A", sample_outcome(Some(true), Some(80)), now)
+        .release_success(
+            id,
+            "worker-A",
+            sample_outcome(Some(true), Some(80)),
+            "pg-eff-model",
+            now,
+        )
         .await
         .expect("pg release_success");
     assert!(released);
@@ -398,6 +404,7 @@ async fn pg_release_success_and_advance_keep_ready_for_publish() {
             ai_result_id,
             "w",
             sample_outcome(Some(true), Some(80)),
+            "pg-eff-model",
             article_id,
             50,
             now,
@@ -462,6 +469,7 @@ async fn pg_release_success_and_advance_filtered_publish_skipped() {
             ai_result_id,
             "w",
             sample_outcome(Some(false), None),
+            "pg-eff-model",
             article_id,
             50,
             now,

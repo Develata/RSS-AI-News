@@ -76,6 +76,7 @@ async fn release_success_keep_true_high_score_advances_to_ready_for_publish() {
             ai_result_id,
             &owner,
             success_outcome(Some(true), Some(80)),
+            "test-effective-model",
             article_id,
             30,
             OffsetDateTime::now_utc(),
@@ -102,6 +103,7 @@ async fn release_success_keep_true_low_score_advances_to_ai_done() {
             ai_result_id,
             &owner,
             success_outcome(Some(true), Some(10)),
+            "test-effective-model",
             article_id,
             30,
             OffsetDateTime::now_utc(),
@@ -126,6 +128,7 @@ async fn release_success_keep_false_no_other_succeeded_advances_to_publish_skipp
             ai_result_id,
             &owner,
             success_outcome(Some(false), None),
+            "test-effective-model",
             article_id,
             30,
             OffsetDateTime::now_utc(),
@@ -169,6 +172,7 @@ async fn release_success_keep_false_with_other_succeeded_returns_no_change() {
             ai_result_id,
             &owner,
             success_outcome(Some(false), None),
+            "test-effective-model",
             article_id,
             30,
             OffsetDateTime::now_utc(),
@@ -180,6 +184,51 @@ async fn release_success_keep_false_with_other_succeeded_returns_no_change() {
     assert_eq!(outcome.article_advance, AiCompleteArticleAdvance::NoChange);
     assert_eq!(article_state(&pool, article_id).await, "ai_pending");
     assert_eq!(ai_result_state(&pool, ai_result_id).await, "filtered");
+}
+
+#[tokio::test]
+async fn release_writes_effective_model_id_and_keeps_anchor_model_id() {
+    // W14-A P3：fallback 成功后 effective_model_id 记实际成功模型，
+    // 而 model_id（幂等键，锚定首选模型）保持不变。
+    let (_dir, pool) = make_test_pool().await;
+    let (repo, article_id, ai_result_id, owner) =
+        setup_claimed_ai_result(&pool, "anchor-primary").await;
+
+    let outcome = repo
+        .release_success_and_advance_article(
+            ai_result_id,
+            &owner,
+            success_outcome(Some(true), Some(80)),
+            "actual-fallback-model",
+            article_id,
+            30,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .expect("release should succeed");
+
+    assert!(outcome.released);
+    assert_eq!(
+        ai_result_model_ids(&pool, ai_result_id).await,
+        (
+            "anchor-primary".to_string(),
+            Some("actual-fallback-model".to_string())
+        ),
+        "model_id 锚定主模型不变；effective_model_id 记实际成功模型"
+    );
+}
+
+async fn ai_result_model_ids(
+    pool: &sqlx::SqlitePool,
+    ai_result_id: i64,
+) -> (String, Option<String>) {
+    sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT model_id, effective_model_id FROM article_ai_results WHERE id = ?",
+    )
+    .bind(ai_result_id)
+    .fetch_one(pool)
+    .await
+    .expect("ai result row should be readable")
 }
 
 async fn setup_claimed_ai_result(

@@ -510,6 +510,7 @@ async fn process_one(
             claimed.id,
             &owner,
             outcome,
+            &task.model_id,
             claimed.article_id,
             i32::from(opts.min_importance_score.get()),
             OffsetDateTime::now_utc(),
