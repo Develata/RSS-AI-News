@@ -11,7 +11,7 @@ use serde_json::json;
 use url::Url;
 
 use crate::{
-    error::{AiError, classify_http_status, is_quota_error},
+    error::{AiError, classify_http_status, is_model_unavailable_error, is_quota_error},
     prompt::{PromptInput, PromptRenderConfig, render_prompt},
 };
 
@@ -242,6 +242,16 @@ fn classify_error_response(code: u16, body: String, retry_after_seconds: Option<
         };
     }
 
+    if is_model_unavailable_error(
+        api_error.r#type.as_deref(),
+        api_error.code.as_deref(),
+        &api_error.message,
+    ) {
+        return AiError::ModelUnavailable {
+            message: api_error.message,
+        };
+    }
+
     classify_http_status(code, api_error.message, retry_after_seconds)
 }
 
@@ -318,5 +328,22 @@ mod tests {
             "Debug must not leak api_key: {rendered}"
         );
         assert!(rendered.contains("***"));
+    }
+
+    #[test]
+    fn classify_error_response_detects_model_unavailable_from_json_code() {
+        // W14-A：reqwest 路径——JSON error 体里 code=model_not_found → ModelUnavailable。
+        let body =
+            r#"{"error":{"message":"The model `gpt-x` does not exist","code":"model_not_found"}}"#;
+        let err = classify_error_response(404, body.to_string(), None);
+        assert!(matches!(err, AiError::ModelUnavailable { .. }));
+    }
+
+    #[test]
+    fn classify_error_response_detects_model_unavailable_from_plain_text() {
+        // W14-A：reqwest 路径——非 JSON 纯文本体含 "model not found" → ModelUnavailable。
+        let err =
+            classify_error_response(404, "404 page not found: model not found".to_string(), None);
+        assert!(matches!(err, AiError::ModelUnavailable { .. }));
     }
 }
