@@ -8,7 +8,7 @@ pub mod reindex;
 
 pub use ai_run::{
     AiProcessSummary, AiRunFlow, AiRunOptions, AiRunSummary, AiTaskOutcome, AiTaskStatus,
-    TaskGenSummary,
+    TaskGenSummary, ai_lease_budget_seconds,
 };
 pub use backfill::{
     BackfillAiOptions, BackfillAiSummary, BackfillExtractOptions, BackfillExtractSummary,

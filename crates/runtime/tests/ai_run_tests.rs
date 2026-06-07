@@ -1,6 +1,6 @@
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -139,6 +139,68 @@ async fn process_filtered_advances_article_to_publish_skipped() {
     assert_eq!(summary.filtered, 1);
     assert_eq!(article_state(&pool, article_id).await, "publish_skipped");
     assert_eq!(ai_result_state(&pool, ai_result_id).await, "filtered");
+}
+
+#[tokio::test]
+async fn process_falls_back_to_next_model_when_primary_fails() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "ai-fallback-1", "title", "body").await;
+    let client = Arc::new(MockAiClient::default());
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.fallback_models = vec!["fallback-model".to_string()];
+    flow.task_gen(&opts).await;
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+    // primary(test-model) 命中 quota（should_fallback=true）→ fallback-model 成功。
+    client
+        .insert_error(
+            ai_result_id,
+            AiError::QuotaExceeded {
+                message: "no quota".to_string(),
+            },
+        )
+        .await;
+    client.insert_success(ai_result_id, output_json(80)).await;
+
+    let summary = flow.process_ai_tasks(&opts).await;
+
+    assert_eq!(summary.claimed, 1);
+    assert_eq!(summary.succeeded, 1);
+    assert_eq!(article_state(&pool, article_id).await, "ready_for_publish");
+    assert_eq!(ai_result_state(&pool, ai_result_id).await, "succeeded");
+    // model_id（幂等键）锚定主模型；effective_model_id 记实际成功的 fallback 模型。
+    let (model_id, effective): (String, Option<String>) =
+        sqlx::query_as("SELECT model_id, effective_model_id FROM article_ai_results WHERE id = ?")
+            .bind(ai_result_id)
+            .fetch_one(&pool)
+            .await
+            .expect("ai result row readable");
+    assert_eq!(model_id, "test-model");
+    assert_eq!(effective.as_deref(), Some("fallback-model"));
+}
+
+#[tokio::test]
+async fn process_does_not_fall_back_on_connection_error() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "ai-fallback-2", "title", "body").await;
+    let client = Arc::new(MockAiClient::default());
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.fallback_models = vec!["fallback-model".to_string()];
+    flow.task_gen(&opts).await;
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+    // primary ConnectionFailed（should_fallback=false）→ 不试 fallback，retryable 回 pending。
+    client
+        .insert_error(ai_result_id, AiError::ConnectionFailed("down".to_string()))
+        .await;
+    // 这条成功响应不应被消费（fallback 未触发）。
+    client.insert_success(ai_result_id, output_json(80)).await;
+
+    let summary = flow.process_ai_tasks(&opts).await;
+
+    assert_eq!(summary.succeeded, 0);
+    assert_eq!(summary.retryable_failed, 1);
+    assert_eq!(ai_result_state(&pool, ai_result_id).await, "pending");
 }
 
 #[tokio::test]
@@ -290,6 +352,7 @@ fn opts_for_category(category_key: &str) -> AiRunOptions {
         max_attempts: 3,
         prompt_template: "Title: {title}\nCategory: {category_key}\nBody: {body_text}".to_string(),
         model_id: "test-model".to_string(),
+        fallback_models: Vec::new(),
         max_input_chars: 1024,
         max_tokens: 128,
         temperature: 0.0,
@@ -309,7 +372,9 @@ fn output_json(score: i32) -> String {
 
 #[derive(Default)]
 struct MockAiClient {
-    responses: Mutex<HashMap<i64, MockAiResult>>,
+    /// 每个 ai_result_id 一个响应队列：按 invoke 顺序 pop_front，可表达 fallback 链上
+    /// 各模型尝试的不同结果（如 primary 失败 → fallback 成功）。
+    responses: Mutex<HashMap<i64, VecDeque<MockAiResult>>>,
 }
 
 enum MockAiResult {
@@ -322,14 +387,18 @@ impl MockAiClient {
         self.responses
             .lock()
             .await
-            .insert(ai_result_id, MockAiResult::Success(raw_response));
+            .entry(ai_result_id)
+            .or_default()
+            .push_back(MockAiResult::Success(raw_response));
     }
 
     async fn insert_error(&self, ai_result_id: i64, error: AiError) {
         self.responses
             .lock()
             .await
-            .insert(ai_result_id, MockAiResult::Error(error));
+            .entry(ai_result_id)
+            .or_default()
+            .push_back(MockAiResult::Error(error));
     }
 }
 
@@ -340,7 +409,8 @@ impl AiClient for MockAiClient {
             .responses
             .lock()
             .await
-            .remove(&task.article_ai_result_id)
+            .get_mut(&task.article_ai_result_id)
+            .and_then(VecDeque::pop_front)
             .unwrap_or_else(|| {
                 MockAiResult::Error(AiError::ConnectionFailed(
                     "missing mock response".to_string(),
