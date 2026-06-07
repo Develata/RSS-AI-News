@@ -94,12 +94,14 @@ key = "ai"
 display_name = "AI"
 priority = 10
 
-[ai_override]        # 可选：覆盖 [ai] 的子集
+[category.ai_override]   # 可选：覆盖 [ai] 的子集
 prompt_template = "..."
 max_input_chars = 12000
-model = "gpt-4o"
+model = "gpt-4o"         # 空串 "" = 继承全局 [ai].model（trim 后为空即继承）
+fallback_models = ["gpt-4o-mini", "deepseek-chat"]  # 可选：覆盖全局 fallback 链。
+                         # 省略(None)=继承全局；[]=显式禁用；非空=覆盖。见 ./14-ai-fallback.md
 
-[publish_override]   # 可选：覆盖 [publish] 的子集
+[category.publish_override]   # 可选：覆盖 [publish] 的子集
 max_items_per_report = 50
 min_importance_score = 0     # 0 = 显式无下限（None 才表示继承）
 include_unscored = true

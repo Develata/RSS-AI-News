@@ -116,14 +116,20 @@ Azure OpenAI）都可通过 `OPENAI_BASE_URL` 切换。
 
 **不**承诺支持 OpenAI 私有扩展（function calling 之外的字段、tools 字段、stream tools 等）。
 
-### 5.2 不内置模型路由
+### 5.2 模型路由：仅失败回退，不做智能路由
 
-每次调用走同一模型。**不**实现：
-- 多模型 fallback chain
-- 按文章长度路由不同模型
-- 智能选择模型
+**支持**（v0.x，见 [./14-ai-fallback.md](./14-ai-fallback.md)）：
+- 调用失败时按配置的 fallback 模型链顺序重试（同凭证下换 model 名）。主模型失败
+  （quota / 限流 / 5xx / 模型不存在 / 超时 / 内容解析失败等）时，在同一次执行内依次尝试
+  `[ai].fallback_models`，全部失败才按可重试性回队 / 永久失败。
 
-如需多模型策略，由调用方多次启动 CLI 配合不同 `OPENAI_MODEL` 实现。
+**仍不实现**（明确排除的"模型路由 essence"）：
+- 按文章长度 / 内容特征路由不同模型
+- 智能选择模型（成本 / 质量自适应、A/B、加权）
+- 运行时跨 provider 动态路由
+
+即：fallback 是"失败后的静态顺序降级"，不是"按输入挑模型"。板块（category）独立凭证
+（key / base_url 自治）属第二期，见 [./14-ai-fallback.md](./14-ai-fallback.md) §B。
 
 ### 5.3 不内置 prompt 工程工具
 
