@@ -476,19 +476,31 @@ async fn process_one(
                 let has_next = error.should_fallback() && attempt_index + 1 < chain.len();
                 // W14-A（codex P2）：lease 到期后不再发起后续模型调用。release 已按
                 // lease_owner 守护（被他人接管时写回返回 Ok(false) 丢弃，无重复写），
-                // 故到期 ⇒ 直接终止 fallback，省掉无主的额外 AI 调用与成本；剩余尝试
-                // 留待下次 run 重新 claim。仅 CLI 预算被绕过 / 调用超时等边缘时序会命中。
+                // 故到期 ⇒ 终止 fallback，省掉无主的额外 AI 调用与成本。仅 CLI 预算被
+                // 绕过 / 调用超时等边缘时序会命中。
                 let lease_live = OffsetDateTime::now_utc() < lease_deadline;
-                let try_next = has_next && lease_live;
                 if has_next && !lease_live {
+                    // codex P2-fix2：中止原因是"lease 时间耗尽"而非"错误本身永久"，故
+                    // **无条件**按 retryable 释放回 pending —— 让下次 run 接续尚未尝试的
+                    // fallback 模型；绝不让本次非 retryable 错误（如 QuotaExceeded）把任务
+                    // 永久失败而丢掉本可成功的 fallback。release 仍受 lease_owner 守护。
                     tracing::warn!(
                         ai_result_id = claimed.id,
                         attempt_index,
-                        "AI lease expired mid-chain; aborting fallback to avoid orphaned model calls"
+                        "AI lease expired mid-chain; releasing for retry to defer remaining fallback models"
                     );
+                    return release_retryable_ai_failure(
+                        &ctx,
+                        &emitter,
+                        &owner,
+                        &claimed,
+                        error,
+                        OffsetDateTime::now_utc(),
+                    )
+                    .await;
                 }
                 last_error = Some(error);
-                if !try_next {
+                if !has_next {
                     break;
                 }
             }

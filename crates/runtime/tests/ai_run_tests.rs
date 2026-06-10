@@ -209,6 +209,10 @@ async fn process_aborts_fallback_when_lease_expired() {
     // 本批 lease 截止时刻 = claim 时刻；首个模型尝试返回后 now() 已 ≥ 截止，
     // fallback 前的到期校验应中止链，绝不消费 fallback 响应。该时序仅在 CLI
     // 预算被绕过（如此处直接驱动 AiRunFlow）时可达。
+    //
+    // codex P2-fix2：中止须按 **retryable** 释放回 pending（而非 permanent），
+    // 即便触发错误本身 is_retryable=false（QuotaExceeded）—— 中止原因是 lease
+    // 耗尽而非错误永久，尚未尝试的 fallback 模型必须留待下次 run 接续。
     let (_dir, pool) = make_test_pool().await;
     let article_id = seed_persisted_article(&pool, "ai-fallback-lease", "title", "body").await;
     let client = Arc::new(MockAiClient::default());
@@ -219,7 +223,8 @@ async fn process_aborts_fallback_when_lease_expired() {
     opts.fallback_models = vec!["fallback-model".to_string()];
     flow.task_gen(&opts).await;
     let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
-    // primary 命中 quota（should_fallback=true，但 is_retryable=false → permanent）。
+    // primary 命中 quota（should_fallback=true，但 is_retryable=false）。若按错误分类
+    // 释放会变 permanent；lease 中止路径必须强制 retryable，避免丢掉未尝试的 fallback。
     client
         .insert_error(
             ai_result_id,
@@ -234,11 +239,11 @@ async fn process_aborts_fallback_when_lease_expired() {
     let summary = flow.process_ai_tasks(&opts).await;
 
     assert_eq!(summary.succeeded, 0);
-    assert_eq!(summary.permanent_failed, 1);
-    assert_eq!(
-        ai_result_state(&pool, ai_result_id).await,
-        "permanent_failed"
-    );
+    assert_eq!(summary.permanent_failed, 0);
+    // 强制 retryable：任务回 pending，下次 run 可接续剩余 fallback。
+    assert_eq!(summary.retryable_failed, 1);
+    assert_eq!(ai_result_state(&pool, ai_result_id).await, "pending");
+    assert_eq!(article_state(&pool, article_id).await, "ai_pending");
     // fallback 模型从未被调用：成功响应仍原样留在队列里。
     assert_eq!(client.remaining(ai_result_id).await, 1);
     // effective_model_id 未被写成 fallback-model（成功路径未走）。
