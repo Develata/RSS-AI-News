@@ -16,7 +16,7 @@
 
 B 的难点在 config 层（现 `config::load` 强制全局 `OPENAI_API_KEY`/`OPENAI_BASE_URL`、`.env` 原始键值
 load 后丢弃、不注入 `std::env`），需把动态 env 解析做成 config 层一等能力、校验按 selected category
-判断。B 单独立项，本章 §B 仅占位。
+判断。完整设计见本章 §B（W14-B）。
 
 ## 2. 语义（A 期）
 
@@ -126,9 +126,82 @@ fallback_models = ["gpt-4o-mini"]                # 省略(None)=继承全局 / [
 - 不做任何"按输入挑模型"的智能路由（§5.2 仍排除）。
 - A 期不动 config 加载骨架、不动 crate 边界。
 
-## B. 第二期：板块凭证自治（占位）
+## B. 第二期：板块凭证自治（W14-B）
 
 板块可独立配 `base_url` + `api_key_env`（env 变量名引用，**绝不**明文入 toml / 库）+ model + fallback，
-留空继承全局。因一次 ai-run 严格单 category（task_gen + claim 均按 `category_key` 过滤），凭证可在
+留空继承全局。因一次 ai-run 严格单 category（task_gen + claim 均按 `category_key` 过滤），凭证在
 composition root 按 selected category **静态解析**为单 client，**无需运行时路由**。
-需先重构 config 加载 / 校验（见 §1）。单独立项，本期不做。
+
+### B.1 配置面
+
+```toml
+# categories/<key>.toml
+[category.ai_override]
+base_url = "https://api.deepseek.com/v1"   # 省略或空串(trim) = 继承全局 OPENAI_BASE_URL
+api_key_env = "DEEPSEEK_API_KEY"           # 省略或空串(trim) = 继承全局 OPENAI_API_KEY；
+                                           # 值是 env 变量名引用，key 本身绝不入 toml
+```
+
+- `model` / `fallback_models` 沿用 A 期字段；`base_url` 与 `api_key_env` 的继承**相互独立**
+  （板块可只换 key 不换 endpoint，反之亦然）。
+- `api_key_env` 指向的变量解析优先级与全局一致：进程 env > `.env` 文件（同 key 取最后一次），
+  trim 后空白 = 未设置。
+
+### B.2 动态 env 解析（config 一等能力）
+
+- `EnvConfig` 在 8 个固定字段之外**保留 `.env` 文件全量键值**（私有字段；`Debug` 输出
+  redact 值，防 tracing 整体格式化泄漏，沿用 `SecretString` redaction 契约）。
+- 新增 `EnvConfig::resolve_secret(name) -> Option<SecretString>`：进程 env 优先、
+  `.env` 文件兜底、空白过滤——与既有 `env.rs::value` 同一优先级语义。
+- 不注入 `std::env`（保持进程环境只读）；8 个固定字段语义不变。
+
+### B.3 凭证折叠 — 单一真相源
+
+`LoadedConfig::ai_credentials_for_category(category_key) -> Result<AiCredentials, ConfigError>`：
+
+- `AiCredentials { base_url: String, api_key: SecretString }`（config crate 内定义）。
+- 折叠：`base_url` = override 非空（trim）> `env.openai_base_url`；
+  `api_key` = override 有 `api_key_env` → `resolve_secret(名)`，否则 `env.openai_api_key`。
+- 解析失败（指向的 env 变量不存在 / 继承全局但全局缺失）→ `ConfigError`，
+  错误消息含 **env 变量名**（绝不含值）。
+- `EffectiveConfig` 保持纯 toml 折叠、**不携带 secrets**；凭证走本独立函数。
+- 同构先例：`SourceSecrets`（RSSHub per-source key，load 时解析、不暴露进 Debug）。
+
+### B.4 校验（2026-06-10 决议：放宽 + 延迟）
+
+| 层 | 时机 | 内容 |
+|---|---|---|
+| 结构校验 | 每次 load（全量板块） | `base_url` 非空时必须合法 URL；`api_key_env` 出现时必须非空白 |
+| 全局 gate（放宽） | 每次 load | `ai.enabled` 时，**仅当 filtered 范围内存在"继承全局"的板块**才要求对应全局变量：缺 `api_key_env` 的板块触发 `OPENAI_API_KEY` 必填、缺 `base_url` 的板块触发 `OPENAI_BASE_URL` 必填。全部板块自带凭证 ⇒ 全局可空 |
+| 板块 presence（延迟） | ai-run 选定板块后 | `ai_credentials_for_category` fail-fast，消息含缺失的 env 变量名。部署只需配"要跑的板块"的 key |
+| 全量诊断 | `validate-config` | 对每个声明 `api_key_env` 的板块报告该 env 可解析性（诊断报告，不阻塞其它命令 load） |
+
+### B.5 composition root 装配
+
+- `build_run_context` 增加可选板块凭证参数：`None` = 按全局装配（现行为，其余调用点零语义变化）；
+  `Some(creds)` = 用板块凭证构造 `OpenAiCompatClient`。
+- **ai-run**：`select_category` 后调 `ai_credentials_for_category(key)?` 传入——单 category、
+  单 client、静态解析。
+- **backfill**：跨 category（`list_in_window_for_backfill` 不按 category 过滤，A 期决议），
+  固定全局凭证；入口对全局凭证缺失 fail-fast（清晰报错，不再落到 NullAiClient 的模糊
+  `ConnectionFailed`）。
+- **doctor** `OpenAiPingCheck`：仅在全局凭证存在时执行；全局缺失（全部板块自带凭证）时 skip 并注明。
+- `request_timeout` 仍用全局 `[ai].request_timeout_seconds`——超时不是凭证，不入板块自治范围。
+
+### B.6 不变契约（铁律）
+
+- key 绝不明文入 toml / 库 / 日志 / run_event（`SecretString` 全链路，错误消息只含 env 变量名）。
+- `model_id` 幂等键不可变（同 A 期）。
+- 单次执行单 client：fallback 链上所有模型走**同一板块凭证**，不做跨 provider 运行时路由
+  （[./13-non-goals.md](./13-non-goals.md) §5.2 仍排除）。
+- crate 边界不动：`AiClientConfig` 已凭证参数化，ai crate 零改动。
+
+### B.7 实现阶段
+
+1. **P0** 契约（本章 §B + 03-ai §2.2 + 06-config §3/§5）
+2. **P1** config env 层：`.env` 全量键值保留（redaction）+ `resolve_secret` + 测试
+3. **P2** config schema：`AiOverride.base_url/api_key_env` + 结构校验 + 全局 gate 放宽
+   + `ai_credentials_for_category` + `validate-config` 诊断 + 测试
+4. **P3** composition root：`build_run_context` 凭证参数 + ai-run 装配 + backfill fail-fast
+   + doctor ping 条件化 + 测试
+5. **P4** 收尾：示例 toml + README + 全量回归 + codex review 真实 diff

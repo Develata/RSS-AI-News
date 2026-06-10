@@ -33,7 +33,9 @@
 
 ## 3. `.env` 字段
 
-由 `EnvConfig` 显式枚举，**未列出的环境变量不被消费**。
+固定字段由 `EnvConfig` 显式枚举；此外 `.env` 文件**全量键值会被保留**（私有、Debug redact），
+供板块 `api_key_env` 动态解析（`EnvConfig::resolve_secret(name)`，W14-B，
+见 [./14-ai-fallback.md](./14-ai-fallback.md) §B.2）。**进程环境不被注入**。
 
 ```rust
 pub struct EnvConfig {
@@ -100,6 +102,10 @@ max_input_chars = 12000
 model = "gpt-4o"         # 空串 "" = 继承全局 [ai].model（trim 后为空即继承）
 fallback_models = ["gpt-4o-mini", "deepseek-chat"]  # 可选：覆盖全局 fallback 链。
                          # 省略(None)=继承全局；[]=显式禁用；非空=覆盖。见 ./14-ai-fallback.md
+base_url = "https://api.deepseek.com/v1"  # 可选：板块独立 endpoint。空/省略 = 继承
+                         # 全局 OPENAI_BASE_URL。见 ./14-ai-fallback.md §B（W14-B）
+api_key_env = "DEEPSEEK_API_KEY"          # 可选：板块独立 key 的 env 变量名引用
+                         # （key 本身绝不入 toml）。空/省略 = 继承全局 OPENAI_API_KEY
 
 [category.publish_override]   # 可选：覆盖 [publish] 的子集
 max_items_per_report = 50
