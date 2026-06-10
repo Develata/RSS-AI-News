@@ -59,13 +59,23 @@ pub async fn build_run_context(
             api_key: credentials.api_key,
             request_timeout: Duration::from_secs(app.ai.request_timeout_seconds),
         })?),
+        // W14-B codex P2：全局分支须同时具备 key + base 才构造 client。放宽
+        // gate 后"全部板块自带凭证 + 遗留全局 key + 全局 base 缺省"是合法配置，
+        // 旧守卫只查 key 会拿空串 api_base 构造 → InvalidConfig，让 ingest/
+        // publish 等不调 AI 的命令死在 ctx 构造期。base 缺省 ⇒ 无板块继承
+        // 全局（gate 已保证），回落 NullAiClient 即可。
         (true, None)
             if loaded
                 .env
                 .openai_api_key
                 .as_ref()
                 .map(SecretString::expose_secret)
-                .is_some_and(|value| !value.trim().is_empty()) =>
+                .is_some_and(|value| !value.trim().is_empty())
+                && loaded
+                    .env
+                    .openai_base_url
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()) =>
         {
             // Pass the SecretString through end-to-end (W2-A2). The branch
             // condition above already verified `openai_api_key` is `Some(_)`
