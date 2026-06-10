@@ -70,8 +70,11 @@ pub async fn run(cli: &Cli, args: &AiRunArgs) -> Result<AiRunCommandSummary, Cli
     let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let category = select_category(cli, &categories)?;
+    // W14-B：按选定板块解析有效凭证（override 非空 > 全局 env），缺失即
+    // fail-fast（错误只含 env 变量名），单 client 静态装配。
+    let ai_credentials = loaded.ai_credentials_for_category(&category.category.key)?;
     let started = Instant::now();
-    let ctx = build_run_context("ai-run", &loaded).await?;
+    let ctx = build_run_context("ai-run", &loaded, Some(ai_credentials)).await?;
 
     // F15-3: 生产读路径走 active_rule_or_register（先读 active，无则 seed
     // 首版）。直接 get_or_create 会被 partial unique index 误判（同 kind

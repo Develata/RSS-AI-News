@@ -182,10 +182,10 @@ api_key_env = "DEEPSEEK_API_KEY"           # 省略或空串(trim) = 继承全�
   `Some(creds)` = 用板块凭证构造 `OpenAiCompatClient`。
 - **ai-run**：`select_category` 后调 `ai_credentials_for_category(key)?` 传入——单 category、
   单 client、静态解析。
-- **backfill**：跨 category（`list_in_window_for_backfill` 不按 category 过滤，A 期决议），
-  固定全局凭证；入口对全局凭证缺失 fail-fast（清晰报错，不再落到 NullAiClient 的模糊
-  `ConnectionFailed`）。
-- **doctor** `OpenAiPingCheck`：仅在全局凭证存在时执行；全局缺失（全部板块自带凭证）时 skip 并注明。
+- **backfill**：只播种 pending AI 行（model 取全局 `[ai].model` 做行身份，A 期决议），
+  **不调用 AI client**——凭证由后续 ai-run 按板块解析，backfill 无凭证需求。
+- **doctor** `OpenAiPingCheck`：全局 key 缺失时已有行为即 `Info: skipped (OPENAI_API_KEY
+  not configured)`，与放宽后的 gate 自洽，零改动。
 - `request_timeout` 仍用全局 `[ai].request_timeout_seconds`——超时不是凭证，不入板块自治范围。
 
 ### B.6 不变契约（铁律）

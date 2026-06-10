@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use reqwest::Client;
 use rss_ai_news_ai::{AiClient, AiClientConfig, AiError, AiResponse, AiTask, OpenAiCompatClient};
-use rss_ai_news_config::{self as config, LoadedConfig};
+use rss_ai_news_config::{self as config, AiCredentials, LoadedConfig};
 use rss_ai_news_domain::SecretString;
 use rss_ai_news_extractor::{ContentStrategy, ReqwestHtmlFetcher};
 use rss_ai_news_feed::ReqwestFeedFetcher;
@@ -27,9 +27,14 @@ use crate::{db_url::resolve_storage_url, error::CliError};
 ///
 /// 返回值不再含 pool（原 `_pool` 在 7 个调用点均未使用），让签名直接反映
 /// "这里只构造 ctx" 的语义。
+/// W14-B：`ai_credentials` = `Some(板块凭证)` 时用其装配 `OpenAiCompatClient`
+/// （ai-run 在 `select_category` 后经 `ai_credentials_for_category` 解析传入）；
+/// `None` = 沿用全局 env 凭证（其余调用点零语义变化）。一次 ai-run 严格单
+/// category，故单 client 静态装配、无运行时路由（docs/plan/14-ai-fallback.md §B.5）。
 pub async fn build_run_context(
     stage: &str,
     loaded: &LoadedConfig,
+    ai_credentials: Option<AiCredentials>,
 ) -> Result<Arc<RunContext>, CliError> {
     let app = Arc::new(loaded.app.clone());
     let url = resolve_storage_url(loaded)?;
@@ -46,29 +51,37 @@ pub async fn build_run_context(
     let html_fetcher = Arc::new(ReqwestHtmlFetcher::new(app.extractor.max_body_bytes)?);
     let strategies: Vec<Arc<dyn ContentStrategy>> = Vec::new();
 
-    let ai_client: Arc<dyn AiClient> = if app.ai.enabled
-        && loaded
-            .env
-            .openai_api_key
-            .as_ref()
-            .map(SecretString::expose_secret)
-            .is_some_and(|value| !value.trim().is_empty())
-    {
-        // Pass the SecretString through end-to-end (W2-A2). The branch
-        // condition above already verified `openai_api_key` is `Some(_)`
-        // and non-empty after trim, so cloning the original is sound.
-        let api_key = loaded
-            .env
-            .openai_api_key
-            .clone()
-            .unwrap_or_else(|| SecretString::from(""));
-        Arc::new(OpenAiCompatClient::new(AiClientConfig {
-            api_base: loaded.env.openai_base_url.clone().unwrap_or_default(),
-            api_key,
+    let ai_client: Arc<dyn AiClient> = match (app.ai.enabled, ai_credentials) {
+        // W14-B：板块凭证已由 ai_credentials_for_category 折叠并保证非空，
+        // 直接装配。request_timeout 仍取全局（超时不是凭证，见 §B.5）。
+        (true, Some(credentials)) => Arc::new(OpenAiCompatClient::new(AiClientConfig {
+            api_base: credentials.base_url,
+            api_key: credentials.api_key,
             request_timeout: Duration::from_secs(app.ai.request_timeout_seconds),
-        })?)
-    } else {
-        Arc::new(NullAiClient)
+        })?),
+        (true, None)
+            if loaded
+                .env
+                .openai_api_key
+                .as_ref()
+                .map(SecretString::expose_secret)
+                .is_some_and(|value| !value.trim().is_empty()) =>
+        {
+            // Pass the SecretString through end-to-end (W2-A2). The branch
+            // condition above already verified `openai_api_key` is `Some(_)`
+            // and non-empty after trim, so cloning the original is sound.
+            let api_key = loaded
+                .env
+                .openai_api_key
+                .clone()
+                .unwrap_or_else(|| SecretString::from(""));
+            Arc::new(OpenAiCompatClient::new(AiClientConfig {
+                api_base: loaded.env.openai_base_url.clone().unwrap_or_default(),
+                api_key,
+                request_timeout: Duration::from_secs(app.ai.request_timeout_seconds),
+            })?)
+        }
+        _ => Arc::new(NullAiClient),
     };
 
     let publish_target_local: Arc<dyn PublishTarget> =

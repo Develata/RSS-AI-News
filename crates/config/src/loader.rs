@@ -449,6 +449,32 @@ enabled = true
         assert!(matches!(err, ConfigError::ValidationFailed { .. }));
     }
 
+    /// W14-B 端到端：板块自带 base_url + api_key_env 时，全局 OPENAI_* 可空，
+    /// load 通过且 ai_credentials_for_category 从 .env 解析出板块凭证。
+    #[test]
+    fn load_succeeds_without_global_openai_when_category_self_credentialed() {
+        let ws = Workspace::new("self-credentialed");
+        ws.write_app(APP_TOML_AI_ENABLED_RSSHUB_PLACEHOLDER);
+        ws.write_category(
+            "ai",
+            &CATEGORY_TOML_RSSHUB_PLACEHOLDER.replace(
+                "priority = 10\n\n[[sources]]",
+                "priority = 10\n\n[category.ai_override]\nbase_url = \"https://api.deepseek.com/v1\"\napi_key_env = \"DEEPSEEK_API_KEY\"\n\n[[sources]]",
+            ),
+        );
+        let env_file =
+            ws.env_file("RSSHUB_BASE_URL=http://rsshub:1200/\nDEEPSEEK_API_KEY=sk-deepseek\n");
+
+        let loaded = load(&ws.config_dir(), Some(&env_file), CliOverrides::default())
+            .expect("self-credentialed category does not require global OPENAI_*");
+
+        let credentials = loaded
+            .ai_credentials_for_category("ai")
+            .expect("category credentials resolve from .env");
+        assert_eq!(credentials.base_url, "https://api.deepseek.com/v1");
+        assert_eq!(credentials.api_key.expose_secret(), "sk-deepseek");
+    }
+
     #[test]
     fn load_expands_rsshub_placeholder_and_appends_access_key() {
         let ws = Workspace::new("rsshub-expand");

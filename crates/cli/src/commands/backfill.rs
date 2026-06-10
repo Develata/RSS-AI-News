@@ -75,7 +75,9 @@ pub async fn run(cli: &Cli, args: &BackfillArgs) -> Result<BackfillCommandSummar
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let date_from = parse_date_start(args.date_from.as_deref())?;
     let date_to = parse_date_start(args.date_to.as_deref())?;
-    let ctx = build_run_context("backfill", &loaded).await?;
+    // W14-B：backfill 只播种 pending AI 行（model 取全局 [ai].model 做行身份），
+    // 不调用 AI client——凭证由后续 ai-run 按板块解析，此处无需传入。
+    let ctx = build_run_context("backfill", &loaded, None).await?;
     let flow = BackfillFlow::new(ctx.clone());
 
     match args.target {

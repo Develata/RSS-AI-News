@@ -148,7 +148,7 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
             .ok_or_else(|| CliError::ReindexAbortInvalidJobId { raw: raw.clone() })?;
 
         let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
-        let ctx = build_run_context("reindex", &loaded).await?;
+        let ctx = build_run_context("reindex", &loaded, None).await?;
         let outcome = ReindexFlow::new(ctx)
             .abort(job_id, "cli reindex --abort")
             .await?;
@@ -167,7 +167,7 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
 
     let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
-    let ctx = build_run_context("reindex", &loaded).await?;
+    let ctx = build_run_context("reindex", &loaded, None).await?;
 
     // F15-10：dry-run 与真实 run 共用 build_run_context（dry-run 仅读不写，
     // 复用同一 RunContext 没有副作用）。

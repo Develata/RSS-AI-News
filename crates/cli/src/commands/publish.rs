@@ -62,7 +62,7 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
     if args.date.is_some() {
         let _ = parse_date_start(args.date.as_deref())?;
     }
-    let ctx = build_run_context("publish", &loaded).await?;
+    let ctx = build_run_context("publish", &loaded, None).await?;
     let flow = PublishFlow::new(ctx.clone());
     let mode = if args.local_only || ctx.publish_target_remote.is_none() {
         "local"
