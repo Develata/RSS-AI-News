@@ -39,17 +39,37 @@ pub(super) fn collect_env_checks(
     app: &AppConfig,
     categories: &[CategoryConfig],
     env: &EnvConfig,
+    category_filter: Option<&str>,
 ) {
     if app.ai.enabled {
-        if is_blank(
-            env.openai_api_key
-                .as_ref()
-                .map(rss_ai_news_domain::SecretString::expose_secret),
-        ) {
+        // W14-B 决议（2026-06-10）：全局凭证仅在 filtered 范围内存在"继承
+        // 全局"的板块时必填；全部板块自带 base_url / api_key_env ⇒ 全局可空。
+        // filtered 为空（零板块 / filter 未命中）保持旧语义要求全局，保守兜底
+        // （backfill 等跨板块路径固定用全局凭证）。
+        let checked: Vec<&CategoryConfig> = categories
+            .iter()
+            .filter(|category| category_filter.is_none_or(|filter| category.category.key == filter))
+            .collect();
+        let requires_global_key = checked.is_empty()
+            || checked
+                .iter()
+                .any(|category| category.ai_api_key_env().is_none());
+        let requires_global_base = checked.is_empty()
+            || checked
+                .iter()
+                .any(|category| category.ai_base_url().is_none());
+
+        if requires_global_key
+            && is_blank(
+                env.openai_api_key
+                    .as_ref()
+                    .map(rss_ai_news_domain::SecretString::expose_secret),
+            )
+        {
             report.push(Diagnostic::new(
                 ".env",
                 "OPENAI_API_KEY",
-                "required when app.ai.enabled=true",
+                "required when app.ai.enabled=true and a category inherits the global api key",
             ));
         }
         match env
@@ -58,16 +78,18 @@ pub(super) fn collect_env_checks(
             .filter(|value| !value.trim().is_empty())
         {
             Some(value) if Url::parse(value).is_ok() => {}
+            // 设置了但非法 URL：与是否被继承无关，一律报错。
             Some(value) => report.push(Diagnostic::new(
                 ".env",
                 "OPENAI_BASE_URL",
                 format!("invalid URL {value:?}"),
             )),
-            None => report.push(Diagnostic::new(
+            None if requires_global_base => report.push(Diagnostic::new(
                 ".env",
                 "OPENAI_BASE_URL",
-                "required when app.ai.enabled=true",
+                "required when app.ai.enabled=true and a category inherits the global base_url",
             )),
+            None => {}
         }
     }
 
@@ -191,6 +213,18 @@ fn collect_category_checks(
                     ));
                 }
             }
+        }
+
+        // W14-B：板块 base_url 非空（trim）时必须是合法 URL；空串 = 继承全局，
+        // 无结构约束（api_key_env 同理——任意非空名字都是合法 env 引用）。
+        if let Some(base_url) = category.ai_base_url()
+            && Url::parse(base_url).is_err()
+        {
+            report.push(Diagnostic::new(
+                source_file.clone(),
+                "category.ai_override.base_url",
+                format!("invalid URL {base_url:?}"),
+            ));
         }
 
         let mut source_keys = HashSet::new();

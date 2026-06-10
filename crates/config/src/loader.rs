@@ -100,7 +100,13 @@ fn load_inner(
 
     cli_overrides.apply_to_app(&mut app);
     if enforce_env_checks {
-        validate::run_general_checks(&app, &categories, &env)?;
+        // W14-B：全局凭证 gate 按 --category filtered 范围判定继承关系。
+        validate::run_general_checks(
+            &app,
+            &categories,
+            &env,
+            cli_overrides.category_filter.as_deref(),
+        )?;
     } else {
         validate::run_structural_checks(&app, &categories, &env)?;
     }

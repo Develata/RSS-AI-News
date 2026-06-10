@@ -33,6 +33,15 @@ impl EnvConfig {
             .filter(|value| !value.trim().is_empty())
             .map(SecretString::new)
     }
+
+    /// crate 内测试构造器：注入 `.env` 文件键值而不落盘、不碰进程环境。
+    #[cfg(test)]
+    pub(crate) fn with_file_values(values: Vec<(String, String)>) -> Self {
+        Self {
+            file_values: EnvFileValues(values),
+            ..Self::default()
+        }
+    }
 }
 
 /// `.env` 文件原始键值的私有载体。值可能含任意密钥，`Debug` 只输出键名

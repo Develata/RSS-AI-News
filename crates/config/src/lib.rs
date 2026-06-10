@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod category;
+pub mod credentials;
 pub mod effective;
 pub mod env;
 pub mod error;
@@ -21,6 +22,7 @@ pub use app::{
     PublishTemplateConfig, RetentionPolicy, RetryConfig, RuntimeConfig,
 };
 pub use category::{AiOverride, CategoryConfig, CategoryMeta, PublishOverride, SourceConfig};
+pub use credentials::{AiCredentials, audit_ai_credentials};
 pub use effective::EffectiveConfig;
 pub use env::EnvConfig;
 pub use error::{ConfigError, Diagnostic, DiagnosticReport};

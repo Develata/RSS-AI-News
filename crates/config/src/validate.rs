@@ -19,14 +19,17 @@ pub struct CommandFlags {
     pub local_only: bool,
 }
 
+/// `category_filter`（W14-B）：`--category` 选定的板块；全局凭证 gate 只在
+/// filtered 范围内判定继承关系（见 docs/plan/14-ai-fallback.md §B.4）。
 pub fn run_general_checks(
     app: &AppConfig,
     categories: &[CategoryConfig],
     env: &EnvConfig,
+    category_filter: Option<&str>,
 ) -> Result<(), ConfigError> {
     let mut report = DiagnosticReport::new(Vec::new());
     collect_general_checks(&mut report, app, categories, env);
-    collect_env_checks(&mut report, app, categories, env);
+    collect_env_checks(&mut report, app, categories, env, category_filter);
     fail_if_needed(report)
 }
 
@@ -47,9 +50,10 @@ pub fn run_env_checks(
     app: &AppConfig,
     categories: &[CategoryConfig],
     env: &EnvConfig,
+    category_filter: Option<&str>,
 ) -> Result<(), ConfigError> {
     let mut report = DiagnosticReport::new(Vec::new());
-    collect_env_checks(&mut report, app, categories, env);
+    collect_env_checks(&mut report, app, categories, env, category_filter);
     fail_if_needed(report)
 }
 
@@ -68,7 +72,12 @@ pub fn run_command_checks(
             if !config.app.ai.enabled {
                 return Err(ConfigError::AiRunWhileDisabled);
             }
-            run_env_checks(&config.app, &config.categories, &config.env)
+            run_env_checks(
+                &config.app,
+                &config.categories,
+                &config.env,
+                config.cli_overrides.category_filter.as_deref(),
+            )
         }
         CommandKind::Doctor => {
             // doctor 只校验"配置本身是否有效"，不把"某命令与当前配置不兼容"
@@ -76,7 +85,13 @@ pub fn run_command_checks(
             // 分支在调用时单独判断，不应让 doctor 整体失败。
             let mut report = DiagnosticReport::new(Vec::new());
             collect_general_checks(&mut report, &config.app, &config.categories, &config.env);
-            collect_env_checks(&mut report, &config.app, &config.categories, &config.env);
+            collect_env_checks(
+                &mut report,
+                &config.app,
+                &config.categories,
+                &config.env,
+                config.cli_overrides.category_filter.as_deref(),
+            );
             collect_publish_checks(&mut report, config, flags);
             fail_if_needed(report)
         }
@@ -233,6 +248,7 @@ mod tests {
             &app(true),
             &[category("ai", "https://example.test/feed")],
             &EnvConfig::default(),
+            None,
         )
         .expect_err("missing OpenAI env fails");
         assert!(matches!(err, ConfigError::ValidationFailed { .. }));
@@ -244,6 +260,7 @@ mod tests {
             &app(false),
             &[category("ai", "https://example.test/feed")],
             &EnvConfig::default(),
+            None,
         )
         .expect("OpenAI env is optional when AI disabled");
     }
@@ -289,6 +306,7 @@ mod tests {
             &app(false),
             &[category("ai", "{RSSHUB}/feed")],
             &EnvConfig::default(),
+            None,
         )
         .expect_err("missing RSSHub base fails");
         assert!(matches!(err, ConfigError::ValidationFailed { .. }));
@@ -300,6 +318,7 @@ mod tests {
             &app(false),
             &[category("ai", "{RSSHUB_BASE_URL}/feed")],
             &EnvConfig::default(),
+            None,
         )
         .expect_err("missing RSSHub base for alias fails");
         assert!(matches!(err, ConfigError::ValidationFailed { .. }));
@@ -311,11 +330,16 @@ mod tests {
 
     #[test]
     fn rsshub_base_url_placeholder_alias_with_base_url_is_valid() {
-        run_general_checks(&app(false), &[category("ai", "{RSSHUB_BASE_URL}/feed")], &{
-            let mut env = EnvConfig::default();
-            env.rsshub_base_url = Some("http://rsshub:1200/".to_string());
-            env
-        })
+        run_general_checks(
+            &app(false),
+            &[category("ai", "{RSSHUB_BASE_URL}/feed")],
+            &{
+                let mut env = EnvConfig::default();
+                env.rsshub_base_url = Some("http://rsshub:1200/".to_string());
+                env
+            },
+            None,
+        )
         .expect("RSSHUB_BASE_URL placeholder alias expands before URL validation");
     }
 
@@ -325,7 +349,7 @@ mod tests {
             category("ai", "https://example.test/1"),
             category("ai", "https://example.test/2"),
         ];
-        let err = run_general_checks(&app(false), &categories, &EnvConfig::default())
+        let err = run_general_checks(&app(false), &categories, &EnvConfig::default(), None)
             .expect_err("duplicate category fails");
         assert!(matches!(err, ConfigError::ValidationFailed { .. }));
     }
@@ -336,6 +360,7 @@ mod tests {
             &app(false),
             &[category("ai", "not a url")],
             &EnvConfig::default(),
+            None,
         )
         .expect_err("invalid URL fails");
         assert!(matches!(err, ConfigError::ValidationFailed { .. }));
@@ -349,6 +374,7 @@ mod tests {
             &app,
             &[category("ai", "https://example.test/feed")],
             &EnvConfig::default(),
+            None,
         )
         .expect_err("unsupported schema fails");
         assert!(matches!(err, ConfigError::ValidationFailed { .. }));
@@ -599,7 +625,87 @@ mod tests {
             &app(true),
             &[category("ai", "https://example.test/feed")],
             &env,
+            None,
         )
         .expect("tokens_per_minute=0 is valid");
+    }
+
+    // ── W14-B：全局凭证 gate 按继承关系放宽 + filter 范围判定 ──────────────
+
+    /// 板块自带凭证：把 `category()` fixture 加上 base_url + api_key_env 覆盖。
+    fn self_credentialed(mut category: CategoryConfig) -> CategoryConfig {
+        category.ai_override = Some(crate::AiOverride {
+            base_url: Some("https://api.example.test/v1".to_string()),
+            api_key_env: Some("CATEGORY_KEY_ENV".to_string()),
+            ..crate::AiOverride::default()
+        });
+        category
+    }
+
+    #[test]
+    fn global_openai_env_not_required_when_all_categories_self_credentialed() {
+        run_general_checks(
+            &app(true),
+            &[self_credentialed(category(
+                "ai",
+                "https://example.test/feed",
+            ))],
+            &EnvConfig::default(),
+            None,
+        )
+        .expect("self-credentialed categories do not require global OPENAI_*");
+    }
+
+    #[test]
+    fn global_openai_env_required_when_any_category_inherits() {
+        let err = run_general_checks(
+            &app(true),
+            &[
+                self_credentialed(category("ai", "https://example.test/feed")),
+                category("ml", "https://example.test/ml"),
+            ],
+            &EnvConfig::default(),
+            None,
+        )
+        .expect_err("inheriting category requires global OPENAI_*");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
+    fn category_filter_scopes_global_gate_to_selected_category() {
+        let categories = [
+            self_credentialed(category("ai", "https://example.test/feed")),
+            category("ml", "https://example.test/ml"),
+        ];
+        // 选中自带凭证的板块：继承板块不在范围内，全局可空。
+        run_general_checks(&app(true), &categories, &EnvConfig::default(), Some("ai"))
+            .expect("filter to self-credentialed category skips global gate");
+        // 选中继承板块：仍要求全局。
+        run_general_checks(&app(true), &categories, &EnvConfig::default(), Some("ml"))
+            .expect_err("filter to inheriting category requires global OPENAI_*");
+    }
+
+    #[test]
+    fn global_openai_env_still_required_with_zero_categories() {
+        // 保守兜底：零板块（或 filter 未命中）保持旧语义要求全局凭证
+        // （backfill 等跨板块路径固定用全局）。
+        let err = run_general_checks(&app(true), &[], &EnvConfig::default(), None)
+            .expect_err("zero categories keeps legacy global requirement");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
+    fn category_base_url_must_be_valid_url() {
+        let mut invalid = category("ai", "https://example.test/feed");
+        invalid.ai_override = Some(crate::AiOverride {
+            base_url: Some("not a url".to_string()),
+            ..crate::AiOverride::default()
+        });
+        let err = run_structural_checks(&app(false), &[invalid], &EnvConfig::default())
+            .expect_err("invalid category base_url fails structurally");
+        assert!(
+            err.to_string().contains("base_url"),
+            "diagnostic should point at base_url: {err}"
+        );
     }
 }

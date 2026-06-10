@@ -27,6 +27,12 @@ pub struct AiOverride {
     /// 板块失败回退链覆盖（W14-A）。`None` = 继承全局 `[ai].fallback_models`；
     /// `Some([])` = 显式禁用回退；`Some(非空)` = 覆盖。见 docs/plan/14-ai-fallback.md。
     pub fallback_models: Option<Vec<String>>,
+    /// 板块独立 endpoint（W14-B）。省略或空串（trim）= 继承全局
+    /// `OPENAI_BASE_URL`，与 `model` 同语义。见 docs/plan/14-ai-fallback.md §B。
+    pub base_url: Option<String>,
+    /// 板块独立 key 的 **env 变量名引用**（W14-B），key 本身绝不入 toml。
+    /// 省略或空串（trim）= 继承全局 `OPENAI_API_KEY`。
+    pub api_key_env: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -111,6 +117,24 @@ impl CategoryConfig {
     pub fn key(&self) -> &str {
         &self.category.key
     }
+
+    /// W14-B：规范化后的板块 endpoint 覆盖。`None` = 继承全局
+    /// `OPENAI_BASE_URL`（省略与空串等价，trim 后返回）。
+    pub fn ai_base_url(&self) -> Option<&str> {
+        normalized_override(self.ai_override.as_ref()?.base_url.as_deref())
+    }
+
+    /// W14-B：规范化后的板块 key env 变量名。`None` = 继承全局
+    /// `OPENAI_API_KEY`（省略与空串等价，trim 后返回）。
+    pub fn ai_api_key_env(&self) -> Option<&str> {
+        normalized_override(self.ai_override.as_ref()?.api_key_env.as_deref())
+    }
+}
+
+/// 空串（trim）与省略统一折叠为 `None`——与 `model` 的继承语义一致，
+/// 是 checks（全局 gate）与 credentials（折叠）共用的单一真相源。
+fn normalized_override(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]

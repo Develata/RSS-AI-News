@@ -171,7 +171,7 @@ api_key_env = "DEEPSEEK_API_KEY"           # 省略或空串(trim) = 继承全�
 
 | 层 | 时机 | 内容 |
 |---|---|---|
-| 结构校验 | 每次 load（全量板块） | `base_url` 非空时必须合法 URL；`api_key_env` 出现时必须非空白 |
+| 结构校验 | 每次 load（全量板块） | `base_url` 非空（trim）时必须合法 URL；`api_key_env` 空串（trim）= 继承（与 `model` 同语义），任意非空名字均合法引用 |
 | 全局 gate（放宽） | 每次 load | `ai.enabled` 时，**仅当 filtered 范围内存在"继承全局"的板块**才要求对应全局变量：缺 `api_key_env` 的板块触发 `OPENAI_API_KEY` 必填、缺 `base_url` 的板块触发 `OPENAI_BASE_URL` 必填。全部板块自带凭证 ⇒ 全局可空 |
 | 板块 presence（延迟） | ai-run 选定板块后 | `ai_credentials_for_category` fail-fast，消息含缺失的 env 变量名。部署只需配"要跑的板块"的 key |
 | 全量诊断 | `validate-config` | 对每个声明 `api_key_env` 的板块报告该 env 可解析性（诊断报告，不阻塞其它命令 load） |

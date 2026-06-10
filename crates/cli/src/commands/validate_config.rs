@@ -25,6 +25,9 @@ impl CommandSummary for ValidateConfigSummary {
 
 pub async fn run(cli: &Cli) -> Result<ValidateConfigSummary, CliError> {
     let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
+    // W14-B：诊断命令全量审计每个板块的 AI 凭证可解析性（普通 load 只按
+    // filtered 范围做全局 gate + ai-run 选定板块后 fail-fast，不查未选板块）。
+    config::audit_ai_credentials(&loaded)?;
     Ok(ValidateConfigSummary {
         config_dir: cli.config_dir.display().to_string(),
         category_count: loaded.categories.len() as u32,

@@ -249,10 +249,8 @@ mod tests {
                     priority: 10,
                 },
                 ai_override: Some(AiOverride {
-                    prompt_template: None,
-                    max_input_chars: None,
                     model: model.map(str::to_string),
-                    fallback_models: None,
+                    ..AiOverride::default()
                 }),
                 publish_override: Some(PublishOverride {
                     max_items_per_report: override_max_items
