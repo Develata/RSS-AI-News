@@ -1,5 +1,5 @@
 use std::{
-    env,
+    env, fmt,
     path::{Path, PathBuf},
 };
 
@@ -17,6 +17,46 @@ pub struct EnvConfig {
     pub http_proxy: Option<String>,
     pub https_proxy: Option<String>,
     pub database_url: Option<String>,
+    /// W14-B：`.env` 文件全量键值（私有），供 `resolve_secret` 按板块
+    /// `api_key_env` 动态解析。值在 `Debug` 中固定 redact（见 [`EnvFileValues`]）。
+    file_values: EnvFileValues,
+}
+
+impl EnvConfig {
+    /// W14-B：按名字动态解析 env 变量（板块 `api_key_env` 引用）。
+    /// 优先级与固定字段一致（`value` 同语义）：进程 env > `.env` 文件
+    /// （同 key 取最后一次出现）；trim 后空白视为未设置。
+    pub fn resolve_secret(&self, name: &str) -> Option<SecretString> {
+        env::var(name)
+            .ok()
+            .or_else(|| self.file_values.get(name).map(str::to_owned))
+            .filter(|value| !value.trim().is_empty())
+            .map(SecretString::new)
+    }
+}
+
+/// `.env` 文件原始键值的私有载体。值可能含任意密钥，`Debug` 只输出键名
+/// 列表（键名非密钥，便于诊断"配置了哪些变量"），值一律不打印。
+#[derive(Clone, Default, PartialEq, Eq)]
+struct EnvFileValues(Vec<(String, String)>);
+
+impl EnvFileValues {
+    /// 同 key 多次出现取最后一次（与 `value` 的 `.rev().find()` 一致）。
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+impl fmt::Debug for EnvFileValues {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(name, _)| name))
+            .finish()
+    }
 }
 
 pub fn load(env_file: Option<&Path>) -> Result<EnvConfig, ConfigError> {
@@ -31,6 +71,7 @@ pub fn load(env_file: Option<&Path>) -> Result<EnvConfig, ConfigError> {
         http_proxy: value("HTTP_PROXY", &file_values),
         https_proxy: value("HTTPS_PROXY", &file_values),
         database_url: value("DATABASE_URL", &file_values),
+        file_values: EnvFileValues(file_values),
     })
 }
 
@@ -147,5 +188,61 @@ mod tests {
             "Debug must not leak secret: {rendered}"
         );
         assert!(rendered.contains("***"));
+    }
+
+    /// W14-B：动态解析覆盖三态——文件命中 / 空白视为未设置 / 不存在。
+    #[test]
+    fn resolve_secret_reads_arbitrary_env_file_key() {
+        let mut path = env::temp_dir();
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        path.push(format!("rss-ai-news-config-resolve-{unique}.env"));
+        fs::write(
+            &path,
+            "DEEPSEEK_API_KEY=sk-deepseek\nDEEPSEEK_API_KEY=sk-deepseek-last\nBLANK_KEY=   \n",
+        )
+        .expect("write temp env file");
+
+        let config = load(Some(&path)).expect("env file loads");
+        fs::remove_file(&path).expect("remove temp env file");
+
+        // 同 key 多次出现取最后一次（与固定字段的 value() 语义一致）。
+        assert_eq!(
+            config
+                .resolve_secret("DEEPSEEK_API_KEY")
+                .as_ref()
+                .map(SecretString::expose_secret),
+            Some("sk-deepseek-last")
+        );
+        assert_eq!(config.resolve_secret("BLANK_KEY"), None);
+        assert_eq!(config.resolve_secret("NO_SUCH_KEY_W14B"), None);
+    }
+
+    /// W14-B：`.env` 保留的全量键值在 Debug 中只露键名、绝不露值。
+    #[test]
+    fn env_file_values_redact_in_debug_output() {
+        let secret = "sk-w14b-file-secret-1234";
+        let mut path = env::temp_dir();
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        path.push(format!("rss-ai-news-config-redact-{unique}.env"));
+        fs::write(&path, format!("CUSTOM_PROVIDER_KEY={secret}\n")).expect("write temp env file");
+
+        let config = load(Some(&path)).expect("env file loads");
+        fs::remove_file(&path).expect("remove temp env file");
+
+        let rendered = format!("{config:?}");
+        assert!(
+            !rendered.contains(secret),
+            "Debug must not leak .env file value: {rendered}"
+        );
+        assert!(
+            rendered.contains("CUSTOM_PROVIDER_KEY"),
+            "Debug should list key names for diagnostics: {rendered}"
+        );
     }
 }

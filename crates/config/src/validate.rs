@@ -208,11 +208,12 @@ mod tests {
     }
 
     fn env_with_ai() -> EnvConfig {
-        EnvConfig {
-            openai_api_key: Some(rss_ai_news_domain::SecretString::new("sk-test")),
-            openai_base_url: Some("https://api.example.test/v1".to_string()),
-            ..EnvConfig::default()
-        }
+        // W14-B：EnvConfig 含私有 file_values 字段后，模块外不能再用
+        // 函数式更新语法（FRU 要求全部字段可见），改为逐字段赋值。
+        let mut env = EnvConfig::default();
+        env.openai_api_key = Some(rss_ai_news_domain::SecretString::new("sk-test"));
+        env.openai_base_url = Some("https://api.example.test/v1".to_string());
+        env
     }
 
     fn loaded(app: AppConfig, categories: Vec<CategoryConfig>, env: EnvConfig) -> LoadedConfig {
@@ -310,14 +311,11 @@ mod tests {
 
     #[test]
     fn rsshub_base_url_placeholder_alias_with_base_url_is_valid() {
-        run_general_checks(
-            &app(false),
-            &[category("ai", "{RSSHUB_BASE_URL}/feed")],
-            &EnvConfig {
-                rsshub_base_url: Some("http://rsshub:1200/".to_string()),
-                ..EnvConfig::default()
-            },
-        )
+        run_general_checks(&app(false), &[category("ai", "{RSSHUB_BASE_URL}/feed")], &{
+            let mut env = EnvConfig::default();
+            env.rsshub_base_url = Some("http://rsshub:1200/".to_string());
+            env
+        })
         .expect("RSSHUB_BASE_URL placeholder alias expands before URL validation");
     }
 
