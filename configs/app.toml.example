@@ -17,6 +17,12 @@ concurrent_fetches = 5
 [ai]
 enabled = true
 model = "gpt-4o-mini"
+# 失败回退链（W14-A）：主模型调用失败时，依次改用下列模型重试同一篇文章。
+# 仅在"换模型可能有救"的失败上触发（如 quota/限流/模型不可用/5xx/解析失败）；
+# 凭证/配置错与连不上 endpoint 不回退。空 [] = 不回退。共用全局凭证，不做跨
+# provider 路由。注意 lease.ai_duration_seconds 须覆盖 (1+链长) 倍的批处理耗时
+# （ai-run 启动时会按 --batch-size 做预算校验，超了会直接报错）。
+fallback_models = []
 max_tokens = 4096
 temperature = 0.3
 request_timeout_seconds = 60

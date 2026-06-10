@@ -11,6 +11,10 @@ prompt_template = """
 """
 max_input_chars = 10000
 model = ""
+# 板块级失败回退链（W14-A，可选）。三态：整行省略 = 继承全局 [ai].fallback_models；
+# [] = 本板块显式禁用回退；["m1","m2"] = 覆盖全局。链内会自动 trim/去空白/去重，并去掉
+# 与主模型重复的项。
+# fallback_models = ["gpt-4o", "gpt-4o-mini"]
 
 [category.publish_override]
 max_items_per_report = 30

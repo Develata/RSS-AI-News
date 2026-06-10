@@ -481,6 +481,7 @@ include_unscored = true
 | 字段 | 默认 | 何时调 |
 |---|---|---|
 | `model` | `"gpt-4o-mini"` | 按你的 OpenAI 兼容 API 实际可用模型填；模型 ID 不存在会跑时报错 |
+| `fallback_models` | `[]` | 主模型失败时依次回退的备选模型（W14-A）；仅"换模型可能有救"的失败触发（quota/限流/模型不可用/5xx/解析失败），凭证错与连不上不回退；共用全局凭证不跨 provider 路由。注意 `lease.ai_duration_seconds` 要覆盖 `(1+链长)` 倍批耗时（ai-run 启动时会预算校验）。板块可在 `[category.ai_override].fallback_models` 覆盖（省略=继承 / `[]`=禁用） |
 | `max_input_chars` | `8000` | 单篇文章送入 AI 前的字符截断；越大成本越高，越小可能丢上下文 |
 | `request_timeout_seconds` | `60` | 慢模型 / 长输入要调到 `120`+；过短会让 AI 阶段大量 `timeout` 重试 |
 | `ai.rate_limit.requests_per_minute` | `60` | 按你的 API tier 调；超出会被 governor 排队，不会丢请求 |
