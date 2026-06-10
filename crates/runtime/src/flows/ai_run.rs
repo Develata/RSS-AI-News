@@ -261,14 +261,6 @@ impl AiRunFlow {
             }
 
             let now = OffsetDateTime::now_utc();
-            // W14-A（codex P2）：本批 lease 截止时刻。传入 process_one，用于 fallback 前的
-            // 到期校验 —— lease 一旦过期，reclaim 可能已把本行重新放回 pending 让其他
-            // worker 接管，此时本 worker 不应再为该行发起后续模型调用（避免无主的额外
-            // AI 调用与成本；幂等键写回另有 lease_owner 守护，见 release_*）。
-            let lease_deadline = lease_expires_at(
-                now,
-                Duration::seconds(self.ctx.app.lease.ai_duration_seconds as i64),
-            );
             let claimed = match self
                 .ctx
                 .ai_result_repo
@@ -276,7 +268,10 @@ impl AiRunFlow {
                     &ClaimRequest {
                         owner: owner.clone(),
                         now,
-                        lease_expires_at: lease_deadline,
+                        lease_expires_at: lease_expires_at(
+                            now,
+                            Duration::seconds(self.ctx.app.lease.ai_duration_seconds as i64),
+                        ),
                         batch_size: opts.process_batch_size.max(1),
                         max_attempts: opts.max_attempts,
                     },
@@ -329,7 +324,7 @@ impl AiRunFlow {
                         .acquire_owned()
                         .await
                         .expect("semaphore should not be closed");
-                    process_one(ctx, owner, task, opts, lease_deadline).await
+                    process_one(ctx, owner, task, opts).await
                 });
             }
 
@@ -401,7 +396,6 @@ async fn process_one(
     owner: String,
     claimed: ClaimedAiResult,
     opts: AiRunOptions,
-    lease_deadline: OffsetDateTime,
 ) -> AiTaskOutcome {
     let emitter = RunEventEmitter {
         run_id: &ctx.run_id,
@@ -473,34 +467,9 @@ async fn process_one(
                     "error_kind": error.error_kind(),
                     "should_fallback": error.should_fallback(),
                 }));
-                let has_next = error.should_fallback() && attempt_index + 1 < chain.len();
-                // W14-A（codex P2）：lease 到期后不再发起后续模型调用。release 已按
-                // lease_owner 守护（被他人接管时写回返回 Ok(false) 丢弃，无重复写），
-                // 故到期 ⇒ 终止 fallback，省掉无主的额外 AI 调用与成本。仅 CLI 预算被
-                // 绕过 / 调用超时等边缘时序会命中。
-                let lease_live = OffsetDateTime::now_utc() < lease_deadline;
-                if has_next && !lease_live {
-                    // codex P2-fix2：中止原因是"lease 时间耗尽"而非"错误本身永久"，故
-                    // **无条件**按 retryable 释放回 pending —— 让下次 run 接续尚未尝试的
-                    // fallback 模型；绝不让本次非 retryable 错误（如 QuotaExceeded）把任务
-                    // 永久失败而丢掉本可成功的 fallback。release 仍受 lease_owner 守护。
-                    tracing::warn!(
-                        ai_result_id = claimed.id,
-                        attempt_index,
-                        "AI lease expired mid-chain; releasing for retry to defer remaining fallback models"
-                    );
-                    return release_retryable_ai_failure(
-                        &ctx,
-                        &emitter,
-                        &owner,
-                        &claimed,
-                        error,
-                        OffsetDateTime::now_utc(),
-                    )
-                    .await;
-                }
+                let try_next = error.should_fallback() && attempt_index + 1 < chain.len();
                 last_error = Some(error);
-                if !has_next {
+                if !try_next {
                     break;
                 }
             }
