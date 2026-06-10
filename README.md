@@ -309,8 +309,9 @@ rss-ai-news --config-dir configs --category ai rebuild-report --date 2026-05-18 
 
 | 变量 | 何时需要 |
 |---|---|
-| `OPENAI_API_KEY` | `[ai].enabled = true` 时必填 |
-| `OPENAI_BASE_URL` | `[ai].enabled = true` 时必填；默认可用 `https://api.openai.com/v1` |
+| `OPENAI_API_KEY` | `[ai].enabled = true` 且存在继承全局凭证的板块时必填（W14-B：板块可经 `[category.ai_override].api_key_env` 自带 key；全部板块自带时全局可空） |
+| `OPENAI_BASE_URL` | `[ai].enabled = true` 且存在继承全局 endpoint 的板块时必填；板块可经 `[category.ai_override].base_url` 覆盖 |
+| 板块 `api_key_env` 指向的变量 | 该板块跑 `ai-run` 时必填（缺失启动即报错，错误只含变量名）；`validate-config` 会全量审计所有板块 |
 | `RSSHUB_BASE_URL` | 任一订阅源使用 `{RSSHUB}` 或 `{RSSHUB_BASE_URL}` 占位符时必填 |
 | `RSSHUB_ACCESS_KEY` | 可选；设置后会给 `feed_kind = "rsshub"` 的源在抓取时追加访问 key，不写入 `feed_sources.feed_url` |
 | `GITHUB_TOKEN` | 远端 GitHub 发布时必填 |
@@ -481,7 +482,7 @@ include_unscored = true
 | 字段 | 默认 | 何时调 |
 |---|---|---|
 | `model` | `"gpt-4o-mini"` | 按你的 OpenAI 兼容 API 实际可用模型填；模型 ID 不存在会跑时报错 |
-| `fallback_models` | `[]` | 主模型失败时依次回退的备选模型（W14-A）；仅"换模型可能有救"的失败触发（quota/限流/模型不可用/5xx/解析失败），凭证错与连不上不回退；共用全局凭证不跨 provider 路由。注意 `lease.ai_duration_seconds` 要覆盖 `(1+链长)` 倍批耗时（ai-run 启动时会预算校验）。板块可在 `[category.ai_override].fallback_models` 覆盖（省略=继承 / `[]`=禁用） |
+| `fallback_models` | `[]` | 主模型失败时依次回退的备选模型（W14-A）；仅"换模型可能有救"的失败触发（quota/限流/模型不可用/5xx/解析失败），凭证错与连不上不回退；链上所有模型共用该次运行的板块凭证（W14-B 板块可经 `[category.ai_override].base_url`/`api_key_env` 自带凭证），不跨 provider 路由。注意 `lease.ai_duration_seconds` 要覆盖 `(1+链长)` 倍批耗时（ai-run 启动时会预算校验）。板块可在 `[category.ai_override].fallback_models` 覆盖（省略=继承 / `[]`=禁用） |
 | `max_input_chars` | `8000` | 单篇文章送入 AI 前的字符截断；越大成本越高，越小可能丢上下文 |
 | `request_timeout_seconds` | `60` | 慢模型 / 长输入要调到 `120`+；过短会让 AI 阶段大量 `timeout` 重试 |
 | `ai.rate_limit.requests_per_minute` | `60` | 按你的 API tier 调；超出会被 governor 排队，不会丢请求 |

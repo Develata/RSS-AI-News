@@ -15,6 +15,12 @@ model = ""
 # [] = 本板块显式禁用回退；["m1","m2"] = 覆盖全局。链内会自动 trim/去空白/去重，并去掉
 # 与主模型重复的项。
 # fallback_models = ["gpt-4o", "gpt-4o-mini"]
+# 板块独立凭证（W14-B，可选）。省略或空串 = 继承全局 OPENAI_BASE_URL / OPENAI_API_KEY，
+# 两者相互独立（可只换 key 不换 endpoint）。api_key_env 的值是 env 变量名引用——key 本身
+# 绝不写进 toml，部署时在 .env 或进程环境配置该变量。全部板块自带凭证时全局 OPENAI_*
+# 可不设；本板块凭证缺失会在 ai-run 启动时报错（错误只含变量名，不含值）。
+# base_url = "https://api.deepseek.com/v1"
+# api_key_env = "DEEPSEEK_API_KEY"
 
 [category.publish_override]
 max_items_per_report = 30
