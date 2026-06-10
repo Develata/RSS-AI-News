@@ -204,6 +204,54 @@ async fn process_does_not_fall_back_on_connection_error() {
 }
 
 #[tokio::test]
+async fn process_aborts_fallback_when_lease_expired() {
+    // codex P2：lease 到期后不再继续 fallback。把 ai_duration_seconds 设为 0 →
+    // 本批 lease 截止时刻 = claim 时刻；首个模型尝试返回后 now() 已 ≥ 截止，
+    // fallback 前的到期校验应中止链，绝不消费 fallback 响应。该时序仅在 CLI
+    // 预算被绕过（如此处直接驱动 AiRunFlow）时可达。
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "ai-fallback-lease", "title", "body").await;
+    let client = Arc::new(MockAiClient::default());
+    let mut app = app_config(RetentionPolicy::Always, 1);
+    app.lease.ai_duration_seconds = 0;
+    let flow = flow_with_app(pool.clone(), Arc::clone(&client), app);
+    let mut opts = opts();
+    opts.fallback_models = vec!["fallback-model".to_string()];
+    flow.task_gen(&opts).await;
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+    // primary 命中 quota（should_fallback=true，但 is_retryable=false → permanent）。
+    client
+        .insert_error(
+            ai_result_id,
+            AiError::QuotaExceeded {
+                message: "no quota".to_string(),
+            },
+        )
+        .await;
+    // 这条成功响应不应被消费（fallback 因 lease 到期被中止）。
+    client.insert_success(ai_result_id, output_json(80)).await;
+
+    let summary = flow.process_ai_tasks(&opts).await;
+
+    assert_eq!(summary.succeeded, 0);
+    assert_eq!(summary.permanent_failed, 1);
+    assert_eq!(
+        ai_result_state(&pool, ai_result_id).await,
+        "permanent_failed"
+    );
+    // fallback 模型从未被调用：成功响应仍原样留在队列里。
+    assert_eq!(client.remaining(ai_result_id).await, 1);
+    // effective_model_id 未被写成 fallback-model（成功路径未走）。
+    let effective: Option<String> =
+        sqlx::query_scalar("SELECT effective_model_id FROM article_ai_results WHERE id = ?")
+            .bind(ai_result_id)
+            .fetch_one(&pool)
+            .await
+            .expect("ai result row readable");
+    assert_ne!(effective.as_deref(), Some("fallback-model"));
+}
+
+#[tokio::test]
 async fn process_writes_ai_raw_response_artifact_before_release() {
     let (_dir, pool) = make_test_pool().await;
     let article_id = seed_persisted_article(&pool, "ai-process-4", "title", "body").await;
@@ -315,7 +363,15 @@ async fn process_releases_permanent_on_invalid_json() {
 }
 
 fn flow(pool: SqlitePool, ai_client: Arc<MockAiClient>) -> AiRunFlow {
-    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    flow_with_app(pool, ai_client, app_config(RetentionPolicy::Always, 1))
+}
+
+fn flow_with_app(
+    pool: SqlitePool,
+    ai_client: Arc<MockAiClient>,
+    app: rss_ai_news_config::AppConfig,
+) -> AiRunFlow {
+    let app = Arc::new(app);
     let ctx = Arc::new(RunContext::new_for_stage(
         "ai_run",
         app,
@@ -399,6 +455,16 @@ impl MockAiClient {
             .entry(ai_result_id)
             .or_default()
             .push_back(MockAiResult::Error(error));
+    }
+
+    /// 队列里尚未被 `invoke` 消费的响应条数。用于断言某次模型尝试是否真的发起
+    /// （fallback 被中止时，后续响应应原样留在队列里）。
+    async fn remaining(&self, ai_result_id: i64) -> usize {
+        self.responses
+            .lock()
+            .await
+            .get(&ai_result_id)
+            .map_or(0, VecDeque::len)
     }
 }
 
