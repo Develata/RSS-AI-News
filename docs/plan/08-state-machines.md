@@ -45,20 +45,25 @@
 - `attempt_count` — 已尝试次数
 
 reclaim 任务扫到过期租约，把状态回退到 `pending` 类前置态，清空 lease 字段，**不**重置
-attempt_count（避免无限重试）。
+attempt_count（避免无限重试）。执行时机：**各 flow 启动期、首次 claim 前**（非常驻任务），
+连同耗尽 sweep 一并执行，见 [./15-retry-exhaustion-and-reclaim.md](./15-retry-exhaustion-and-reclaim.md) §5。
 
 ### 2.4 retry budget
 
 每个状态机的 retryable 失败次数有上限：
 
-| 状态机 | 配置项 | 默认值 |
+| 状态机 | 配置项 | 默认值（`configs/app.toml.example`） |
 |---|---|---|
-| FeedEntry | `retry.feed_max_attempts` | 5 |
+| FeedEntry | `retry.feed_entry_max_attempts` | 5 |
 | AiResult | `retry.ai_max_attempts` | 3 |
-| Publish | `retry.publish_max_attempts` | 3 |
-| ReindexJob | `retry.reindex_max_attempts` | 3 |
+| Publish | `retry.publish_max_attempts` | 5 |
 
-超限后 retryable 失败也会转为终态 `failed`。详细配置见 [./06-config.md](./06-config.md)。
+ReindexJob 无 retry 预算：claim 不过滤 attempt_count，失败经 `mark_failed` 直转终态。
+
+超限后 retryable 失败也会转为终态（FeedEntry/Publish → `failed`，AiResult →
+`permanent_failed`）。执行点与兜底 sweep 见
+[./15-retry-exhaustion-and-reclaim.md](./15-retry-exhaustion-and-reclaim.md)。
+详细配置见 [./06-config.md](./06-config.md)。
 
 ### 2.5 错误分类
 

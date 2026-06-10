@@ -22,6 +22,8 @@
 | 11 | [error-and-recovery.md](./11-error-and-recovery.md) | 错误模型 / exit code / 失败路径 / 重试边界 |
 | 12 | [deployment.md](./12-deployment.md) | Docker multi-stage / scheduler / GHCR / CI / PG 部署 |
 | 13 | [non-goals.md](./13-non-goals.md) | 明确不做的事（继承自旧蓝图 §14 不变量） |
+| 14 | [ai-fallback.md](./14-ai-fallback.md) | AI 失败回退（fallback 模型链）+ 板块凭证自治 |
+| 15 | [retry-exhaustion-and-reclaim.md](./15-retry-exhaustion-and-reclaim.md) | 重试预算耗尽转终态 + lease 回收接线 |
 
 ## 与其它目录的关系
 

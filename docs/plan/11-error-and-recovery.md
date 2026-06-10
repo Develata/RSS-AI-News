@@ -32,7 +32,6 @@
     ├── Publish(PublishError)
     ├── Report(ReportError)
     ├── LeaseConflict { table, id, expected_owner }
-    ├── RetryBudgetExhausted { table, id, attempts }
     └── Cancelled
 
 交互层（crates/cli + binary）
@@ -79,7 +78,7 @@ trait ClassifiedError {
 | feed 抓取 | `feed_entries.last_error*` | `Fetching → PendingFetch`（retry）/ `Failed`（exhausted） |
 | 正文提取 | `feed_entries.last_error*` | 同上；fallback 命中时转 `FallbackPersisted` |
 | AI 调用 | `article_ai_results.last_error*` | `Running → Pending`（retry）/ `PermanentFailed`（exhausted） |
-| 本地落盘 | `publish_records.last_error*` | `Rendered → Failed`（无 retry） |
+| 本地落盘 | `publish_records.last_error*` | retryable 回原态重试 / 耗尽或永久 → `Failed` |
 | GitHub 推送 | `publish_records.last_error*` | 422 → 重试一次后 `Failed`；其它直接 `Failed` |
 | Reindex 批次 | `reindex_jobs.last_error*` | `Running → Pending`（retry）/ `Failed`（exhausted） |
 
@@ -87,15 +86,18 @@ trait ClassifiedError {
 
 ## 4. retry 预算
 
-每个状态机有独立预算，超限即转终态 `failed`。配置项：
+每个 lease 状态机有独立预算，超限即转终态（FeedEntry/Publish → `failed`，AiResult →
+`permanent_failed`）。配置项：
 
 | 状态机 | 配置 | 默认 |
 |---|---|---|
-| FeedEntry | `retry.feed_max_attempts` | 5 |
+| FeedEntry | `retry.feed_entry_max_attempts` | 5 |
 | AiResult | `retry.ai_max_attempts` | 3 |
-| Publish | `retry.publish_max_attempts` | 3 |
-| Reindex | `retry.reindex_max_attempts` | 3 |
+| Publish | `retry.publish_max_attempts` | 5 |
 
+Reindex 无预算（claim 不过滤 attempt_count，失败 `mark_failed` 直转终态）。
+耗尽转终态的执行点（release 折叠 + 兜底 sweep）见
+[./15-retry-exhaustion-and-reclaim.md](./15-retry-exhaustion-and-reclaim.md)。
 详细 schema 见 [./06-config.md](./06-config.md)。
 
 ### 4.1 attempt_count 的契约
@@ -173,8 +175,11 @@ ignored_unit_patterns = "warn"
 
 ### 7.1 lease 过期回收
 
-`fetching` / `extracting` / `running` / `running`（reindex）期间崩溃 → lease 过期后自动回退到
-前置 `pending` 态，下轮 claim 重领。详见 [./05-storage.md](./05-storage.md) §lease。
+`fetching` / `extracting` / `running` / `running`（reindex）期间崩溃 → lease 过期后，
+**下一次 flow 启动期**经 `reclaim_expired_leases` 回退到前置 `pending` 态，下轮 claim 重领；
+预算已耗尽者由同时执行的 sweep 转终态。接线设计见
+[./15-retry-exhaustion-and-reclaim.md](./15-retry-exhaustion-and-reclaim.md) §5，
+lease 模型见 [./05-storage.md](./05-storage.md) §lease。
 
 ### 7.2 事务回滚
 
