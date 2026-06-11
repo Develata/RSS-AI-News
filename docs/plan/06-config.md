@@ -215,12 +215,13 @@ enabled = true
 - categories 顺序变化不影响 sha（先排序）
 - env 变量**不**参与（密钥变化不应触发版本切换）
 
-`config_sha256` 写入 `rule_versions` 表，用于 `ConfigVersionStore::get_or_create_config_version`，
-向 reindex 流程关联具体配置快照。详见 [./05-storage.md](./05-storage.md) §8 与
+`config_sha256` 写入 `rule_versions` 表（`kind='config'`），CLI 启动期 seed
+（`context_factory::ensure_active_config_version`）检测 active 行的
+`payload_sha256` 与当前 sha 是否一致，不一致则单事务轮换（demote 旧 active →
+按 sha 复用/插入 → promote）。ingest / reindex 通过 `active_rule("config")`
+读取该行给 `feed_sources.config_version` 盖版本戳。完整生命周期设计见
+[./16-config-versioning.md](./16-config-versioning.md)，partial unique 约束见
 [../adr/0004-active-rule-resolver-partial-unique.md](../adr/0004-active-rule-resolver-partial-unique.md)。
-
-> **已知缺口**：bootstrap rule 升 active 后真实 config sha 的替换路径，详见
-> Phase B1 结束前未关闭的 W10 后续设计任务。
 
 ## 12. 错误模型对接
 

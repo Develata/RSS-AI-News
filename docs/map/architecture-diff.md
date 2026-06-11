@@ -28,12 +28,16 @@
 | 编号 | 发现日期 | 节点 :id | 差异描述 | 状态 | 收敛 |
 |---|---|---|---|---|---|
 | D-001 | 2026-06-04 | _(baseline)_ | 初版 plan 视图与 code 视图按章节 + codegraph 协同写出，未发现需登记的具体漂移 | resolved | 基线建立；后续漂移由首先发现的人在此追加 |
+| D-002 | 2026-06-11 | config-versioning | plan 06 §11 声称 `ConfigVersionStore::get_or_create_config_version` 向 reindex 关联配置快照；code 中该 trait 生产路径零调用（reindex 实际走 `active_rule_or_register`），`reindex.rs` 注释同样描述不实 | open | 改代码 + 改 plan：W16 设计（plan/16-config-versioning.md）P2 删除 trait 死代码、P0 修订 06 §11 |
+| D-003 | 2026-06-11 | storage-multi-dialect-doc | `cli/src/context_factory.rs` 等多处注释引用 `docs/design/storage-multi-dialect.md`（§2.5/§5.4），该文件在仓库中不存在（docs/design/ 目录不存在） | open | 待 PG 实补设计落地时补文件，或注释改指既有章节 |
 
 ## 已知**可能**的近期漂移点（监视）
 
 以下不是确认漂移，只是设计/实现演进路径上较可能产生差异的位置，列出便于日后核对：
 
-- `config_sha256` 与 bootstrap rule 升 active 后真实 sha 替换路径（plan 06 §11 标注的"已知缺口"）
+- ~~`config_sha256` 与 bootstrap rule 升 active 后真实 sha 替换路径~~ → 已升级为
+  W16 设计议题（[../plan/16-config-versioning.md](../plan/16-config-versioning.md)），
+  相关文档漂移登记为 D-002
 - `replay --kind` 对文件后端 artifact 的支持（commands/replay.md 标注 partial）
 - `scheduler` 镜像缺自动化 e2e（commands/scheduler.md 标注 partial）
 - `runtime/flows/backfill.rs` 与 `runtime/flows/rebuild_report.rs` 的 plan 节点尚未在 plan/ 章节内单列入口段落（10 章是整段叙述）
