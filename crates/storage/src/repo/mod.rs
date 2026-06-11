@@ -48,5 +48,5 @@ pub use reindex_job::{
     ClaimedReindexJob, FinishReindexTxOutcome, ReindexJob, ReindexJobRepo, ReindexJobRepository,
     StartReindexTxOutcome,
 };
-pub use rule_version::{RuleVersion, RuleVersionRepo, RuleVersionRepository};
+pub use rule_version::{ConfigRotation, RuleVersion, RuleVersionRepo, RuleVersionRepository};
 pub use run_event::{NewRunEvent, RunEventRepo, RunEventRepository};

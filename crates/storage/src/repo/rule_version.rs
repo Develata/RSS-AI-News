@@ -77,6 +77,30 @@ pub trait RuleVersionRepository: Send + Sync {
     }
 }
 
+/// W16（docs/plan/16-config-versioning.md §4）：`kind='config'` 行 sha-keyed
+/// 轮换的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigRotation {
+    /// active 行的 `payload_sha256` 已与当前 config 一致，未发生任何写入。
+    NoChange { id: i64 },
+    /// 发生轮换：`new_id` 是轮换后的 active 行；`demoted_id` 是被推到
+    /// `superseded` 的旧 active 行（轮换前无 active 行时为 `None`）。
+    Rotated {
+        new_id: i64,
+        demoted_id: Option<i64>,
+    },
+}
+
+impl ConfigRotation {
+    /// 轮换后当前 active config 行的 id。
+    pub fn active_id(&self) -> i64 {
+        match self {
+            Self::NoChange { id } => *id,
+            Self::Rotated { new_id, .. } => *new_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RuleVersionRepo {
     pool: StoragePool,
@@ -122,6 +146,38 @@ impl RuleVersionRepo {
         self.get_or_create("config", &version_tag, "auto-registered config", sha256)
             .await
     }
+
+    /// W16（docs/plan/16-config-versioning.md §4）：让 `kind='config'` 的
+    /// active 行跟随当前真实 `config_sha256`。
+    ///
+    /// 1. active 行的 payload 已等于 `sha256` → [`ConfigRotation::NoChange`]
+    ///    （热路径，单 SELECT 零写入）。
+    /// 2. 否则单事务内：demote 现 active（若有）→ 按 `payload_sha256` 查既有
+    ///    行（pending / superseded 均复活为 active 并清 `retired_at`；config
+    ///    回滚 A→B→A 必须复用原行——`(kind, version_tag)` 唯一且 tag 由 sha
+    ///    派生，插同 sha 新行走不通）→ 无既有行则插入新 active 行。
+    ///
+    /// 不变量：事务提交后 `kind='config'` 恰有一行 active 且 payload 等于
+    /// `sha256`；partial unique `uq_rule_versions_kind_active` 在 DB 层兜底。
+    /// 并发轮换 last-writer-wins（最近启动的 config 生效，语义正确）。
+    pub async fn rotate_active_config(
+        &self,
+        sha256: &str,
+        description: &str,
+        now: OffsetDateTime,
+    ) -> Result<ConfigRotation, StorageError> {
+        if let Some(active) = self.active_rule("config").await?
+            && active.payload_sha256 == sha256
+        {
+            return Ok(ConfigRotation::NoChange { id: active.id });
+        }
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_rotate_active_config(p, sha256, description, now).await
+            }
+            StoragePool::Postgres(p) => pg_rotate_active_config(p, sha256, description, now).await,
+        }
+    }
 }
 
 #[async_trait]
@@ -140,6 +196,34 @@ impl ConfigVersionStore for RuleVersionRepo {
 
 const SELECT_CONFIG_VERSION_BY_SHA_SQL: &str =
     "SELECT id FROM rule_versions WHERE kind = 'config' AND payload_sha256 = $1 LIMIT 1";
+
+// ── W16 rotate_active_config 三步 SQL（跨方言等价）────────────────
+//
+// demote 不排除目标 sha：极端并发下另一进程已把同 sha 推 active 时，
+// 本事务先 demote 再按 sha 复活同一行，净效果幂等（设计 §4）。
+
+const DEMOTE_ACTIVE_CONFIG_SQL: &str = r#"
+UPDATE rule_versions
+SET status = 'superseded',
+    retired_at = $1
+WHERE kind = 'config' AND status = 'active'
+RETURNING id
+"#;
+
+/// 复活既有行（pending 或 superseded → active）。仅 `kind='config'` 开放
+/// superseded→active 迁移（config 回滚 A→B→A），见 16-config-versioning §4。
+const REVIVE_CONFIG_VERSION_SQL: &str = r#"
+UPDATE rule_versions
+SET status = 'active',
+    retired_at = NULL
+WHERE id = $1 AND kind = 'config'
+"#;
+
+const INSERT_ACTIVE_CONFIG_VERSION_SQL: &str = r#"
+INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status)
+VALUES ('config', $1, $2, $3, 'active')
+RETURNING id
+"#;
 
 /// F15-1 引入了 partial unique index `uq_rule_versions_kind_active`
 /// (kind WHERE status='active')。get_or_create 不感知"是否首版"，因此
@@ -284,6 +368,51 @@ async fn sqlite_active_rule(
         .map(|opt| opt.map(RuleVersion::from))
 }
 
+/// W16：demote → 按 sha 复活/插入 → commit，单事务保证"恰一行 active"
+/// 不变量没有可观察的中间窗口（SQLite 写串行化下天然成立）。
+async fn sqlite_rotate_active_config(
+    pool: &SqlitePool,
+    sha256: &str,
+    description: &str,
+    now: OffsetDateTime,
+) -> Result<ConfigRotation, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    let demoted_id = sqlx::query_scalar::<_, i64>(DEMOTE_ACTIVE_CONFIG_SQL)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    let existing = sqlx::query_scalar::<_, i64>(SELECT_CONFIG_VERSION_BY_SHA_SQL)
+        .bind(sha256)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    let new_id = match existing {
+        Some(id) => {
+            sqlx::query(REVIVE_CONFIG_VERSION_SQL)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(StorageError::from)?;
+            id
+        }
+        None => {
+            let tag: String = sha256.chars().take(12).collect();
+            sqlx::query_scalar::<_, i64>(INSERT_ACTIVE_CONFIG_VERSION_SQL)
+                .bind(&tag)
+                .bind(description)
+                .bind(sha256)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| {
+                    classify_db_error(error, "rule_versions", format!("config/{tag}"))
+                })?
+        }
+    };
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(ConfigRotation::Rotated { new_id, demoted_id })
+}
+
 // ── PostgreSQL helper（W11-P3-E-1） ─────────────────────────────
 
 /// codex P3-E-fix1 HIGH-1 修复：PG 上 `get_or_create` 的并发首版 seed race。
@@ -359,6 +488,68 @@ async fn pg_insert_pending_rule(
         .fetch_one(pool)
         .await
         .map_err(|error| classify_db_error(error, "rule_versions", format!("{kind}/{version_tag}")))
+}
+
+/// W16：与 sqlite 同步骤。跨进程并发轮换时 `(kind, version_tag)` 唯一或
+/// partial unique 触发 23505 → 单次 retry（沿用 [`pg_get_or_create`] 模式）：
+/// 重试时 SELECT BY SHA 已能看到对方 commit 的行，走复活分支。两个不同 sha
+/// 共享前 12 hex 的 tag 碰撞（48-bit，概率可忽略）重试后仍 Conflict，
+/// 向上显式 fail 不静默。
+async fn pg_rotate_active_config(
+    pool: &PgPool,
+    sha256: &str,
+    description: &str,
+    now: OffsetDateTime,
+) -> Result<ConfigRotation, StorageError> {
+    match pg_rotate_active_config_once(pool, sha256, description, now).await {
+        Err(StorageError::Conflict { table, .. }) if table == "rule_versions" => {
+            pg_rotate_active_config_once(pool, sha256, description, now).await
+        }
+        other => other,
+    }
+}
+
+async fn pg_rotate_active_config_once(
+    pool: &PgPool,
+    sha256: &str,
+    description: &str,
+    now: OffsetDateTime,
+) -> Result<ConfigRotation, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    let demoted_id = sqlx::query_scalar::<_, i64>(DEMOTE_ACTIVE_CONFIG_SQL)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    let existing = sqlx::query_scalar::<_, i64>(SELECT_CONFIG_VERSION_BY_SHA_SQL)
+        .bind(sha256)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    let new_id = match existing {
+        Some(id) => {
+            sqlx::query(REVIVE_CONFIG_VERSION_SQL)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(StorageError::from)?;
+            id
+        }
+        None => {
+            let tag: String = sha256.chars().take(12).collect();
+            sqlx::query_scalar::<_, i64>(INSERT_ACTIVE_CONFIG_VERSION_SQL)
+                .bind(&tag)
+                .bind(description)
+                .bind(sha256)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| {
+                    classify_db_error(error, "rule_versions", format!("config/{tag}"))
+                })?
+        }
+    };
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(ConfigRotation::Rotated { new_id, demoted_id })
 }
 
 async fn pg_active_rule(pool: &PgPool, kind: &str) -> Result<Option<RuleVersion>, StorageError> {
