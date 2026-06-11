@@ -1,6 +1,6 @@
 # Agent 工作指南
 
-本文件指引在 RSS-AI-News 仓库内工作的所有 agent（含 Claude Code、Codex MCP、各类 subagent）。
+本文件指引在 RSS-AI-News 仓库内工作的所有 agent（含 Claude Code、Codex CLI、各类 subagent）。
 
 ## 角色定位
 
@@ -92,8 +92,8 @@ TEMPLATE 见 [handoffs/TEMPLATE.md](./handoffs/TEMPLATE.md)。
 
 ## 与 codex 协作
 
-参考 `~/.claude/skills/codex-orchestration/`。RSS-AI-News 上 codex 已多次承担实施类任务，
-Claude 做评审与决策。两边并行时：
+参考 `~/.claude/skills/codex-orchestration/`（统一走 `codex exec` CLI，不走 MCP）。
+RSS-AI-News 上 codex 已多次承担实施类任务，Claude 做评审与决策。两边并行时：
 - Claude 不动 codex 工作中文件
 - 提交前互相 review 对方变更
 - 关键决策写入 adr/，不留在私聊
