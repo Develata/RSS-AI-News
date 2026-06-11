@@ -18,6 +18,34 @@ use common::{
 };
 
 #[tokio::test]
+async fn store_local_run_start_maintenance_sweeps_exhausted_rendered_record() {
+    // W15 §5（codex P4 复审）：publish CLI 断点续跑时 store_local 可能是
+    // 本次 run 的首次 claim——record 停在 rendered 且预算耗尽时必须被入口
+    // sweep 转 failed，而非永远 NothingToClaim。
+    let (_dir, pool) = make_test_pool().await;
+    let rendered_at = fixed_time();
+    let record_id = seed_rendered_publish_record(&pool, None, rendered_at).await;
+    sqlx::query("UPDATE publish_records SET attempt_count = 5 WHERE id = ?")
+        .bind(record_id)
+        .execute(&pool)
+        .await
+        .expect("prime exhausted attempt_count");
+    let flow = flow(pool.clone(), Arc::new(MockFailingTarget));
+
+    let outcome = flow.store_local(store_opts(rendered_at)).await;
+
+    assert_eq!(outcome.status, PublishStoreLocalStatus::NothingToClaim);
+    assert_record_state(&pool, record_id, "failed").await;
+    let swept_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM run_events WHERE event_kind = 'retry_budget_swept'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("event count should be readable");
+    assert_eq!(swept_events, 1);
+}
+
+#[tokio::test]
 async fn store_local_with_no_remote_target_publishes_locally_and_promotes_articles() {
     let (_dir, pool) = make_test_pool().await;
     let rendered_at = fixed_time();

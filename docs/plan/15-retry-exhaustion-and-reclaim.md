@@ -137,11 +137,16 @@ WHERE state IN (<可领取态>)
 |---|---|---|---|
 | extract（含 fetch；ingest 命令内） | feed_entries | ✓ | ✓ |
 | ai_run process | article_ai_results | ✓ | ✓ |
-| publish freeze / remote batch（两个独立入口） | publish_records | ✓ | ✓ |
+| publish 全阶段：freeze / render / store_local / publish_remote（单条 + batch） | publish_records | ✓ | ✓ |
 | reindex | reindex_jobs | ✓ | —（无预算语义） |
 
 reindex 不做 sweep：其 claim 不过滤 attempt_count、失败走 `mark_failed` 直转终态，
 不存在耗尽卡死；只缺崩溃回收，纯接线 ①。
+
+publish 必须覆盖**全部**阶段入口而非仅 freeze/remote batch：publish CLI 支持断点续跑
+（record 停在 `snapshot_frozen` 时跳过 freeze 直接 render；`rendered` → store_local；
+`stored_local` → publish_remote），任一阶段都可能是本次 run 的首次 claim。维护操作幂等、
+count=0 静默，同一 run 内多次执行无害（codex W15-P4 复审补全）。
 
 ## 6. 行为变化与恢复路径（用户已确认的语义收紧）
 

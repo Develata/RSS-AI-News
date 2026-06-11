@@ -18,6 +18,7 @@ use time::OffsetDateTime;
 
 use crate::context::RunContext;
 use crate::events::RunEventEmitter;
+use crate::flows::maintenance::emit_maintenance_outcome;
 
 mod dto;
 mod freeze;
@@ -98,6 +99,26 @@ impl PublishFlow {
                 })
             }
         }
+    }
+
+    /// W15 §5：publish_records 的启动期 maintenance（① reclaim + ② sweep，
+    /// 顺序固定，best-effort）。publish CLI 支持断点续跑，freeze / render /
+    /// store_local / publish_remote（单条与 batch）任一阶段都可能是本次 run
+    /// 对 publish_records 的首次 claim，故每个阶段入口各执行一次（codex
+    /// W15-P4 复审）。幂等、count=0 静默，同 run 内重复无害。
+    async fn run_publish_maintenance(&self, emitter: &RunEventEmitter<'_>) {
+        let now = OffsetDateTime::now_utc();
+        let reclaimed = self
+            .ctx
+            .publish_record_repo
+            .reclaim_expired_leases(now)
+            .await;
+        let swept = self
+            .ctx
+            .publish_record_repo
+            .terminalize_exhausted(self.ctx.app.retry.publish_max_attempts, now)
+            .await;
+        emit_maintenance_outcome(emitter, "publish_records", reclaimed, Some(swept)).await;
     }
 
     async fn fail_claimed(

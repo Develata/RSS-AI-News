@@ -37,6 +37,12 @@ impl PublishFlow {
             stage: "publish",
             repo: self.ctx.event_repo.as_ref(),
         };
+
+        // W15 §5：publish CLI 断点续跑时 render 可能是本次 run 的首次 claim
+        // （record 停在 snapshot_frozen 时跳过 freeze），故同样接 ① + ②
+        // （codex W15-P4 复审）。幂等且 count=0 静默，与 freeze 重复无害。
+        self.run_publish_maintenance(&emitter).await;
+
         let now = OffsetDateTime::now_utc();
         let owner = build_owner_id();
         let claim = ClaimRequest {

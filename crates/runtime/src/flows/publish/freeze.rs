@@ -18,7 +18,6 @@ use time::{Duration, OffsetDateTime};
 use super::PublishFlow;
 use super::dto::{PublishFreezeOptions, PublishFreezeOutcome, PublishFreezeStatus};
 use crate::events::RunEventEmitter;
-use crate::flows::maintenance::emit_maintenance_outcome;
 
 impl PublishFlow {
     pub async fn freeze(&self, opts: PublishFreezeOptions) -> PublishFreezeOutcome {
@@ -56,18 +55,7 @@ impl PublishFlow {
             .await;
 
         // W15 §5：首次 claim 前执行一次 ① reclaim + ② sweep（顺序固定，best-effort）。
-        let maintenance_now = OffsetDateTime::now_utc();
-        let reclaimed = self
-            .ctx
-            .publish_record_repo
-            .reclaim_expired_leases(maintenance_now)
-            .await;
-        let swept = self
-            .ctx
-            .publish_record_repo
-            .terminalize_exhausted(self.ctx.app.retry.publish_max_attempts, maintenance_now)
-            .await;
-        emit_maintenance_outcome(&emitter, "publish_records", reclaimed, Some(swept)).await;
+        self.run_publish_maintenance(&emitter).await;
 
         let now = OffsetDateTime::now_utc();
         let owner = build_owner_id();
