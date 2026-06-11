@@ -18,7 +18,10 @@
 辅助状态轮（不在 4 状态机内，但同等重要）：
 
 - `ReindexJobState`：规则版本升级任务轮，见 [../adr/0004-active-rule-resolver-partial-unique.md](../adr/0004-active-rule-resolver-partial-unique.md)
-- `RuleVersionStatus`：`rule_versions` 的 pending / active / superseded 三态
+- `RuleVersionStatus`：`rule_versions` 的 pending / active / superseded 三态。
+  reindex 管理的 kind 单向推进（pending → active → superseded）；**仅
+  `kind='config'` 额外开放 superseded → active 复活**（config 回滚 A→B→A 时
+  rotate 复用原行并清 `retired_at`，见 [./16-config-versioning.md](./16-config-versioning.md) §4）
 
 ## 2. 通用约定
 

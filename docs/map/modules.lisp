@@ -45,7 +45,8 @@
        :downstream (domain)
        :state active
        :notes "三层加载：.env (EnvConfig) + app.toml (AppConfig) + categories/*.toml (CategoryConfig)。
-               compute_config_sha256 + ConfigVersionStore 提供版本指纹。
+               compute_config_sha256 提供版本指纹（版本行轮换在 storage 层
+               rotate_active_config，W16 见 plan/16-config-versioning.md）。
                validate.rs 把 ConfigError + DiagnosticReport 一次性吐给 CLI。
                详见 plan/06-config.md。")
 

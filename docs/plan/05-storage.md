@@ -247,6 +247,15 @@ active rule resolver 保证 reindex 中途 `active_rule(kind)` 仍返回旧 acti
 
 测试覆盖：[`crates/runtime/tests/`](../../crates/runtime/tests/) 中的 reindex_* 测试。
 
+### 8.2 `kind='config'` 行的生命周期（W16）
+
+config 行**不走** reindex 两阶段激活，由 CLI 启动期 seed 直接轮换
+（`RuleVersionRepo::rotate_active_config`）：active 行 `payload_sha256` 与当前
+`config_sha256` 一致 → 零写入；漂移 → 单事务 demote 旧 active → 按 payload
+复用既有行（pending / superseded 复活，清 `retired_at`）或插入新行（tag =
+sha 前 12 位）。仅该 kind 开放 superseded → active 复活（回滚 A→B→A）。
+完整设计与决策见 [./16-config-versioning.md](./16-config-versioning.md)。
+
 ## 9. raw_artifacts
 
 留档原始外部输入，支持回放。三种 kind：

@@ -24,6 +24,7 @@
 | 13 | [non-goals.md](./13-non-goals.md) | 明确不做的事（继承自旧蓝图 §14 不变量） |
 | 14 | [ai-fallback.md](./14-ai-fallback.md) | AI 失败回退（fallback 模型链）+ 板块凭证自治 |
 | 15 | [retry-exhaustion-and-reclaim.md](./15-retry-exhaustion-and-reclaim.md) | 重试预算耗尽转终态 + lease 回收接线 |
+| 16 | [config-versioning.md](./16-config-versioning.md) | config 版本闭环：active config 跟随真实 sha |
 
 ## 与其它目录的关系
 

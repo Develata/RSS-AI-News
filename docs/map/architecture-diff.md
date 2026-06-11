@@ -28,7 +28,7 @@
 | 编号 | 发现日期 | 节点 :id | 差异描述 | 状态 | 收敛 |
 |---|---|---|---|---|---|
 | D-001 | 2026-06-04 | _(baseline)_ | 初版 plan 视图与 code 视图按章节 + codegraph 协同写出，未发现需登记的具体漂移 | resolved | 基线建立；后续漂移由首先发现的人在此追加 |
-| D-002 | 2026-06-11 | config-versioning | plan 06 §11 声称 `ConfigVersionStore::get_or_create_config_version` 向 reindex 关联配置快照；code 中该 trait 生产路径零调用（reindex 实际走 `active_rule_or_register`），`reindex.rs` 注释同样描述不实 | open | 改代码 + 改 plan：W16 设计（plan/16-config-versioning.md）P2 删除 trait 死代码、P0 修订 06 §11 |
+| D-002 | 2026-06-11 | config-versioning | plan 06 §11 声称 `ConfigVersionStore::get_or_create_config_version` 向 reindex 关联配置快照；code 中该 trait 生产路径零调用（reindex 实际走 `active_rule_or_register`），`reindex.rs` 注释同样描述不实 | resolved | 双向收敛：P0 修订 06 §11（c6612a7）；P2 删除 trait 死代码 + 修 reindex.rs 注释（43f7443） |
 | D-003 | 2026-06-11 | storage-multi-dialect-doc | `cli/src/context_factory.rs` 等多处注释引用 `docs/design/storage-multi-dialect.md`（§2.5/§5.4），该文件在仓库中不存在（docs/design/ 目录不存在） | open | 待 PG 实补设计落地时补文件，或注释改指既有章节 |
 
 ## 已知**可能**的近期漂移点（监视）
