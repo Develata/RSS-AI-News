@@ -156,6 +156,24 @@ WHERE state IN ('fetching', 'extracting')
 
 涉及 lease 的表：`feed_entries` / `article_ai_results` / `publish_records` / `reindex_jobs`。
 
+### 5.1 重试预算耗尽闭环（W15）
+
+retryable release 在 SQL 内按预算折叠，杜绝"耗尽后回到可领取态但永远不被 claim"的卡死：
+
+```sql
+UPDATE <表>
+SET state = CASE WHEN attempt_count >= $max THEN '<终态>' ELSE '<可领取态>' END,
+    lease_owner = NULL, lease_expires_at = NULL, last_error = $..., ...
+WHERE id = $... AND lease_owner = $...
+RETURNING state;  -- 调用方据此判别 ReleaseFailureOutcome { released, exhausted }
+```
+
+辅以 `terminalize_exhausted` 兜底 sweep（可领取态 + `attempt_count >= max` + lease
+空/过期 → 终态；`COALESCE` 保留已有 `last_error*`，缺失时填 `retry budget exhausted`），
+覆盖"崩溃发生在最后一次尝试"的路径。reindex 无预算语义（claim 不过滤
+attempt_count，失败直转终态），只接 reclaim。接线时机、事件与恢复路径见
+[./15-retry-exhaustion-and-reclaim.md](./15-retry-exhaustion-and-reclaim.md) §5–§7。
+
 ## 6. 多方言翻译规则
 
 由 [`docs-backup/design/storage-multi-dialect.md`](../../docs-backup/design/storage-multi-dialect.md) §5

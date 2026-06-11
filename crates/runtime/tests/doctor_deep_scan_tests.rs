@@ -1,20 +1,32 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rss_ai_news_config::RetryConfig;
 use rss_ai_news_runtime::doctor::deep_scan::{InvariantId, run};
 use rss_ai_news_storage::{StoragePool, build_sqlite_pool, run_migrations};
 use sqlx::SqlitePool;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+fn retry_config() -> RetryConfig {
+    RetryConfig {
+        feed_entry_max_attempts: 5,
+        ai_max_attempts: 3,
+        publish_max_attempts: 5,
+    }
+}
+
 macro_rules! happy_path_test {
     ($name:ident, $id:expr) => {
         #[tokio::test]
         async fn $name() {
             let pool = make_pool().await;
-            let report = run(&rss_ai_news_storage::StoragePool::Sqlite(pool.clone()))
-                .await
-                .expect("deep scan");
+            let report = run(
+                &rss_ai_news_storage::StoragePool::Sqlite(pool.clone()),
+                &retry_config(),
+            )
+            .await
+            .expect("deep scan");
             assert_eq!(violations(&report, $id), 0);
         }
     };
@@ -29,6 +41,9 @@ happy_path_test!(i4b_prime_happy_path, InvariantId::I4BPrime);
 happy_path_test!(i5_happy_path, InvariantId::I5);
 happy_path_test!(i6_happy_path, InvariantId::I6);
 happy_path_test!(i8_happy_path, InvariantId::I8);
+happy_path_test!(i9_feed_happy_path, InvariantId::I9Feed);
+happy_path_test!(i9_ai_happy_path, InvariantId::I9Ai);
+happy_path_test!(i9_publish_happy_path, InvariantId::I9Publish);
 
 #[tokio::test]
 async fn i4_violation_ready_for_publish_with_non_keep_ai_row() {
@@ -36,9 +51,12 @@ async fn i4_violation_ready_for_publish_with_non_keep_ai_row() {
     let article_id = insert_article(&pool, "ready_for_publish").await;
     insert_ai_result(&pool, article_id, "filtered", None, None).await;
 
-    let report = run(&rss_ai_news_storage::StoragePool::Sqlite(pool.clone()))
-        .await
-        .expect("deep scan");
+    let report = run(
+        &rss_ai_news_storage::StoragePool::Sqlite(pool.clone()),
+        &retry_config(),
+    )
+    .await
+    .expect("deep scan");
 
     assert_eq!(violations(&report, InvariantId::I4), 1);
 }
@@ -51,9 +69,12 @@ async fn i4a_prime_violation_publish_item_bound_to_non_keep_ai_result() {
     let publish_record_id = insert_publish_record(&pool, "snapshot_frozen").await;
     insert_publish_item(&pool, publish_record_id, article_id, Some(ai_result_id)).await;
 
-    let report = run(&rss_ai_news_storage::StoragePool::Sqlite(pool.clone()))
-        .await
-        .expect("deep scan");
+    let report = run(
+        &rss_ai_news_storage::StoragePool::Sqlite(pool.clone()),
+        &retry_config(),
+    )
+    .await
+    .expect("deep scan");
 
     assert_eq!(violations(&report, InvariantId::I4APrime), 1);
 }
@@ -66,9 +87,12 @@ async fn i4b_prime_violation_passthrough_publish_item_with_ai_row() {
     let publish_record_id = insert_publish_record(&pool, "snapshot_frozen").await;
     insert_publish_item(&pool, publish_record_id, article_id, None).await;
 
-    let report = run(&rss_ai_news_storage::StoragePool::Sqlite(pool.clone()))
-        .await
-        .expect("deep scan");
+    let report = run(
+        &rss_ai_news_storage::StoragePool::Sqlite(pool.clone()),
+        &retry_config(),
+    )
+    .await
+    .expect("deep scan");
 
     assert_eq!(violations(&report, InvariantId::I4BPrime), 1);
 }
@@ -81,11 +105,89 @@ async fn i6_violation_successful_publish_record_with_unpublished_article() {
     let publish_record_id = insert_publish_record(&pool, "published_remote").await;
     insert_publish_item(&pool, publish_record_id, article_id, Some(ai_result_id)).await;
 
-    let report = run(&rss_ai_news_storage::StoragePool::Sqlite(pool.clone()))
-        .await
-        .expect("deep scan");
+    let report = run(
+        &rss_ai_news_storage::StoragePool::Sqlite(pool.clone()),
+        &retry_config(),
+    )
+    .await
+    .expect("deep scan");
 
     assert_eq!(violations(&report, InvariantId::I6), 1);
+}
+
+// === W15 I9：预算耗尽的可领取行（docs/plan/15 §7） ===
+
+#[tokio::test]
+async fn i9_feed_violation_claimable_entry_with_exhausted_budget() {
+    let pool = make_pool().await;
+    let entry_id = insert_feed_entry(&pool).await;
+    sqlx::query("UPDATE feed_entries SET state = 'pending_fetch', attempt_count = 5 WHERE id = ?")
+        .bind(entry_id)
+        .execute(&pool)
+        .await
+        .expect("prime exhausted entry");
+
+    let report = run(
+        &rss_ai_news_storage::StoragePool::Sqlite(pool.clone()),
+        &retry_config(),
+    )
+    .await
+    .expect("deep scan");
+
+    assert_eq!(violations(&report, InvariantId::I9Feed), 1);
+}
+
+#[tokio::test]
+async fn i9_ai_violation_counts_only_exhausted_pending() {
+    let pool = make_pool().await;
+    let exhausted_article = insert_article(&pool, "ai_pending").await;
+    let exhausted_id = insert_ai_result(&pool, exhausted_article, "pending", None, None).await;
+    sqlx::query("UPDATE article_ai_results SET attempt_count = 3 WHERE id = ?")
+        .bind(exhausted_id)
+        .execute(&pool)
+        .await
+        .expect("prime exhausted ai result");
+    // 预算未满的 pending 行不计入（复用既有 rule id 插入，rule_versions.kind
+    // 每 kind 唯一，不能再走 insert_ai_result 造新 rule）。
+    sqlx::query(
+        "INSERT INTO article_ai_results (article_id, prompt_version, output_schema_version, \
+         model_id, state) \
+         SELECT article_id, prompt_version, output_schema_version, 'model-fresh', 'pending' \
+         FROM article_ai_results WHERE id = ?",
+    )
+    .bind(exhausted_id)
+    .execute(&pool)
+    .await
+    .expect("insert fresh pending ai result");
+
+    let report = run(
+        &rss_ai_news_storage::StoragePool::Sqlite(pool.clone()),
+        &retry_config(),
+    )
+    .await
+    .expect("deep scan");
+
+    assert_eq!(violations(&report, InvariantId::I9Ai), 1);
+}
+
+#[tokio::test]
+async fn i9_publish_violation_exhausted_stage_state() {
+    let pool = make_pool().await;
+    let record_id = insert_publish_record(&pool, "rendered").await;
+    sqlx::query("UPDATE publish_records SET attempt_count = 5 WHERE id = ?")
+        .bind(record_id)
+        .execute(&pool)
+        .await
+        .expect("prime exhausted publish record");
+
+    let report = run(
+        &rss_ai_news_storage::StoragePool::Sqlite(pool.clone()),
+        &retry_config(),
+    )
+    .await
+    .expect("deep scan");
+
+    assert_eq!(violations(&report, InvariantId::I9Publish), 1);
 }
 
 async fn make_pool() -> SqlitePool {

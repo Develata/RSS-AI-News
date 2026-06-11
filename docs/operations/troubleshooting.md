@@ -6,7 +6,7 @@
 
 ```bash
 rss-ai-news doctor              # 浅层（config + DB + migrations + openai + github + rsshub + disk）
-rss-ai-news doctor --deep       # 深层（跨表不变量 I4 / I4'a / I4'b / I6）
+rss-ai-news doctor --deep       # 深层（跨表不变量 I1–I6 / I8 / I9）
 rss-ai-news -o json doctor      # JSON 输出便于 grep / 管道
 ```
 
@@ -97,6 +97,15 @@ rss-ai-news migrate check
 - backfill / reindex 中途崩溃
 
 修复：通常需手工 SQL 修正 + 再 backfill / reindex。**先备份 DB**。
+
+### 8a. doctor `--deep` 报 I9（预算耗尽的可领取行）
+
+W15 起各 flow 启动期会自动 sweep 这类行转终态（事件 `retry_budget_swept`），
+该检查常态应为绿；报违规说明对应 flow 自上次滞留后没再跑过。处置：跑一次对应
+flow（ingest / ai-run / publish）让 sweep 收走，或等终态化后按恢复路径处理——
+feed `failed` → `backfill --target extract`；AI `permanent_failed` →
+`backfill --target ai`（新版本行）；publish `failed` → bump `render_version`。
+详见 [../plan/15-retry-exhaustion-and-reclaim.md](../plan/15-retry-exhaustion-and-reclaim.md) §6。
 
 ### 9. 日志缺失 / 末尾被截断
 

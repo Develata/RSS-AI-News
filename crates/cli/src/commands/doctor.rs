@@ -66,7 +66,7 @@ pub async fn run(cli: &Cli, args: &DoctorArgs, writer: &mut OutputWriter) -> Res
     }
 
     let deep = if args.deep {
-        Some(deep_scan::run(&deps.pool).await?)
+        Some(deep_scan::run(&deps.pool, &app.retry).await?)
     } else {
         None
     };

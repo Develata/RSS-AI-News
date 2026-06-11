@@ -136,7 +136,21 @@ redaction 在**截断之前**执行，保证即使内容超长，密钥也已被
 run_events 是观测旁路，主流程不应因事件写入失败而退出。这是宪法 §"不静默吞错"的
 **唯一豁免点**（"日志写入失败"），详见 [./11-error-and-recovery.md](./11-error-and-recovery.md) §豁免清单。
 
-### 5.4 查询入口
+### 5.4 维护与预算耗尽事件（W15）
+
+各 flow 启动期 maintenance（[./15-retry-exhaustion-and-reclaim.md](./15-retry-exhaustion-and-reclaim.md) §5）
+影响行数 > 0 时各发一条，= 0 静默：
+
+| event_kind | severity | context |
+|---|---|---|
+| `leases_reclaimed` | info | `{ "table", "count" }` |
+| `retry_budget_swept` | warn | `{ "table", "count" }` |
+
+release 折叠出终态时，既有失败事件升级：`ai_failed` / `entry_permanent_failed` /
+`publish_failed` 携带 `"budget_exhausted": true`，severity 为 `error`（AI 同时
+`"retryable": false`）。maintenance 自身失败仅 `tracing::warn`（best-effort，不中断 run）。
+
+### 5.5 查询入口
 
 `run_events` 没有内置查询子命令，按 SQL 直查即可。typical query：
 
@@ -173,6 +187,12 @@ check，汇总成 `CheckReport`，按 outcome 染色输出。
 | `github` | 远端 publish 启用时探测 `https://api.github.com/repos/<owner>/<repo>` |
 | `rsshub` | 任一 source 使用占位符时探测 `RSSHUB_BASE_URL` 健康端点 |
 | `disk` | `local_output_dir` + `[artifact].file_storage_dir` 可写 |
+
+`--deep` 额外执行跨表不变量扫描
+（[`crates/runtime/src/doctor/deep_scan.rs`](../../crates/runtime/src/doctor/deep_scan.rs)）：
+I1–I6（跨表派生一致性，见 [./08-state-machines.md](./08-state-machines.md) §6）、
+I8（无过期 running AI lease）、I9（无预算已耗尽的可领取行，feed/ai/publish 三表，
+W15——sweep 接线后常态应为绿，见 [./15-retry-exhaustion-and-reclaim.md](./15-retry-exhaustion-and-reclaim.md) §7）。
 
 `doctor` exit code 表：
 

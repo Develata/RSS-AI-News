@@ -61,7 +61,7 @@
 - `--force`：强制重做（即使已有 publish_record）
 
 ### `doctor`
-- `--deep`：启用跨表不变量扫描（I4 / I4'a / I4'b / I6）
+- `--deep`：启用跨表不变量扫描（I1–I6 / I8 过期 running lease / I9 预算耗尽的可领取行）
 
 ### `replay`
 - `--kind <feed\|html\|ai>`：必填
