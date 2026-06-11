@@ -5,7 +5,6 @@ edition.workspace = true
 
 [dependencies]
 async-trait = "0.1"
-rss-ai-news-config.workspace = true
 rss-ai-news-domain.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true

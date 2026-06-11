@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use rss_ai_news_config::{ConfigVersionStore, ConfigVersionStoreError};
 use sqlx::{PgPool, SqlitePool};
 use time::OffsetDateTime;
 
@@ -118,35 +117,6 @@ impl RuleVersionRepo {
         Self { pool }
     }
 
-    pub async fn get_or_create_config_version_async(
-        &self,
-        sha256: &str,
-    ) -> Result<i64, StorageError> {
-        // 先查已有的 config sha256：跨方言等价 const SQL。
-        let existing = match &self.pool {
-            StoragePool::Sqlite(p) => {
-                sqlx::query_scalar::<_, i64>(SELECT_CONFIG_VERSION_BY_SHA_SQL)
-                    .bind(sha256)
-                    .fetch_optional(p)
-                    .await
-                    .map_err(StorageError::from)?
-            }
-            StoragePool::Postgres(p) => {
-                sqlx::query_scalar::<_, i64>(SELECT_CONFIG_VERSION_BY_SHA_SQL)
-                    .bind(sha256)
-                    .fetch_optional(p)
-                    .await
-                    .map_err(StorageError::from)?
-            }
-        };
-        if let Some(id) = existing {
-            return Ok(id);
-        }
-        let version_tag: String = sha256.chars().take(12).collect();
-        self.get_or_create("config", &version_tag, "auto-registered config", sha256)
-            .await
-    }
-
     /// W16（docs/plan/16-config-versioning.md §4）：让 `kind='config'` 的
     /// active 行跟随当前真实 `config_sha256`。
     ///
@@ -177,18 +147,6 @@ impl RuleVersionRepo {
             }
             StoragePool::Postgres(p) => pg_rotate_active_config(p, sha256, description, now).await,
         }
-    }
-}
-
-#[async_trait]
-impl ConfigVersionStore for RuleVersionRepo {
-    async fn get_or_create_config_version(
-        &self,
-        sha256: &str,
-    ) -> Result<i64, ConfigVersionStoreError> {
-        self.get_or_create_config_version_async(sha256)
-            .await
-            .map_err(|err| ConfigVersionStoreError::Storage(err.to_string()))
     }
 }
 

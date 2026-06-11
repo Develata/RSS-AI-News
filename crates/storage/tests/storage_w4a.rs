@@ -10,8 +10,8 @@ use rss_ai_news_domain::{
     state::{FeedKind, FeedSourceStatus},
 };
 use rss_ai_news_storage::{
-    FeedSourceRepo, FeedSourceRepository, RuleVersionRepo, StorageError, StoragePool,
-    build_sqlite_pool, classify_db_error, run_migrations,
+    FeedSourceRepo, FeedSourceRepository, StorageError, StoragePool, build_sqlite_pool,
+    classify_db_error, run_migrations,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -318,59 +318,8 @@ async fn feed_source_repo_find_by_keys_returns_none_when_missing() {
     assert!(found.is_none());
 }
 
-#[tokio::test]
-async fn rule_version_config_get_or_create_returns_same_id_for_same_sha() {
-    let (_dir, pool) = make_test_pool().await;
-    let repo = RuleVersionRepo::new(pool);
-
-    let left = repo
-        .get_or_create_config_version_async("0123456789abcdef")
-        .await
-        .expect("first get_or_create should succeed");
-    let right = repo
-        .get_or_create_config_version_async("0123456789abcdef")
-        .await
-        .expect("second get_or_create should succeed");
-
-    assert_eq!(left, right);
-}
-
-#[tokio::test]
-async fn rule_version_config_get_or_create_returns_different_ids_for_different_sha() {
-    let (_dir, pool) = make_test_pool().await;
-    let repo = RuleVersionRepo::new(pool);
-
-    let left = repo
-        .get_or_create_config_version_async("aaaaaaaaaaaabbbb")
-        .await
-        .expect("first get_or_create should succeed");
-    let right = repo
-        .get_or_create_config_version_async("bbbbbbbbbbbbcccc")
-        .await
-        .expect("second get_or_create should succeed");
-
-    assert_ne!(left, right);
-}
-
-#[tokio::test]
-async fn config_version_store_trait_impl_round_trip() {
-    use rss_ai_news_config::ConfigVersionStore;
-
-    let (_dir, pool) = make_test_pool().await;
-    let repo = RuleVersionRepo::new(pool);
-    let store: &dyn ConfigVersionStore = &repo;
-
-    let first = store
-        .get_or_create_config_version("ccccccccccccdddd")
-        .await
-        .expect("first trait call should succeed");
-    let second = store
-        .get_or_create_config_version("ccccccccccccdddd")
-        .await
-        .expect("second trait call should succeed");
-
-    assert_eq!(first, second);
-}
+// W16：原 get_or_create_config_version_async / ConfigVersionStore 三个测试
+// 随死代码删除——config 行注册语义由 rule_version_rotate_tests.rs 全量覆盖。
 
 #[tokio::test]
 async fn down_sql_then_up_sql_succeeds() {

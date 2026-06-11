@@ -29,4 +29,4 @@ pub use error::{ConfigError, Diagnostic, DiagnosticReport};
 pub use loader::{LoadedConfig, SourceSecrets, load, load_skip_env_checks};
 pub use overrides::CliOverrides;
 pub use validate::{CommandFlags, CommandKind};
-pub use version::{ConfigVersionStore, ConfigVersionStoreError, compute_config_sha256};
+pub use version::compute_config_sha256;

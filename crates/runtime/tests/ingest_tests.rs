@@ -12,7 +12,7 @@ use rss_ai_news_domain::link_normalizer::normalize_link;
 use rss_ai_news_feed::fetcher::RawFeedFetch;
 use rss_ai_news_feed::{FeedError, FeedFetcher};
 use rss_ai_news_runtime::{IngestFlow, IngestOptions, IngestSourceStatus};
-use rss_ai_news_storage::{FeedEntryRepo, FeedEntryRepository, NewFeedEntry};
+use rss_ai_news_storage::{FeedEntryRepo, FeedEntryRepository, NewFeedEntry, RuleVersionRepo};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
@@ -394,6 +394,54 @@ async fn ingest_bootstrap_writes_config_kind_id_into_feed_sources_config_version
             "feed_sources.config_version 必须指向 kind='config' 行，实际：{kind}"
         );
     }
+}
+
+#[tokio::test]
+async fn ingest_needs_sync_refreshes_config_version_to_current_active() {
+    // W16（docs/plan/16-config-versioning.md §6）：存量 feed_source 因配置
+    // 变化被重写时，config_version 必须跟随当前 active config 行——旧值是
+    // 上一份 config 的事实，沿用会让"哪个配置产生了这行"在审计上指错。
+    let (_dir, pool) = make_test_pool().await;
+
+    // 第一次 run：bootstrap 建行，config_version 指向 placeholder。
+    let first = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&["s-sync"]),
+        HashMap::new(),
+    );
+    let _ = first.run(IngestOptions::default()).await;
+
+    // 模拟 CLI 启动期轮换：真实 config sha 接管 active，placeholder 退位。
+    let sha = "d".repeat(64);
+    let active_id = RuleVersionRepo::new(pool.clone())
+        .rotate_active_config(&sha, "test rotated config", OffsetDateTime::now_utc())
+        .await
+        .expect("rotate should succeed")
+        .active_id();
+
+    // 第二次 run：display_name 变化触发 needs_sync 重写。
+    let mut category = category_with_sources(&["s-sync"]);
+    category.sources[0].display_name = "Renamed Source".to_string();
+    let second = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category,
+        HashMap::new(),
+    );
+    let _ = second.run(IngestOptions::default()).await;
+
+    let stamped: i64 =
+        sqlx::query_scalar("SELECT config_version FROM feed_sources WHERE source_key = 's-sync'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stamped, active_id,
+        "needs_sync 重写后 config_version 必须指向当前 active config 行"
+    );
 }
 
 fn flow(

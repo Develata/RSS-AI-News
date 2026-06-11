@@ -212,6 +212,23 @@ impl IngestFlow {
         sources
     }
 
+    /// W16（docs/plan/16-config-versioning.md §6）：拿"当前生效 config 版本"
+    /// 行 id。CLI 路径下启动期 seed 已保证 active 行跟随真实 sha，走读分支；
+    /// 库内嵌/测试无 active 行时 seed placeholder（tag 显式标
+    /// `ingest-bootstrap` 让 admin 一眼看出是回退路径），下次 CLI 启动被
+    /// rotate 收编为 superseded。
+    async fn active_config_version_id(&self) -> Result<i64, rss_ai_news_storage::StorageError> {
+        self.ctx
+            .rule_version_repo
+            .active_rule_or_register(
+                "config",
+                "ingest-bootstrap",
+                "auto-registered by ingest when no active config rule existed",
+                "ingest-bootstrap",
+            )
+            .await
+    }
+
     async fn resolve_source(
         &self,
         category: &CategoryConfig,
@@ -237,6 +254,11 @@ impl IngestFlow {
                 updated.feed_kind = source.feed_kind;
                 updated.status = FeedSourceStatus::Active;
                 updated.priority = i64::from(source.priority);
+                // W16 §6：行被配置变化触发重写时，版本戳必须跟随触发这次
+                // 重写的 config（旧值是上一份 config 的事实，继续沿用会让
+                // "哪个配置产生了这行"在审计上指错）。仅 needs_sync 时多
+                // 一次 active_rule 读，不影响无变化热路径。
+                updated.config_version = self.active_config_version_id().await?;
                 updated.updated_at = OffsetDateTime::now_utc();
                 if endpoint_changed {
                     updated.etag = None;
@@ -255,27 +277,11 @@ impl IngestFlow {
                 existing
             }
         } else {
-            // F15-fix6：与 F15-fix3 同类——`feed_sources.config_version` 必须指
-            // 向 `kind='config'` 的 rule_versions 行。原硬编码 `config_version: 1`
-            // 在测试场景或首次部署下 id=1 可能根本不是 `kind='config'` 行（例如
-            // 测试 fixture 先 INSERT 了 `kind='prompt'`），导致下游 active_rule_*
-            // 反查不到对应 payload。改为 active_rule_or_register("config", ...)：
-            // 生产路径走"读现有 active"，测试/首次部署走"seed placeholder"，
-            // tag 显式标 `ingest-bootstrap` 让 admin 一眼看出是回退路径。
-            //
-            // 注：只在 bootstrap 分支（新建 FeedSource）触发该读路径，存量
-            // FeedSource 复用既有 config_version 不变；对单次 ingest run 通常
-            // 是 0~N 次（N=新增源数），不影响热路径性能。
-            let config_version_id = self
-                .ctx
-                .rule_version_repo
-                .active_rule_or_register(
-                    "config",
-                    "ingest-bootstrap",
-                    "auto-registered by ingest when no active config rule existed",
-                    "ingest-bootstrap",
-                )
-                .await?;
+            // F15-fix6：`feed_sources.config_version` 必须指向 `kind='config'`
+            // 的 rule_versions 行（原硬编码 `1` 在测试/首次部署下可能指向
+            // 其它 kind）。W16 起读路径收敛到 active_config_version_id helper，
+            // 与 needs_sync 分支共用。
+            let config_version_id = self.active_config_version_id().await?;
             let now = OffsetDateTime::now_utc();
             let new_source = FeedSource {
                 id: 0,

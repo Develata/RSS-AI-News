@@ -14,6 +14,9 @@ use rss_ai_news_config::{
     AiCredentials, AppConfig, CategoryConfig, CliOverrides, EnvConfig, LoadedConfig, SourceSecrets,
 };
 use rss_ai_news_domain::SecretString;
+use rss_ai_news_storage::{
+    RuleVersionRepo, RuleVersionRepository, StoragePool, build_sqlite_pool, run_migrations,
+};
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -40,6 +43,95 @@ async fn global_branch_without_base_url_falls_back_to_null_client() {
     build_run_context("test-category", &loaded, Some(credentials))
         .await
         .expect("category credentials build the client");
+}
+
+/// W16 P2（docs/plan/16-config-versioning.md §5/§7）：启动期 seed 的 sha-keyed
+/// 轮换接线——config 漂移后 active 行跟随最近一次启动的 sha。
+#[tokio::test]
+async fn startup_seed_rotates_active_config_to_current_sha() {
+    let temp = TempDir::new().expect("temp dir");
+
+    let mut loaded = loaded_config(&temp);
+    loaded.config_sha256 = "a".repeat(64);
+    build_run_context("test-rotate-a", &loaded, None)
+        .await
+        .expect("first build seeds sha A");
+
+    let mut loaded = loaded_config(&temp);
+    loaded.config_sha256 = "b".repeat(64);
+    build_run_context("test-rotate-b", &loaded, None)
+        .await
+        .expect("second build rotates to sha B");
+
+    let pool = verify_pool(&temp).await;
+    let active = RuleVersionRepo::new(pool.clone())
+        .active_rule("config")
+        .await
+        .expect("active_rule query")
+        .expect("active config row should exist");
+    assert_eq!(
+        active.payload_sha256,
+        "b".repeat(64),
+        "active config 必须跟随最近一次启动的 sha"
+    );
+    let superseded: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rule_versions
+         WHERE kind='config' AND status='superseded' AND payload_sha256=?",
+    )
+    .bind("a".repeat(64))
+    .fetch_one(&pool)
+    .await
+    .expect("superseded count");
+    assert_eq!(superseded, 1, "旧 sha 行应被 demote 为 superseded");
+}
+
+/// W16 P2：D1 存量库自愈——bootstrap placeholder 占着 active 时，CLI 启动
+/// 必须把它收编为 superseded 并让真实 sha 接管。
+#[tokio::test]
+async fn startup_seed_supersedes_bootstrap_placeholder() {
+    let temp = TempDir::new().expect("temp dir");
+
+    // 预置 D1 场景：placeholder 是首个 active config 行。
+    let pool = verify_pool(&temp).await;
+    RuleVersionRepo::new(pool.clone())
+        .active_rule_or_register(
+            "config",
+            "ingest-bootstrap",
+            "auto-registered by ingest when no active config rule existed",
+            "ingest-bootstrap",
+        )
+        .await
+        .expect("placeholder seed");
+
+    let mut loaded = loaded_config(&temp);
+    loaded.config_sha256 = "c".repeat(64);
+    build_run_context("test-heal", &loaded, None)
+        .await
+        .expect("build on placeholder db");
+
+    let active = RuleVersionRepo::new(pool.clone())
+        .active_rule("config")
+        .await
+        .expect("active_rule query")
+        .expect("active config row should exist");
+    assert_eq!(
+        active.payload_sha256,
+        "c".repeat(64),
+        "placeholder 滞留库启动后真实 sha 必须接管 active"
+    );
+}
+
+/// 打开与 build_run_context 同一 sqlite 文件的校验连接（顺带跑 migrations，
+/// 供"先预置数据再启动"的场景使用；migrations 幂等）。
+async fn verify_pool(temp: &TempDir) -> sqlx::SqlitePool {
+    let db_path = temp.path().join("rss.sqlite");
+    let pool = build_sqlite_pool(&db_path, 1, 5_000)
+        .await
+        .expect("verify pool");
+    run_migrations(&StoragePool::Sqlite(pool.clone()))
+        .await
+        .expect("migrations apply");
+    pool
 }
 
 /// 密闭构造：所有路径落在 temp 目录，EnvConfig 逐字段赋值（不读进程 env、

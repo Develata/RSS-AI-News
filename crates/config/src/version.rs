@@ -1,6 +1,4 @@
-use async_trait::async_trait;
 use sha2::{Digest, Sha256};
-use thiserror::Error;
 
 pub fn compute_config_sha256(
     app_toml_content: &str,
@@ -25,21 +23,9 @@ pub fn compute_config_sha256(
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-#[async_trait]
-pub trait ConfigVersionStore: Send + Sync {
-    /// Returns the rule_versions.id for the given config sha256.
-    /// Inserts a new row if not found.
-    async fn get_or_create_config_version(
-        &self,
-        sha256: &str,
-    ) -> Result<i64, ConfigVersionStoreError>;
-}
-
-#[derive(Debug, Error)]
-pub enum ConfigVersionStoreError {
-    #[error("config version store error: {0}")]
-    Storage(String),
-}
+// W16（docs/plan/16-config-versioning.md §5）：原 `ConfigVersionStore` trait
+// 及其错误类型已删除——生产路径零调用，且作为 config 行的第二写入口违反
+// 单一真相源。config 行的注册/轮换统一走 storage 层 `rotate_active_config`。
 
 #[cfg(test)]
 mod tests {

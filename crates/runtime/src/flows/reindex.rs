@@ -761,10 +761,12 @@ impl ReindexFlow {
         // payload_sha256，破坏 ingest/extract/ai/publish 读路径的版本一致性。
         //
         // 用 `active_rule_or_register("config", ...)` 拿当前 active config 行；
-        // 生产环境下 config loader 在启动时已经 `get_or_create_config_version_async`
-        // seed 了真正的 config row，本调用走"查现有 active"分支；测试环境
-        // 下若无 active config 行则 seed placeholder（version_tag 显式标
-        // 为 `reindex-categories-bootstrap` 让 admin 一眼看出是回退路径）。
+        // 生产环境下 CLI 启动期 `ensure_active_config_version`（W16，
+        // docs/plan/16-config-versioning.md §5）已把 active 行轮换到当前真实
+        // config_sha256，本调用走"查现有 active"分支；测试环境下若无 active
+        // config 行则 seed placeholder（version_tag 显式标为
+        // `reindex-categories-bootstrap` 让 admin 一眼看出是回退路径，下次
+        // CLI 启动被 rotate 收编）。
         let config_version_id = self
             .ctx
             .rule_version_repo
