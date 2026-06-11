@@ -15,6 +15,7 @@ use time::{Duration, OffsetDateTime};
 use crate::context::RunContext;
 use crate::error::RuntimeError;
 use crate::events::RunEventEmitter;
+use crate::flows::maintenance::emit_maintenance_outcome;
 
 #[derive(Debug, Clone)]
 pub struct ReindexOptions {
@@ -343,6 +344,16 @@ impl ReindexFlow {
                 Some(json!({ "target": format!("{:?}", opts.target) })),
             )
             .await;
+
+        // W15 §5：仅 ① reclaim（reindex claim 不过滤 attempt_count、失败
+        // 直转终态，无预算耗尽语义，故无 ② sweep），best-effort。
+        let maintenance_now = OffsetDateTime::now_utc();
+        let reclaimed = self
+            .ctx
+            .reindex_job_repo
+            .reclaim_expired_leases(maintenance_now)
+            .await;
+        emit_maintenance_outcome(&emitter, "reindex_jobs", reclaimed, None).await;
 
         // F15-7 W9-F4: 跨表 start TX —— rule_versions(status='pending') +
         // reindex_jobs(state='pending') 同事务写入；任一冲突整段回滚，

@@ -232,6 +232,37 @@ async fn freeze_skips_articles_without_correct_category_key() {
     assert_record_state(&pool, publish_record_id, "failed").await;
 }
 
+// === W15: freeze 入口启动期 maintenance（docs/plan/15 §5） ===
+
+#[tokio::test]
+async fn freeze_run_start_maintenance_sweeps_exhausted_pending_record() {
+    // W15 §5：freeze 是 publish 表的 CLI 入口之一，首次 claim 前 sweep——
+    // 预算耗尽（attempt_count >= publish_max_attempts=5）的 pending 记录转
+    // failed。改前语义：claim 过滤 attempt_count < max 永远跳过它，行无限滞留。
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flow(pool.clone());
+    let exhausted_id = init_record(&flow, &pool).await;
+    sqlx::query("UPDATE publish_records SET attempt_count = 5 WHERE id = ?")
+        .bind(exhausted_id)
+        .execute(&pool)
+        .await
+        .expect("prime exhausted attempt_count");
+
+    let outcome = flow.freeze(freeze_opts(true, false)).await;
+
+    // 唯一记录已被 sweep 转终态，claim 拿不到 → NothingToClaim。
+    assert_eq!(outcome.status, PublishFreezeStatus::NothingToClaim);
+    assert_record_state(&pool, exhausted_id, "failed").await;
+    let (severity, context): (String, String) = sqlx::query_as(
+        "SELECT severity, context_json FROM run_events WHERE event_kind = 'retry_budget_swept'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("retry_budget_swept event should exist");
+    assert_eq!(severity, "warn");
+    assert!(context.contains(r#""table":"publish_records""#));
+}
+
 fn flow(pool: SqlitePool) -> PublishFlow {
     let app = Arc::new(app_config(RetentionPolicy::Always, 1));
     let ctx = Arc::new(full_context(

@@ -15,6 +15,7 @@ use tokio::task::JoinSet;
 use crate::artifact::ArtifactWriter;
 use crate::context::RunContext;
 use crate::events::RunEventEmitter;
+use crate::flows::maintenance::emit_maintenance_outcome;
 
 #[derive(Debug, Clone)]
 pub struct AiRunOptions {
@@ -236,6 +237,20 @@ impl AiRunFlow {
                 Some(json!({ "phase": "process" })),
             )
             .await;
+
+        // W15 §5：首次 claim 前执行一次 ① reclaim + ② sweep（顺序固定，best-effort）。
+        let maintenance_now = OffsetDateTime::now_utc();
+        let reclaimed = self
+            .ctx
+            .ai_result_repo
+            .reclaim_expired_leases(maintenance_now)
+            .await;
+        let swept = self
+            .ctx
+            .ai_result_repo
+            .terminalize_exhausted(opts.max_attempts, maintenance_now)
+            .await;
+        emit_maintenance_outcome(&emitter, "article_ai_results", reclaimed, Some(swept)).await;
 
         let owner = build_owner_id();
         let mut summary = AiProcessSummary::default();

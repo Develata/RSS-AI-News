@@ -285,6 +285,59 @@ async fn extract_releases_retryable_on_5xx() {
 }
 
 #[tokio::test]
+async fn extract_retryable_on_final_attempt_folds_to_failed() {
+    // W15 §3：有效预算 = max(opts.max_attempts, config.feed_entry_max_attempts=5)。
+    // 预置 attempt_count=4，本次 claim 自增到 5 即预算内最后一次尝试；
+    // retryable 503 由 release SQL 内折叠 → failed（改前回 pending_fetch 卡死）。
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry_id =
+        seed_pending_fetch_entry(&pool, source_id, "uid-exhaust", "hash-exhaust", None).await;
+    sqlx::query("UPDATE feed_entries SET attempt_count = 4 WHERE id = ?")
+        .bind(entry_id)
+        .execute(&pool)
+        .await
+        .expect("prime attempt_count");
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Err(ExtractorError::HttpStatus { code: 503 }))]),
+        vec![success_strategy("unused")],
+    );
+
+    let summary = flow
+        .run(ExtractOptions {
+            batch_size: 1,
+            max_attempts: 5,
+            max_batches: 0,
+        })
+        .await;
+    let row: (String, i64, Option<String>) = sqlx::query_as(
+        "SELECT state, attempt_count, last_error_kind FROM feed_entries WHERE id = ?",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .expect("entry should be readable");
+
+    // 计入永久失败而非"将重试"；折叠保留真实错误。
+    assert_eq!(summary.permanent_failed, 1);
+    assert_eq!(summary.retryable_failed, 0);
+    assert!(!summary.retryable_deferred);
+    assert_eq!(row.0, "failed");
+    assert_eq!(row.1, 5);
+    assert_eq!(row.2, Some("http_5xx".to_string()));
+    // entry_permanent_failed 事件带 budget_exhausted（15 §7）。
+    let (severity, context): (String, String) = sqlx::query_as(
+        "SELECT severity, context_json FROM run_events WHERE event_kind = 'entry_permanent_failed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("entry_permanent_failed event should exist");
+    assert_eq!(severity, "error");
+    assert!(context.contains(r#""budget_exhausted":true"#));
+}
+
+#[tokio::test]
 async fn extract_marks_failed_on_4xx() {
     let (_dir, pool) = make_test_pool().await;
     let (_rule_id, source_id) = setup_base(&pool).await;

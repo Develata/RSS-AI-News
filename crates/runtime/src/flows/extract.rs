@@ -17,6 +17,7 @@ use tokio::task::JoinSet;
 use crate::artifact::ArtifactWriter;
 use crate::context::RunContext;
 use crate::events::RunEventEmitter;
+use crate::flows::maintenance::emit_maintenance_outcome;
 
 #[derive(Debug, Clone, Default)]
 pub struct ExtractOptions {
@@ -103,6 +104,21 @@ impl ExtractFlow {
         let max_attempts = opts
             .max_attempts
             .max(self.ctx.app.retry.feed_entry_max_attempts);
+
+        // W15 §5：首次 claim 前执行一次 ① reclaim + ② sweep（顺序固定，best-effort）。
+        let maintenance_now = OffsetDateTime::now_utc();
+        let reclaimed = self
+            .ctx
+            .feed_entry_repo
+            .reclaim_expired_leases(maintenance_now)
+            .await;
+        let swept = self
+            .ctx
+            .feed_entry_repo
+            .terminalize_exhausted(max_attempts, maintenance_now)
+            .await;
+        emit_maintenance_outcome(&emitter, "feed_entries", reclaimed, Some(swept)).await;
+
         // F6-3: 0 表示不限，仅由 lease + 宿主超时兜底（config-schema §4.4 line 196）。
         // 内部用 Option<u32> 表达"无上限"；命中上限时主动 break + 写 INFO。
         let cap: Option<u32> = if opts.max_batches == 0 {

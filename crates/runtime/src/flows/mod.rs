@@ -2,6 +2,7 @@ pub mod ai_run;
 pub mod backfill;
 pub mod extract;
 pub mod ingest;
+mod maintenance;
 pub mod publish;
 pub mod rebuild_report;
 pub mod reindex;

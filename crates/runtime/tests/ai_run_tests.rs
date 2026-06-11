@@ -17,6 +17,7 @@ use rss_ai_news_storage::{
     PublishRecordRepo, RawArtifactRepo, RunEventRepo,
 };
 use sqlx::SqlitePool;
+use time::{Duration, OffsetDateTime};
 use tokio::sync::Mutex;
 
 use common::{DummyHtmlFetcher, app_config, make_test_pool, seed_persisted_article};
@@ -312,6 +313,127 @@ async fn process_releases_permanent_on_invalid_json() {
         "permanent_failed"
     );
     assert_eq!(article_state(&pool, article_id).await, "ai_pending");
+}
+
+// === W15: 重试预算耗尽闭环（docs/plan/15 §3/§5） ===
+
+#[tokio::test]
+async fn process_retryable_failure_on_final_attempt_folds_to_permanent_failed() {
+    // W15 §3：max_attempts=1 ⇒ 本次 claim 自增到 1 即预算内最后一次尝试，
+    // retryable 5xx 由 release SQL 内折叠 → permanent_failed。
+    // 改前语义（RED）：回 pending 但 claim 过滤 attempt_count < max 永远捞不回，卡死。
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "ai-exhaust-fold", "title", "body").await;
+    let client = Arc::new(MockAiClient::default());
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.max_attempts = 1;
+    flow.task_gen(&opts).await;
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+    client
+        .insert_error(
+            ai_result_id,
+            AiError::HttpStatus {
+                code: 503,
+                message: "service unavailable".to_string(),
+            },
+        )
+        .await;
+
+    let summary = flow.process_ai_tasks(&opts).await;
+
+    assert_eq!(summary.permanent_failed, 1);
+    assert_eq!(summary.retryable_failed, 0);
+    let (state, error_kind): (String, Option<String>) =
+        sqlx::query_as("SELECT state, last_error_kind FROM article_ai_results WHERE id = ?")
+            .bind(ai_result_id)
+            .fetch_one(&pool)
+            .await
+            .expect("AI result should be readable");
+    assert_eq!(state, "permanent_failed");
+    // 折叠保留真实错误，不被 sweep 的兜底文案覆盖。
+    assert!(error_kind.is_some());
+    // article 保持 ai_pending（08 §5.2：permanent_failed 不推进 article）。
+    assert_eq!(article_state(&pool, article_id).await, "ai_pending");
+    // 事件升 error 级并带 budget_exhausted（15 §7）。
+    let (severity, context): (String, String) = sqlx::query_as(
+        "SELECT severity, context_json FROM run_events WHERE event_kind = 'ai_failed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("ai_failed event should exist");
+    assert_eq!(severity, "error");
+    assert!(context.contains(r#""budget_exhausted":true"#));
+}
+
+#[tokio::test]
+async fn process_run_start_maintenance_reclaims_then_sweeps_exhausted_row() {
+    // W15 §5：入口顺序 ① reclaim（过期 running → pending）→ ② sweep（耗尽 → 终态）。
+    // 模拟"最后一次尝试中崩溃"：running + lease 过期 + attempt_count = max(=3)，
+    // 该行必须先被 reclaim 送回 pending，sweep 才能按谓词收走——单测两步接线与顺序。
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "ai-exhaust-sweep", "title", "body").await;
+    let client = Arc::new(MockAiClient::default());
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    flow.task_gen(&opts()).await;
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+    let expired = OffsetDateTime::now_utc() - Duration::seconds(120);
+    sqlx::query(
+        "UPDATE article_ai_results SET state = 'running', lease_owner = 'dead-owner', \
+         lease_expires_at = ?, attempt_count = 3 WHERE id = ?",
+    )
+    .bind(expired)
+    .bind(ai_result_id)
+    .execute(&pool)
+    .await
+    .expect("seed crashed-final-attempt row");
+
+    let summary = flow.process_ai_tasks(&opts()).await;
+
+    // 行已被 sweep 转终态，claim 循环拿不到任何任务。
+    assert_eq!(summary.claimed, 0);
+    assert_eq!(
+        ai_result_state(&pool, ai_result_id).await,
+        "permanent_failed"
+    );
+    // maintenance 事件各一条：leases_reclaimed(info) / retry_budget_swept(warn)。
+    let (reclaim_severity,): (String,) =
+        sqlx::query_as("SELECT severity FROM run_events WHERE event_kind = 'leases_reclaimed'")
+            .fetch_one(&pool)
+            .await
+            .expect("leases_reclaimed event should exist");
+    assert_eq!(reclaim_severity, "info");
+    let (swept_severity, swept_context): (String, String) = sqlx::query_as(
+        "SELECT severity, context_json FROM run_events WHERE event_kind = 'retry_budget_swept'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("retry_budget_swept event should exist");
+    assert_eq!(swept_severity, "warn");
+    assert!(swept_context.contains(r#""count":1"#));
+}
+
+#[tokio::test]
+async fn process_run_start_maintenance_is_silent_when_nothing_to_do() {
+    // W15 §7：影响行数 = 0 时 maintenance 静默，不产生事件噪音。
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "ai-maintenance-quiet", "title", "body").await;
+    let client = Arc::new(MockAiClient::default());
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    flow.task_gen(&opts()).await;
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+    client.insert_success(ai_result_id, output_json(80)).await;
+
+    let summary = flow.process_ai_tasks(&opts()).await;
+
+    assert_eq!(summary.succeeded, 1);
+    let maintenance_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM run_events WHERE event_kind IN ('leases_reclaimed', 'retry_budget_swept')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("event count should be readable");
+    assert_eq!(maintenance_events, 0);
 }
 
 fn flow(pool: SqlitePool, ai_client: Arc<MockAiClient>) -> AiRunFlow {
