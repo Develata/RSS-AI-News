@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use sqlx::{PgPool, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{ClaimRequest, StorageError, StoragePool, classify_db_error};
+use crate::{ClaimRequest, ReleaseFailureOutcome, StorageError, StoragePool, classify_db_error};
 
 use super::article_ai_result::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
@@ -17,8 +17,8 @@ use super::article_ai_result::{
 use super::article_ai_result_sql::{
     ADVANCE_ARTICLE_FROM_AI_PHASE_SQL, ADVANCE_ARTICLE_TO_AI_PENDING_SQL, CLAIM_AI_PENDING_PG_SQL,
     CLAIM_AI_PENDING_SQLITE_SQL, INSERT_AI_PENDING_SQL, OTHER_SUCCEEDED_AI_EXISTS_SQL,
-    RECLAIM_AI_LEASES_SQL, RELEASE_AI_FAILURE_SQL, RELEASE_AI_SUCCESS_SQL,
-    SELECT_ARTICLE_STATE_SQL,
+    RECLAIM_AI_LEASES_SQL, RELEASE_AI_FAILURE_SQL, RELEASE_AI_RETRYABLE_FAILURE_SQL,
+    RELEASE_AI_SUCCESS_SQL, SELECT_ARTICLE_STATE_SQL, TERMINALIZE_EXHAUSTED_AI_SQL,
 };
 
 // ── trait 实现 ─────────────────────────────────────────────────
@@ -67,14 +67,16 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
         owner: &str,
         error: &str,
         kind: &str,
+        max_attempts: u32,
         now: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<ReleaseFailureOutcome, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlite_release_ai_failure(p, id, owner, error, kind, now, "pending").await
+                sqlite_release_ai_retryable_failure(p, id, owner, error, kind, max_attempts, now)
+                    .await
             }
             StoragePool::Postgres(p) => {
-                pg_release_ai_failure(p, id, owner, error, kind, now, "pending").await
+                pg_release_ai_retryable_failure(p, id, owner, error, kind, max_attempts, now).await
             }
         }
     }
@@ -101,6 +103,17 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
         match &self.pool {
             StoragePool::Sqlite(p) => sqlite_reclaim_expired_leases(p, now).await,
             StoragePool::Postgres(p) => pg_reclaim_expired_leases(p, now).await,
+        }
+    }
+
+    async fn terminalize_exhausted(
+        &self,
+        max_attempts: u32,
+        now: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_terminalize_exhausted(p, max_attempts, now).await,
+            StoragePool::Postgres(p) => pg_terminalize_exhausted(p, max_attempts, now).await,
         }
     }
 
@@ -260,12 +273,52 @@ async fn sqlite_release_ai_failure(
     Ok(result.rows_affected() == 1)
 }
 
+async fn sqlite_release_ai_retryable_failure(
+    pool: &SqlitePool,
+    id: i64,
+    owner: &str,
+    error: &str,
+    kind: &str,
+    max_attempts: u32,
+    now: OffsetDateTime,
+) -> Result<ReleaseFailureOutcome, StorageError> {
+    let state = sqlx::query_scalar::<_, String>(RELEASE_AI_RETRYABLE_FAILURE_SQL)
+        .bind(i64::from(max_attempts))
+        .bind(error)
+        .bind(kind)
+        .bind(now)
+        .bind(id)
+        .bind(owner)
+        .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(ReleaseFailureOutcome {
+        released: state.is_some(),
+        exhausted: state.as_deref() == Some("permanent_failed"),
+    })
+}
+
 async fn sqlite_reclaim_expired_leases(
     pool: &SqlitePool,
     now: OffsetDateTime,
 ) -> Result<u64, StorageError> {
     let result = sqlx::query(RECLAIM_AI_LEASES_SQL)
         .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected())
+}
+
+async fn sqlite_terminalize_exhausted(
+    pool: &SqlitePool,
+    max_attempts: u32,
+    now: OffsetDateTime,
+) -> Result<u64, StorageError> {
+    let result = sqlx::query(TERMINALIZE_EXHAUSTED_AI_SQL)
+        .bind(now)
+        .bind(i64::from(max_attempts))
         .bind(now)
         .execute(pool)
         .await
@@ -539,12 +592,52 @@ async fn pg_release_ai_failure(
     Ok(result.rows_affected() == 1)
 }
 
+async fn pg_release_ai_retryable_failure(
+    pool: &PgPool,
+    id: i64,
+    owner: &str,
+    error: &str,
+    kind: &str,
+    max_attempts: u32,
+    now: OffsetDateTime,
+) -> Result<ReleaseFailureOutcome, StorageError> {
+    let state = sqlx::query_scalar::<_, String>(RELEASE_AI_RETRYABLE_FAILURE_SQL)
+        .bind(i64::from(max_attempts))
+        .bind(error)
+        .bind(kind)
+        .bind(now)
+        .bind(id)
+        .bind(owner)
+        .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(ReleaseFailureOutcome {
+        released: state.is_some(),
+        exhausted: state.as_deref() == Some("permanent_failed"),
+    })
+}
+
 async fn pg_reclaim_expired_leases(
     pool: &PgPool,
     now: OffsetDateTime,
 ) -> Result<u64, StorageError> {
     let result = sqlx::query(RECLAIM_AI_LEASES_SQL)
         .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected())
+}
+
+async fn pg_terminalize_exhausted(
+    pool: &PgPool,
+    max_attempts: u32,
+    now: OffsetDateTime,
+) -> Result<u64, StorageError> {
+    let result = sqlx::query(TERMINALIZE_EXHAUSTED_AI_SQL)
+        .bind(now)
+        .bind(i64::from(max_attempts))
         .bind(now)
         .execute(pool)
         .await

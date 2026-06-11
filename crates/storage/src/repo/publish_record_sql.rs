@@ -119,7 +119,17 @@ pub(super) const ADVANCE_SNAPSHOT_SQL: &str = "UPDATE publish_records SET state 
 pub(super) const ADVANCE_RENDERED_SQL: &str = "UPDATE publish_records SET state = $1, rendered_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
 pub(super) const ADVANCE_LOCAL_SQL: &str = "UPDATE publish_records SET state = $1, local_stored_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
 pub(super) const ADVANCE_REMOTE_SQL: &str = "UPDATE publish_records SET state = $1, remote_published_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
-pub(super) const RELEASE_PUBLISH_FAILURE_SQL: &str = "UPDATE publish_records SET lease_owner = NULL, lease_expires_at = NULL, last_error = $1, last_error_kind = $2, updated_at = $3 WHERE id = $4 AND lease_owner = $5";
+/// W15 §3 折叠：retryable 失败按预算决定维持原阶段态（清 lease 后等下轮
+/// claim）/ 转终态 `failed`，规则收口在 SQL。`RETURNING state` 供调用方判定
+/// 走向。预算横跨四阶段共享，与 claim 行为一致。
+pub(super) const RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL: &str = r#"
+UPDATE publish_records
+SET state = CASE WHEN attempt_count >= $1 THEN 'failed' ELSE state END,
+    lease_owner = NULL, lease_expires_at = NULL,
+    last_error = $2, last_error_kind = $3, updated_at = $4
+WHERE id = $5 AND lease_owner = $6
+RETURNING state
+"#;
 pub(super) const RELEASE_PERMANENT_FAILURE_SQL: &str = "UPDATE publish_records SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL, last_error = $1, last_error_kind = $2, updated_at = $3 WHERE id = $4 AND lease_owner = $5";
 pub(super) const RECLAIM_PUBLISH_LEASES_SQL: &str = r#"
 UPDATE publish_records
@@ -127,6 +137,22 @@ SET lease_owner = NULL, lease_expires_at = NULL, updated_at = $1
 WHERE lease_expires_at IS NOT NULL
   AND lease_expires_at < $2
   AND state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local')
+"#;
+
+/// W15 §4 sweep：预算耗尽且 claim 永远不会再领取的阶段态行 → 终态。
+/// 预算横跨 freeze/render/store_local/remote 四阶段共享（与 claim 行为一致）。
+/// COALESCE 保留行上既有真实错误，仅对从未留过错误的行落兜底文案。
+pub(super) const TERMINALIZE_EXHAUSTED_PUBLISH_SQL: &str = r#"
+UPDATE publish_records
+SET state = 'failed',
+    last_error = COALESCE(last_error, 'retry budget exhausted'),
+    last_error_kind = COALESCE(last_error_kind, 'retry_budget_exhausted'),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = $1
+WHERE state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local')
+  AND attempt_count >= $2
+  AND (lease_expires_at IS NULL OR lease_expires_at < $3)
 "#;
 pub(super) const PROMOTE_ARTICLE_PUBLISHED_SQL: &str = "UPDATE articles SET state = 'published', updated_at = $1 WHERE id = $2 AND state = 'ready_for_publish'";
 

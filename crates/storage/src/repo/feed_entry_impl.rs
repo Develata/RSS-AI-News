@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use sqlx::{PgPool, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{ClaimRequest, StorageError, StoragePool, classify_db_error};
+use crate::{ClaimRequest, ReleaseFailureOutcome, StorageError, StoragePool, classify_db_error};
 
 use super::feed_entry::{
     ClaimedFeedEntry, FeedEntry, FeedEntryRepo, FeedEntryRepository, LinkHashReindexCandidate,
@@ -18,8 +18,9 @@ use super::feed_entry_sql::{
     CLAIM_PENDING_FETCH_PG_SQL, CLAIM_PENDING_FETCH_SQLITE_SQL, COUNT_FEED_ENTRIES_IN_WINDOW_SQL,
     EXISTS_BY_LINK_HASH_SQL, INSERT_FEED_ENTRY_SQL, LIST_FOR_LINK_HASH_REINDEX_SQL,
     RECLAIM_FEED_ENTRY_LEASES_SQL, RELEASE_DEDUP_SKIPPED_SQL, RELEASE_FALLBACK_PERSISTED_SQL,
-    RELEASE_FEED_FAILURE_SQL, RELEASE_SUCCESS_SQL, RESET_FAILED_IN_WINDOW_SQL,
-    SELECT_FEED_ENTRY_BY_ID_SQL, UPDATE_LINK_HASH_SQL,
+    RELEASE_FEED_FAILURE_SQL, RELEASE_FEED_RETRYABLE_FAILURE_SQL, RELEASE_SUCCESS_SQL,
+    RESET_FAILED_IN_WINDOW_SQL, SELECT_FEED_ENTRY_BY_ID_SQL, TERMINALIZE_EXHAUSTED_FEED_SQL,
+    UPDATE_LINK_HASH_SQL,
 };
 
 // ── trait 实现 ─────────────────────────────────────────────────
@@ -76,14 +77,17 @@ impl FeedEntryRepository for FeedEntryRepo {
         owner: &str,
         error: &str,
         kind: &str,
+        max_attempts: u32,
         now: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<ReleaseFailureOutcome, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlite_release_feed_failure(p, id, owner, error, kind, now, "pending_fetch").await
+                sqlite_release_feed_retryable_failure(p, id, owner, error, kind, max_attempts, now)
+                    .await
             }
             StoragePool::Postgres(p) => {
-                pg_release_feed_failure(p, id, owner, error, kind, now, "pending_fetch").await
+                pg_release_feed_retryable_failure(p, id, owner, error, kind, max_attempts, now)
+                    .await
             }
         }
     }
@@ -110,6 +114,17 @@ impl FeedEntryRepository for FeedEntryRepo {
         match &self.pool {
             StoragePool::Sqlite(p) => sqlite_reclaim_expired_leases(p, now).await,
             StoragePool::Postgres(p) => pg_reclaim_expired_leases(p, now).await,
+        }
+    }
+
+    async fn terminalize_exhausted(
+        &self,
+        max_attempts: u32,
+        now: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_terminalize_exhausted(p, max_attempts, now).await,
+            StoragePool::Postgres(p) => pg_terminalize_exhausted(p, max_attempts, now).await,
         }
     }
 
@@ -283,6 +298,46 @@ async fn sqlite_reclaim_expired_leases(
 ) -> Result<u64, StorageError> {
     let result = sqlx::query(RECLAIM_FEED_ENTRY_LEASES_SQL)
         .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected())
+}
+
+async fn sqlite_release_feed_retryable_failure(
+    pool: &SqlitePool,
+    id: i64,
+    owner: &str,
+    error: &str,
+    kind: &str,
+    max_attempts: u32,
+    now: OffsetDateTime,
+) -> Result<ReleaseFailureOutcome, StorageError> {
+    let state = sqlx::query_scalar::<_, String>(RELEASE_FEED_RETRYABLE_FAILURE_SQL)
+        .bind(i64::from(max_attempts))
+        .bind(error)
+        .bind(kind)
+        .bind(now)
+        .bind(id)
+        .bind(owner)
+        .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(ReleaseFailureOutcome {
+        released: state.is_some(),
+        exhausted: state.as_deref() == Some("failed"),
+    })
+}
+
+async fn sqlite_terminalize_exhausted(
+    pool: &SqlitePool,
+    max_attempts: u32,
+    now: OffsetDateTime,
+) -> Result<u64, StorageError> {
+    let result = sqlx::query(TERMINALIZE_EXHAUSTED_FEED_SQL)
+        .bind(now)
+        .bind(i64::from(max_attempts))
         .bind(now)
         .execute(pool)
         .await
@@ -480,6 +535,46 @@ async fn pg_reclaim_expired_leases(
 ) -> Result<u64, StorageError> {
     let result = sqlx::query(RECLAIM_FEED_ENTRY_LEASES_SQL)
         .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected())
+}
+
+async fn pg_release_feed_retryable_failure(
+    pool: &PgPool,
+    id: i64,
+    owner: &str,
+    error: &str,
+    kind: &str,
+    max_attempts: u32,
+    now: OffsetDateTime,
+) -> Result<ReleaseFailureOutcome, StorageError> {
+    let state = sqlx::query_scalar::<_, String>(RELEASE_FEED_RETRYABLE_FAILURE_SQL)
+        .bind(i64::from(max_attempts))
+        .bind(error)
+        .bind(kind)
+        .bind(now)
+        .bind(id)
+        .bind(owner)
+        .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(ReleaseFailureOutcome {
+        released: state.is_some(),
+        exhausted: state.as_deref() == Some("failed"),
+    })
+}
+
+async fn pg_terminalize_exhausted(
+    pool: &PgPool,
+    max_attempts: u32,
+    now: OffsetDateTime,
+) -> Result<u64, StorageError> {
+    let result = sqlx::query(TERMINALIZE_EXHAUSTED_FEED_SQL)
+        .bind(now)
+        .bind(i64::from(max_attempts))
         .bind(now)
         .execute(pool)
         .await

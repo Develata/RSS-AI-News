@@ -5,7 +5,7 @@ use rss_ai_news_domain::Score0To100;
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_storage::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ClaimRequest, ClaimedAiResult, NewAiResult,
-    ReleaseSuccessOutcome, build_owner_id, lease_expires_at,
+    ReleaseFailureOutcome, ReleaseSuccessOutcome, build_owner_id, lease_expires_at,
 };
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
@@ -477,7 +477,16 @@ async fn process_one(
     }
 
     let error = last_error.expect("model chain is non-empty, so at least one attempt ran");
-    finish_ai_failure(&ctx, &emitter, &owner, &claimed, error, &attempts).await
+    finish_ai_failure(
+        &ctx,
+        &emitter,
+        &owner,
+        &claimed,
+        error,
+        opts.max_attempts,
+        &attempts,
+    )
+    .await
 }
 
 /// W14-A：构造模型尝试链 `[主模型, ...fallback]`，主模型恒在首位，其余 trim / 去空白 /
@@ -640,12 +649,15 @@ async fn finish_ai_success(
 
 /// 失败路径（模型链耗尽或遇到不可回退错误）：发生过多模型尝试时先 emit 完整尝试链
 /// （codex P3 MEDIUM），再按最后错误的 `is_retryable()` 回队 / 永久失败。
+/// W15 §3：retryable 路径在 release SQL 内按 `max_attempts` 折叠——预算耗尽
+/// 直接转 `permanent_failed`，不再造出永久卡 pending 的行。
 async fn finish_ai_failure(
     ctx: &RunContext,
     emitter: &RunEventEmitter<'_>,
     owner: &str,
     claimed: &ClaimedAiResult,
     error: AiError,
+    max_attempts: u32,
     attempts: &[serde_json::Value],
 ) -> AiTaskOutcome {
     let now = OffsetDateTime::now_utc();
@@ -668,7 +680,7 @@ async fn finish_ai_failure(
     }
 
     if error.is_retryable() {
-        release_retryable_ai_failure(ctx, emitter, owner, claimed, error, now).await
+        release_retryable_ai_failure(ctx, emitter, owner, claimed, error, max_attempts, now).await
     } else {
         let message = error.display_user();
         let kind = error.error_kind().to_string();
@@ -754,26 +766,40 @@ async fn release_retryable_ai_failure(
     owner: &str,
     claimed: &ClaimedAiResult,
     error: AiError,
+    max_attempts: u32,
     now: OffsetDateTime,
 ) -> AiTaskOutcome {
     let message = error.display_user();
     let kind = error.error_kind().to_string();
-    match ctx
+    let outcome = match ctx
         .ai_result_repo
-        .release_retryable_failure(claimed.id, owner, &message, &kind, now)
+        .release_retryable_failure(claimed.id, owner, &message, &kind, max_attempts, now)
         .await
     {
-        Ok(false) => tracing::warn!(ai_result_id = claimed.id, "AI retryable release conflicted"),
-        Err(error) => tracing::error!(
-            ai_result_id = claimed.id,
-            "AI retryable release failed: {error}"
-        ),
-        Ok(true) => {}
-    }
+        Ok(outcome) => {
+            if !outcome.released {
+                tracing::warn!(ai_result_id = claimed.id, "AI retryable release conflicted");
+            }
+            outcome
+        }
+        Err(error) => {
+            tracing::error!(
+                ai_result_id = claimed.id,
+                "AI retryable release failed: {error}"
+            );
+            ReleaseFailureOutcome {
+                released: false,
+                exhausted: false,
+            }
+        }
+    };
+    // W15 §3：预算耗尽时 release SQL 已折叠进 permanent_failed——事件升 error
+    // 级并标记 budget_exhausted，summary 计入永久失败而非"将重试"。
+    let exhausted = outcome.exhausted;
     emitter
         .emit(
             "ai_failed",
-            "warn",
+            if exhausted { "error" } else { "warn" },
             Some("article_ai_result"),
             Some(claimed.id),
             &message,
@@ -781,14 +807,19 @@ async fn release_retryable_ai_failure(
                 "article_id": claimed.article_id,
                 "article_ai_result_id": claimed.id,
                 "error_kind": kind,
-                "retryable": true,
+                "retryable": !exhausted,
+                "budget_exhausted": exhausted,
             })),
         )
         .await;
     AiTaskOutcome {
         article_ai_result_id: claimed.id,
         article_id: claimed.article_id,
-        status: AiTaskStatus::RetryableFailed,
+        status: if exhausted {
+            AiTaskStatus::PermanentFailed
+        } else {
+            AiTaskStatus::RetryableFailed
+        },
         article_advance: None,
         error_kind: Some(kind),
     }

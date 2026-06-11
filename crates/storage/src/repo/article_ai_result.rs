@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{ClaimRequest, StorageError, StoragePool};
+use crate::{ClaimRequest, ReleaseFailureOutcome, StorageError, StoragePool};
 
 #[derive(Debug, Clone)]
 pub struct NewAiResult {
@@ -93,14 +93,17 @@ pub trait ArticleAiResultRepository: Send + Sync {
         effective_model_id: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
+    /// W15 §3 折叠：retryable 失败按 `attempt_count >= max_attempts` 在 SQL 内
+    /// 决定回 `pending` / 转 `permanent_failed`。`last_error*` 写真实底层错误。
     async fn release_retryable_failure(
         &self,
         id: i64,
         owner: &str,
         error: &str,
         kind: &str,
+        max_attempts: u32,
         now: OffsetDateTime,
-    ) -> Result<bool, StorageError>;
+    ) -> Result<ReleaseFailureOutcome, StorageError>;
     async fn release_permanent_failure(
         &self,
         id: i64,
@@ -110,6 +113,16 @@ pub trait ArticleAiResultRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
     async fn reclaim_expired_leases(&self, now: OffsetDateTime) -> Result<u64, StorageError>;
+
+    /// W15 §4 sweep：`pending` + `attempt_count >= max_attempts` + lease 空/过期
+    /// → `permanent_failed`。兜底 release 折叠摸不到的行（设计落地前的遗留卡死行、
+    /// 崩溃在最后一次尝试经 reclaim 回 pending 的行）。保留既有 `last_error*`。
+    /// 返回转终态的行数。
+    async fn terminalize_exhausted(
+        &self,
+        max_attempts: u32,
+        now: OffsetDateTime,
+    ) -> Result<u64, StorageError>;
 
     /// 同事务：INSERT article_ai_results state='pending' + UPDATE articles state='ai_pending'。
     async fn insert_pending_and_advance_article(

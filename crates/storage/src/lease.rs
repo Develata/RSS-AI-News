@@ -29,3 +29,16 @@ pub enum ReleaseOutcome {
     RetryableFailure { error: String, kind: String },
     PermanentFailure { error: String, kind: String },
 }
+
+/// W15 §3：retryable 失败 release 的折叠结果。
+///
+/// release SQL 内按 `attempt_count >= max_attempts` 折叠（CASE）：耗尽 → 终态，
+/// 否则回可领取态。状态转移规则收口在 repo 层，flow 只据此发准确事件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseFailureOutcome {
+    /// false = lease guard 冲突（行已被 reclaim / 他人持有），未写任何变更。
+    pub released: bool,
+    /// true = 预算耗尽，本次已折叠进终态（feed/publish `failed`，
+    /// ai `permanent_failed`）。
+    pub exhausted: bool,
+}

@@ -158,6 +158,8 @@ impl PublishFlow {
         let artifact = match self.ctx.publish_target_local.publish(&report).await {
             Ok(artifact) => artifact,
             Err(error) => {
+                // W15 §3：retryable 路径在 release SQL 内按预算折叠（耗尽 → failed）。
+                let mut budget_exhausted = false;
                 let release_result = if error.is_retryable() {
                     self.ctx
                         .publish_record_repo
@@ -166,9 +168,14 @@ impl PublishFlow {
                             &owner,
                             &error.display_user(),
                             error.error_kind(),
+                            self.ctx.app.retry.publish_max_attempts,
                             now,
                         )
                         .await
+                        .map(|outcome| {
+                            budget_exhausted = outcome.exhausted;
+                            outcome.released
+                        })
                 } else {
                     self.ctx
                         .publish_record_repo
@@ -197,7 +204,11 @@ impl PublishFlow {
                         Some("publish_record"),
                         Some(claimed.id),
                         &error.display_user(),
-                        Some(json!({ "phase": "store_local", "error_kind": error.error_kind() })),
+                        Some(json!({
+                            "phase": "store_local",
+                            "error_kind": error.error_kind(),
+                            "budget_exhausted": budget_exhausted
+                        })),
                     )
                     .await;
                 return PublishStoreLocalOutcome {

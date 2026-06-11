@@ -99,6 +99,10 @@ impl ExtractFlow {
 
         let owner = build_owner_id();
         let mut summary = ExtractSummary::default();
+        // W15 §3.3：claim 过滤与 release 折叠必须用同一预算值，hoist 一处计算。
+        let max_attempts = opts
+            .max_attempts
+            .max(self.ctx.app.retry.feed_entry_max_attempts);
         // F6-3: 0 表示不限，仅由 lease + 宿主超时兜底（config-schema §4.4 line 196）。
         // 内部用 Option<u32> 表达"无上限"；命中上限时主动 break + 写 INFO。
         let cap: Option<u32> = if opts.max_batches == 0 {
@@ -129,9 +133,7 @@ impl ExtractFlow {
                     Duration::seconds(self.ctx.app.lease.fetch_duration_seconds as i64),
                 ),
                 batch_size: opts.batch_size.max(1),
-                max_attempts: opts
-                    .max_attempts
-                    .max(self.ctx.app.retry.feed_entry_max_attempts),
+                max_attempts,
             };
             let claimed = match self.ctx.feed_entry_repo.claim_pending_fetch(&request).await {
                 Ok(claimed) => claimed,
@@ -178,7 +180,7 @@ impl ExtractFlow {
                         .acquire_owned()
                         .await
                         .expect("semaphore should not be closed");
-                    Self::process_entry(ctx, owner, entry).await
+                    Self::process_entry(ctx, owner, entry, max_attempts).await
                 });
             }
 
@@ -242,6 +244,7 @@ impl ExtractFlow {
         ctx: Arc<RunContext>,
         owner: String,
         claimed: ClaimedFeedEntry,
+        max_attempts: u32,
     ) -> ExtractEntryOutcome {
         let now = OffsetDateTime::now_utc();
         let emitter = RunEventEmitter {
@@ -271,7 +274,16 @@ impl ExtractFlow {
         let raw = match ctx.html_fetcher.fetch_html(&fetch_task).await {
             Ok(raw) => raw,
             Err(error) => {
-                return release_extract_error(&ctx, &emitter, claimed.id, &owner, error, now).await;
+                return release_extract_error(
+                    &ctx,
+                    &emitter,
+                    claimed.id,
+                    &owner,
+                    error,
+                    max_attempts,
+                    now,
+                )
+                .await;
             }
         };
 
@@ -290,7 +302,8 @@ impl ExtractFlow {
                 .await
             }
             ChainResult::Retryable(error) => {
-                release_extract_error(&ctx, &emitter, claimed.id, &owner, error, now).await
+                release_extract_error(&ctx, &emitter, claimed.id, &owner, error, max_attempts, now)
+                    .await
             }
             ChainResult::Failed(errors) => {
                 if let Some(fallback) = summary_fallback(&fetch_task) {
@@ -580,19 +593,57 @@ async fn release_extract_error(
     feed_entry_id: i64,
     owner: &str,
     error: ExtractorError,
+    max_attempts: u32,
     now: OffsetDateTime,
 ) -> ExtractEntryOutcome {
     let message = error.display_user();
     let kind = error.error_kind().to_string();
     if error.is_retryable() {
-        match ctx
+        // W15 §3：release SQL 内按预算折叠——耗尽即转 failed 终态。
+        let outcome = match ctx
             .feed_entry_repo
-            .release_retryable_failure(feed_entry_id, owner, &message, &kind, now)
+            .release_retryable_failure(feed_entry_id, owner, &message, &kind, max_attempts, now)
             .await
         {
-            Ok(false) => tracing::warn!(feed_entry_id, "retryable release conflicted"),
-            Err(error) => tracing::error!(feed_entry_id, "retryable release failed: {error}"),
-            Ok(true) => {}
+            Ok(outcome) => {
+                if !outcome.released {
+                    tracing::warn!(feed_entry_id, "retryable release conflicted");
+                }
+                outcome
+            }
+            Err(error) => {
+                tracing::error!(feed_entry_id, "retryable release failed: {error}");
+                rss_ai_news_storage::ReleaseFailureOutcome {
+                    released: false,
+                    exhausted: false,
+                }
+            }
+        };
+        if outcome.exhausted {
+            emitter
+                .emit(
+                    "entry_permanent_failed",
+                    "error",
+                    Some("feed_entry"),
+                    Some(feed_entry_id),
+                    &message,
+                    Some(json!({ "error_kind": kind, "budget_exhausted": true })),
+                )
+                .await;
+            tracing::error!(
+                target = "feed_entry.transition",
+                id = feed_entry_id,
+                from = "fetching",
+                to = "failed",
+                reason = %kind,
+                budget_exhausted = true
+            );
+            return ExtractEntryOutcome {
+                feed_entry_id,
+                status: ExtractEntryStatus::PermanentFailed,
+                article_id: None,
+                error_kind: Some(kind),
+            };
         }
         tracing::warn!(
             feed_entry_id,

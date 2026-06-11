@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use sqlx::{PgPool, Postgres, QueryBuilder, Sqlite, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::{ClaimRequest, StorageError, StoragePool, classify_db_error};
+use crate::{ClaimRequest, ReleaseFailureOutcome, StorageError, StoragePool, classify_db_error};
 
 use super::{
     publish_record::{
@@ -19,9 +19,10 @@ use super::{
     publish_record_sql::{
         ADVANCE_LOCAL_SQL, ADVANCE_REMOTE_SQL, ADVANCE_RENDERED_SQL, ADVANCE_SNAPSHOT_SQL,
         CREATE_IF_NEW_SQL, PROMOTE_ARTICLE_PUBLISHED_SQL, PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL,
-        RECLAIM_PUBLISH_LEASES_SQL, RELEASE_PERMANENT_FAILURE_SQL, RELEASE_PUBLISH_FAILURE_SQL,
-        SELECT_PUBLISH_RECORD_BY_ID, SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY, claim_publish_pg,
-        claim_publish_sqlite,
+        RECLAIM_PUBLISH_LEASES_SQL, RELEASE_PERMANENT_FAILURE_SQL,
+        RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL, SELECT_PUBLISH_RECORD_BY_ID,
+        SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY, TERMINALIZE_EXHAUSTED_PUBLISH_SQL,
+        claim_publish_pg, claim_publish_sqlite,
     },
 };
 
@@ -150,14 +151,15 @@ impl PublishRecordRepository for PublishRecordRepo {
         owner: &str,
         error: &str,
         kind: &str,
+        max_attempts: u32,
         now: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<ReleaseFailureOutcome, StorageError> {
         match self.storage_pool() {
             StoragePool::Sqlite(p) => {
-                sqlite_release_retryable_failure(p, id, owner, error, kind, now).await
+                sqlite_release_retryable_failure(p, id, owner, error, kind, max_attempts, now).await
             }
             StoragePool::Postgres(p) => {
-                pg_release_retryable_failure(p, id, owner, error, kind, now).await
+                pg_release_retryable_failure(p, id, owner, error, kind, max_attempts, now).await
             }
         }
     }
@@ -184,6 +186,17 @@ impl PublishRecordRepository for PublishRecordRepo {
         match self.storage_pool() {
             StoragePool::Sqlite(p) => sqlite_reclaim_expired_leases(p, now).await,
             StoragePool::Postgres(p) => pg_reclaim_expired_leases(p, now).await,
+        }
+    }
+
+    async fn terminalize_exhausted(
+        &self,
+        max_attempts: u32,
+        now: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        match self.storage_pool() {
+            StoragePool::Sqlite(p) => sqlite_terminalize_exhausted(p, max_attempts, now).await,
+            StoragePool::Postgres(p) => pg_terminalize_exhausted(p, max_attempts, now).await,
         }
     }
 
@@ -305,18 +318,23 @@ async fn sqlite_release_retryable_failure(
     owner: &str,
     error: &str,
     kind: &str,
+    max_attempts: u32,
     now: OffsetDateTime,
-) -> Result<bool, StorageError> {
-    let result = sqlx::query(RELEASE_PUBLISH_FAILURE_SQL)
+) -> Result<ReleaseFailureOutcome, StorageError> {
+    let state = sqlx::query_scalar::<_, String>(RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL)
+        .bind(i64::from(max_attempts))
         .bind(error)
         .bind(kind)
         .bind(now)
         .bind(id)
         .bind(owner)
-        .execute(pool)
+        .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;
-    Ok(result.rows_affected() == 1)
+    Ok(ReleaseFailureOutcome {
+        released: state.is_some(),
+        exhausted: state.as_deref() == Some("failed"),
+    })
 }
 
 async fn sqlite_release_permanent_failure(
@@ -345,6 +363,21 @@ async fn sqlite_reclaim_expired_leases(
 ) -> Result<u64, StorageError> {
     let result = sqlx::query(RECLAIM_PUBLISH_LEASES_SQL)
         .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected())
+}
+
+async fn sqlite_terminalize_exhausted(
+    pool: &SqlitePool,
+    max_attempts: u32,
+    now: OffsetDateTime,
+) -> Result<u64, StorageError> {
+    let result = sqlx::query(TERMINALIZE_EXHAUSTED_PUBLISH_SQL)
+        .bind(now)
+        .bind(i64::from(max_attempts))
         .bind(now)
         .execute(pool)
         .await
@@ -514,18 +547,23 @@ async fn pg_release_retryable_failure(
     owner: &str,
     error: &str,
     kind: &str,
+    max_attempts: u32,
     now: OffsetDateTime,
-) -> Result<bool, StorageError> {
-    let result = sqlx::query(RELEASE_PUBLISH_FAILURE_SQL)
+) -> Result<ReleaseFailureOutcome, StorageError> {
+    let state = sqlx::query_scalar::<_, String>(RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL)
+        .bind(i64::from(max_attempts))
         .bind(error)
         .bind(kind)
         .bind(now)
         .bind(id)
         .bind(owner)
-        .execute(pool)
+        .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;
-    Ok(result.rows_affected() == 1)
+    Ok(ReleaseFailureOutcome {
+        released: state.is_some(),
+        exhausted: state.as_deref() == Some("failed"),
+    })
 }
 
 async fn pg_release_permanent_failure(
@@ -554,6 +592,21 @@ async fn pg_reclaim_expired_leases(
 ) -> Result<u64, StorageError> {
     let result = sqlx::query(RECLAIM_PUBLISH_LEASES_SQL)
         .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected())
+}
+
+async fn pg_terminalize_exhausted(
+    pool: &PgPool,
+    max_attempts: u32,
+    now: OffsetDateTime,
+) -> Result<u64, StorageError> {
+    let result = sqlx::query(TERMINALIZE_EXHAUSTED_PUBLISH_SQL)
+        .bind(now)
+        .bind(i64::from(max_attempts))
         .bind(now)
         .execute(pool)
         .await
