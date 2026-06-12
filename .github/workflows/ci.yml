@@ -142,7 +142,7 @@ jobs:
           mkdir -p smoke/configs/categories
           cp configs/app.toml.example smoke/configs/app.toml
           # 覆盖 app.toml：database.driver=postgres + 留 sqlite_path 占位（被 driver 路由忽略）
-          # 详见 docs/design/storage-multi-dialect.md §5.4
+          # 详见 docs-backup/design/storage-multi-dialect.md §5.4
           sed -i 's/^driver = .*/driver = "postgres"/' smoke/configs/app.toml
           cp configs/categories/ai.toml.example smoke/configs/categories/ai.toml
       - name: migrate run (postgres)

@@ -2,7 +2,7 @@
 //!
 //! ## W11-P3-E-3：PG 分支落地
 //!
-//! 按 `docs/design/storage-multi-dialect.md` §6.2 模式：trait method `match`
+//! 按 `docs-backup/design/storage-multi-dialect.md` §6.2 模式：trait method `match`
 //! 分发到 sqlite_*/pg_* 私有 helper + 共享 SQL const + new_with_storage 入口。
 //! SQL const 见 [`super::article_ai_result_sql`]，方言分发实装见
 //! [`super::article_ai_result_impl`]。

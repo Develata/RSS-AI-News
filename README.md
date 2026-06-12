@@ -295,7 +295,7 @@ rss-ai-news --config-dir configs --category ai rebuild-report --date 2026-05-18 
 
 ## 配置说明
 
-> **完整字段定义、默认值理由、effective 覆盖规则**：见 [`docs/design/config-schema.md`](docs/design/config-schema.md)。该文档逐字段给出语义、作用阶段、与状态机的关系（例如 `ai.enabled × include_unscored` 真值表、`[http]` 并发预算分配、`[runtime].max_batches_per_run` 作用边界）。本节只覆盖文件分工、常用环境变量、最常调字段和典型场景——遇到 README 没讲到的字段，去 `config-schema.md` 查。
+> **完整字段定义、默认值理由、effective 覆盖规则**：见 [`docs-backup/design/config-schema.md`](docs-backup/design/config-schema.md)（设计契约存档；现行综述见 [`docs/plan/06-config.md`](docs/plan/06-config.md)）。该文档逐字段给出语义、作用阶段、与状态机的关系（例如 `ai.enabled × include_unscored` 真值表、`[http]` 并发预算分配、`[runtime].max_batches_per_run` 作用边界）。本节只覆盖文件分工、常用环境变量、最常调字段和典型场景——遇到 README 没讲到的字段，去 `config-schema.md` 查。
 
 项目使用三类配置文件：
 
@@ -467,7 +467,7 @@ include_unscored = true
 
 ### 常调字段速查
 
-`app.toml` 字段中实际部署时最常碰到的字段，按 section 分组。每项的完整语义、与状态机/并发模型的关系见 `docs/design/config-schema.md` 对应小节。
+`app.toml` 字段中实际部署时最常碰到的字段，按 section 分组。每项的完整语义、与状态机/并发模型的关系见 `docs-backup/design/config-schema.md` 对应小节。
 
 **网络与并发（`[http]`）**
 
@@ -506,7 +506,7 @@ include_unscored = true
 
 **未列出但需要知道的**：
 
-- `[database].driver` —— `"sqlite"` 与 `"postgres"` 切换的所有影响（见 [`docs/design/storage-multi-dialect.md`](docs/design/storage-multi-dialect.md)）
+- `[database].driver` —— `"sqlite"` 与 `"postgres"` 切换的所有影响（见 [`docs/plan/05-storage.md`](docs/plan/05-storage.md)）
 - `[publish].github_owner` / `github_repo` —— 空字符串触发本地发布模式，详见上文「本地发布与远端发布」
 - `[category.publish_override]` —— 分类级覆盖 `[publish]` 全局默认，按字段独立生效（详见 config-schema §4.5）
 
@@ -546,7 +546,7 @@ rss-ai-news --config-dir configs migrate check
 切 PG 时几个常见坑：
 
 - `driver = "postgres"` 必须配 `DATABASE_URL`，缺则 exit 78 ConfigError；URL 必须是 `postgres://` 或 `postgresql://` schema。
-- W11 起 SQLite / PostgreSQL 走两套迁移目录，但共享版本号。从 SQLite 迁出已有数据需要走 `replay` + 手动导入（非自动 schema dump，参见 `docs/design/storage-multi-dialect.md`）。
+- W11 起 SQLite / PostgreSQL 走两套迁移目录，但共享版本号。从 SQLite 迁出已有数据需要走 `replay` + 手动导入（非自动 schema dump，参见 `docs-backup/design/storage-multi-dialect.md` §1.2）。
 - `max_connections=8` 是 SQLite 设置；PG pool 上限由 sqlx 内部 `PgPoolOptions::max_connections(env-tunable)` 控制，开发期不必动。
 - 长跑过 SQLite WAL 后切回去之前，记得 `VACUUM` 一次，或者 backup 后重建 db 文件。
 
@@ -802,7 +802,7 @@ rss-ai-news --config-dir configs validate-config
 
 已实装：
 
-- SQLite 与 PostgreSQL 双方言存储（参见 `docs/design/storage-multi-dialect.md`）。
+- SQLite 与 PostgreSQL 双方言存储（参见 `docs/plan/05-storage.md`）。
 - 10 个 CLI 子命令（含 `doctor` / `replay` / `reindex --dry-run`）。
 - 可配置发布路径与 Markdown 模板（`[publish.template]`）。
 - 双 backend `doctor` / `replay`。
@@ -817,12 +817,13 @@ v0.2 follow-up：
 
 ## 更多文档
 
-- [配置 Schema](./docs/design/config-schema.md)
-- [CLI 语义](./docs/design/cli-semantics.md)
-- [存储多方言设计](./docs/design/storage-multi-dialect.md)
-- [状态机](./docs/design/state-machine.md)
-- [错误模型与可观测性](./docs/design/error-and-observability.md)
-- [Replay 与 Artifact](./docs/design/replay-and-artifacts.md)
+- [配置](./docs/plan/06-config.md)
+- [CLI 与 Runtime](./docs/plan/09-cli-and-runtime.md)
+- [存储与多方言](./docs/plan/05-storage.md)
+- [状态机](./docs/plan/08-state-machines.md)
+- [错误模型与恢复](./docs/plan/11-error-and-recovery.md) / [可观测性](./docs/plan/07-observability.md)
+- [Replay 与 Backfill](./docs/plan/10-replay-and-backfill.md)
+- 建造期设计契约存档：[`docs-backup/design/`](./docs-backup/design/)（含 config-schema、cli-semantics、storage-multi-dialect 等逐字段/逐 § 契约）
 - [本地开发：pre-commit hook 启用](./.githooks/README.md)
 - [文档总览](./docs/README.md)
 

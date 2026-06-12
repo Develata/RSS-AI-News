@@ -1,6 +1,6 @@
 //! feed_sources 持久化层（契约）。
 //!
-//! 按 `docs/design/storage-multi-dialect.md` §6.2 模式：trait method `match`
+//! 按 `docs-backup/design/storage-multi-dialect.md` §6.2 模式：trait method `match`
 //! 分发到 sqlite_*/pg_* 私有 helper。SQL const 见 [`super::feed_source_sql`]，
 //! 方言分发实装 + row 解码见 [`super::feed_source_impl`]。
 

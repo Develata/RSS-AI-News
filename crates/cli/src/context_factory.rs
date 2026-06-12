@@ -20,7 +20,7 @@ use crate::{db_url::resolve_storage_url, error::CliError};
 
 /// W11-P4-C：cli/runtime PG 端到端入口。
 ///
-/// 按 [`docs/design/storage-multi-dialect.md`] §5.4 通过 [`resolve_storage_url`]
+/// 按 [`docs-backup/design/storage-multi-dialect.md`] §5.4 通过 [`resolve_storage_url`]
 /// 解析 `driver` + `DATABASE_URL`，[`StoragePool::build`] 按 URL scheme 路由到
 /// `StoragePool::{Sqlite, Postgres}`。所有 10 个 repo 通过
 /// `new_with_storage(StoragePool)` 入口注入，业务方法内部按 backend `match`

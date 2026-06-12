@@ -2,7 +2,7 @@
 //!
 //! ## W11-P3-E-2：PG 分支落地
 //!
-//! 按 `docs/design/storage-multi-dialect.md` §6.2 模式：trait method `match`
+//! 按 `docs-backup/design/storage-multi-dialect.md` §6.2 模式：trait method `match`
 //! 分发到 sqlite_*/pg_* 私有 helper。除 `claim_pending_fetch` 外 SQL 跨方言
 //! 完全等价（EXISTS 已 P1 改 CASE WHEN decode i32）。SQL const 见
 //! [`super::feed_entry_sql`]，方言分发实装见 [`super::feed_entry_impl`]。

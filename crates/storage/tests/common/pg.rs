@@ -1,6 +1,6 @@
 //! W11-P3-C-0：PostgreSQL 测试 fixture。
 //!
-//! 按 [`docs/design/storage-multi-dialect.md`] §8.3 方案 1（URL 参数固化
+//! 按 [`docs-backup/design/storage-multi-dialect.md`] §8.3 方案 1（URL 参数固化
 //! `?options=-c%20search_path%3D...`）实现 per-test 独立 schema 隔离，
 //! 避免 `SET search_path` 单次命中只影响连接池里某一条连接的"测试隔离假象"。
 //!

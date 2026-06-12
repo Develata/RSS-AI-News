@@ -24,7 +24,7 @@
 //!
 //! ## W11-P3-C-2：PG 分支落地
 //!
-//! 按 `docs/design/storage-multi-dialect.md` §6.2 模式：trait method `match`
+//! 按 `docs-backup/design/storage-multi-dialect.md` §6.2 模式：trait method `match`
 //! 分发到 sqlite_*/pg_* 私有 helper（实装见 [`super::reindex_job_impl`]，SQL
 //! const 见 [`super::reindex_job_sql`]）。除两条 claim 路径外，SQL 跨方言完全等价。
 //!
