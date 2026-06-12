@@ -109,6 +109,13 @@ storage 层 `RuleVersionRepo` 新增固有方法（替代 `get_or_create_config_
 - `ConfigVersionStore` trait（config crate）+ `get_or_create_config_version_async`
   + impl：生产死代码，**删除**，消除 config 行的第二写入口（单一真相源）。
   工作区内部 API，无外部消费者。
+- **`reindex --dry-run` 不豁免启动轮换**（codex W16 review 提议 carve-out，
+  裁定不采纳）：启动期写入（migrations + config 轮换）是所有命令共享的基础
+  设施，W16 前 `ensure_default_rule_version` 在同一位置就有同性质写入（空库
+  seed）；轮换幂等且自我纠正（预览 config B 后回到 A，下次启动经复活路径转回
+  A）。为 dry-run 分叉 `build_run_context` 会削弱"任意 CLI 启动后 active ==
+  当前 sha"的构造性保证。dry-run 契约的范围澄清见
+  [../acceptance-cases/commands/reindex.md](../acceptance-cases/commands/reindex.md)。
 
 ## 6. 行为变化与边界
 

@@ -23,7 +23,10 @@
 - `content_hash`：扫描所有 article 重算；命中 unique conflict 时计入 conflict 计数（不写入）
 - `categories`：扫描 sources 增量插入新行、归档已不在 config 的旧行；幂等（第二次执行归档=0）
 - categories reindex 把 active `config` kind rule_version_id 写入新插入 feed_sources 的 `config_rule_version_id`
-- `--dry-run` 与 real run 计数完全一致；dry-run 不写任何业务表
+- `--dry-run` 与 real run 计数完全一致；dry-run 的 **reindex 流程自身**不写任何业务表。
+  契约范围注（W16）：CLI 启动期所有命令共享的基础设施写入——migrations 与
+  config 版本轮换（[../../plan/16-config-versioning.md](../../plan/16-config-versioning.md) §5）——
+  不在本契约内；W16 之前 `ensure_default_rule_version` 在同一启动位置已有同性质写入（空库 seed）
 - `--abort <job_id>` 中止 running 任务，**保留** 已 checkpoint 的数据；幂等
 - `all`：解析为 link_hash → content_hash → categories 顺序执行
 

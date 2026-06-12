@@ -351,7 +351,9 @@ async fn sqlite_rotate_active_config(
                 .bind(id)
                 .execute(&mut *tx)
                 .await
-                .map_err(StorageError::from)?;
+                .map_err(|error| {
+                    classify_db_error(error, "rule_versions", format!("config/revive/{id}"))
+                })?;
             id
         }
         None => {
@@ -486,11 +488,17 @@ async fn pg_rotate_active_config_once(
         .map_err(StorageError::from)?;
     let new_id = match existing {
         Some(id) => {
+            // codex W16-fix1：REVIVE 把行升回 active，并发轮换的落败方会在
+            // partial unique `uq_rule_versions_kind_active` 上吃 23505 ——
+            // 必须 classify 成 Conflict 才能触发外层单次 retry（last-writer-
+            // wins）；裸 `StorageError::from` 会让启动直接失败。
             sqlx::query(REVIVE_CONFIG_VERSION_SQL)
                 .bind(id)
                 .execute(&mut *tx)
                 .await
-                .map_err(StorageError::from)?;
+                .map_err(|error| {
+                    classify_db_error(error, "rule_versions", format!("config/revive/{id}"))
+                })?;
             id
         }
         None => {
