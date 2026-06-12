@@ -10,10 +10,10 @@ use crate::StorageError;
 
 /// 多方言存储池枚举。
 ///
-/// W11-P3-A 起 PG 分支可真实构造 pool（参见 [`StoragePool::build`] / [`build_pg_pool`]），
-/// 但 repo 业务方法 PG 路径仍是 stub —— [`StoragePool::require_sqlite`] 在 PG 分支
-/// 仍返回 [`StorageError::UnsupportedBackend("<scope> postgres path is P3+")`]。
-/// P3-C 起逐 repo 替换为真实 PG 实现，届时 require_sqlite 调用点逐个迁出。
+/// W11-P4 起全部 repo 的 PG 路径均为真实实现（见
+/// `docs-backup/design/storage-multi-dialect.md` §6.2 的 trait method `match`
+/// 分发模式），不再存在 stub —— W17 已删除过渡期的 `require_sqlite` /
+/// `PG_STUB_SUFFIX`（生产路径零调用）。
 ///
 /// `Clone` 透传给底层 `SqlitePool` / `PgPool`（二者均为 `Arc` 包裹的 cheap-clone）。
 /// `Debug` 手写脱敏 —— 不透传 sqlx 内部，避免未来日志意外暴露连接字符串。
@@ -22,9 +22,6 @@ pub enum StoragePool {
     Sqlite(SqlitePool),
     Postgres(PgPool),
 }
-
-/// W11-P2-A 阶段 PG 路径 stub 的错误信息后缀；P3 实装时全文 grep 这一串。
-const PG_STUB_SUFFIX: &str = "postgres path is P3+";
 
 impl StoragePool {
     /// 按 URL scheme 路由：`postgres[ql]://` → Postgres，其余视为 SQLite 文件路径或 `sqlite://`。
@@ -56,21 +53,6 @@ impl StoragePool {
             .flat_map(char::to_lowercase)
             .collect();
         head.starts_with("postgres://") || head.starts_with("postgresql://")
-    }
-
-    /// 取出底层 `SqlitePool`；PG 分支返回 [`StorageError::UnsupportedBackend`]，
-    /// 错误信息以 `scope` 标识"哪个 repo 还没填实 PG 路径"，P3 实装时
-    /// `git grep "postgres path is P3+"` 一次扫齐所有 stub 点。
-    ///
-    /// 由 10 个 repo 的 `sqlite_pool()` thin wrapper 统一调用，避免分散的
-    /// `match` 与不一致的错误信息字符串。
-    pub fn require_sqlite(&self, scope: &'static str) -> Result<&SqlitePool, StorageError> {
-        match self {
-            Self::Sqlite(p) => Ok(p),
-            Self::Postgres(_) => Err(StorageError::UnsupportedBackend(format!(
-                "{scope} {PG_STUB_SUFFIX}"
-            ))),
-        }
     }
 }
 
@@ -197,19 +179,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn require_sqlite_returns_pool_on_sqlite_variant() {
-        let pool = build_sqlite_pool(Path::new(":memory:"), 1, 100)
-            .await
-            .expect("in-memory sqlite pool builds");
-        let storage = StoragePool::Sqlite(pool);
-        let inner = storage
-            .require_sqlite("test_repo")
-            .expect("sqlite returns pool");
-        // 仅断言能取到引用即可（size 在 lazy 模式下可能仍为 0）
-        let _ = inner.size();
-    }
-
     /// W11-P3-A-fix1.L1：blackhole 地址（TEST-NET-1 `192.0.2.1`，RFC 5737 保留
     /// 不可路由）锁住 [`build_pg_pool`] 的 acquire 上限。`tokio::time::timeout`
     /// 加 5 秒 slack 兜底，超时即测试 fail（说明 [`PG_ACQUIRE_TIMEOUT`] 没生效）。
@@ -232,17 +201,5 @@ mod tests {
             inner.is_err(),
             "expected connect error on blackhole, got Ok pool"
         );
-    }
-
-    /// P3 grep 兜底：所有 stub 错误信息都以 `PG_STUB_SUFFIX` 结尾，且包含 scope 标识。
-    /// 单测无法构造真实 PgPool（连不到 server），但能通过常量与格式约束锁住语义。
-    #[test]
-    fn pg_stub_suffix_is_grep_friendly() {
-        // 关键词唯一：避免与业务 SQL/日志中其它"P3"字串混淆
-        assert_eq!(PG_STUB_SUFFIX, "postgres path is P3+");
-        // 错误信息格式按"<scope> <suffix>"组合
-        let msg = format!("article_repo {PG_STUB_SUFFIX}");
-        assert!(msg.contains("article_repo"));
-        assert!(msg.ends_with(PG_STUB_SUFFIX));
     }
 }
