@@ -29,7 +29,7 @@
 |---|---|---|---|---|---|
 | D-001 | 2026-06-04 | _(baseline)_ | 初版 plan 视图与 code 视图按章节 + codegraph 协同写出，未发现需登记的具体漂移 | resolved | 基线建立；后续漂移由首先发现的人在此追加 |
 | D-002 | 2026-06-11 | config-versioning | plan 06 §11 声称 `ConfigVersionStore::get_or_create_config_version` 向 reindex 关联配置快照；code 中该 trait 生产路径零调用（reindex 实际走 `active_rule_or_register`），`reindex.rs` 注释同样描述不实 | resolved | 双向收敛：P0 修订 06 §11（c6612a7）；P2 删除 trait 死代码 + 修 reindex.rs 注释（43f7443） |
-| D-003 | 2026-06-11 | storage-multi-dialect-doc | `cli/src/context_factory.rs` 等多处注释引用 `docs/design/storage-multi-dialect.md`（§2.5/§5.4），该文件在仓库中不存在（docs/design/ 目录不存在） | resolved | 改注释/链接（W17）：设计契约实际存于 `docs-backup/design/storage-multi-dialect.md`（2026-05-16 落地，docs 重组迁入 backup 后引用未跟上）。代码注释/ci.yml/migrations 8 处改指 backup 真实路径；README 10 处死链改指 plan/ 活章节 + backup 存档。现行权威 = plan/05-storage.md |
+| D-003 | 2026-06-11 | storage-multi-dialect-doc | `cli/src/context_factory.rs` 等多处注释引用 `docs/design/storage-multi-dialect.md`（§2.5/§5.4），该文件在仓库中不存在（docs/design/ 目录不存在） | resolved | 改注释/链接（W17）：设计契约实际存于 `docs-backup/design/storage-multi-dialect.md`（2026-05-16 落地，docs 重组迁入 backup 后引用未跟上）。代码注释/ci.yml 7 处改指 backup 真实路径；README 10 处死链改指 plan/ 活章节 + backup 存档。现行权威 = plan/05-storage.md。**例外**：migrations/postgres/0001 的注释已回滚不改——sqlx 对已应用迁移做校验和比对，文件字节不可变（见 migration_immutability_tests.rs 锁定） |
 
 ## 已知**可能**的近期漂移点（监视）
 

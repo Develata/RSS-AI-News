@@ -3050,6 +3050,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rss-ai-news-domain",
+ "sha2",
  "sqlx",
  "testcontainers-modules",
  "thiserror 2.0.18",
