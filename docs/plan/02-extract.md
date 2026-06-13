@@ -5,6 +5,10 @@
 ```text
 pending_fetch (claim+lease)
   → fetching   (HTML 抓取)
+    → 抓取永久失败（4xx/too_large/invalid_url）→ summary fallback
+      → 摘要可用 → fallback_persisted（W18，见 ./17-extract-fetch-fallback.md）
+      → 无摘要   → failed
+    → 抓取可重试失败（超时/5xx）→ 回 pending_fetch（W15 预算路径）
   → extracting (策略链提取)
     → 第三层 content_hash 去重
     → 成功 → INSERT articles + feed_entries.state='persisted'
@@ -157,10 +161,10 @@ rss-ai-news replay --kind html --target-id <feed_entry_id> --diff
 | 失败点 | 错误变体 | retryable | 处理 |
 |---|---|---|---|
 | HTML fetch 超时 | `ExtractorError::HttpTimeout` | true | 回 `pending_fetch` |
-| HTML 4xx | `ExtractorError::HttpStatus { 4xx }` | false | 转 `failed` |
+| HTML 4xx | `ExtractorError::HttpStatus { 4xx }` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | HTML 5xx | `ExtractorError::HttpStatus { 5xx }` | true | 回 `pending_fetch` |
 | 不支持的媒体类型 | `ExtractorError::UnsupportedMediaType` | false | 转 `failed` |
-| payload 过大 | `ExtractorError::TooLarge` | false | 转 `failed` |
+| payload 过大 | `ExtractorError::TooLarge` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | 提取失败 | `ExtractorError::ParseFailed` | false | 尝试 fallback；失败则 `failed` |
 | 内容太短 | `ExtractorError::ContentTooShort` | false | 尝试 fallback；失败则 `failed` |
 | content_hash 命中 | 非错误 | — | 转 `dedup_skipped` |
