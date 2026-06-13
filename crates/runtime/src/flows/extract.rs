@@ -290,6 +290,23 @@ impl ExtractFlow {
         let raw = match ctx.html_fetcher.fetch_html(&fetch_task).await {
             Ok(raw) => raw,
             Err(error) => {
+                // W18（plan/17）：永久性抓取失败（403 付费墙 / 404 / too_large）
+                // 且 feed 摘要可用时降级成文，与下方解析链失败分支对称。
+                // 可重试错误（超时/5xx）不消费摘要——重试仍有机会拿到全文，
+                // W15 预算路径维持不变。
+                if !error.is_retryable()
+                    && let Some(fallback) = summary_fallback(&fetch_task)
+                {
+                    tracing::info!(
+                        feed_entry_id = claimed.id,
+                        error_kind = error.error_kind(),
+                        "permanent fetch failure; falling back to feed summary"
+                    );
+                    return persist_fallback(
+                        &ctx, &emitter, &owner, claimed.id, fallback, None, now,
+                    )
+                    .await;
+                }
                 return release_extract_error(
                     &ctx,
                     &emitter,

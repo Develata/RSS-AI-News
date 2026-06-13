@@ -247,6 +247,128 @@ async fn extract_marks_failed_when_strategy_and_fallback_both_fail() {
     assert_eq!(event_count, 1);
 }
 
+/// W18（plan/17）：403 等永久性抓取失败 + feed 摘要可用 → 摘要成文，
+/// 不再整条作废。生产实证：付费墙源（FT/NYT/OpenAI）3312 条 http_4xx。
+#[tokio::test]
+async fn extract_fetch_403_with_summary_persists_fallback() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry_id = seed_pending_fetch_entry(
+        &pool,
+        source_id,
+        "uid-403-fb",
+        "hash-403-fb",
+        Some("<p>paywalled article summary from feed</p>"),
+    )
+    .await;
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Err(ExtractorError::HttpStatus { code: 403 }))]),
+        vec![success_strategy("unused")],
+    );
+
+    let summary = flow
+        .run(ExtractOptions {
+            batch_size: 1,
+            max_attempts: 5,
+            max_batches: 0,
+        })
+        .await;
+    let row: (String, Option<i64>) =
+        sqlx::query_as("SELECT state, article_id FROM feed_entries WHERE id = ?")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .expect("entry should be readable");
+    let (quality, strategy, artifact_id): (String, String, Option<i64>) = sqlx::query_as(
+        "SELECT content_quality, extractor_strategy, body_html_artifact_id \
+         FROM articles WHERE id = ?",
+    )
+    .bind(row.1)
+    .fetch_one(&pool)
+    .await
+    .expect("fallback article should be readable");
+
+    assert_eq!(summary.fallback_persisted, 1);
+    assert_eq!(summary.permanent_failed, 0);
+    assert_eq!(row.0, "fallback_persisted");
+    assert_eq!(quality, "fallback");
+    assert_eq!(strategy, "summary_fallback");
+    assert_eq!(artifact_id, None, "no html fetched, no artifact to persist");
+}
+
+/// W18：403 且 feed 无摘要 → 维持旧行为转 failed(http_4xx)，锁住不回归。
+#[tokio::test]
+async fn extract_fetch_403_without_summary_fails_permanent() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry_id =
+        seed_pending_fetch_entry(&pool, source_id, "uid-403-dead", "hash-403-dead", None).await;
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Err(ExtractorError::HttpStatus { code: 403 }))]),
+        vec![success_strategy("unused")],
+    );
+
+    let summary = flow
+        .run(ExtractOptions {
+            batch_size: 1,
+            max_attempts: 5,
+            max_batches: 0,
+        })
+        .await;
+    let row: (String, Option<String>) =
+        sqlx::query_as("SELECT state, last_error_kind FROM feed_entries WHERE id = ?")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .expect("entry should be readable");
+
+    assert_eq!(summary.permanent_failed, 1);
+    assert_eq!(row.0, "failed");
+    assert_eq!(row.1, Some("http_4xx".to_string()));
+}
+
+/// W18：可重试错误（5xx）即使摘要可用也不提前降级——重试仍有机会拿全文，
+/// W15 预算路径不变。
+#[tokio::test]
+async fn extract_fetch_5xx_with_summary_stays_retryable() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry_id = seed_pending_fetch_entry(
+        &pool,
+        source_id,
+        "uid-503-summary",
+        "hash-503-summary",
+        Some("<p>summary exists but must not be consumed yet</p>"),
+    )
+    .await;
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Err(ExtractorError::HttpStatus { code: 503 }))]),
+        vec![success_strategy("unused")],
+    );
+
+    let summary = flow
+        .run(ExtractOptions {
+            batch_size: 1,
+            max_attempts: 5,
+            max_batches: 0,
+        })
+        .await;
+    let row: (String, Option<String>) =
+        sqlx::query_as("SELECT state, last_error_kind FROM feed_entries WHERE id = ?")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .expect("entry should be readable");
+
+    assert_eq!(summary.retryable_failed, 1);
+    assert_eq!(summary.fallback_persisted, 0);
+    assert_eq!(row.0, "pending_fetch");
+    assert_eq!(row.1, Some("http_5xx".to_string()));
+}
+
 #[tokio::test]
 async fn extract_releases_retryable_on_5xx() {
     let (_dir, pool) = make_test_pool().await;
