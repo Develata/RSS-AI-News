@@ -290,7 +290,10 @@ async fn pg_reset_failed_in_window_counts_and_resets() {
     assert_eq!(outcome.reset, 1, "only the failed row is reset");
 
     let reset_row = repo.find_by_id(id_failed).await.unwrap().unwrap();
-    assert_eq!(reset_row.state, "discovered", "failed → discovered");
+    assert_eq!(
+        reset_row.state, "pending_fetch",
+        "failed → pending_fetch（claim 认的状态，非死状态 discovered）"
+    );
     assert_eq!(reset_row.attempt_count, 0);
 
     ctx.cleanup().await;

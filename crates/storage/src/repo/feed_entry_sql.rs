@@ -156,9 +156,13 @@ WHERE ($1 IS NULL OR created_at >= $1)
   AND ($2 IS NULL OR created_at < $2)
 "#;
 
+// 重置目标必须是 'pending_fetch'：extract 的 claim 只认 'pending_fetch'
+// （见 CLAIM_PENDING_FETCH_*），且 INSERT 新条目也直接进 'pending_fetch'。
+// 'discovered' 在当前管线中无任何消费者（claim/晋升都不认它），重置到该
+// 状态会让条目卡死、永不被重抓——backfill extract 因此曾是空操作。
 pub(super) const RESET_FAILED_IN_WINDOW_SQL: &str = r#"
 UPDATE feed_entries
-SET state = 'discovered',
+SET state = 'pending_fetch',
     attempt_count = 0,
     last_error = NULL,
     last_error_kind = NULL,

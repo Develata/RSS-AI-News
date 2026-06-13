@@ -5,8 +5,8 @@ use rss_ai_news_domain::{
     state::{FeedKind, FeedSourceStatus},
 };
 use rss_ai_news_storage::{
-    ArticleRepo, ArticleRepository, FeedEntryRepo, FeedEntryRepository, FeedSourceRepo,
-    FeedSourceRepository, NewRawArtifact, RawArtifactRepo, RawArtifactRepository,
+    ArticleRepo, ArticleRepository, ClaimRequest, FeedEntryRepo, FeedEntryRepository,
+    FeedSourceRepo, FeedSourceRepository, NewRawArtifact, RawArtifactRepo, RawArtifactRepository,
     ResetFailedFilter, UpdateContentHashOutcome,
 };
 use sqlx::SqlitePool;
@@ -48,7 +48,44 @@ async fn reset_failed_resets_all_failed() {
         .unwrap();
 
     assert_eq!(outcome.reset, 2);
-    assert_eq!(count_state(&pool, "discovered").await, 2);
+    // 必须回到 pending_fetch（claim 认的状态），不是死状态 discovered。
+    assert_eq!(count_state(&pool, "pending_fetch").await, 2);
+    assert_eq!(count_state(&pool, "discovered").await, 0);
+}
+
+#[tokio::test]
+async fn reset_failed_entries_are_reclaimable() {
+    // 回归：reset_failed_in_window 重置后的条目必须能被 extract 的 claim
+    // 重新领取（此前重置成 discovered，claim 不认 → 条目卡死，backfill 空操作）。
+    let (_dir, pool) = common::make_test_pool().await;
+    let source_id = common::seed_source(&pool).await;
+    let id_a = insert_entry_state(&pool, source_id, "a", "failed", OffsetDateTime::now_utc()).await;
+    // 高 attempt_count 同时验证重置会清零，使其重新落在 claim 的预算内。
+    sqlx::query("UPDATE feed_entries SET attempt_count = 9 WHERE id = ?")
+        .bind(id_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo = FeedEntryRepo::new(pool.clone());
+
+    repo.reset_failed_in_window(&ResetFailedFilter::default())
+        .await
+        .unwrap();
+
+    let now = OffsetDateTime::now_utc();
+    let claimed = repo
+        .claim_pending_fetch(&ClaimRequest {
+            owner: "test-worker".to_string(),
+            now,
+            lease_expires_at: now + Duration::minutes(5),
+            batch_size: 10,
+            max_attempts: 5,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(claimed.len(), 1, "reset 后的条目应被 claim 重新领取");
+    assert_eq!(claimed[0].id, id_a);
 }
 
 #[tokio::test]
