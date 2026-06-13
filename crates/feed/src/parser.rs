@@ -33,7 +33,14 @@ pub fn parse_feed(bytes: &[u8], feed_kind: FeedKind) -> Result<Vec<FeedEntryMeta
             feed_entry_uid: entry.id,
             title_raw,
             link_raw,
-            summary_raw: entry.summary.map(|summary| summary.content),
+            // atom 的正文可能放在 <summary> 或 <content>（GitHub releases.atom
+            // 只有 <content>）。优先 <summary>，缺失则回退 <content>，否则正文
+            // 在 readability 失败时无从兜底而整条 failed。RSS 的 <description>
+            // 经 feed-rs 映射到 summary，行为不变。
+            summary_raw: entry
+                .summary
+                .map(|summary| summary.content)
+                .or_else(|| entry.content.and_then(|content| content.body)),
             published_at: entry
                 .published
                 .or(entry.updated)
@@ -84,6 +91,32 @@ mod tests {
         assert_eq!(entries[0].feed_entry_uid, "json-1");
         assert_eq!(entries[0].title_raw, "JSON item 1");
         assert_eq!(entries[0].link_raw, "https://example.com/json/1");
+    }
+
+    #[test]
+    fn atom_content_falls_back_to_summary_raw_when_summary_absent() {
+        // GitHub releases.atom 把 release notes 放在 <content>、没有 <summary>。
+        // 解析器必须把 <content> 映射进 summary_raw，否则 readability 失败时
+        // 无摘要可兜底 → 整条 failed（生产 sglang 10/10 即此症状）。
+        let atom = br#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Releases</title>
+  <entry>
+    <id>tag:github.com,2008:Repository/1/v1.0</id>
+    <title>v1.0</title>
+    <link rel="alternate" type="text/html" href="https://github.com/x/y/releases/tag/v1.0"/>
+    <content type="html">&lt;p&gt;Release notes body&lt;/p&gt;</content>
+  </entry>
+</feed>"#;
+
+        let entries = parse_feed(atom, FeedKind::Atom).expect("atom should parse");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].summary_raw.as_deref(),
+            Some("<p>Release notes body</p>"),
+            "summary_raw must fall back to <content> when <summary> is absent"
+        );
     }
 
     #[test]
