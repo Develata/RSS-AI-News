@@ -58,10 +58,17 @@ pub fn parse_feed(bytes: &[u8], feed_kind: FeedKind) -> Result<Vec<FeedEntryMeta
 /// 当作 fallback 文章持久化，污染数据。按 `content_type` 过滤是必要的边界校验。
 fn textual_content_body(content: feed_rs::model::Content) -> Option<String> {
     let is_textual = {
-        let media_type = content.content_type.as_str();
-        media_type.starts_with("text/")
-            || media_type.ends_with("/xml")
-            || media_type.ends_with("+xml")
+        // 先归一化媒体类型：去掉参数（"; charset=..."）再小写，规避大小写
+        // 与参数导致 application/xhtml+xml 这类合法文本被误判为非文本。
+        let essence = content
+            .content_type
+            .as_str()
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        essence.starts_with("text/") || essence.ends_with("/xml") || essence.ends_with("+xml")
     };
     is_textual.then_some(content.body).flatten()
 }
@@ -131,6 +138,31 @@ mod tests {
             entries[0].summary_raw.as_deref(),
             Some("<p>Release notes body</p>"),
             "summary_raw must fall back to <content> when <summary> is absent"
+        );
+    }
+
+    #[test]
+    fn atom_textual_content_with_charset_param_is_used_as_summary_raw() {
+        // 带 charset 参数的合法 XHTML content type 必须仍被识别为文本（归一化
+        // 去参数后判断），否则摘要回退会漏掉这类条目（codex 第二轮 P2）。
+        let atom = br#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Xhtml</title>
+  <entry>
+    <id>xhtml-1</id>
+    <title>x</title>
+    <link rel="alternate" type="text/html" href="https://example.com/x"/>
+    <content type="application/xhtml+xml; charset=utf-8">&lt;p&gt;Xhtml body&lt;/p&gt;</content>
+  </entry>
+</feed>"#;
+
+        let entries = parse_feed(atom, FeedKind::Atom).expect("atom should parse");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].summary_raw.as_deref(),
+            Some("<p>Xhtml body</p>"),
+            "textual content type with parameters must still populate summary_raw"
         );
     }
 
