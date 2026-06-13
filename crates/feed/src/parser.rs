@@ -34,13 +34,13 @@ pub fn parse_feed(bytes: &[u8], feed_kind: FeedKind) -> Result<Vec<FeedEntryMeta
             title_raw,
             link_raw,
             // atom 的正文可能放在 <summary> 或 <content>（GitHub releases.atom
-            // 只有 <content>）。优先 <summary>，缺失则回退 <content>，否则正文
-            // 在 readability 失败时无从兜底而整条 failed。RSS 的 <description>
-            // 经 feed-rs 映射到 summary，行为不变。
+            // 只有 <content>）。优先 <summary>，缺失则回退到**文本类** <content>，
+            // 否则正文在 readability 失败时无从兜底而整条 failed。RSS 的
+            // <description> 经 feed-rs 映射到 summary，行为不变。
             summary_raw: entry
                 .summary
                 .map(|summary| summary.content)
-                .or_else(|| entry.content.and_then(|content| content.body)),
+                .or_else(|| entry.content.and_then(textual_content_body)),
             published_at: entry
                 .published
                 .or(entry.updated)
@@ -49,6 +49,21 @@ pub fn parse_feed(bytes: &[u8], feed_kind: FeedKind) -> Result<Vec<FeedEntryMeta
     }
 
     Ok(entries)
+}
+
+/// 仅当 atom `<content>` 是文本/HTML/XML 类型时返回其 body 作为摘要回退。
+///
+/// 非文本 content（`image/*` 的 base64、`application/json`、`application/octet-stream`
+/// 等）的 body 不是可读正文，若直接写入 `summary_raw` 会被 `summary_fallback`
+/// 当作 fallback 文章持久化，污染数据。按 `content_type` 过滤是必要的边界校验。
+fn textual_content_body(content: feed_rs::model::Content) -> Option<String> {
+    let is_textual = {
+        let media_type = content.content_type.as_str();
+        media_type.starts_with("text/")
+            || media_type.ends_with("/xml")
+            || media_type.ends_with("+xml")
+    };
+    is_textual.then_some(content.body).flatten()
 }
 
 #[cfg(test)]
@@ -116,6 +131,30 @@ mod tests {
             entries[0].summary_raw.as_deref(),
             Some("<p>Release notes body</p>"),
             "summary_raw must fall back to <content> when <summary> is absent"
+        );
+    }
+
+    #[test]
+    fn atom_non_textual_content_is_not_used_as_summary_raw() {
+        // 非文本 content（这里 application/json）不是可读正文：必须拒绝，
+        // 否则会被 summary_fallback 当成 fallback 文章持久化（codex P2）。
+        let atom = br#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Binary</title>
+  <entry>
+    <id>bin-1</id>
+    <title>blob</title>
+    <link rel="alternate" type="text/html" href="https://example.com/blob"/>
+    <content type="application/json">{"not":"an article"}</content>
+  </entry>
+</feed>"#;
+
+        let entries = parse_feed(atom, FeedKind::Atom).expect("atom should parse");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].summary_raw, None,
+            "non-textual <content> must not populate summary_raw"
         );
     }
 
