@@ -134,6 +134,11 @@ rss-ai-news backfill --target ai      --date-from 2026-05-01 \
 `backfill` 处理**业务状态的重做**。两者底层都用 rule_versions，但 reindex 走 reindex_jobs
 + partial unique index 的 claim/lease 机制，backfill 不走。详见 [./05-storage.md](./05-storage.md) §8。
 
+`--target categories` 还承担 `feed_sources` 的**整集对账**：配置里改名 / 删除 source 后，
+ingest（per-source UPSERT）只会新建新行、留下旧 key 的孤儿行；归档孤儿由 categories
+reindex 完成（`--dry-run` 先报 `archived: N`）。该生命周期约定见
+[./06-config.md](./06-config.md) §7.1。
+
 ## 6. `rebuild-report` 子命令
 
 入口：[`crates/cli/src/commands/rebuild_report.rs`](../../crates/cli/src/commands/rebuild_report.rs) →

@@ -165,6 +165,33 @@ enabled = true
 不暴露到 `CategoryConfig.sources[i]` 字段，避免日志/Debug 泄漏。
 详见 [../adr/0007-rsshub-secret-runtime-expansion.md](../adr/0007-rsshub-secret-runtime-expansion.md)。
 
+### 7.1 source `key` 改名 / 删除的生命周期（孤儿行）
+
+`feed_sources` 行以 `(category_key, source_key)` 为身份。`ingest` 的 `resolve_source`
+按此身份只做 **per-source UPSERT**：改名（旧 key→新 key）等价于"删旧 source + 加新
+source"，于是 ingest 会**新建**新 key 的行，而旧 key 的行**不会被 ingest 触碰**——
+它成为"孤儿"（仍 `Active`，但配置里已无对应 source）。删除 source 同理留下孤儿。
+
+这是有意的边界划分：ingest 只认单个 source 的同步，**不持有整集视图**，因此不负责
+对账归档；归档孤儿由 `reindex --target categories` 负责（它一次读全部 categories +
+全部 `feed_sources`，对配置外的 `Active`/`Paused` 行走 lease-guarded `mark_archived`）。
+因 `feed_entries` / `articles` 有 FK 指向 `feed_sources`，归档用 `status='archived'`
+而非物理 DELETE。
+
+操作约定（改名 / 删除 source 后）：
+
+```bash
+# 1) 先看会归档几行（只读，不写库）
+rss-ai-news reindex --dry-run --target categories   # 输出 "archived: N"
+# 2) 确认无误后执行归档
+rss-ai-news reindex --target categories
+```
+
+不执行 reindex 不会出错，但孤儿行会一直停留在 `Active`；它已不在任何配置 source 中，
+ingest 不会再为它建任务，故不再抓取，只是占着一行历史。详见
+[./10-replay-and-backfill.md](./10-replay-and-backfill.md) §5.3 与
+`reindex_categories`（`crates/runtime/src/flows/reindex/execute.rs`）。
+
 ## 8. `[ai].enabled × [publish].include_unscored` 真值表
 
 | `ai.enabled` | `include_unscored` | 行为 |
