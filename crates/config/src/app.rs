@@ -148,8 +148,27 @@ pub struct DedupConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExtractorConfig {
     pub strategy_order: Vec<String>,
+    /// HTML 文章正文抓取的响应体上限（字节）。extract 阶段抓原文页时用，
+    /// 用于把单篇文章占用的内存 / 带宽限定在合理范围。
     pub max_body_bytes: u64,
+    /// Feed 下载的响应体上限（字节）。`None` = 沿用 [`Self::max_body_bytes`]
+    /// （向后兼容：旧配置无此字段时行为完全不变）。
+    ///
+    /// 解耦动机：GitHub `releases.atom` 等把全文 release notes 嵌进 feed 的源，
+    /// 体积远大于普通文章页，需要更高的 feed 上限；而该上限若与
+    /// `max_body_bytes` 共用，会连带放大**每篇 HTML 抓取**的内存 / 带宽天花板。
+    /// 拆开后可单独抬高 feed 上限而不波及 HTML 路径。
+    #[serde(default)]
+    pub feed_max_body_bytes: Option<u64>,
     pub min_body_chars: u32,
+}
+
+impl ExtractorConfig {
+    /// Feed 下载体上限的有效值：显式配置优先，缺省回退到 `max_body_bytes`。
+    /// 回退保证旧配置（无 `feed_max_body_bytes`）的 feed 抓取行为零变化。
+    pub fn effective_feed_max_body_bytes(&self) -> u64 {
+        self.feed_max_body_bytes.unwrap_or(self.max_body_bytes)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -343,5 +362,31 @@ metrics_bind = "127.0.0.1:9090"
 "#;
         let config: AppConfig = toml::from_str(toml).expect("zero parses");
         assert_eq!(config.runtime.max_batches_per_run, 0);
+    }
+
+    #[test]
+    fn feed_max_body_bytes_falls_back_to_max_body_bytes_when_absent() {
+        // 旧配置（无 feed_max_body_bytes）：feed 抓取上限沿用 max_body_bytes，
+        // 行为零变化。这是解耦该 knob 时向后兼容的核心保证。
+        let extractor = ExtractorConfig {
+            strategy_order: vec!["readability".to_string()],
+            max_body_bytes: 1_048_576,
+            feed_max_body_bytes: None,
+            min_body_chars: 100,
+        };
+        assert_eq!(extractor.effective_feed_max_body_bytes(), 1_048_576);
+    }
+
+    #[test]
+    fn feed_max_body_bytes_overrides_max_body_bytes_when_present() {
+        // 显式设置时，feed 上限与 HTML 上限解耦：抬高 feed 不波及 HTML。
+        let extractor = ExtractorConfig {
+            strategy_order: vec!["readability".to_string()],
+            max_body_bytes: 1_048_576,
+            feed_max_body_bytes: Some(5_242_880),
+            min_body_chars: 100,
+        };
+        assert_eq!(extractor.effective_feed_max_body_bytes(), 5_242_880);
+        assert_eq!(extractor.max_body_bytes, 1_048_576, "HTML 上限不受影响");
     }
 }

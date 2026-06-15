@@ -212,6 +212,7 @@ mod tests {
                 extractor: ExtractorConfig {
                     strategy_order: vec!["readability".to_string()],
                     max_body_bytes: 1024,
+                    feed_max_body_bytes: None,
                     min_body_chars: 1,
                 },
                 lease: LeaseConfig {
@@ -388,13 +389,11 @@ mod tests {
             .as_mut()
             .unwrap()
             .fallback_models = Some(vec![]);
-        assert!(
-            config
-                .effective_for_category("ai")
-                .unwrap()
-                .fallback_models
-                .is_empty()
-        );
+        assert!(config
+            .effective_for_category("ai")
+            .unwrap()
+            .fallback_models
+            .is_empty());
     }
 
     #[test]

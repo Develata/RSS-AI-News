@@ -78,7 +78,12 @@ link_normalizer_version = "1"
 
 [extractor]
 strategy_order = ["readability", "summary_fallback"]
+# HTML 文章正文抓取的响应体上限（字节）。
 max_body_bytes = 1_048_576
+# Feed 下载的响应体上限（字节）。可选；省略时沿用 max_body_bytes（旧配置行为不变）。
+# 把全文嵌进 feed 的源（如 GitHub releases.atom）体积远超文章页，需要更高上限；
+# 单独设此项可抬高 feed 上限而不连带放大每篇 HTML 抓取的内存/带宽天花板。
+# feed_max_body_bytes = 5_242_880
 min_body_chars = 100
 
 [lease]

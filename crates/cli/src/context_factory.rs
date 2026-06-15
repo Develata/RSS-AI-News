@@ -10,9 +10,9 @@ use rss_ai_news_feed::ReqwestFeedFetcher;
 use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, LocalFsTarget, PublishTarget};
 use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
-    ArticleAiResultRepo, ArticleRepo, ConfigRotation, FeedEntryRepo, FeedSourceRepo,
-    PublishItemRepo, PublishRecordRepo, RawArtifactRepo, ReindexJobRepo, RuleVersionRepo,
-    RunEventRepo, StoragePool, run_migrations,
+    run_migrations, ArticleAiResultRepo, ArticleRepo, ConfigRotation, FeedEntryRepo,
+    FeedSourceRepo, PublishItemRepo, PublishRecordRepo, RawArtifactRepo, ReindexJobRepo,
+    RuleVersionRepo, RunEventRepo, StoragePool,
 };
 use time::OffsetDateTime;
 
@@ -48,7 +48,11 @@ pub async fn build_run_context(
         .await
         .map_err(CliError::Storage)?;
 
-    let feed_fetcher = Arc::new(ReqwestFeedFetcher::new(app.extractor.max_body_bytes)?);
+    // Feed 与 HTML 抓取的体上限解耦：feed 走可独立抬高的有效值（嵌全文的
+    // atom 源需要更高上限），HTML 仍用 max_body_bytes（约束单篇文章内存/带宽）。
+    let feed_fetcher = Arc::new(ReqwestFeedFetcher::new(
+        app.extractor.effective_feed_max_body_bytes(),
+    )?);
     let html_fetcher = Arc::new(ReqwestHtmlFetcher::new(app.extractor.max_body_bytes)?);
     let strategies: Vec<Arc<dyn ContentStrategy>> = Vec::new();
 

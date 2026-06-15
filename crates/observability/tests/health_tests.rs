@@ -8,16 +8,16 @@ use rss_ai_news_config::{
 };
 use rss_ai_news_domain::Score0To100;
 use rss_ai_news_observability::health::{
-    CheckOutcome, HealthCheck, config_check::ConfigCheck, db_check::DatabaseConnectivityCheck,
-    disk_check::DiskSpaceCheck, github_check::GitHubPingCheck,
-    migration_check::MigrationVersionCheck, openai_check::OpenAiPingCheck,
+    config_check::ConfigCheck, db_check::DatabaseConnectivityCheck, disk_check::DiskSpaceCheck,
+    github_check::GitHubPingCheck, migration_check::MigrationVersionCheck,
+    openai_check::OpenAiPingCheck, CheckOutcome, HealthCheck,
 };
 use rss_ai_news_storage::StoragePool;
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use tempfile::TempDir;
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
+    Mock, MockServer, ResponseTemplate,
 };
 
 #[tokio::test]
@@ -190,6 +190,7 @@ fn app_config() -> AppConfig {
         extractor: ExtractorConfig {
             strategy_order: vec!["summary_fallback".to_string()],
             max_body_bytes: 1024,
+            feed_max_body_bytes: None,
             min_body_chars: 1,
         },
         lease: LeaseConfig {

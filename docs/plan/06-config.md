@@ -72,7 +72,7 @@ pub struct EnvConfig {
 | `[publish]` | GitHub 目标 / `local_output_dir` / `include_unscored` / `max_items_per_report`（`NonZeroU32`）/ `min_importance_score`（`Score0To100`）/ `candidate_window_hours` | 是 |
 | `[publish.template]` | `path_template` / `frontmatter_template` / `report_template` / `item_template` | 是 |
 | `[dedup]` | 三层去重开关 + `link_normalizer_version` | 是 |
-| `[extractor]` | `strategy_order` / `max_body_bytes` / `min_body_chars` | 是 |
+| `[extractor]` | `strategy_order` / `max_body_bytes`（HTML 抓取上限）/ `feed_max_body_bytes`（feed 抓取上限，可缺省→回退 `max_body_bytes`）/ `min_body_chars` | 是（`feed_max_body_bytes` 可缺省） |
 | `[lease]` | fetch / ai / publish 三个 lease 时长 + 回收间隔 | 是 |
 | `[retry]` | feed / ai / publish 各自 `max_attempts` | 是 |
 | `[runtime]` | `max_batches_per_run`（默认 10；`0` = 不限） | **可缺省** |
@@ -83,6 +83,7 @@ pub struct EnvConfig {
 - `max_items_per_report: NonZeroU32` — `0` 在反序列化阶段直接失败（避免 `LIMIT 0` 静默丢数据）
 - `min_importance_score: Score0To100` — 越界值在反序列化阶段失败
 - `runtime` 用 `#[serde(default)]`：旧 `app.toml` 无 `[runtime]` 段时仍能解析（`tests::missing_runtime_block_falls_back_to_default`）
+- `feed_max_body_bytes: Option<u64>`（`#[serde(default)]`）— feed 下载体上限与 HTML 抓取上限（`max_body_bytes`）解耦。缺省（`None`）时 `ExtractorConfig::effective_feed_max_body_bytes()` 回退到 `max_body_bytes`，旧配置行为零变化。动机：把全文嵌进 feed 的源（GitHub `releases.atom` 等）体积远超文章页，需要更高 feed 上限；共用一个 knob 会连带放大每篇 HTML 抓取的内存/带宽天花板。设置时按正值校验（`Some(0)` 会让 feed 永远 `too_large`）。
 
 ## 5. `categories/*.toml` 字段
 

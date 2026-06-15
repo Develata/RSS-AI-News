@@ -170,6 +170,7 @@ mod tests {
             extractor: ExtractorConfig {
                 strategy_order: vec!["readability".to_string()],
                 max_body_bytes: 1024,
+                feed_max_body_bytes: None,
                 min_body_chars: 1,
             },
             lease: LeaseConfig {

@@ -2,8 +2,8 @@
 
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -13,18 +13,17 @@ use rss_ai_news_config::{
     DatabaseConfig, DatabaseDriver, DedupConfig, ExtractorConfig, HttpConfig, LeaseConfig,
     ObservabilityConfig, PublishConfig, RetentionPolicy, RetryConfig, RuntimeConfig, SourceConfig,
 };
-use rss_ai_news_domain::Score0To100;
 use rss_ai_news_domain::dto::extract::ArticleFetchTask;
 use rss_ai_news_domain::dto::publish::RenderedReport;
 use rss_ai_news_domain::state::FeedKind;
+use rss_ai_news_domain::Score0To100;
 use rss_ai_news_extractor::{ExtractorError, HtmlFetcher, RawHtmlFetch};
 use rss_ai_news_feed::FeedFetcher;
 use rss_ai_news_publish::{LocalFsTarget, PublishError, PublishTarget, PublishedArtifact};
 use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
-    ArticleAiResultRepo, ArticleRepo, FeedEntryRepo, FeedSourceRepo, PublishItemRepo,
-    PublishRecordRepo, RawArtifactRepo, RunEventRepo, StoragePool, build_sqlite_pool,
-    run_migrations,
+    build_sqlite_pool, run_migrations, ArticleAiResultRepo, ArticleRepo, FeedEntryRepo,
+    FeedSourceRepo, PublishItemRepo, PublishRecordRepo, RawArtifactRepo, RunEventRepo, StoragePool,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -156,6 +155,7 @@ pub fn app_config(retention_policy: RetentionPolicy, concurrent_feeds: u32) -> A
         extractor: ExtractorConfig {
             strategy_order: vec!["readability".to_string()],
             max_body_bytes: 1024 * 1024,
+            feed_max_body_bytes: None,
             min_body_chars: 1,
         },
         lease: LeaseConfig {

@@ -272,6 +272,16 @@ fn collect_app_value_checks(report: &mut DiagnosticReport, app: &AppConfig) {
     for (field_path, value) in u64_checks {
         check_positive_u64(report, "app.toml", field_path, value);
     }
+    // feed_max_body_bytes 是可选项（None = 回退 max_body_bytes）；仅当显式设置
+    // 时校验为正，否则配置无意义（LIMIT 0 会让 feed 抓取永远 too_large）。
+    if let Some(feed_max_body_bytes) = app.extractor.feed_max_body_bytes {
+        check_positive_u64(
+            report,
+            "app.toml",
+            "extractor.feed_max_body_bytes",
+            feed_max_body_bytes,
+        );
+    }
 
     let u32_checks = [
         ("http.concurrent_feeds", app.http.concurrent_feeds),
