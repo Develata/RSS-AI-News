@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use rss_ai_news_domain::error::ClassifiedError;
-use rss_ai_news_storage::{build_owner_id, lease_expires_at, ClaimRequest, NewAiResult};
+use rss_ai_news_storage::{ClaimRequest, NewAiResult, build_owner_id, lease_expires_at};
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Semaphore;

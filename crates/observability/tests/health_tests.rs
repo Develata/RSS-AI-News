@@ -8,16 +8,16 @@ use rss_ai_news_config::{
 };
 use rss_ai_news_domain::Score0To100;
 use rss_ai_news_observability::health::{
-    config_check::ConfigCheck, db_check::DatabaseConnectivityCheck, disk_check::DiskSpaceCheck,
-    github_check::GitHubPingCheck, migration_check::MigrationVersionCheck,
-    openai_check::OpenAiPingCheck, CheckOutcome, HealthCheck,
+    CheckOutcome, HealthCheck, config_check::ConfigCheck, db_check::DatabaseConnectivityCheck,
+    disk_check::DiskSpaceCheck, github_check::GitHubPingCheck,
+    migration_check::MigrationVersionCheck, openai_check::OpenAiPingCheck,
 };
 use rss_ai_news_storage::StoragePool;
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use tempfile::TempDir;
 use wiremock::{
-    matchers::{method, path},
     Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
 };
 
 #[tokio::test]

@@ -389,11 +389,13 @@ mod tests {
             .as_mut()
             .unwrap()
             .fallback_models = Some(vec![]);
-        assert!(config
-            .effective_for_category("ai")
-            .unwrap()
-            .fallback_models
-            .is_empty());
+        assert!(
+            config
+                .effective_for_category("ai")
+                .unwrap()
+                .fallback_models
+                .is_empty()
+        );
     }
 
     #[test]
