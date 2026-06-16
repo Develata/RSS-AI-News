@@ -11,6 +11,7 @@ thiserror.workspace = true
 tracing.workspace = true
 time.workspace = true
 tokio.workspace = true
+ulid.workspace = true
 
 [dev-dependencies]
 # W11-P3-A.5：本地拉一次性 PG 容器跑 migrations apply。
