@@ -15,10 +15,11 @@ use rss_ai_news_config::{
 };
 use rss_ai_news_domain::Score0To100;
 use rss_ai_news_domain::dto::extract::ArticleFetchTask;
+use rss_ai_news_domain::dto::feed::FeedFetchRequest;
 use rss_ai_news_domain::dto::publish::RenderedReport;
 use rss_ai_news_domain::state::FeedKind;
 use rss_ai_news_extractor::{ExtractorError, HtmlFetcher, RawHtmlFetch};
-use rss_ai_news_feed::FeedFetcher;
+use rss_ai_news_feed::{FeedError, FeedFetcher, fetcher::RawFeedFetch};
 use rss_ai_news_publish::{LocalFsTarget, PublishError, PublishTarget, PublishedArtifact};
 use rss_ai_news_runtime::{RunContext, RunContextDeps};
 use rss_ai_news_storage::{
@@ -613,6 +614,19 @@ pub struct DummyAiClient;
 impl AiClient for DummyAiClient {
     async fn invoke(&self, _task: &AiTask) -> Result<AiResponse, AiError> {
         Err(AiError::ConnectionFailed("dummy".to_string()))
+    }
+}
+
+/// 永远连接失败的 feed fetcher。backfill / reindex flow 的构造需要一个
+/// `FeedFetcher`，但这些 flow 不实际抓取 feed，给个失败桩即可。
+pub struct DummyFeedFetcher;
+
+#[async_trait]
+impl FeedFetcher for DummyFeedFetcher {
+    async fn fetch_raw(&self, _request: &FeedFetchRequest) -> Result<RawFeedFetch, FeedError> {
+        Err(FeedError::ConnectionFailed {
+            source: "dummy".to_string(),
+        })
     }
 }
 
