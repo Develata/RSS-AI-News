@@ -10,8 +10,9 @@ use async_trait::async_trait;
 use rss_ai_news_ai::{AiClient, AiError, AiResponse, AiTask};
 use rss_ai_news_config::{
     AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, CategoryConfig, CategoryMeta,
-    DatabaseConfig, DatabaseDriver, DedupConfig, ExtractorConfig, HttpConfig, LeaseConfig,
-    ObservabilityConfig, PublishConfig, RetentionPolicy, RetryConfig, RuntimeConfig, SourceConfig,
+    DatabaseConfig, DatabaseDriver, DedupConfig, DoctorConfig, ExtractorConfig, HttpConfig,
+    LeaseConfig, ObservabilityConfig, PublishConfig, RetentionPolicy, RetryConfig, RuntimeConfig,
+    SourceConfig,
 };
 use rss_ai_news_domain::Score0To100;
 use rss_ai_news_domain::dto::extract::ArticleFetchTask;
@@ -186,6 +187,7 @@ pub fn app_config(retention_policy: RetentionPolicy, concurrent_feeds: u32) -> A
             enable_metrics: false,
             metrics_bind: "127.0.0.1:9090".to_string(),
         },
+        doctor: DoctorConfig::default(),
     }
 }
 

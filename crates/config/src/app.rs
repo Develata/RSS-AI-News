@@ -20,6 +20,11 @@ pub struct AppConfig {
     pub runtime: RuntimeConfig,
     pub artifact: ArtifactConfig,
     pub observability: ObservabilityConfig,
+    /// `[doctor]` 段：诊断检查阈值（卡住的 reindex job / 静默 source /
+    /// 待处理积压）。`#[serde(default)]` 使旧 `app.toml`（无 `[doctor]` 段）
+    /// 仍可解析，缺省值见 [`DoctorConfig::default`]。
+    #[serde(default)]
+    pub doctor: DoctorConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -239,6 +244,37 @@ pub struct ObservabilityConfig {
     pub log_file: String,
     pub enable_metrics: bool,
     pub metrics_bind: String,
+}
+
+/// `[doctor]` 段：`doctor` 子命令的诊断阈值。这些是**运维调参**（非业务规则），
+/// 全部 `#[serde(default)]`，缺省给出对一个日级新闻管线合理的保守值；按部署
+/// 节奏在 `app.toml` 覆盖。
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DoctorConfig {
+    /// reindex job 停在 `pending` 超过此秒数仍未被 claim → 视为卡住（Warn）。
+    /// 默认 3600（1h）：reindex 由调度/运维触发，pending 滞留意味着创建后
+    /// 没有任何 reindex run 来认领（多半 run 在建 job 后崩溃）。
+    pub stuck_reindex_pending_secs: u64,
+    /// 活跃 source 距上次成功抓取超过此秒数 → 视为静默（Warn）。默认
+    /// 86400（24h）：日级源超过一天没有任何成功抓取即可疑。
+    pub silent_source_max_age_secs: u64,
+    /// 活跃 source 连续失败次数达到此值 → 视为静默（Warn）。默认 10。
+    pub silent_source_max_consecutive_failures: u32,
+    /// `pending_fetch` 抓取队列或 `pending` AI 队列深度超过此值 → 视为积压
+    /// （Warn）。默认 1000：worker 跟不上 / 调度未运行 / 流量尖峰的早期信号。
+    pub pending_backlog_warn_threshold: u64,
+}
+
+impl Default for DoctorConfig {
+    fn default() -> Self {
+        Self {
+            stuck_reindex_pending_secs: 3600,
+            silent_source_max_age_secs: 86_400,
+            silent_source_max_consecutive_failures: 10,
+            pending_backlog_warn_threshold: 1000,
+        }
+    }
 }
 
 #[cfg(test)]

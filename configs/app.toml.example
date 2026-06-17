@@ -114,3 +114,11 @@ log_format = "pretty"
 log_file = ""
 enable_metrics = false
 metrics_bind = "127.0.0.1:9090"
+
+# doctor 子命令的诊断阈值（运维调参，非业务规则）。整段 [doctor] 可省略，
+# 缺省值见 DoctorConfig::default。详见 docs/plan/07-observability.md §6。
+[doctor]
+stuck_reindex_pending_secs = 3600            # reindex job pending 超此秒数未被 claim → Warn
+silent_source_max_age_secs = 86400           # active source 距上次成功抓取超此秒数 → Warn
+silent_source_max_consecutive_failures = 10  # active source 连续失败达此值 → Warn
+pending_backlog_warn_threshold = 1000        # pending_fetch / pending AI 队列深度超此值 → Warn

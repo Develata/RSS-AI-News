@@ -3,14 +3,16 @@ use std::sync::Arc;
 
 use rss_ai_news_config::{
     AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, CategoryConfig, DatabaseConfig,
-    DatabaseDriver, DedupConfig, EnvConfig, ExtractorConfig, HttpConfig, LeaseConfig, LoadedConfig,
-    ObservabilityConfig, PublishConfig, RetentionPolicy, RetryConfig, RuntimeConfig,
+    DatabaseDriver, DedupConfig, DoctorConfig, EnvConfig, ExtractorConfig, HttpConfig, LeaseConfig,
+    LoadedConfig, ObservabilityConfig, PublishConfig, RetentionPolicy, RetryConfig, RuntimeConfig,
 };
 use rss_ai_news_domain::Score0To100;
 use rss_ai_news_observability::health::{
     CheckOutcome, HealthCheck, config_check::ConfigCheck, db_check::DatabaseConnectivityCheck,
     disk_check::DiskSpaceCheck, github_check::GitHubPingCheck,
     migration_check::MigrationVersionCheck, openai_check::OpenAiPingCheck,
+    pending_backlog_check::PendingBacklogCheck, silent_source_check::SilentSourceCheck,
+    stuck_reindex_check::StuckReindexCheck,
 };
 use rss_ai_news_storage::StoragePool;
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
@@ -120,6 +122,151 @@ async fn disk_check_reports_fail_when_minimum_is_impossible() {
     assert!(matches!(check.run().await, CheckOutcome::Fail(_)));
 }
 
+// ── 3am liveness checks ────────────────────────────────────────
+// 用最小表 + 固定远古/远未来时间戳（年份前缀主导 RFC3339 字典序比较），
+// 与本文件既有 minimal-table 风格一致，免迁移/外键铺设。
+
+#[tokio::test]
+async fn stuck_reindex_check_warns_on_expired_running_and_stale_pending() {
+    let pool = memory_pool().await;
+    create_reindex_jobs_table(&pool).await;
+    sqlx::query(
+        "INSERT INTO reindex_jobs (state, lease_expires_at, created_at) VALUES ('running', '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed running");
+    sqlx::query(
+        "INSERT INTO reindex_jobs (state, lease_expires_at, created_at) VALUES ('pending', NULL, '2000-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed pending");
+    let check = StuckReindexCheck::new(StoragePool::Sqlite(pool), 3600);
+    assert!(matches!(check.run().await, CheckOutcome::Warn(_)));
+}
+
+#[tokio::test]
+async fn stuck_reindex_check_ok_when_lease_valid_and_pending_fresh() {
+    let pool = memory_pool().await;
+    create_reindex_jobs_table(&pool).await;
+    sqlx::query(
+        "INSERT INTO reindex_jobs (state, lease_expires_at, created_at) VALUES ('running', '2999-01-01T00:00:00Z', '2999-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed running");
+    sqlx::query(
+        "INSERT INTO reindex_jobs (state, lease_expires_at, created_at) VALUES ('pending', NULL, '2999-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed pending");
+    let check = StuckReindexCheck::new(StoragePool::Sqlite(pool), 3600);
+    assert!(matches!(check.run().await, CheckOutcome::Ok(_)));
+}
+
+#[tokio::test]
+async fn silent_source_check_warns_on_stale_and_failing_active_sources() {
+    let pool = memory_pool().await;
+    create_feed_sources_table(&pool).await;
+    sqlx::query(
+        "INSERT INTO feed_sources (status, last_success_at, consecutive_failures) VALUES ('active', '2000-01-01T00:00:00Z', 0)",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed stale");
+    sqlx::query(
+        "INSERT INTO feed_sources (status, last_success_at, consecutive_failures) VALUES ('active', NULL, 20)",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed failing");
+    let check = SilentSourceCheck::new(StoragePool::Sqlite(pool), 3600, 5);
+    assert!(matches!(check.run().await, CheckOutcome::Warn(_)));
+}
+
+#[tokio::test]
+async fn silent_source_check_ok_for_recent_active_and_ignores_paused() {
+    let pool = memory_pool().await;
+    create_feed_sources_table(&pool).await;
+    // active 且最近成功 → 健康。
+    sqlx::query(
+        "INSERT INTO feed_sources (status, last_success_at, consecutive_failures) VALUES ('active', '2999-01-01T00:00:00Z', 0)",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed recent");
+    // paused 即使很久没成功 + 高失败计数也不计（仅看 active）。
+    sqlx::query(
+        "INSERT INTO feed_sources (status, last_success_at, consecutive_failures) VALUES ('paused', '2000-01-01T00:00:00Z', 99)",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed paused");
+    let check = SilentSourceCheck::new(StoragePool::Sqlite(pool), 3600, 5);
+    assert!(matches!(check.run().await, CheckOutcome::Ok(_)));
+}
+
+#[tokio::test]
+async fn pending_backlog_check_warns_when_ai_queue_exceeds_threshold() {
+    let pool = memory_pool().await;
+    create_backlog_tables(&pool).await;
+    for _ in 0..3 {
+        sqlx::query("INSERT INTO article_ai_results (state) VALUES ('pending')")
+            .execute(&pool)
+            .await
+            .expect("seed pending ai");
+    }
+    let check = PendingBacklogCheck::new(StoragePool::Sqlite(pool), 3);
+    assert!(matches!(check.run().await, CheckOutcome::Warn(_)));
+}
+
+#[tokio::test]
+async fn pending_backlog_check_ok_below_threshold() {
+    let pool = memory_pool().await;
+    create_backlog_tables(&pool).await;
+    sqlx::query("INSERT INTO feed_entries (state) VALUES ('pending_fetch')")
+        .execute(&pool)
+        .await
+        .expect("seed fetch");
+    sqlx::query("INSERT INTO article_ai_results (state) VALUES ('succeeded')")
+        .execute(&pool)
+        .await
+        .expect("seed succeeded");
+    let check = PendingBacklogCheck::new(StoragePool::Sqlite(pool), 100);
+    assert!(matches!(check.run().await, CheckOutcome::Ok(_)));
+}
+
+async fn create_reindex_jobs_table(pool: &SqlitePool) {
+    sqlx::query(
+        "CREATE TABLE reindex_jobs (id INTEGER PRIMARY KEY, state TEXT NOT NULL, lease_expires_at TEXT, created_at TEXT NOT NULL)",
+    )
+    .execute(pool)
+    .await
+    .expect("create reindex_jobs");
+}
+
+async fn create_feed_sources_table(pool: &SqlitePool) {
+    sqlx::query(
+        "CREATE TABLE feed_sources (id INTEGER PRIMARY KEY, status TEXT NOT NULL, last_success_at TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0)",
+    )
+    .execute(pool)
+    .await
+    .expect("create feed_sources");
+}
+
+async fn create_backlog_tables(pool: &SqlitePool) {
+    sqlx::query("CREATE TABLE feed_entries (id INTEGER PRIMARY KEY, state TEXT NOT NULL)")
+        .execute(pool)
+        .await
+        .expect("create feed_entries");
+    sqlx::query("CREATE TABLE article_ai_results (id INTEGER PRIMARY KEY, state TEXT NOT NULL)")
+        .execute(pool)
+        .await
+        .expect("create article_ai_results");
+}
+
 async fn memory_pool() -> SqlitePool {
     SqlitePoolOptions::new()
         .max_connections(1)
@@ -219,5 +366,6 @@ fn app_config() -> AppConfig {
             enable_metrics: false,
             metrics_bind: "127.0.0.1:9090".to_string(),
         },
+        doctor: DoctorConfig::default(),
     }
 }

@@ -567,3 +567,212 @@ pub mod backlog_check {
         }
     }
 }
+
+pub mod stuck_reindex_check {
+    use super::*;
+
+    /// reindex job 卡住检测（3am 场景①）。两种卡死信号：
+    /// - `running` + 租约过期：worker 中途死亡。该 job 因 partial-unique index
+    ///   `(target) WHERE state IN ('pending','running')` 会**静默挡住**该 target
+    ///   的后续 reindex，故必须可见。
+    /// - `pending` 滞留超阈值：建 job 后没有任何 reindex run 来 claim（多半 run
+    ///   在建 job 后崩溃）。
+    ///
+    /// 两者都 Warn——可由再次运行 reindex（启动期 reclaim + 重新 claim）自愈，
+    /// 但需运维知晓。
+    pub struct StuckReindexCheck {
+        pool: StoragePool,
+        pending_threshold_secs: u64,
+    }
+
+    impl StuckReindexCheck {
+        pub fn new(pool: StoragePool, pending_threshold_secs: u64) -> Self {
+            Self {
+                pool,
+                pending_threshold_secs,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HealthCheck for StuckReindexCheck {
+        fn name(&self) -> &str {
+            "Stuck reindex jobs"
+        }
+
+        async fn run(&self) -> CheckOutcome {
+            let now = OffsetDateTime::now_utc();
+            let pending_cutoff = now
+                - time::Duration::seconds(
+                    i64::try_from(self.pending_threshold_secs).unwrap_or(i64::MAX),
+                );
+            // $1=now（running 租约过期判定），$2=pending_cutoff（pending 滞留判定）。
+            // created_at 由 INSERT_REINDEX_JOB_PENDING_SQL 绑定 OffsetDateTime
+            // 写入（RFC3339），与 $2 同格式可比。
+            let sql = r#"
+                SELECT
+                    (SELECT COUNT(*) FROM reindex_jobs
+                     WHERE state = 'running'
+                       AND lease_expires_at IS NOT NULL
+                       AND lease_expires_at < $1) AS expired_running,
+                    (SELECT COUNT(*) FROM reindex_jobs
+                     WHERE state = 'pending'
+                       AND created_at < $2) AS stale_pending
+            "#;
+            let result: Result<(i64, i64), sqlx::Error> = match &self.pool {
+                StoragePool::Sqlite(p) => sqlx::query(sql)
+                    .bind(now)
+                    .bind(pending_cutoff)
+                    .fetch_one(p)
+                    .await
+                    .map(|row| (row.get(0), row.get(1))),
+                StoragePool::Postgres(p) => sqlx::query(sql)
+                    .bind(now)
+                    .bind(pending_cutoff)
+                    .fetch_one(p)
+                    .await
+                    .map(|row| (row.get(0), row.get(1))),
+            };
+            match result {
+                Ok((0, 0)) => CheckOutcome::Ok("0 stuck reindex jobs".to_string()),
+                Ok((expired, stale)) => CheckOutcome::Warn(format!(
+                    "{expired} reindex jobs with expired running lease, {stale} pending past threshold"
+                )),
+                Err(error) => CheckOutcome::Fail(format!("stuck reindex query failed: {error}")),
+            }
+        }
+    }
+}
+
+pub mod silent_source_check {
+    use super::*;
+
+    /// 静默 source 检测（3am 场景②）。两种静默信号，仅看 `active` source：
+    /// - 曾成功但 `last_success_at` 早于阈值：源上游死亡 / 路由失效后变哑。
+    /// - `consecutive_failures` 达阈值：持续失败（含从未成功的源）。
+    ///
+    /// 数据由 ingest 维护（`feed_sources.last_success_at` / `consecutive_failures`）。
+    /// 不用 `COALESCE(last_success_at, created_at)`——`created_at` 可能是
+    /// `DEFAULT CURRENT_TIMESTAMP`（非 RFC3339）会破坏文本比较；从未成功的源
+    /// 由 `consecutive_failures` 一臂兜住即可。
+    pub struct SilentSourceCheck {
+        pool: StoragePool,
+        max_age_secs: u64,
+        max_consecutive_failures: u32,
+    }
+
+    impl SilentSourceCheck {
+        pub fn new(pool: StoragePool, max_age_secs: u64, max_consecutive_failures: u32) -> Self {
+            Self {
+                pool,
+                max_age_secs,
+                max_consecutive_failures,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HealthCheck for SilentSourceCheck {
+        fn name(&self) -> &str {
+            "Silent feed sources"
+        }
+
+        async fn run(&self) -> CheckOutcome {
+            let stale_cutoff = OffsetDateTime::now_utc()
+                - time::Duration::seconds(i64::try_from(self.max_age_secs).unwrap_or(i64::MAX));
+            let max_fail = i64::from(self.max_consecutive_failures);
+            // $1=stale_cutoff（last_success_at 由 ingest 绑定 RFC3339），$2=max_fail。
+            let sql = r#"
+                SELECT
+                    (SELECT COUNT(*) FROM feed_sources
+                     WHERE status = 'active'
+                       AND last_success_at IS NOT NULL
+                       AND last_success_at < $1) AS stale,
+                    (SELECT COUNT(*) FROM feed_sources
+                     WHERE status = 'active'
+                       AND consecutive_failures >= $2) AS failing
+            "#;
+            let result: Result<(i64, i64), sqlx::Error> = match &self.pool {
+                StoragePool::Sqlite(p) => sqlx::query(sql)
+                    .bind(stale_cutoff)
+                    .bind(max_fail)
+                    .fetch_one(p)
+                    .await
+                    .map(|row| (row.get(0), row.get(1))),
+                StoragePool::Postgres(p) => sqlx::query(sql)
+                    .bind(stale_cutoff)
+                    .bind(max_fail)
+                    .fetch_one(p)
+                    .await
+                    .map(|row| (row.get(0), row.get(1))),
+            };
+            match result {
+                Ok((0, 0)) => CheckOutcome::Ok("0 silent sources".to_string()),
+                Ok((stale, failing)) => CheckOutcome::Warn(format!(
+                    "{stale} active sources stale (no recent success), {failing} over consecutive-failure threshold"
+                )),
+                Err(error) => CheckOutcome::Fail(format!("silent source query failed: {error}")),
+            }
+        }
+    }
+}
+
+pub mod pending_backlog_check {
+    use super::*;
+
+    /// 待处理积压检测（3am 场景③）。数**健康但堆积**的待处理队列深度：
+    /// `pending_fetch`（抓取队列）与 `pending` AI 任务队列。区别于
+    /// `FailedBacklogCheck`（数终态失败）与 deep-scan I9（数预算耗尽的滞留行）——
+    /// 本检查抓的是 worker 跟不上 / 调度未运行 / 流量尖峰导致的队列增长。
+    pub struct PendingBacklogCheck {
+        pool: StoragePool,
+        warn_threshold: u64,
+    }
+
+    impl PendingBacklogCheck {
+        pub fn new(pool: StoragePool, warn_threshold: u64) -> Self {
+            Self {
+                pool,
+                warn_threshold,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HealthCheck for PendingBacklogCheck {
+        fn name(&self) -> &str {
+            "Pending backlog"
+        }
+
+        async fn run(&self) -> CheckOutcome {
+            let sql = r#"
+                SELECT
+                    (SELECT COUNT(*) FROM feed_entries WHERE state = 'pending_fetch') AS fetch_queue,
+                    (SELECT COUNT(*) FROM article_ai_results WHERE state = 'pending') AS ai_queue
+            "#;
+            let result: Result<(i64, i64), sqlx::Error> = match &self.pool {
+                StoragePool::Sqlite(p) => sqlx::query(sql)
+                    .fetch_one(p)
+                    .await
+                    .map(|row| (row.get(0), row.get(1))),
+                StoragePool::Postgres(p) => sqlx::query(sql)
+                    .fetch_one(p)
+                    .await
+                    .map(|row| (row.get(0), row.get(1))),
+            };
+            match result {
+                Ok((fetch_q, ai_q)) => {
+                    let threshold = i64::try_from(self.warn_threshold).unwrap_or(i64::MAX);
+                    if fetch_q >= threshold || ai_q >= threshold {
+                        CheckOutcome::Warn(format!(
+                            "fetch queue {fetch_q}, AI queue {ai_q} (warn threshold {threshold})"
+                        ))
+                    } else {
+                        CheckOutcome::Ok(format!("fetch queue {fetch_q}, AI queue {ai_q}"))
+                    }
+                }
+                Err(error) => CheckOutcome::Fail(format!("pending backlog query failed: {error}")),
+            }
+        }
+    }
+}

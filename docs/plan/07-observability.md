@@ -186,7 +186,17 @@ check，汇总成 `CheckReport`，按 outcome 染色输出。
 | `openai` | `[ai].enabled` 为 true 时探测 `OPENAI_BASE_URL` 可达 |
 | `github` | 远端 publish 启用时探测 `https://api.github.com/repos/<owner>/<repo>` |
 | `rsshub` | 任一 source 使用占位符时探测 `RSSHUB_BASE_URL` 健康端点 |
+| `Timezone` | `[publish].target_timezone` 是合法 IANA 时区 |
 | `disk` | `local_output_dir` + `[artifact].file_storage_dir` 可写 |
+| `Expired leases` | 无过期未回收的 running AI 租约（与 deep I8 同源） |
+| `Failed backlog` | 终态失败计数（feed/ai/publish 三表），Info |
+| `Stuck reindex jobs` | reindex_jobs 卡在 running（租约过期，且会因 partial-unique index 静默挡住该 target 后续 reindex）或 pending（滞留超 `[doctor].stuck_reindex_pending_secs`） |
+| `Silent feed sources` | active source 距上次成功超 `[doctor].silent_source_max_age_secs`，或 `consecutive_failures` 达 `[doctor].silent_source_max_consecutive_failures` |
+| `Pending backlog` | `pending_fetch` 抓取队列 / `pending` AI 队列深度超 `[doctor].pending_backlog_warn_threshold`（区别于 `Failed backlog` 数终态、deep I9 数预算耗尽——本检查数健康但堆积的待处理量） |
+
+最后三个是 W19「3am 可观测」检查：阈值由 `[doctor]` 段驱动（缺省见
+[06-config](./06-config.md) / `DoctorConfig::default`），命中 → `Warn`（exit 0，
+仅告警），供 cron 跑 `doctor` 后据 outcome 染色/告警。
 
 `--deep` 额外执行跨表不变量扫描
 （[`crates/runtime/src/doctor/deep_scan.rs`](../../crates/runtime/src/doctor/deep_scan.rs)）：

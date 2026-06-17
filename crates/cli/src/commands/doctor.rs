@@ -3,7 +3,9 @@ use rss_ai_news_observability::health::{
     CheckReport, HealthCheck, backlog_check::FailedBacklogCheck, config_check::ConfigCheck,
     db_check::DatabaseConnectivityCheck, disk_check::DiskSpaceCheck, github_check::GitHubPingCheck,
     lease_check::ExpiredLeaseCheck, migration_check::MigrationVersionCheck,
-    openai_check::OpenAiPingCheck, rsshub_check::RsshubPingCheck, timezone_check::TimezoneCheck,
+    openai_check::OpenAiPingCheck, pending_backlog_check::PendingBacklogCheck,
+    rsshub_check::RsshubPingCheck, silent_source_check::SilentSourceCheck,
+    stuck_reindex_check::StuckReindexCheck, timezone_check::TimezoneCheck,
 };
 use rss_ai_news_runtime::doctor::deep_scan;
 
@@ -56,6 +58,19 @@ pub async fn run(cli: &Cli, args: &DoctorArgs, writer: &mut OutputWriter) -> Res
         )),
         Box::new(ExpiredLeaseCheck::new(deps.pool.clone())),
         Box::new(FailedBacklogCheck::new(deps.pool.clone())),
+        Box::new(StuckReindexCheck::new(
+            deps.pool.clone(),
+            app.doctor.stuck_reindex_pending_secs,
+        )),
+        Box::new(SilentSourceCheck::new(
+            deps.pool.clone(),
+            app.doctor.silent_source_max_age_secs,
+            app.doctor.silent_source_max_consecutive_failures,
+        )),
+        Box::new(PendingBacklogCheck::new(
+            deps.pool.clone(),
+            app.doctor.pending_backlog_warn_threshold,
+        )),
     ];
 
     let mut report = CheckReport::default();

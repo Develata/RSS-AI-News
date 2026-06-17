@@ -111,8 +111,9 @@ mod tests {
     use crate::{
         app::{
             AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, DatabaseConfig, DatabaseDriver,
-            DedupConfig, ExtractorConfig, HttpConfig, LeaseConfig, ObservabilityConfig,
-            PublishConfig, PublishTemplateConfig, RetentionPolicy, RetryConfig, RuntimeConfig,
+            DedupConfig, DoctorConfig, ExtractorConfig, HttpConfig, LeaseConfig,
+            ObservabilityConfig, PublishConfig, PublishTemplateConfig, RetentionPolicy,
+            RetryConfig, RuntimeConfig,
         },
         category::{AiOverride, CategoryConfig, CategoryMeta, PublishOverride},
         env::EnvConfig,
@@ -241,6 +242,7 @@ mod tests {
                     enable_metrics: false,
                     metrics_bind: "127.0.0.1:9090".to_string(),
                 },
+                doctor: DoctorConfig::default(),
             },
             categories: vec![CategoryConfig {
                 schema_version: "1".to_string(),

@@ -124,6 +124,7 @@ mod tests {
                 enable_metrics: false,
                 metrics_bind: "127.0.0.1:9090".to_string(),
             },
+            doctor: DoctorConfig::default(),
         }
     }
 
