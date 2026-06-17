@@ -648,13 +648,15 @@ pub mod silent_source_check {
     use super::*;
 
     /// 静默 source 检测（3am 场景②）。两种静默信号，仅看 `active` source：
-    /// - 曾成功但 `last_success_at` 早于阈值：源上游死亡 / 路由失效后变哑。
-    /// - `consecutive_failures` 达阈值：持续失败（含从未成功的源）。
+    /// - `COALESCE(last_success_at, created_at)` 早于阈值：曾成功后变哑，**或**
+    ///   从未成功（回落到创建时间）——后者覆盖"建后调度/worker 停摆、从未成功
+    ///   且失败计数为 0"的源（codex P2：此前 `last_success_at IS NOT NULL` 谓词
+    ///   会漏掉这个核心场景）。
+    /// - `consecutive_failures` 达阈值：持续失败。
     ///
-    /// 数据由 ingest 维护（`feed_sources.last_success_at` / `consecutive_failures`）。
-    /// 不用 `COALESCE(last_success_at, created_at)`——`created_at` 可能是
-    /// `DEFAULT CURRENT_TIMESTAMP`（非 RFC3339）会破坏文本比较；从未成功的源
-    /// 由 `consecutive_failures` 一臂兜住即可。
+    /// 数据由 ingest / config seed 维护。`created_at` 由 feed_sources upsert 绑定
+    /// `OffsetDateTime` 写入（RFC3339 / TIMESTAMPTZ），与 `last_success_at` 同
+    /// 格式、与 `$1` 可比——故 `COALESCE` 在两方言下都是正确的时间比较。
     pub struct SilentSourceCheck {
         pool: StoragePool,
         max_age_secs: u64,
@@ -681,13 +683,13 @@ pub mod silent_source_check {
             let stale_cutoff = OffsetDateTime::now_utc()
                 - time::Duration::seconds(i64::try_from(self.max_age_secs).unwrap_or(i64::MAX));
             let max_fail = i64::from(self.max_consecutive_failures);
-            // $1=stale_cutoff（last_success_at 由 ingest 绑定 RFC3339），$2=max_fail。
+            // $1=stale_cutoff（与 last_success_at / created_at 同 RFC3339/TIMESTAMPTZ
+            // 格式可比），$2=max_fail。COALESCE 让从未成功的源回落到 created_at 计龄。
             let sql = r#"
                 SELECT
                     (SELECT COUNT(*) FROM feed_sources
                      WHERE status = 'active'
-                       AND last_success_at IS NOT NULL
-                       AND last_success_at < $1) AS stale,
+                       AND COALESCE(last_success_at, created_at) < $1) AS stale,
                     (SELECT COUNT(*) FROM feed_sources
                      WHERE status = 'active'
                        AND consecutive_failures >= $2) AS failing

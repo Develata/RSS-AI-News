@@ -204,8 +204,33 @@ async fn silent_source_check_ok_for_recent_active_and_ignores_paused() {
     .execute(&pool)
     .await
     .expect("seed paused");
+    // 刚加入、尚未成功的 active source（created_at 新）不应误报——COALESCE 回落
+    // 到 created_at，新创建时间不早于阈值。
+    sqlx::query(
+        "INSERT INTO feed_sources (status, last_success_at, consecutive_failures, created_at) VALUES ('active', NULL, 0, '2999-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed fresh never-succeeded");
     let check = SilentSourceCheck::new(StoragePool::Sqlite(pool), 3600, 5);
     assert!(matches!(check.run().await, CheckOutcome::Ok(_)));
+}
+
+#[tokio::test]
+async fn silent_source_check_warns_on_never_succeeded_old_active_source() {
+    // codex P2 回归：从未成功（last_success_at NULL）+ 失败计数为 0 + 创建已久的
+    // active source（建后调度/worker 停摆），必须按 created_at 计龄报静默——
+    // 此前 `last_success_at IS NOT NULL` 谓词会漏掉这个核心 liveness 场景。
+    let pool = memory_pool().await;
+    create_feed_sources_table(&pool).await;
+    sqlx::query(
+        "INSERT INTO feed_sources (status, last_success_at, consecutive_failures, created_at) VALUES ('active', NULL, 0, '2000-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed never-succeeded old");
+    let check = SilentSourceCheck::new(StoragePool::Sqlite(pool), 3600, 5);
+    assert!(matches!(check.run().await, CheckOutcome::Warn(_)));
 }
 
 #[tokio::test]
@@ -249,7 +274,7 @@ async fn create_reindex_jobs_table(pool: &SqlitePool) {
 
 async fn create_feed_sources_table(pool: &SqlitePool) {
     sqlx::query(
-        "CREATE TABLE feed_sources (id INTEGER PRIMARY KEY, status TEXT NOT NULL, last_success_at TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0)",
+        "CREATE TABLE feed_sources (id INTEGER PRIMARY KEY, status TEXT NOT NULL, last_success_at TEXT, consecutive_failures INTEGER NOT NULL DEFAULT 0, created_at TEXT)",
     )
     .execute(pool)
     .await
