@@ -148,6 +148,42 @@ async fn backfill_ai_pagination_covers_all_articles() {
     assert_eq!(summary.articles_scanned, 2);
 }
 
+#[tokio::test]
+async fn backfill_ai_requeues_ai_pending_article_whose_results_all_failed() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let article = common::seed_persisted_article(&pool, "bf-recover", "R", "body text").await;
+    sqlx::query("UPDATE articles SET state = 'ai_pending' WHERE id = ?")
+        .bind(article)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 第一轮 backfill ai 建一条 pending 任务，随后标成 permanent_failed——模拟
+    // §4.3 的停泊态：article 仍 ai_pending、既有 AiResult 全失败、自身无出口。
+    let first = backfill(&pool)
+        .ai(ai_opts(&pool, "prompt-old", 10).await)
+        .await
+        .unwrap();
+    assert_eq!(first.ai_tasks_inserted, 1);
+    sqlx::query(
+        "UPDATE article_ai_results SET state = 'permanent_failed' WHERE article_id = ? AND prompt_version = ?",
+    )
+    .bind(article)
+    .bind(first.new_prompt_version_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 唯一恢复路径：换新 prompt_version 再跑 backfill ai → 重投一条 pending 任务。
+    let second = backfill(&pool)
+        .ai(ai_opts(&pool, "prompt-new", 10).await)
+        .await
+        .unwrap();
+    assert_eq!(second.ai_tasks_inserted, 1);
+    // backfill 不改 article.state（派生态留给 ai-run 推进），仍 ai_pending。
+    assert_eq!(article_state(&pool, article).await, "ai_pending");
+}
+
 fn backfill(pool: &SqlitePool) -> BackfillFlow {
     BackfillFlow::new(Arc::new(common::full_context(
         "backfill",
