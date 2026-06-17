@@ -101,37 +101,39 @@
       :label "AiRunFlow"
       :layer flow-coord
       :crate runtime
-      :path "crates/runtime/src/flows/ai_run.rs:107"
+      :path "crates/runtime/src/flows/ai_run/mod.rs:24"
       :kind struct
       :upstream (runtime-context)
       :downstream (ai-crate repo-article repo-article-ai-result artifact-writer
                    run-event-emitter)
       :state active
-      :notes "run() at line 383。包含 task_gen + process 两段。")
+      :notes "run() at mod.rs:314。mod 编排 + 拆出 dto / process(任务生成+处理) / release。")
 
 (node :id flow-publish
       :label "PublishFlow"
       :layer flow-coord
       :crate runtime
-      :path "crates/runtime/src/flows/publish/mod.rs:30"
+      :path "crates/runtime/src/flows/publish/mod.rs:31"
       :kind struct
       :upstream (runtime-context)
       :downstream (report-crate publish-crate repo-publish-record repo-publish-item
                    run-event-emitter)
       :state active
-      :notes "5 阶段：init / freeze / render / store_local / publish_remote。
-              freeze() at line 256。")
+      :notes "5 阶段：init(mod) / freeze / render / store_local / publish_remote(remote)，
+              按阶段拆 freeze.rs / render.rs / store_local.rs / remote.rs + dto.rs。
+              freeze() at freeze.rs:23。")
 
 (node :id flow-reindex
       :label "ReindexFlow"
       :layer flow-coord
       :crate runtime
-      :path "crates/runtime/src/flows/reindex.rs:64"
+      :path "crates/runtime/src/flows/reindex/mod.rs:27"
       :kind struct
       :upstream (runtime-context)
       :downstream (repo-reindex-job repo-rule-version repo-feed-entry repo-article repo-feed-source)
       :state active
-      :notes "run() at line 330。三 target × dry-run/real-run × abort 分支。")
+      :notes "run() at mod.rs:36。mod 编排 + 拆出 dto / dry_run / execute / abort。
+              三 target × dry-run/real-run × abort 分支。")
 
 (node :id flow-backfill
       :label "BackfillFlow"

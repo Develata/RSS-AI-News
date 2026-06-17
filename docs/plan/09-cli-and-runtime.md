@@ -60,8 +60,24 @@ CLI 框架：`clap` derive。每个子命令是独立 enum 变体。
 1. 解析参数（clap derive）
 2. 加载配置（`config::load_all` 或 `config::load_skip_env_checks`）
 3. 构造 `RunContext`
-4. 调用 `crates/runtime/src/flows/<flow>.rs` 的对应 Flow
+4. 调用 `crates/runtime/src/flows/<flow>`（单文件 `<flow>.rs` 或 `<flow>/` 目录）的对应 Flow
 5. 把 Flow 结果转 exit code / 输出格式
+
+### 3.1 Flow 文件组织约定（单文件 vs. 目录）
+
+小 Flow 用单文件 `flows/<flow>.rs`。Flow 自身超 800 行软上限时，拆为
+`flows/<flow>/` 目录，与存储层三件套（[05-storage §4.1](./05-storage.md)）同理：
+
+- `<flow>/mod.rs` — `Flow` struct + 构造器 + `run()` 编排 + 跨阶段私有 helper，并
+  `mod dto; pub use dto::*;` 重导出 DTO、`mod <stage>;` 声明各阶段子模块。
+- `<flow>/dto.rs` — 该 Flow 的 Options / Outcome / Summary 等 DTO。
+- `<flow>/<stage>.rs` — 各阶段方法，直接写 `impl <Flow> { ... }`（Rust 允许同类型
+  `impl` 跨同 mod 树多文件）。
+
+模块路径与对外 `pub use`（`flows::<flow>::<Flow>`）与是否目录化无关，调度表照旧。
+当前目录化的 Flow：`publish/`（freeze/render/store_local/remote + dto）、
+`ai_run/`（process/release + dto）、`reindex/`（dry_run/execute/abort + dto）。
+其余（`ingest` / `extract` / `backfill` / `rebuild_report` / `maintenance`）仍单文件。
 
 调度表：
 

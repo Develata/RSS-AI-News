@@ -294,7 +294,7 @@ CREATE TABLE run_events (
 | PostgreSQL migrations | [`migrations/postgres/`](../../migrations/postgres/) |
 | StorageError | [`crates/storage/src/error.rs`](../../crates/storage/src/error.rs) |
 | migrate CLI | [`crates/cli/src/commands/migrate.rs`](../../crates/cli/src/commands/migrate.rs) |
-| reindex Flow | [`crates/runtime/src/flows/reindex.rs`](../../crates/runtime/src/flows/reindex.rs) |
+| reindex Flow | [`crates/runtime/src/flows/reindex/`](../../crates/runtime/src/flows/reindex/) |
 | db url resolver | [`crates/cli/src/db_url.rs`](../../crates/cli/src/db_url.rs) |
 
 代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。
