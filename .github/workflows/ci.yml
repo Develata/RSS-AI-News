@@ -38,6 +38,13 @@ jobs:
           shared-key: lint
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # error-and-observability §3.3 Enforcement 第 2 层（codex P1：脚本声称由
+      # CI 消费但此前从未接线 → 门形同虚设、allowlist 行号漂移）。接入 lint job
+      # 强校验；ubuntu runner 自带 ripgrep，加 install 兜底防镜像变更。
+      - name: swallowed-error gate
+        run: |
+          command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
+          bash .ci/check_swallowed_errors.sh
 
   test:
     name: cargo test
