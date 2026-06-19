@@ -27,29 +27,35 @@ fn file_mode_first_init_writes_log_to_rolling_daily_file() {
     // drop guard → tracing-appender worker flush 队列、关闭文件。
     drop(guard);
 
-    // 文件名形如 `rss-ai-news.log.YYYY-MM-DD`。轮询到首个匹配项；上限
-    // 2s 避免 worker 调度延迟下 flakiness（Windows / CI 环境）。
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut hit: Option<std::path::PathBuf> = None;
+    // 文件名形如 `rss-ai-news.log.YYYY-MM-DD`。轮询直到匹配文件出现**且**
+    // marker 已落盘——non_blocking worker 异步投递，文件可能先被 lazy 创建
+    // （空）再写入内容；只轮询"存在"会在 worker 调度延迟下（Windows / CI
+    // 负载）拿到空文件而误判 flush 契约。把内容断言也纳入轮询，上限 5s
+    // 兜底调度延迟，匹配即提前退出（happy path 仍是毫秒级）。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut matched = false;
+    let mut last_seen: Option<(std::path::PathBuf, String)> = None;
     while Instant::now() < deadline {
         if let Ok(entries) = std::fs::read_dir(dir.path()) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if name.starts_with("rss-ai-news.log.") {
-                    hit = Some(entry.path());
+                    let path = entry.path();
+                    let body = std::fs::read_to_string(&path).unwrap_or_default();
+                    matched = body.contains("rss-ai-news-test-marker-line");
+                    last_seen = Some((path, body));
                     break;
                 }
             }
         }
-        if hit.is_some() {
+        if matched {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let path = hit.expect("rolling::daily 应当在 dir 下创建 prefix.YYYY-MM-DD 日志文件");
-    let body = std::fs::read_to_string(&path).expect("日志文件应当可读");
     assert!(
-        body.contains("rss-ai-news-test-marker-line"),
-        "刚 emit 的日志应已落盘，实际内容：{body:?}"
+        matched,
+        "rolling::daily 应在 dir 下创建 prefix.YYYY-MM-DD 且刚 emit 的 marker \
+         已落盘；最后观测：{last_seen:?}"
     );
 }
