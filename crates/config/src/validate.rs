@@ -357,6 +357,48 @@ mod tests {
     }
 
     #[test]
+    fn category_key_with_parent_dir_traversal_fails() {
+        // codex P2-2：key 含 `..` 会被代入 {category_key} 与 categories/<key>.toml，
+        // 渲染出逃出发布根的路径；必须在 validate 阶段（而非 publish 阶段）拦下。
+        let err = run_general_checks(
+            &app(false),
+            &[category("../evil", "https://example.test/feed")],
+            &EnvConfig::default(),
+            None,
+        )
+        .expect_err("traversal category key must fail validation");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+        assert!(
+            err.to_string().contains("single safe path component"),
+            "diagnostic should explain the path-safety requirement: {err}"
+        );
+    }
+
+    #[test]
+    fn category_key_with_path_separator_fails() {
+        let err = run_general_checks(
+            &app(false),
+            &[category("a/b", "https://example.test/feed")],
+            &EnvConfig::default(),
+            None,
+        )
+        .expect_err("category key with '/' must fail validation");
+        assert!(matches!(err, ConfigError::ValidationFailed { .. }));
+    }
+
+    #[test]
+    fn safe_slug_category_key_is_accepted() {
+        // 下划线 / 连字符 / 点的普通 slug 是合法单段路径组件，不应被路径安全检查误伤。
+        run_general_checks(
+            &app(false),
+            &[category("ai-ml_v2.x", "https://example.test/feed")],
+            &EnvConfig::default(),
+            None,
+        )
+        .expect("safe slug category key should pass validation");
+    }
+
+    #[test]
     fn invalid_feed_url_fails() {
         let err = run_general_checks(
             &app(false),

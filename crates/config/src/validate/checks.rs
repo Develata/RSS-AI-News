@@ -162,6 +162,7 @@ fn collect_category_checks(
                 format!("duplicate category key {:?}", category.category.key),
             ));
         }
+        validate_category_key_path_safety(report, &source_file, &category.category.key);
         if let Some(path_template) = category
             .publish_override
             .as_ref()
@@ -510,6 +511,9 @@ fn validate_path_template(
         ));
     }
 
+    // 固定样本 `ai_ml` 只检测模板**结构**安全（绝对路径 / `..` / 盘符前缀）。
+    // 实际 category key 的路径安全由 `validate_category_key_path_safety` 单独保证
+    // （codex P2-2），故安全 key 代入此处不会引入 traversal，样本足以代表全部。
     let sample = template
         .replace("{category_key}", "ai_ml")
         .replace("{CATEGORY_KEY}", "AI_ML")
@@ -548,6 +552,35 @@ fn validate_path_template(
             source,
             field_path,
             "must include {category_key} or {CATEGORY_KEY} to avoid cross-category overwrites",
+        ));
+    }
+}
+
+/// codex P2-2：category key 会被替换进 `{category_key}` 占位符并拼进发布路径，
+/// 也直接用作 `categories/<key>.toml` 文件名。`validate_path_template` 的路径
+/// 安全检查用固定样本 `ai_ml` 渲染，故无法发现"恶意/错误 key 把渲染结果带出
+/// 发布根"的情况（traversal 此前只在 publish 阶段 local.rs / github.rs 被拒，
+/// 属 fail-late）。这里在 validate 阶段直接校验 key 本身是安全的单段路径组件：
+/// 非空、不含 `/` 或 `\`、不是 `.` / `..` / 绝对路径 / 盘符前缀。key 安全后，
+/// 固定样本即可代表任意合法 key，path_template 的样本检查随之 sound。
+fn validate_category_key_path_safety(report: &mut DiagnosticReport, source_file: &str, key: &str) {
+    let mut components = std::path::Path::new(key).components();
+    // 恰好一个 Normal 组件 ⇒ 既非空、又无 `/` 分隔、也无 ParentDir/RootDir/Prefix。
+    let single_normal = matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    );
+    // 显式拒 `\`：Unix 下 Path 把反斜杠当普通字符（单组件检查会放行），但它在
+    // Windows 发布路径上是分隔符——跨平台一律拒，避免方言相关的逃逸。
+    if !single_normal || key.contains('\\') {
+        report.push(Diagnostic::new(
+            source_file.to_string(),
+            "category.key",
+            format!(
+                "category key {key:?} must be a single safe path component \
+                 (non-empty, no '/' or '\\', not '.'/'..'/absolute): it is \
+                 substituted into path_template and the categories/<key>.toml filename"
+            ),
         ));
     }
 }
