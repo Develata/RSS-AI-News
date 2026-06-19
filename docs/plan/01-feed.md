@@ -106,7 +106,9 @@ struct FeedEntryMeta {
 ```
 
 关键：`link` **规范化**（小写 host、去 fragment、按 query 白名单过滤跟踪参数），结果存
-`feed_entries.normalized_link`，用作第二层去重。`link_hash = blake3(normalized_link)`。
+`feed_entries.normalized_link`，用作第二层去重。`link_hash = sha256_hex(normalized_link)`（现行
+权威算法，实装见 `crates/domain/src/link_normalizer.rs`；早期草案曾写 blake3，已对齐为 SHA-256。
+变更哈希算法属破坏性改动，需走版本化数据迁移而非直接替换）。
 
 ### 4.3 published_at 时间窗口过滤
 
