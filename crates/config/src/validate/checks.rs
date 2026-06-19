@@ -565,14 +565,17 @@ fn validate_path_template(
 /// 固定样本即可代表任意合法 key，path_template 的样本检查随之 sound。
 fn validate_category_key_path_safety(report: &mut DiagnosticReport, source_file: &str, key: &str) {
     let mut components = std::path::Path::new(key).components();
-    // 恰好一个 Normal 组件 ⇒ 既非空、又无 `/` 分隔、也无 ParentDir/RootDir/Prefix。
+    // 恰好一个 Normal 组件 ⇒ 非空、无 ParentDir/RootDir/Prefix。
     let single_normal = matches!(
         (components.next(), components.next()),
         (Some(Component::Normal(_)), None)
     );
-    // 显式拒 `\`：Unix 下 Path 把反斜杠当普通字符（单组件检查会放行），但它在
-    // Windows 发布路径上是分隔符——跨平台一律拒，避免方言相关的逃逸。
-    if !single_normal || key.contains('\\') {
+    // 先显式拒原始分隔符 `/` `\`（codex P2 复审）：尾随分隔符（如 `"ai/"`、
+    // `"ai/."`）会被 `Path::components()` 规约掉、只剩单个 Normal 组件而漏过
+    // single_normal，但它们在文件系统归一到与 `"ai"` 相同的发布路径（而
+    // collision pass 只做字符串比较亦发现不了）。Unix 下 Path 还把 `\` 当普通
+    // 字符。故两者一律先拒，再用 components 兜 `..` / 绝对路径 / 盘符前缀 / 空。
+    if key.contains('/') || key.contains('\\') || !single_normal {
         report.push(Diagnostic::new(
             source_file.to_string(),
             "category.key",

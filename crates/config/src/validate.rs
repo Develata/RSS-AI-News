@@ -387,6 +387,24 @@ mod tests {
     }
 
     #[test]
+    fn category_key_with_trailing_separator_fails() {
+        // codex P2 复审：尾随 `/` 会被 Path::components 规约掉、只剩单 Normal 组件，
+        // 但 "ai/" 在文件系统归一到与 "ai" 同一发布路径；必须按原始分隔符直接拒。
+        for bad in ["ai/", "ai/.", "ai\\"] {
+            let result = run_general_checks(
+                &app(false),
+                &[category(bad, "https://example.test/feed")],
+                &EnvConfig::default(),
+                None,
+            );
+            assert!(
+                matches!(result, Err(ConfigError::ValidationFailed { .. })),
+                "trailing-separator key {bad:?} must fail validation, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
     fn safe_slug_category_key_is_accepted() {
         // 下划线 / 连字符 / 点的普通 slug 是合法单段路径组件，不应被路径安全检查误伤。
         run_general_checks(
