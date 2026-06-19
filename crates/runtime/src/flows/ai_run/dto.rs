@@ -64,6 +64,10 @@ pub struct AiProcessSummary {
     pub filtered: u32,
     pub retryable_failed: u32,
     pub permanent_failed: u32,
+    /// 因 task panic / cancel 而失败的 AI 任务数（codex P2-1）。这类失败不进入
+    /// `per_task`，故 `recalculate_process_summary` 不重算它——与 `permanent_failed`
+    /// （进入 per_task 的业务永久失败）分开计，避免被 recalc 清零而隐身。
+    pub tasks_panicked: u32,
     /// 实际执行的批次数（F6-3）。命中 `max_batches` 时等于上限；否则小于上限。
     pub batches_executed: u32,
     /// `true` 表示循环因 `max_batches` 上限退出（仍有 pending 任务）；

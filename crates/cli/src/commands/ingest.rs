@@ -25,6 +25,9 @@ pub struct IngestCommandSummary {
     pub articles_persisted: u32,
     pub articles_fallback: u32,
     pub fetch_failed: u32,
+    /// 因 task panic / cancel 而失败的任务数（ingest source + extract entry 之和；
+    /// codex P2-1）。与业务失败计数分列，避免 panic 在运维输出中报 0 failure。
+    pub tasks_panicked: u32,
     pub duration_seconds: f64,
 }
 
@@ -52,6 +55,7 @@ impl CommandSummary for IngestCommandSummary {
         )?;
         writeln!(writer, "  Articles fallback:    {}", self.articles_fallback)?;
         writeln!(writer, "  Fetch failed:         {}", self.fetch_failed)?;
+        writeln!(writer, "  Tasks panicked:       {}", self.tasks_panicked)?;
         writeln!(
             writer,
             "  Duration:             {:.2}s",
@@ -104,6 +108,7 @@ pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, C
         articles_persisted: extract_summary.persisted,
         articles_fallback: extract_summary.fallback_persisted,
         fetch_failed: extract_summary.permanent_failed + extract_summary.retryable_failed,
+        tasks_panicked: ingest_summary.tasks_panicked + extract_summary.tasks_panicked,
         duration_seconds: started.elapsed().as_secs_f64(),
     })
 }

@@ -24,6 +24,9 @@ pub struct AiRunCommandSummary {
     pub process_filtered: u32,
     pub process_retryable_failed: u32,
     pub process_permanent_failed: u32,
+    /// 因 task panic / cancel 而失败的 AI 任务数（codex P2-1）。与业务永久失败
+    /// 分列，避免 panic 在运维输出中报 0 failure。
+    pub process_tasks_panicked: u32,
     pub duration_seconds: f64,
 }
 
@@ -57,6 +60,11 @@ impl CommandSummary for AiRunCommandSummary {
             writer,
             "  Failed (permanent):    {}",
             self.process_permanent_failed
+        )?;
+        writeln!(
+            writer,
+            "  Tasks panicked:        {}",
+            self.process_tasks_panicked
         )?;
         writeln!(
             writer,
@@ -172,6 +180,7 @@ pub async fn run(cli: &Cli, args: &AiRunArgs) -> Result<AiRunCommandSummary, Cli
         process_filtered: summary.process.filtered,
         process_retryable_failed: summary.process.retryable_failed,
         process_permanent_failed: summary.process.permanent_failed,
+        process_tasks_panicked: summary.process.tasks_panicked,
         duration_seconds: started.elapsed().as_secs_f64(),
     })
 }

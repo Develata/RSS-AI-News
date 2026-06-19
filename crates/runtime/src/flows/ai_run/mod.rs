@@ -260,7 +260,7 @@ impl AiRunFlow {
                     Ok(outcome) => summary.per_task.push(outcome),
                     Err(error) => {
                         tracing::error!("AI task panicked or was cancelled: {error}");
-                        summary.permanent_failed += 1;
+                        summary.tasks_panicked += 1;
                     }
                 }
             }
@@ -300,6 +300,7 @@ impl AiRunFlow {
                     "filtered": summary.filtered,
                     "retryable_failed": summary.retryable_failed,
                     "permanent_failed": summary.permanent_failed,
+                    "tasks_panicked": summary.tasks_panicked,
                     "batches_executed": summary.batches_executed,
                     "max_batches_reached": summary.max_batches_reached,
                     "retryable_deferred": summary.retryable_deferred,
@@ -393,5 +394,41 @@ mod tests {
         assert_eq!(ai_lease_budget_seconds(3, 5, 60, 1), 120);
         // concurrent=0 兜底为 1 波/项（不 panic）。
         assert_eq!(ai_lease_budget_seconds(4, 0, 10, 0), 40);
+    }
+
+    #[test]
+    fn recalculate_process_summary_preserves_tasks_panicked() {
+        // codex P2-1 回归：panic/cancel 的任务在 join-error 分支累计到
+        // tasks_panicked，它不进 per_task；recalc 只从 per_task 重算业务计数，
+        // 必须**不**清零 tasks_panicked。旧实现把 permanent_failed += 1 后又被
+        // recalc 清零，导致 panic 在 summary / JSON 中报 0 failure。
+        let mut summary = AiProcessSummary {
+            permanent_failed: 99, // 脏值：recalc 应按 per_task 重算覆盖
+            tasks_panicked: 2,    // join-error 累计；recalc 不得清零
+            per_task: vec![
+                AiTaskOutcome {
+                    article_ai_result_id: 1,
+                    article_id: 1,
+                    status: AiTaskStatus::Succeeded,
+                    article_advance: None,
+                    error_kind: None,
+                },
+                AiTaskOutcome {
+                    article_ai_result_id: 2,
+                    article_id: 2,
+                    status: AiTaskStatus::PermanentFailed,
+                    article_advance: None,
+                    error_kind: Some("boom".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+        recalculate_process_summary(&mut summary);
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(summary.permanent_failed, 1, "per_task 重算应覆盖脏值");
+        assert_eq!(
+            summary.tasks_panicked, 2,
+            "recalc 必须保留 join-failure 计数"
+        );
     }
 }

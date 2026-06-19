@@ -171,6 +171,7 @@ fn ai_summary() -> AiRunCommandSummary {
         process_filtered: 1,
         process_retryable_failed: 0,
         process_permanent_failed: 0,
+        process_tasks_panicked: 0,
         duration_seconds: 1.25,
     }
 }
@@ -292,6 +293,7 @@ fn run_summary() -> RunCommandSummary {
             articles_persisted: 1,
             articles_fallback: 0,
             fetch_failed: 0,
+            tasks_panicked: 0,
             duration_seconds: 1.0,
         }),
         ai_run: Some(ai_summary()),

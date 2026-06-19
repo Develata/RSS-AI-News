@@ -37,6 +37,10 @@ pub struct ExtractSummary {
     pub dedup_skipped: u32,
     pub retryable_failed: u32,
     pub permanent_failed: u32,
+    /// 因 task panic / cancel 而失败的 entry 数（codex P2-1）。这类失败不进入
+    /// `per_entry`，故 `recalculate_summary` 不重算它——与 `permanent_failed`
+    /// （进入 per_entry 的业务永久失败）分开计，避免被 recalc 清零而隐身。
+    pub tasks_panicked: u32,
     /// 实际执行的批次数（F6-3）。命中 `max_batches` 上限时等于上限值；
     /// 队列耗尽时小于上限。供 observability / 测试可见。
     pub batches_executed: u32,
@@ -205,7 +209,7 @@ impl ExtractFlow {
                     Ok(outcome) => summary.per_entry.push(outcome),
                     Err(error) => {
                         tracing::error!("extract entry task panicked or was cancelled: {error}");
-                        summary.permanent_failed += 1;
+                        summary.tasks_panicked += 1;
                     }
                 }
             }
@@ -246,6 +250,7 @@ impl ExtractFlow {
                     "dedup_skipped": summary.dedup_skipped,
                     "retryable_failed": summary.retryable_failed,
                     "permanent_failed": summary.permanent_failed,
+                    "tasks_panicked": summary.tasks_panicked,
                     "batches_executed": summary.batches_executed,
                     "max_batches_reached": summary.max_batches_reached,
                     "retryable_deferred": summary.retryable_deferred,
@@ -767,5 +772,43 @@ fn recalculate_summary(summary: &mut ExtractSummary) {
             ExtractEntryStatus::RetryableFailed => summary.retryable_failed += 1,
             ExtractEntryStatus::PermanentFailed => summary.permanent_failed += 1,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk_outcome(status: ExtractEntryStatus) -> ExtractEntryOutcome {
+        ExtractEntryOutcome {
+            feed_entry_id: 1,
+            status,
+            article_id: None,
+            error_kind: None,
+        }
+    }
+
+    #[test]
+    fn recalculate_summary_preserves_tasks_panicked() {
+        // codex P2-1 回归：panic/cancel 的 entry 在 join-error 分支累计到
+        // tasks_panicked，它不进 per_entry；recalc 只从 per_entry 重算业务
+        // 计数，必须**不**清零 tasks_panicked。旧实现把 permanent_failed += 1
+        // 后又被 recalc 清零，使 panic 在 summary / JSON 中报 0 failure。
+        let mut summary = ExtractSummary {
+            permanent_failed: 99, // 脏值：recalc 应按 per_entry 重算覆盖
+            tasks_panicked: 4,    // join-error 累计；recalc 不得清零
+            per_entry: vec![
+                mk_outcome(ExtractEntryStatus::Persisted),
+                mk_outcome(ExtractEntryStatus::PermanentFailed),
+            ],
+            ..Default::default()
+        };
+        recalculate_summary(&mut summary);
+        assert_eq!(summary.persisted, 1);
+        assert_eq!(summary.permanent_failed, 1, "per_entry 重算应覆盖脏值");
+        assert_eq!(
+            summary.tasks_panicked, 4,
+            "recalc 必须保留 join-failure 计数"
+        );
     }
 }

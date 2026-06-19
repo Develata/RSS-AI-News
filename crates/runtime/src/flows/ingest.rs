@@ -31,6 +31,11 @@ pub struct IngestSummary {
     pub sources_succeeded: u32,
     pub sources_not_modified: u32,
     pub sources_failed: u32,
+    /// 因 task panic / cancel 而失败的 source 数（codex P2-1）。这类失败没有
+    /// source 身份、不进入 `per_source`，故 `recalculate_summary` 不重算它——
+    /// 与 `sources_failed`（带 error_kind 的业务失败）分开计。不变量：
+    /// `sources_attempted == succeeded + not_modified + failed + tasks_panicked`。
+    pub tasks_panicked: u32,
     pub entries_discovered: u32,
     pub entries_inserted: u32,
     pub entries_uid_dup: u32,
@@ -160,7 +165,7 @@ impl IngestFlow {
                 Ok(outcome) => summary.per_source.push(outcome),
                 Err(error) => {
                     tracing::error!("ingest source task panicked or was cancelled: {error}");
-                    summary.sources_failed += 1;
+                    summary.tasks_panicked += 1;
                 }
             }
         }
@@ -178,6 +183,7 @@ impl IngestFlow {
                     "sources_succeeded": summary.sources_succeeded,
                     "sources_not_modified": summary.sources_not_modified,
                     "sources_failed": summary.sources_failed,
+                    "tasks_panicked": summary.tasks_panicked,
                     "entries_discovered": summary.entries_discovered,
                     "entries_inserted": summary.entries_inserted,
                     "entries_uid_dup": summary.entries_uid_dup,
@@ -625,5 +631,48 @@ fn recalculate_summary(summary: &mut IngestSummary) {
         summary.entries_inserted += outcome.entries_inserted;
         summary.entries_uid_dup += outcome.entries_uid_dup;
         summary.entries_link_dup += outcome.entries_link_dup;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk_outcome(status: IngestSourceStatus) -> IngestSourceOutcome {
+        IngestSourceOutcome {
+            source_id: 1,
+            category_key: "c".to_string(),
+            source_key: "s".to_string(),
+            status,
+            entries_discovered: 0,
+            entries_inserted: 0,
+            entries_uid_dup: 0,
+            entries_link_dup: 0,
+            error_kind: None,
+        }
+    }
+
+    #[test]
+    fn recalculate_summary_preserves_tasks_panicked() {
+        // codex P2-1 回归：panic/cancel 的 source 在 join-error 分支累计到
+        // tasks_panicked，它不进 per_source；recalc 只从 per_source 重算业务
+        // 计数，必须**不**清零 tasks_panicked。旧实现把 sources_failed += 1
+        // 后又被 recalc 清零，使 panic 在 summary / JSON 中报 0 failure。
+        let mut summary = IngestSummary {
+            sources_failed: 99, // 脏值：recalc 应按 per_source 重算覆盖
+            tasks_panicked: 3,  // join-error 累计；recalc 不得清零
+            per_source: vec![
+                mk_outcome(IngestSourceStatus::Succeeded),
+                mk_outcome(IngestSourceStatus::Failed),
+            ],
+            ..Default::default()
+        };
+        recalculate_summary(&mut summary);
+        assert_eq!(summary.sources_succeeded, 1);
+        assert_eq!(summary.sources_failed, 1, "per_source 重算应覆盖脏值");
+        assert_eq!(
+            summary.tasks_panicked, 3,
+            "recalc 必须保留 join-failure 计数"
+        );
     }
 }
