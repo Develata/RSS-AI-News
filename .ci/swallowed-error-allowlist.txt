@@ -27,7 +27,7 @@ crates/config/src/loader.rs:425:测试 fixture Workspace::drop 清理 temp 目�
 crates/observability/tests/prometheus_http_test.rs:35:测试 spawn 的 hyper server 任务，退出 Err 不影响用例（端口探测已成功）；fire-and-forget
 crates/observability/tests/prometheus_http_test.rs:87:同上，第二处测试 server spawn 任务
 crates/observability/tests/tracing_init_file_appender_test.rs:39:测试代码：read_dir 失败时进入下一轮重试（最终断言由 deadline 兜底）
-crates/storage/tests/common/pg.rs:154:PG 测试容器 cleanup，pool close 超时/失败静默吞——容器停止兜底回收
-crates/storage/tests/common/pg.rs:162:PG 测试容器 cleanup，DROP SCHEMA 超时/失败静默吞——容器停止兜底回收
-crates/storage/tests/common/pg.rs:176:PgTestContext::drop 兜底 cleanup 探测 tokio runtime handle，无 handle 时跳过
-crates/storage/tests/common/pg.rs:182:detached 兜底 DROP SCHEMA 任务，runtime 关闭可能来不及完成，容器停止时整库回收
+crates/storage/tests/common/pg.rs:162:PG 测试容器 cleanup，pool close 超时/失败静默吞——容器停止兜底回收
+crates/storage/tests/common/pg.rs:170:PG 测试容器 cleanup，DROP SCHEMA 超时/失败静默吞——容器停止兜底回收
+crates/storage/tests/common/pg.rs:184:PgTestContext::drop 兜底 cleanup 探测 tokio runtime handle，无 handle 时跳过
+crates/storage/tests/common/pg.rs:190:detached 兜底 DROP SCHEMA 任务，runtime 关闭可能来不及完成，容器停止时整库回收

@@ -348,7 +348,7 @@ async fn pg_recent_entries_read_only_pool_enforces_session_and_rejects_writes() 
         .await
         .expect("seed through writer pool")
         .expect("new row");
-    let priority_before: i32 =
+    let priority_before: i64 =
         sqlx::query_scalar("SELECT priority FROM feed_sources WHERE id = $1")
             .bind(source_id)
             .fetch_one(ctx.pg_pool())
@@ -392,7 +392,7 @@ async fn pg_recent_entries_read_only_pool_enforces_session_and_rejects_writes() 
         .map(|code| code.into_owned());
     assert_eq!(sqlstate.as_deref(), Some("25006"));
 
-    let priority_after: i32 = sqlx::query_scalar("SELECT priority FROM feed_sources WHERE id = $1")
+    let priority_after: i64 = sqlx::query_scalar("SELECT priority FROM feed_sources WHERE id = $1")
         .bind(source_id)
         .fetch_one(ctx.pg_pool())
         .await
