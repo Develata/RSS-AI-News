@@ -2,8 +2,8 @@ use std::io::{self, Write};
 
 use rss_ai_news_config as config;
 use rss_ai_news_storage::{
-    ReindexJobRepo, ReindexJobRepository, StorageError, StoragePool, embedded_migration_versions,
-    run_migrations,
+    ReindexJobRepo, ReindexJobRepository, StorageError, StoragePool, applied_migration_versions,
+    pending_migration_versions, run_migrations,
 };
 use serde::Serialize;
 
@@ -73,12 +73,7 @@ pub async fn check(cli: &Cli) -> Result<MigrateCommandSummary, CliError> {
     // pending drift，返 `CliError::MigrateCheckPending`（exit code 1，CI
     // 可据此分类）。
     let result = summary("check", &pool).await?;
-    let embedded = embedded_migration_versions(&pool);
-    let pending: Vec<i64> = embedded
-        .iter()
-        .copied()
-        .filter(|v| !result.applied_versions.contains(v))
-        .collect();
+    let pending = pending_migration_versions(&pool, &result.applied_versions);
     if !pending.is_empty() {
         return Err(CliError::MigrateCheckPending {
             pending,
@@ -141,22 +136,7 @@ async fn open_pool(loaded: &config::LoadedConfig) -> Result<StoragePool, CliErro
 }
 
 async fn summary(action: &str, pool: &StoragePool) -> Result<MigrateCommandSummary, CliError> {
-    // `_sqlx_migrations` schema 在两个 backend 上完全等价：
-    //   `version BIGINT PRIMARY KEY` —— sqlx::migrate! 自身嵌入，跨方言一致。
-    // 唯一的差异在 sqlx::query 的 Pool 类型签名上。
-    let query = "SELECT version FROM _sqlx_migrations ORDER BY version";
-    let applied_versions: Vec<i64> = match pool {
-        StoragePool::Sqlite(p) => match sqlx::query_scalar::<_, i64>(query).fetch_all(p).await {
-            Ok(v) => v,
-            Err(sqlx::Error::Database(e)) if e.message().contains("_sqlx_migrations") => Vec::new(),
-            Err(error) => return Err(StorageError::from(error).into()),
-        },
-        StoragePool::Postgres(p) => match sqlx::query_scalar::<_, i64>(query).fetch_all(p).await {
-            Ok(v) => v,
-            Err(sqlx::Error::Database(e)) if e.message().contains("_sqlx_migrations") => Vec::new(),
-            Err(error) => return Err(StorageError::from(error).into()),
-        },
-    };
+    let applied_versions = applied_migration_versions(pool).await?;
     let current_version = applied_versions.iter().copied().max();
     Ok(MigrateCommandSummary {
         action: action.to_string(),

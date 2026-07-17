@@ -42,6 +42,20 @@ impl StoragePool {
         Ok(Self::Sqlite(pool))
     }
 
+    /// 构造查询专用 pool。SQLite 必须已存在且以 read-only 打开；PG 在每个
+    /// connection 上设置 `default_transaction_read_only = on`。query CLI 固定单
+    /// connection，避免一次性命令为只读 projection 建立不必要的连接池。
+    pub async fn build_read_only(url: &str, busy_timeout_ms: u32) -> Result<Self, StorageError> {
+        if Self::is_postgres_url(url) {
+            let pool = build_pg_read_only_pool(url).await?;
+            return Ok(Self::Postgres(pool));
+        }
+        let sqlite_path_str = strip_sqlite_scheme(url);
+        let sqlite_path = Path::new(sqlite_path_str.as_ref());
+        let pool = build_sqlite_read_only_pool(sqlite_path, busy_timeout_ms).await?;
+        Ok(Self::Sqlite(pool))
+    }
+
     /// 不区分大小写 + 容忍前导空白：`POSTGRES://`、`  postgresql://` 都识别为 PG，
     /// 避免大小写绕过让 PG URL 落进 sqlite 路径（会被当成文件名打开，行为离谱）。
     pub fn is_postgres_url(url: &str) -> bool {
@@ -101,6 +115,26 @@ pub async fn build_sqlite_pool(
         .map_err(StorageError::from)
 }
 
+/// 打开已存在的 SQLite DB，且从连接层禁止写入。这里刻意不设置 WAL / synchronous：
+/// 两者属于 writer-owned database PRAGMA，query-only CLI 不应在启动时改变持久状态。
+pub async fn build_sqlite_read_only_pool(
+    sqlite_path: &Path,
+    busy_timeout_ms: u32,
+) -> Result<SqlitePool, StorageError> {
+    let options = SqliteConnectOptions::new()
+        .filename(sqlite_path)
+        .create_if_missing(false)
+        .read_only(true)
+        .busy_timeout(Duration::from_millis(u64::from(busy_timeout_ms)))
+        .foreign_keys(true);
+
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .map_err(StorageError::from)
+}
+
 /// W11-P3-A-fix1.L1：PG pool acquire 超时显式上限。
 ///
 /// sqlx 的 `PgPoolOptions::acquire_timeout` 包含"新建连接 + 等待空闲连接"
@@ -126,6 +160,24 @@ pub async fn build_pg_pool(url: &str, max_connections: u32) -> Result<PgPool, St
     PgPoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(PG_ACQUIRE_TIMEOUT)
+        .connect_with(options)
+        .await
+        .map_err(StorageError::from)
+}
+
+async fn build_pg_read_only_pool(url: &str) -> Result<PgPool, StorageError> {
+    let options = PgConnectOptions::from_str(url).map_err(StorageError::from)?;
+    PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(PG_ACQUIRE_TIMEOUT)
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                sqlx::query("SET default_transaction_read_only = on")
+                    .execute(&mut *connection)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect_with(options)
         .await
         .map_err(StorageError::from)

@@ -13,6 +13,7 @@ pub mod migrate;
 pub mod publish;
 pub mod publish_all;
 pub mod rebuild_report;
+pub mod recent_entries;
 pub mod reindex;
 pub mod replay;
 pub mod run;
@@ -75,6 +76,12 @@ pub async fn dispatch(cli: Cli, writer: &mut OutputWriter) -> Result<ExitCode, C
             let summary = reindex::run(&cli, args).await?;
             writer
                 .emit_success("reindex", &summary)
+                .map_err(CliError::Io)?;
+        }
+        Command::RecentEntries(args) => {
+            let summary = recent_entries::run(&cli, args).await?;
+            writer
+                .emit_success(recent_entries::COMMAND_NAME, &summary)
                 .map_err(CliError::Io)?;
         }
         Command::Migrate(args) => match args.action {

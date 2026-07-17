@@ -214,6 +214,59 @@ async fn args_parsing_parses_migrate_check_subcommand() {
     }
 }
 
+#[test]
+fn args_parsing_parses_recent_entries_defaults() {
+    let cli = Cli::try_parse_from([
+        "rss-ai-news",
+        "--category",
+        "daily-math",
+        "recent-entries",
+        "--discovered-after",
+        "1970-01-01T00:00:00Z",
+    ])
+    .expect("parse recent-entries");
+    match cli.command {
+        Command::RecentEntries(args) => {
+            assert_eq!(args.discovered_after.unix_timestamp(), 0);
+            assert_eq!(
+                args.limit,
+                rss_ai_news_runtime::DEFAULT_RECENT_ENTRIES_LIMIT
+            );
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn args_parsing_rejects_recent_entries_invalid_timestamp() {
+    let error = Cli::try_parse_from([
+        "rss-ai-news",
+        "recent-entries",
+        "--discovered-after",
+        "not-a-timestamp",
+    ])
+    .expect_err("invalid RFC3339 should fail");
+    assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    assert_eq!(error.exit_code(), 2);
+}
+
+#[test]
+fn args_parsing_rejects_recent_entries_limit_out_of_range() {
+    for limit in ["0", "201"] {
+        let error = Cli::try_parse_from([
+            "rss-ai-news",
+            "recent-entries",
+            "--discovered-after",
+            "1970-01-01T00:00:00Z",
+            "--limit",
+            limit,
+        ])
+        .expect_err("out-of-range limit should fail");
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert_eq!(error.exit_code(), 2);
+    }
+}
+
 #[tokio::test]
 async fn args_parsing_parses_top_level_run_subcommand() {
     let cli = Cli::try_parse_from(["rss-ai-news", "run"]).expect("parse");
@@ -271,6 +324,7 @@ async fn args_parsing_help_lists_all_top_level_subcommands() {
         "backfill",
         "rebuild-report",
         "reindex",
+        "recent-entries",
         "migrate",
         "validate-config",
         "run",

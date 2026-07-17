@@ -26,6 +26,83 @@ FROM feed_entries
 WHERE id = $1
 "#;
 
+/// SQLite stores `OffsetDateTime` as variable-width RFC3339 TEXT. The leading
+/// lexical predicate is a safe one-day coarse bound (all RFC3339 offsets are
+/// less than 24h) so the existing `(source_id, discovered_at)` index remains
+/// usable; the epoch-second + fractional expressions provide exact instant
+/// semantics and deterministic ordering across `Z`, offsets and optional
+/// fractional digits.
+pub(super) const LIST_RECENT_FEED_ENTRIES_SQLITE_SQL: &str = r#"
+WITH recent_candidates AS (
+    SELECT fe.id,
+           fs.source_key,
+           fs.priority AS source_priority,
+           fe.title_raw AS title,
+           fe.normalized_link AS url,
+           fe.published_at,
+           fe.discovered_at,
+           fe.state,
+           CAST(
+               strftime(
+                   '%s',
+                   CASE
+                       WHEN instr(fe.discovered_at, '.') = 0 THEN fe.discovered_at
+                       ELSE substr(fe.discovered_at, 1, instr(fe.discovered_at, '.') - 1)
+                            || CASE
+                                   WHEN substr(fe.discovered_at, -1) = 'Z' THEN 'Z'
+                                   ELSE substr(fe.discovered_at, -6)
+                               END
+                   END
+               ) AS INTEGER
+           ) AS discovered_epoch_second,
+           CASE
+               WHEN instr(fe.discovered_at, '.') = 0 THEN 0.0
+               ELSE CAST('0' || substr(fe.discovered_at, instr(fe.discovered_at, '.')) AS REAL)
+           END AS discovered_fraction
+    FROM feed_entries AS fe
+    JOIN feed_sources AS fs ON fs.id = fe.source_id
+    WHERE fs.category_key = $1
+      AND fs.status = 'active'
+      AND fe.discovered_at >= $2
+      AND fe.state <> 'dedup_skipped'
+)
+SELECT id,
+       source_key,
+       source_priority,
+       title,
+       url,
+       published_at,
+       discovered_at,
+       state
+FROM recent_candidates
+WHERE discovered_epoch_second > $3
+   OR (discovered_epoch_second = $3 AND discovered_fraction >= $4)
+ORDER BY discovered_epoch_second DESC,
+         discovered_fraction DESC,
+         source_priority ASC,
+         id DESC
+LIMIT $5
+"#;
+
+pub(super) const LIST_RECENT_FEED_ENTRIES_PG_SQL: &str = r#"
+SELECT fe.id,
+       fs.source_key,
+       fs.priority AS source_priority,
+       fe.title_raw AS title,
+       fe.normalized_link AS url,
+       fe.published_at,
+       fe.discovered_at,
+       fe.state
+FROM feed_entries fe
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE fs.category_key = $1
+  AND fs.status = 'active'
+  AND fe.discovered_at >= $2
+  AND fe.state <> 'dedup_skipped'
+ORDER BY fe.discovered_at DESC, fs.priority ASC, fe.id DESC
+LIMIT $3
+"#;
+
 /// SQLite claim：子查询无 `FOR UPDATE`（语法不支持，整库写锁兜底）。
 pub(super) const CLAIM_PENDING_FETCH_SQLITE_SQL: &str = r#"
 UPDATE feed_entries

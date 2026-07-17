@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use rss_ai_news_config::CliOverrides;
 use rss_ai_news_domain::state::ReindexTarget as DomainReindexTarget;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "rss-ai-news", version, about = "Rust 版 RSS-AI-News CLI")]
@@ -115,6 +116,7 @@ pub enum Command {
     Backfill(BackfillArgs),
     RebuildReport(RebuildReportArgs),
     Reindex(ReindexArgs),
+    RecentEntries(RecentEntriesArgs),
     Migrate(MigrateArgs),
     ValidateConfig,
     Run(RunArgs),
@@ -233,6 +235,23 @@ pub struct RebuildReportArgs {
     pub date: Option<String>,
     #[arg(long)]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct RecentEntriesArgs {
+    #[arg(long = "discovered-after", value_parser = parse_rfc3339)]
+    pub discovered_after: OffsetDateTime,
+    #[arg(
+        long,
+        default_value_t = rss_ai_news_runtime::DEFAULT_RECENT_ENTRIES_LIMIT,
+        value_parser = clap::value_parser!(u32).range(1..=200)
+    )]
+    pub limit: u32,
+}
+
+fn parse_rfc3339(value: &str) -> Result<OffsetDateTime, String> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|error| format!("invalid RFC3339 timestamp {value:?}: {error}"))
 }
 
 /// cli-semantics §4.8 lines 285-290:

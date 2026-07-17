@@ -15,13 +15,16 @@ use time::OffsetDateTime;
 
 use crate::{StorageError, StoragePool, classify_db_error};
 
-use super::feed_source::{FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome};
+use super::feed_source::{
+    FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome, RecentFeedSourceHealth,
+    RecentFeedSourceHealthRepository,
+};
 use super::feed_source_sql::{
     LEASE_GUARD_UPDATE_REINDEX_JOBS_SQL, LIST_FEED_SOURCES_ALL_SQL,
-    LIST_FEED_SOURCES_BY_CATEGORY_SQL, MARK_FEED_SOURCE_ARCHIVED_SQL, SELECT_FEED_SOURCE_BY_ID_SQL,
-    SELECT_FEED_SOURCE_BY_KEYS_SQL, UPDATE_FEED_SOURCE_AFTER_FETCH_FAILURE_SQL,
-    UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL, UPSERT_FEED_SOURCE_RETURNING_ID_SQL,
-    UPSERT_FEED_SOURCE_SQL,
+    LIST_FEED_SOURCES_BY_CATEGORY_SQL, LIST_RECENT_FEED_SOURCE_HEALTH_SQL,
+    MARK_FEED_SOURCE_ARCHIVED_SQL, SELECT_FEED_SOURCE_BY_ID_SQL, SELECT_FEED_SOURCE_BY_KEYS_SQL,
+    UPDATE_FEED_SOURCE_AFTER_FETCH_FAILURE_SQL, UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL,
+    UPSERT_FEED_SOURCE_RETURNING_ID_SQL, UPSERT_FEED_SOURCE_SQL,
 };
 
 // ── trait 实现：按 backend 分发到 sqlite_* / pg_* helper ──
@@ -151,6 +154,50 @@ impl FeedSourceRepository for FeedSourceRepo {
             }
         }
     }
+}
+
+#[async_trait]
+impl RecentFeedSourceHealthRepository for FeedSourceRepo {
+    async fn list_recent_health(
+        &self,
+        category_key: &str,
+        max_rows: u32,
+    ) -> Result<Vec<RecentFeedSourceHealth>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(pool) => {
+                list_recent_health_sqlite(pool, category_key, max_rows).await
+            }
+            StoragePool::Postgres(pool) => {
+                list_recent_health_pg(pool, category_key, max_rows).await
+            }
+        }
+    }
+}
+
+async fn list_recent_health_sqlite(
+    pool: &SqlitePool,
+    category_key: &str,
+    max_rows: u32,
+) -> Result<Vec<RecentFeedSourceHealth>, StorageError> {
+    sqlx::query_as::<_, RecentFeedSourceHealth>(LIST_RECENT_FEED_SOURCE_HEALTH_SQL)
+        .bind(category_key)
+        .bind(i64::from(max_rows))
+        .fetch_all(pool)
+        .await
+        .map_err(StorageError::from)
+}
+
+async fn list_recent_health_pg(
+    pool: &PgPool,
+    category_key: &str,
+    max_rows: u32,
+) -> Result<Vec<RecentFeedSourceHealth>, StorageError> {
+    sqlx::query_as::<_, RecentFeedSourceHealth>(LIST_RECENT_FEED_SOURCE_HEALTH_SQL)
+        .bind(category_key)
+        .bind(i64::from(max_rows))
+        .fetch_all(pool)
+        .await
+        .map_err(StorageError::from)
 }
 
 // ── SQLite helper（保留 P3-C-0 前的行为） ──────────────────────

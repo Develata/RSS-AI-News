@@ -85,6 +85,19 @@ WHERE category_key = $1 AND status = 'active'
 ORDER BY priority ASC, source_key ASC
 "#;
 
+pub(super) const LIST_RECENT_FEED_SOURCE_HEALTH_SQL: &str = r#"
+SELECT substr(source_key, 1, 256) AS source_key,
+       priority,
+       last_fetched_at,
+       last_success_at,
+       consecutive_failures,
+       substr(last_error_kind, 1, 128) AS last_error_kind
+FROM feed_sources
+WHERE category_key = $1 AND status = 'active'
+ORDER BY priority ASC, source_key ASC
+LIMIT $2
+"#;
+
 pub(super) const LIST_FEED_SOURCES_ALL_SQL: &str = r#"
 SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
        priority, etag, last_modified, last_fetched_at, last_success_at,

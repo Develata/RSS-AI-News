@@ -96,9 +96,14 @@ GHA / K8s CronJob）比自建调度器更稳定。
 
 如需多份独立部署，启动多个 CLI 实例 + 各自独立的 DB。
 
-### 4.3 不暴露 SQL 接口
+### 4.3 不暴露 arbitrary SQL 接口
 
-CLI 没有 `query` / `exec` 子命令让用户执行 SQL。直接连 DB 用 `sqlite3` / `psql`（运维自负）。
+CLI 没有 `query` / `exec` 子命令让用户执行任意 SQL。直接连 DB 用 `sqlite3` / `psql`（运维自负）。
+
+允许少量**领域固定、字段封闭、输出有版本契约**的只读 projection，例如
+`recent-entries`：它只暴露 feed-entry discovery DTO，有强制 category/time/limit 边界，
+不接受 SQL fragment、column expression 或任意表名。新增 projection 必须经过 Runtime Flow →
+Repository、双方言测试与 read-only 不变性验收；这不构成通用数据库查询接口。
 
 ### 4.4 不内嵌 Web UI
 

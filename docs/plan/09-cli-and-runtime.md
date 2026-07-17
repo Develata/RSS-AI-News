@@ -20,9 +20,10 @@ rss-ai-news [全局 flag] <subcommand> [子命令 flag]
 ├── backfill        对历史数据重跑（extract / ai）
 ├── rebuild-report  从冻结快照重新渲染 Markdown
 ├── reindex         重算派生数据（link_hash / content_hash / categories）
+├── recent-entries  严格只读导出 category 的最近 feed entries + source health
 ├── migrate
 │   ├── run         执行 pending migrations
-│   └── check       校验 migration 状态
+│   └── check       校验 migration 状态，不执行
 ├── validate-config 校验配置 schema + effective 真值表
 └── run             一体化执行：ingest + ai-run + publish 顺序跑
 ```
@@ -30,7 +31,7 @@ rss-ai-news [全局 flag] <subcommand> [子命令 flag]
 入口路径：
 - 二进制：[`src/main.rs`](../../src/main.rs)（`#[tokio::main] async fn main()`）
 - 命令路由：[`crates/cli/src/lib.rs`](../../crates/cli/src/lib.rs)（`pub async fn run() -> ExitCode`）
-- 各子命令：[`crates/cli/src/commands/`](../../crates/cli/src/commands/)（11 个 `.rs` 文件，一命令一文件）
+- 各子命令：[`crates/cli/src/commands/`](../../crates/cli/src/commands/)（13 个 `.rs` 文件，一命令一文件）
 
 CLI 框架：`clap` derive。每个子命令是独立 enum 变体。
 
@@ -91,16 +92,20 @@ CLI 框架：`clap` derive。每个子命令是独立 enum 变体。
 | backfill | `commands/backfill.rs` | `flows::backfill::BackfillFlow` | --target={extract,ai} |
 | rebuild-report | `commands/rebuild_report.rs` | `flows::rebuild_report::RebuildReportFlow` | byte-equal 重渲染 |
 | reindex | `commands/reindex.rs` | `flows::reindex::ReindexFlow` | 3 类 target |
+| recent-entries | `commands/recent_entries.rs` | `flows::recent_entries::RecentEntriesFlow` | strict read-only deps；不构造 `RunContext` |
 | migrate | `commands/migrate.rs` | `storage::migrate::run/check` | 不构造 RunContext |
 | validate-config | `commands/validate_config.rs` | `config::validate` | 不构造 RunContext |
 | run | `commands/run.rs` | 串行调用 ingest + ai-run + publish | 一体化模式 |
 
 `migrate` 与 `validate-config` 是**纯 config / storage 层**的命令，不进入流程协调层。
-这是宪法 §3.3 壳核分离的体现：它们不需要 RunContext，所以不构造。
+`recent-entries` 进入一个只读 Runtime Flow，但只注入 `FeedSourceRepository` 与
+`FeedEntryRepository` 的轻量 deps：它不得复用会自动 migration/config rotation 的完整
+`RunContext`。三者都不构造 `RunContext`；区别是 `recent-entries` 仍保留 CLI → Flow → Repo
+的分层，不让 CLI 直接发 SQL。
 
 ## 4. RunContext —— 流程协调层接缝点
 
-`RunContext` 是 CLI 壳调用 Flow 的唯一参数。它持有：
+`RunContext` 是主链路与会推进状态的 Runtime Flow 的完整依赖接缝。它持有：
 
 ```rust
 pub struct RunContext {
@@ -168,7 +173,10 @@ ULID 自动生成。
 - CLI 不能直接调外部 HTTP（必须经 RunContext 中的 client trait）
 - CLI 不能持有业务状态（每次调用都新构造 RunContext）
 
-唯一例外：`migrate` / `validate-config` 这两个纯配置 / 存储工具命令，绕过 Flow 层。
+`migrate` / `validate-config` 是纯配置 / 存储工具命令，绕过 Flow 层。
+`recent-entries` 是受限例外：CLI 只构造 read-only deps，查询仍必须经过
+`RecentEntriesFlow` → Repository；不得直接发 SQL，也不得走会产生 startup writes 的完整
+`RunContext`。
 
 ## 7. 当前实现入口
 

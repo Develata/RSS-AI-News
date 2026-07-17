@@ -8,11 +8,12 @@ use rss_ai_news_domain::SecretString;
 use rss_ai_news_extractor::{ContentStrategy, ReqwestHtmlFetcher};
 use rss_ai_news_feed::ReqwestFeedFetcher;
 use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, LocalFsTarget, PublishTarget};
-use rss_ai_news_runtime::{RunContext, RunContextDeps};
+use rss_ai_news_runtime::{RecentEntriesFlow, RunContext, RunContextDeps};
 use rss_ai_news_storage::{
     ArticleAiResultRepo, ArticleRepo, ConfigRotation, FeedEntryRepo, FeedSourceRepo,
     PublishItemRepo, PublishRecordRepo, RawArtifactRepo, ReindexJobRepo, RuleVersionRepo,
-    RunEventRepo, StoragePool, run_migrations,
+    RunEventRepo, StoragePool, applied_migration_versions, ensure_migration_state_exact,
+    pending_migration_versions, run_migrations,
 };
 use time::OffsetDateTime;
 
@@ -155,6 +156,37 @@ pub async fn build_run_context(
     );
 
     Ok(Arc::new(ctx))
+}
+
+/// 构造严格只读 recent-entries flow：不自动 migrate、不轮换 config version、
+/// 不创建 HTTP/AI/publish clients，也不建立 writer repositories。
+pub async fn build_recent_entries_flow(
+    cli: &crate::args::Cli,
+) -> Result<RecentEntriesFlow, CliError> {
+    let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
+    let url = resolve_storage_url(&loaded)?;
+    let busy_timeout_ms = u32::try_from(loaded.app.database.busy_timeout_ms).unwrap_or(u32::MAX);
+    let pool = StoragePool::build_read_only(&url, busy_timeout_ms)
+        .await
+        .map_err(CliError::Storage)?;
+
+    let applied = applied_migration_versions(&pool)
+        .await
+        .map_err(CliError::Storage)?;
+    let pending = pending_migration_versions(&pool, &applied);
+    if !pending.is_empty() {
+        return Err(CliError::RecentEntriesMigrationPending { pending });
+    }
+    ensure_migration_state_exact(&pool).await.map_err(|error| {
+        CliError::RecentEntriesMigrationDrift {
+            detail: error.to_string(),
+        }
+    })?;
+
+    Ok(RecentEntriesFlow::new(
+        Arc::new(FeedSourceRepo::new_with_storage(pool.clone())),
+        Arc::new(FeedEntryRepo::new_with_storage(pool)),
+    ))
 }
 
 pub struct ReplayDeps {

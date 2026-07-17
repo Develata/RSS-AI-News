@@ -13,7 +13,8 @@ mod common;
 
 use common::pg::{PgTestContext, make_pg_test_pool};
 use rss_ai_news_storage::{
-    ClaimRequest, FeedEntryRepo, FeedEntryRepository, NewFeedEntry, ResetFailedFilter,
+    ClaimRequest, FeedEntryRepo, FeedEntryRepository, NewFeedEntry, RecentFeedEntryFilter,
+    ResetFailedFilter,
 };
 use time::OffsetDateTime;
 
@@ -249,6 +250,72 @@ async fn pg_claim_pending_fetch_skips_explicitly_locked_row() {
         "entry_a must remain pending_fetch"
     );
 
+    ctx.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_recent_entries_matches_sqlite_contract() {
+    let ctx = make_pg_test_pool().await;
+    let p20 = seed_feed_source(&ctx, "recent-p20").await;
+    let p10 = seed_feed_source(&ctx, "recent-p10").await;
+    let paused = seed_feed_source(&ctx, "recent-paused").await;
+    let other = seed_feed_source(&ctx, "recent-other").await;
+    sqlx::query("UPDATE feed_sources SET priority = 20 WHERE id = $1")
+        .bind(p20)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE feed_sources SET priority = 10 WHERE id = $1")
+        .bind(p10)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE feed_sources SET status = 'paused' WHERE id = $1")
+        .bind(paused)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE feed_sources SET category_key = 'other' WHERE id = $1")
+        .bind(other)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+
+    let repo = FeedEntryRepo::new_with_storage(ctx.storage_pool().clone());
+    let discovered_at = OffsetDateTime::from_unix_timestamp(2_000).unwrap();
+    for (source, uid) in [
+        (p20, "p20"),
+        (p10, "p10"),
+        (paused, "paused"),
+        (other, "other"),
+        (p10, "dedup"),
+    ] {
+        let mut entry = new_feed_entry(source, uid);
+        entry.discovered_at = discovered_at;
+        let id = repo.insert_if_new(&entry).await.unwrap().unwrap();
+        if uid == "dedup" {
+            sqlx::query("UPDATE feed_entries SET state = 'dedup_skipped' WHERE id = $1")
+                .bind(id)
+                .execute(ctx.pg_pool())
+                .await
+                .unwrap();
+        }
+    }
+
+    let rows = repo
+        .list_recent(&RecentFeedEntryFilter {
+            category_key: "ai".to_string(),
+            discovered_after: discovered_at,
+            max_rows: 10,
+        })
+        .await
+        .expect("PG recent projection");
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].source_key, "src-recent-p10");
+    assert_eq!(rows[0].source_priority, 10);
+    assert_eq!(rows[1].source_key, "src-recent-p20");
     ctx.cleanup().await;
 }
 

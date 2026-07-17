@@ -5,6 +5,7 @@ pub mod ingest;
 mod maintenance;
 pub mod publish;
 pub mod rebuild_report;
+pub mod recent_entries;
 pub mod reindex;
 
 pub use ai_run::{
@@ -30,6 +31,10 @@ pub use publish::{
     PublishStoreLocalStatus,
 };
 pub use rebuild_report::{RebuildReportFlow, RebuildReportOptions};
+pub use recent_entries::{
+    DEFAULT_RECENT_ENTRIES_LIMIT, MAX_RECENT_ENTRIES_LIMIT, MAX_RECENT_SOURCE_HEALTH_ROWS,
+    RecentEntriesFlow, RecentEntriesOptions, RecentEntriesResult, RecentSourceHealth,
+};
 pub use reindex::{
     ReindexAbortOutcome, ReindexFlow, ReindexOptions, ReindexSummary, ReindexTarget,
 };

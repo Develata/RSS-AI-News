@@ -12,8 +12,11 @@ pub use error::{StorageError, classify_db_error};
 pub use lease::{
     ClaimRequest, ReleaseFailureOutcome, ReleaseOutcome, build_owner_id, lease_expires_at,
 };
-pub use migrate::{embedded_migration_versions, run_migrations};
-pub use pool::{StoragePool, build_pg_pool, build_sqlite_pool};
+pub use migrate::{
+    applied_migration_versions, embedded_migration_versions, ensure_migration_state_exact,
+    pending_migration_versions, run_migrations,
+};
+pub use pool::{StoragePool, build_pg_pool, build_sqlite_pool, build_sqlite_read_only_pool};
 pub use repo::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
     ArticleAiTaskCandidate, ArticleInsertOutcome, ArticleRepo, ArticleRepository,
@@ -25,8 +28,9 @@ pub use repo::{
     NewPublishRecord, NewRawArtifact, NewRunEvent, PublishAdvanceExtras, PublishCandidateRow,
     PublishItemRepo, PublishItemRepository, PublishRecord, PublishRecordRepo,
     PublishRecordRepository, PublishState, PublishTimestampField, RawArtifactRepo,
-    RawArtifactRepository, ReindexJob, ReindexJobRepo, ReindexJobRepository, ReleaseSuccessOutcome,
-    ResetFailedFilter, ResetFailedOutcome, RuleVersion, RuleVersionRepo, RuleVersionRepository,
-    RunEventRepo, RunEventRepository, StartReindexTxOutcome, TerminalAdvanceOutcome,
-    TerminalAdvanceStatus, UpdateContentHashOutcome,
+    RawArtifactRepository, RecentFeedEntry, RecentFeedEntryFilter, RecentFeedEntryRepository,
+    RecentFeedSourceHealth, RecentFeedSourceHealthRepository, ReindexJob, ReindexJobRepo,
+    ReindexJobRepository, ReleaseSuccessOutcome, ResetFailedFilter, ResetFailedOutcome,
+    RuleVersion, RuleVersionRepo, RuleVersionRepository, RunEventRepo, RunEventRepository,
+    StartReindexTxOutcome, TerminalAdvanceOutcome, TerminalAdvanceStatus, UpdateContentHashOutcome,
 };

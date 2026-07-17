@@ -1,4 +1,6 @@
+use clap::Parser;
 use rss_ai_news_cli::{
+    args::{Cli, Command},
     commands::{
         ai_run::AiRunCommandSummary,
         backfill::{BackfillCommandSummary, parse_date_start, sha256_hex},
@@ -6,12 +8,15 @@ use rss_ai_news_cli::{
         publish::{PublishCommandSummary, PublishStageOutcome},
         publish_all::{PublishAllCategorySummary, PublishAllCommandSummary},
         rebuild_report::RebuildReportCommandSummary,
+        recent_entries::{
+            RecentEntriesCommandSummary, RecentEntrySummary, RecentSourceHealthSummary,
+        },
         reindex::{ReindexCommandSummary, ReindexMode, ReindexTargetOutcome},
         replay::ReplayCommandSummary,
         run::RunCommandSummary,
     },
     error::CliError,
-    output::CommandSummary,
+    output::{CommandSummary, failure_envelope, success_envelope},
 };
 use serde_json::json;
 
@@ -54,6 +59,76 @@ fn migrate_summary_pretty_renders() {
 #[test]
 fn migrate_summary_serializes_current_version() {
     assert_eq!(json_value(&migrate_summary(), "current_version"), 2);
+}
+
+#[test]
+fn recent_entries_summary_pretty_renders() {
+    assert_pretty_contains(&recent_entries_summary(), "Recent entries for daily-math");
+}
+
+#[test]
+fn recent_entries_json_envelope_matches_contract() {
+    let envelope = success_envelope("recent-entries", &recent_entries_summary());
+
+    assert_eq!(envelope["command"], "recent-entries");
+    assert_eq!(envelope["status"], "success");
+    assert_eq!(envelope["errors"], json!([]));
+    assert_eq!(envelope["summary"]["schema_version"], 1);
+    assert_eq!(envelope["summary"]["category"], "daily-math");
+    assert_eq!(
+        envelope["summary"]["discovered_after"],
+        "2026-07-14T23:30:00Z"
+    );
+    assert_eq!(envelope["summary"]["entries"][0]["state"], "pending_fetch");
+}
+
+#[test]
+fn recent_entries_output_redacts_large_or_sensitive_fields() {
+    let value = serde_json::to_value(recent_entries_summary()).expect("serialize summary");
+    let source = value["source_health"][0]
+        .as_object()
+        .expect("source object");
+    let entry = value["entries"][0].as_object().expect("entry object");
+
+    assert!(!source.contains_key("last_error"));
+    assert!(!entry.contains_key("summary_raw"));
+    assert!(!entry.contains_key("last_error"));
+}
+
+#[tokio::test]
+async fn recent_entries_requires_category() {
+    let cli = Cli::try_parse_from([
+        "rss-ai-news",
+        "recent-entries",
+        "--discovered-after",
+        "2026-07-14T23:30:00Z",
+    ])
+    .expect("parse");
+    let Command::RecentEntries(args) = &cli.command else {
+        panic!("expected recent-entries")
+    };
+
+    let error = rss_ai_news_cli::commands::recent_entries::run(&cli, args)
+        .await
+        .expect_err("missing category should fail before config I/O");
+
+    assert_eq!(error.command_name(), "recent-entries");
+    assert_eq!(error.error_kind(), "recent_entries_category_required");
+    assert_eq!(error.exit_code().as_i32(), 2);
+    let envelope = failure_envelope(error.command_name(), &error);
+    assert_eq!(envelope["command"], "recent-entries");
+    assert_eq!(envelope["status"], "error");
+}
+
+#[test]
+fn recent_entries_command_context_preserves_underlying_error_classification() {
+    let error = CliError::Runtime(rss_ai_news_runtime::RuntimeError::Config(
+        "fixture failure".to_string(),
+    ))
+    .in_command("recent-entries");
+
+    assert_eq!(error.command_name(), "recent-entries");
+    assert_eq!(error.error_kind(), "runtime");
 }
 
 #[test]
@@ -233,6 +308,36 @@ fn migrate_summary() -> MigrateCommandSummary {
         action: "check".to_string(),
         applied_versions: vec![1, 2],
         current_version: Some(2),
+    }
+}
+
+fn recent_entries_summary() -> RecentEntriesCommandSummary {
+    RecentEntriesCommandSummary {
+        schema_version: 1,
+        generated_at: "2026-07-17T23:30:00Z".to_string(),
+        category: "daily-math".to_string(),
+        discovered_after: "2026-07-14T23:30:00Z".to_string(),
+        limit: 50,
+        truncated: false,
+        source_health_truncated: false,
+        source_health: vec![RecentSourceHealthSummary {
+            source_key: "person.terence-tao.whats-new".to_string(),
+            priority: 10,
+            last_fetched_at: None,
+            last_success_at: None,
+            consecutive_failures: 0,
+            last_error_kind: None,
+        }],
+        entries: vec![RecentEntrySummary {
+            id: 1,
+            source_key: "person.terence-tao.whats-new".to_string(),
+            source_priority: 10,
+            title: "Example".to_string(),
+            url: "https://example.com/post".to_string(),
+            published_at: None,
+            discovered_at: "2026-07-17T22:00:00Z".to_string(),
+            state: "pending_fetch".to_string(),
+        }],
     }
 }
 

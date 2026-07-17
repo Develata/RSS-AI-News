@@ -6,17 +6,19 @@
 
 use async_trait::async_trait;
 use sqlx::{PgPool, SqlitePool};
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::{ClaimRequest, ReleaseFailureOutcome, StorageError, StoragePool, classify_db_error};
 
 use super::feed_entry::{
     ClaimedFeedEntry, FeedEntry, FeedEntryRepo, FeedEntryRepository, LinkHashReindexCandidate,
-    NewFeedEntry, ResetFailedFilter, ResetFailedOutcome,
+    NewFeedEntry, RecentFeedEntry, RecentFeedEntryFilter, RecentFeedEntryRepository,
+    ResetFailedFilter, ResetFailedOutcome,
 };
 use super::feed_entry_sql::{
     CLAIM_PENDING_FETCH_PG_SQL, CLAIM_PENDING_FETCH_SQLITE_SQL, COUNT_FEED_ENTRIES_IN_WINDOW_SQL,
     EXISTS_BY_LINK_HASH_SQL, INSERT_FEED_ENTRY_SQL, LIST_FOR_LINK_HASH_REINDEX_SQL,
+    LIST_RECENT_FEED_ENTRIES_PG_SQL, LIST_RECENT_FEED_ENTRIES_SQLITE_SQL,
     RECLAIM_FEED_ENTRY_LEASES_SQL, RELEASE_DEDUP_SKIPPED_SQL, RELEASE_FALLBACK_PERSISTED_SQL,
     RELEASE_FEED_FAILURE_SQL, RELEASE_FEED_RETRYABLE_FAILURE_SQL, RELEASE_SUCCESS_SQL,
     RESET_FAILED_IN_WINDOW_SQL, SELECT_FEED_ENTRY_BY_ID_SQL, TERMINALIZE_EXHAUSTED_FEED_SQL,
@@ -24,6 +26,19 @@ use super::feed_entry_sql::{
 };
 
 // ── trait 实现 ─────────────────────────────────────────────────
+
+#[async_trait]
+impl RecentFeedEntryRepository for FeedEntryRepo {
+    async fn list_recent(
+        &self,
+        filter: &RecentFeedEntryFilter,
+    ) -> Result<Vec<RecentFeedEntry>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_list_recent(p, filter).await,
+            StoragePool::Postgres(p) => pg_list_recent(p, filter).await,
+        }
+    }
+}
 
 #[async_trait]
 impl FeedEntryRepository for FeedEntryRepo {
@@ -46,6 +61,13 @@ impl FeedEntryRepository for FeedEntryRepo {
             StoragePool::Sqlite(p) => sqlite_find_by_id(p, id).await,
             StoragePool::Postgres(p) => pg_find_by_id(p, id).await,
         }
+    }
+
+    async fn list_recent(
+        &self,
+        filter: &RecentFeedEntryFilter,
+    ) -> Result<Vec<RecentFeedEntry>, StorageError> {
+        RecentFeedEntryRepository::list_recent(self, filter).await
     }
 
     async fn claim_pending_fetch(
@@ -232,6 +254,25 @@ async fn sqlite_find_by_id(pool: &SqlitePool, id: i64) -> Result<Option<FeedEntr
     sqlx::query_as::<_, FeedEntry>(SELECT_FEED_ENTRY_BY_ID_SQL)
         .bind(id)
         .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)
+}
+
+async fn sqlite_list_recent(
+    pool: &SqlitePool,
+    filter: &RecentFeedEntryFilter,
+) -> Result<Vec<RecentFeedEntry>, StorageError> {
+    let discovered_after = filter.discovered_after.to_offset(UtcOffset::UTC);
+    let coarse_lower_bound = discovered_after.saturating_sub(Duration::days(1));
+    let fractional_second = f64::from(discovered_after.nanosecond()) / 1_000_000_000.0;
+
+    sqlx::query_as::<_, RecentFeedEntry>(LIST_RECENT_FEED_ENTRIES_SQLITE_SQL)
+        .bind(&filter.category_key)
+        .bind(coarse_lower_bound)
+        .bind(discovered_after.unix_timestamp())
+        .bind(fractional_second)
+        .bind(i64::from(filter.max_rows))
+        .fetch_all(pool)
         .await
         .map_err(StorageError::from)
 }
@@ -469,6 +510,19 @@ async fn pg_find_by_id(pool: &PgPool, id: i64) -> Result<Option<FeedEntry>, Stor
     sqlx::query_as::<_, FeedEntry>(SELECT_FEED_ENTRY_BY_ID_SQL)
         .bind(id)
         .fetch_optional(pool)
+        .await
+        .map_err(StorageError::from)
+}
+
+async fn pg_list_recent(
+    pool: &PgPool,
+    filter: &RecentFeedEntryFilter,
+) -> Result<Vec<RecentFeedEntry>, StorageError> {
+    sqlx::query_as::<_, RecentFeedEntry>(LIST_RECENT_FEED_ENTRIES_PG_SQL)
+        .bind(&filter.category_key)
+        .bind(filter.discovered_after)
+        .bind(i64::from(filter.max_rows))
+        .fetch_all(pool)
         .await
         .map_err(StorageError::from)
 }

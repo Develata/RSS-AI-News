@@ -8,6 +8,13 @@ use crate::exit_code::ExitCode;
 
 #[derive(Debug, Error)]
 pub enum CliError {
+    /// 给领域命令补充稳定 command identity，同时保留底层错误分类与退出码。
+    #[error("{source}")]
+    CommandContext {
+        command: &'static str,
+        #[source]
+        source: Box<CliError>,
+    },
     #[error("{0}")]
     Config(#[from] ConfigError),
     #[error("{0}")]
@@ -48,6 +55,17 @@ pub enum CliError {
         pending: Vec<i64>,
         applied_count: usize,
     },
+    #[error("recent-entries requires --category")]
+    RecentEntriesCategoryRequired,
+    #[error(
+        "recent-entries blocked by {count} pending migration version(s) — run `migrate run` first; pending: {pending:?}",
+        count = pending.len()
+    )]
+    RecentEntriesMigrationPending { pending: Vec<i64> },
+    #[error(
+        "recent-entries migration state drift: {detail} — inspect the database and run `migrate run` explicitly"
+    )]
+    RecentEntriesMigrationDrift { detail: String },
     /// cli-semantics §4.8 line 287: `--target` 在非 `--abort` 模式下必填。
     /// clap 通过 `required_unless_present` 保证；这是兜底，正常分支不会触发。
     #[error("reindex requires --target unless --abort is given")]
@@ -63,6 +81,7 @@ pub enum CliError {
 impl CliError {
     pub fn error_kind(&self) -> &'static str {
         match self {
+            Self::CommandContext { source, .. } => source.error_kind(),
             Self::Config(_) => "config",
             Self::Runtime(_) => "runtime",
             Self::Io(_) => "io",
@@ -74,6 +93,9 @@ impl CliError {
             Self::ReindexTargetRequired => "reindex_target_required",
             Self::MigrateBlockedByRunningReindex { .. } => "migrate_blocked_by_running_reindex",
             Self::MigrateCheckPending { .. } => "migrate_check_pending",
+            Self::RecentEntriesCategoryRequired => "recent_entries_category_required",
+            Self::RecentEntriesMigrationPending { .. } => "recent_entries_migration_pending",
+            Self::RecentEntriesMigrationDrift { .. } => "recent_entries_migration_drift",
             Self::ReplayArtifactNotFound { .. } => "replay_artifact_not_found",
             Self::PublishRecordNotFound { .. } => "publish_record_not_found",
             Self::PublishConflict { .. } => "publish_conflict",
@@ -82,13 +104,14 @@ impl CliError {
 
     pub fn exit_code(&self) -> ExitCode {
         match self {
+            Self::CommandContext { source, .. } => source.exit_code(),
             Self::Config(_) => ExitCode::ConfigError,
             // §4.8 line 327: reindex 参数错误 → exit 2 (UserError)。
             // `ReindexTargetRequired` 与 `ReindexAbortInvalidJobId` 都是 clap
             // 没接住的输入校验失败，归类参数错误。
-            Self::ReindexTargetRequired | Self::ReindexAbortInvalidJobId { .. } => {
-                ExitCode::UserError
-            }
+            Self::ReindexTargetRequired
+            | Self::ReindexAbortInvalidJobId { .. }
+            | Self::RecentEntriesCategoryRequired => ExitCode::UserError,
             Self::Runtime(_)
             | Self::Io(_)
             | Self::Storage(_)
@@ -97,6 +120,8 @@ impl CliError {
             | Self::IngestSourceFilterNotImplemented
             | Self::MigrateBlockedByRunningReindex { .. }
             | Self::MigrateCheckPending { .. }
+            | Self::RecentEntriesMigrationPending { .. }
+            | Self::RecentEntriesMigrationDrift { .. }
             | Self::ReplayArtifactNotFound { .. }
             | Self::PublishRecordNotFound { .. }
             | Self::PublishConflict { .. } => ExitCode::RuntimeError,
@@ -105,6 +130,7 @@ impl CliError {
 
     pub fn display_user(&self) -> String {
         match self {
+            Self::CommandContext { source, .. } => source.display_user(),
             Self::Config(error) => error.to_string(),
             Self::Runtime(error) => error.display_user(),
             Self::Io(error) => format!("I/O error: {error}"),
@@ -132,6 +158,16 @@ impl CliError {
                  pending: {pending:?}, applied: {applied_count}",
                 pending.len()
             ),
+            Self::RecentEntriesCategoryRequired => "recent-entries requires --category".to_string(),
+            Self::RecentEntriesMigrationPending { pending } => format!(
+                "recent-entries blocked by {} pending migration version(s) — \
+                 run `migrate run` first; pending: {pending:?}",
+                pending.len()
+            ),
+            Self::RecentEntriesMigrationDrift { detail } => format!(
+                "recent-entries migration state drift: {detail} — \
+                 inspect the database and run `migrate run` explicitly"
+            ),
             Self::ReplayArtifactNotFound { kind, key } => {
                 format!("replay artifact not found: {kind}/{key}")
             }
@@ -146,15 +182,29 @@ impl CliError {
 
     pub fn command_name(&self) -> &str {
         match self {
+            Self::CommandContext { command, .. } => command,
             Self::DoctorFailed => "doctor",
             Self::DryRunNotImplemented | Self::IngestSourceFilterNotImplemented => "ingest",
             Self::ReindexAbortInvalidJobId { .. } | Self::ReindexTargetRequired => "reindex",
             Self::MigrateBlockedByRunningReindex { .. } | Self::MigrateCheckPending { .. } => {
                 "migrate"
             }
+            Self::RecentEntriesCategoryRequired
+            | Self::RecentEntriesMigrationPending { .. }
+            | Self::RecentEntriesMigrationDrift { .. } => "recent-entries",
             Self::ReplayArtifactNotFound { .. } => "replay",
             Self::PublishRecordNotFound { .. } | Self::PublishConflict { .. } => "publish",
             _ => "unknown",
+        }
+    }
+
+    pub fn in_command(self, command: &'static str) -> Self {
+        match self {
+            context @ Self::CommandContext { .. } => context,
+            source => Self::CommandContext {
+                command,
+                source: Box::new(source),
+            },
         }
     }
 }

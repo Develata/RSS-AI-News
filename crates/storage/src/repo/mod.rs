@@ -31,9 +31,13 @@ pub use article_ai_result::{
 };
 pub use feed_entry::{
     ClaimedFeedEntry, FeedEntry, FeedEntryRepo, FeedEntryRepository, LinkHashReindexCandidate,
-    NewFeedEntry, ResetFailedFilter, ResetFailedOutcome,
+    NewFeedEntry, RecentFeedEntry, RecentFeedEntryFilter, RecentFeedEntryRepository,
+    ResetFailedFilter, ResetFailedOutcome,
 };
-pub use feed_source::{FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome};
+pub use feed_source::{
+    FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome, RecentFeedSourceHealth,
+    RecentFeedSourceHealthRepository,
+};
 pub use publish_item::{
     FreezeSnapshotItem, FreezeSnapshotOutcome, FreezeSnapshotStatus, PublishCandidateRow,
     PublishItemRepo, PublishItemRepository,

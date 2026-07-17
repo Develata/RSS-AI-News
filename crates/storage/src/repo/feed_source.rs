@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use rss_ai_news_domain::model::FeedSource;
-use sqlx::SqlitePool;
+use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
 use crate::{StorageError, StoragePool};
@@ -29,6 +29,25 @@ pub enum LeaseGuardedWriteOutcome {
     Applied,
     NoOp,
     LeaseLost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct RecentFeedSourceHealth {
+    pub source_key: String,
+    pub priority: i64,
+    pub last_fetched_at: Option<OffsetDateTime>,
+    pub last_success_at: Option<OffsetDateTime>,
+    pub consecutive_failures: i64,
+    pub last_error_kind: Option<String>,
+}
+
+#[async_trait]
+pub trait RecentFeedSourceHealthRepository: Send + Sync {
+    async fn list_recent_health(
+        &self,
+        category_key: &str,
+        max_rows: u32,
+    ) -> Result<Vec<RecentFeedSourceHealth>, StorageError>;
 }
 
 #[async_trait]

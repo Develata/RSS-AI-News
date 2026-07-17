@@ -12,6 +12,7 @@ pub use crate::commands::backfill::BackfillCommandSummary;
 pub use crate::commands::migrate::MigrateCommandSummary;
 pub use crate::commands::publish::{PublishCommandSummary, PublishStageOutcome};
 pub use crate::commands::rebuild_report::RebuildReportCommandSummary;
+pub use crate::commands::recent_entries::RecentEntriesCommandSummary;
 pub use crate::commands::reindex::ReindexCommandSummary;
 pub use crate::commands::replay::ReplayCommandSummary;
 pub use crate::commands::run::RunCommandSummary;
@@ -76,13 +77,7 @@ impl OutputWriter {
             OutputFormat::Json => {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
-                let envelope = json!({
-                    "command": command,
-                    "status": summary.status(),
-                    "summary": summary,
-                    "errors": summary.errors(),
-                });
-                serde_json::to_writer(&mut handle, &envelope)?;
+                serde_json::to_writer(&mut handle, &success_envelope(command, summary))?;
                 writeln!(handle)
             }
         }
@@ -98,20 +93,32 @@ impl OutputWriter {
             OutputFormat::Json => {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
-                let envelope = json!({
-                    "command": command,
-                    "status": "error",
-                    "summary": null,
-                    "errors": [{
-                        "kind": error.error_kind(),
-                        "message": error.display_user(),
-                    }],
-                });
-                serde_json::to_writer(&mut handle, &envelope)?;
+                serde_json::to_writer(&mut handle, &failure_envelope(command, error))?;
                 writeln!(handle)
             }
         }
     }
+}
+
+pub fn success_envelope<S: CommandSummary>(command: &str, summary: &S) -> serde_json::Value {
+    json!({
+        "command": command,
+        "status": summary.status(),
+        "summary": summary,
+        "errors": summary.errors(),
+    })
+}
+
+pub fn failure_envelope(command: &str, error: &CliError) -> serde_json::Value {
+    json!({
+        "command": command,
+        "status": "error",
+        "summary": null,
+        "errors": [{
+            "kind": error.error_kind(),
+            "message": error.display_user(),
+        }],
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
