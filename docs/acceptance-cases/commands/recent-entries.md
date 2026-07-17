@@ -121,7 +121,8 @@ v1 不输出 `summary_raw`、完整 `last_error`、feed secret、AI result、sco
 | RE-RO-006 | command | unknown migration version | command/error kind 正确并提示 migrate | `recent_entries_fails_closed_on_unknown_migration_version` |
 | RE-JSON-001 | output | success JSON | envelope/schema/字段稳定 | `recent_entries_json_envelope_matches_contract` |
 | RE-JSON-002 | output | source 有完整 error/summary | 不输出 `last_error` / `summary_raw` | `recent_entries_output_redacts_large_or_sensitive_fields` |
-| RE-PG-001 | storage | PG fixture 同样数据 | 行集合与排序同 SQLite | `pg_recent_entries_matches_sqlite_contract` |
+| RE-PG-001 | storage | PG native `TIMESTAMPTZ` offset/fraction/boundary fixture | 行集合、instant 过滤与排序同 SQLite | `pg_recent_entries_matches_sqlite_contract` |
+| RE-PG-002 | pool | `build_read_only` PG pool | `default_transaction_read_only=on`；`UPDATE` 返回 SQLSTATE `25006`；数据不变 | `pg_recent_entries_read_only_pool_enforces_session_and_rejects_writes` |
 | RE-CONC-001 | concurrency | ingest writer 同时存在 | reader 不 claim、不阻塞超出 timeout、不改 state | `recent_entries_can_read_while_sqlite_writer_is_active` |
 | RE-PERF-001 | query plan | 100k entries、3 active sources | 使用现有 source/time indexes；返回仍 bounded | `recent_entries_query_plan_uses_existing_indexes` |
 | RE-COMPAT-001 | workspace | 全量既有测试 | 无回归 | `cargo test --workspace` |
@@ -136,9 +137,9 @@ v1 不输出 `summary_raw`、完整 `last_error`、feed secret、AI result、sco
 
 ## 当前状态
 
-`partial`
+`passing`
 
-contract、实现与 SQLite 自动化 evidence 已落地；USTC107 上 `fmt/check/clippy/test --workspace/release build` 及 100k-row resource smoke 已通过。Docker-backed PostgreSQL parity/read-only write-rejection 仅完成编译，因当前环境无 Docker/PostgreSQL 而未实跑，故状态暂保持 `partial`。
+contract、实现与自动化 evidence 已闭环：USTC107 上 `fmt/check/clippy/test --workspace/release build` 及 100k-row resource smoke 已通过；GitHub Actions Docker-backed PostgreSQL gate 已验证 native `TIMESTAMPTZ` offset/fraction/boundary parity，并确认 command-grade read-only pool 的 `default_transaction_read_only=on`、写操作以 SQLSTATE `25006` 拒绝且数据不变。
 
 ## 相关文档
 
