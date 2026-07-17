@@ -4,7 +4,7 @@
 
 按 `categories/*.toml` 配置的 `[[sources]]` 抓取 RSS / Atom / JSON Feed / RSSHub feed，
 经条件请求（`If-Modified-Since` / `If-None-Match`）后解析为 `FeedEntry`，
-经一层 link 去重、二层 uid 去重后入库；失败 / 5xx 进入重试预算。
+经数据库原子 UID / canonical `link_hash` 去重后入库；失败 / 5xx 进入重试预算。
 
 面向场景：定时（外挂 cron）触发 `ingest` 子命令，或 `run` 子命令的第一段。
 
@@ -24,7 +24,8 @@
 
 - 单 source 5xx → state=`Failed`，发 `source_fetch_failed` 事件，受 `[retry].feed_entry_max_attempts` 限制
 - 解析失败 → artifact 保留（按 retention policy），entry / source 标记失败
-- ingest 整体永不静默吞错；任何业务表写入失败必须经 `RuntimeError` 上抛（详见 [../../plan/11-error-and-recovery.md](../../plan/11-error-and-recovery.md)）
+- ingest 任一 entry 持久化失败 → source 标记 `Failed`、发 `source_persist_failed`；不得继续写 `last_success_at`
+- ingest 整体永不静默吞错；任何业务表写入失败必须进入显式 source failure / `RuntimeError` 路径（详见 [../../plan/11-error-and-recovery.md](../../plan/11-error-and-recovery.md)）
 
 ## 测试覆盖
 
@@ -41,7 +42,13 @@
 | `ingest_bootstrap_writes_config_kind_id_into_feed_sources_config_version` | 同上 | bootstrap rule 绑定 |
 | `ingest_cmd_with_mock_feed_succeeds` | `crates/cli/tests/ingest_cmd_tests.rs` | CLI 入口 e2e |
 | `ingest_cmd_with_failing_feed_records_error` | 同上 | CLI 失败路径 |
-| `feed_entry_uid_unique_duplicate_returns_none` | `crates/storage/tests/dedup_tests.rs` | repo 层 uid 唯一 |
+| `feed_entry_persist_error_marks_source_failed` | `crates/runtime/tests/ingest_tests.rs` | entry DB error 显式 source failure，不伪报 success |
+| `concurrent_cross_source_link_insert_has_one_canonical_winner` | `crates/storage/tests/feed_entry_dedup_atomicity_tests.rs` | SQLite 跨源并发只产生一个 canonical winner |
+| `insert_deduplicated_propagates_non_unique_errors` | 同上 | 非 unique error 不误分类为 link duplicate |
+| `migration_0004_preserves_duplicates_and_marks_deterministic_shadow` | 同上 | 存量重复行保留 + deterministic shadow backfill |
+| `pg_concurrent_cross_source_link_insert_has_one_canonical_winner` | `crates/storage/tests/feed_entry_pg_tests.rs` | PostgreSQL unique constraint 并发裁决 |
+| `chained_link_hash_moves_promote_remaining_shadow` | `crates/storage/tests/w9c_storage_tests.rs` | collision chain 后 old/new groups 各恰一 canonical |
+| `feed_entry_uid_unique_duplicate_returns_none` | `crates/storage/tests/dedup_tests.rs` | repo 兼容层 uid 唯一 |
 | `feed_entry_link_hash_lookup_distinguishes_hit_and_miss` | 同上 | repo 层 link_hash |
 
 ## 当前状态

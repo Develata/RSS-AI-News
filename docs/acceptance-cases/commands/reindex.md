@@ -19,7 +19,8 @@
 - claim → state=`running`，lease 写入；checkpoint 按批 commit `last_processed_id`
 - lease 过期 reclaim → 保留 checkpoint + started_at，可 resume
 - 完成时事务内：rule_versions pending→active、旧 active→superseded、reindex_jobs→completed
-- `link_hash`：扫描所有 entry，重算 hash，未变 / 变化分别计数
+- `link_hash`：扫描所有 entry；每次 move 原子重选 old/new groups 的最小 id canonical，任一非空 final group 恰一 canonical
+- collision candidate 若非组内最小 id → 记 `conflict_skipped`；后续 canonical 移出时原 shadow 同事务 promote
 - `content_hash`：扫描所有 article 重算；命中 unique conflict 时计入 conflict 计数（不写入）
 - `categories`：扫描 sources 增量插入新行、归档已不在 config 的旧行；幂等（第二次执行归档=0）
 - categories reindex 把 active `config` kind rule_version_id 写入新插入 feed_sources 的 `config_rule_version_id`
@@ -71,7 +72,10 @@
 | `abort_running_job_transitions_to_aborted_and_preserves_data` | 同上 | abort 保留数据 |
 | `abort_already_terminal_job_is_idempotent_noop` | 同上 | abort 幂等 |
 | `abort_missing_job_returns_not_found_outcome` | 同上 | abort 缺失 |
-| `dry_run_link_hash_matches_real_run_numbers_and_writes_nothing` | 同上 | dry-run 一致 |
+| `reindex_link_hash_dry_run_matches_collision_chain_and_final_invariant` | `crates/runtime/tests/reindex_tests.rs` | collision-chain dry-run/real 计数等价 + final canonical invariant |
+| `chained_link_hash_moves_promote_remaining_shadow` | `crates/storage/tests/w9c_storage_tests.rs` | SQLite affected-group transaction promote |
+| `pg_chained_link_hash_moves_promote_remaining_shadow` | `crates/storage/tests/feed_entry_pg_tests.rs` | PostgreSQL table-lock transaction promote |
+| `dry_run_link_hash_matches_real_run_numbers_and_writes_nothing` | `crates/runtime/tests/reindex_tests.rs` | dry-run 一致 |
 | `dry_run_content_hash_distinguishes_unchanged_updated_conflict` | 同上 | dry-run 三态 |
 | `dry_run_categories_counts_would_archive_without_writing` | 同上 | dry-run 不写 |
 | `reindex_lease_reclaim_preserves_checkpoint_and_started_at_for_resume` | 同上 | reclaim 续跑 |

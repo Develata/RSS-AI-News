@@ -9,7 +9,7 @@ use rss_ai_news_domain::link_normalizer::normalize_link;
 use rss_ai_news_domain::model::FeedSource;
 use rss_ai_news_domain::state::{FeedKind, FeedSourceStatus};
 use rss_ai_news_feed::parse_feed;
-use rss_ai_news_storage::NewFeedEntry;
+use rss_ai_news_storage::{FeedEntryInsertOutcome, NewFeedEntry, StorageError};
 use serde_json::json;
 use time::OffsetDateTime;
 use tokio::sync::Semaphore;
@@ -485,7 +485,33 @@ impl IngestFlow {
             }
         };
 
-        process_entries(&ctx, &emitter, &mut outcome, task.source_id, now, entries).await;
+        if let Err(error) =
+            process_entries(&ctx, &emitter, &mut outcome, task.source_id, now, entries).await
+        {
+            let message = error.display_user();
+            emitter
+                .emit(
+                    "source_persist_failed",
+                    "error",
+                    Some("feed_source"),
+                    Some(task.source_id),
+                    &message,
+                    Some(json!({ "error_kind": error.error_kind() })),
+                )
+                .await;
+            if let Err(storage_error) = ctx
+                .feed_source_repo
+                .update_after_fetch_failure(task.source_id, now, &message, error.error_kind())
+                .await
+            {
+                tracing::warn!(
+                    source_id = task.source_id,
+                    "failed to update source persistence failure: {storage_error}"
+                );
+            }
+            outcome.error_kind = Some(error.error_kind().to_string());
+            return outcome;
+        }
 
         if let Err(error) = ctx
             .feed_source_repo
@@ -516,9 +542,10 @@ async fn process_entries(
     source_id: i64,
     now: OffsetDateTime,
     entries: Vec<FeedEntryMeta>,
-) {
+) -> Result<(), StorageError> {
     let mut uid_dup_hits = Vec::new();
     let mut link_dup_hits = Vec::new();
+    let mut insert_error = None;
 
     for meta in entries {
         outcome.entries_discovered += 1;
@@ -534,31 +561,6 @@ async fn process_entries(
             }
         };
 
-        match ctx
-            .feed_entry_repo
-            .exists_by_link_hash(&normalized.link_hash)
-            .await
-        {
-            Ok(true) => {
-                outcome.entries_link_dup += 1;
-                link_dup_hits.push(json!({
-                    "feed_entry_uid": meta.feed_entry_uid,
-                    "link_hash": normalized.link_hash,
-                    "normalized_link": normalized.normalized,
-                }));
-                continue;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                tracing::warn!(
-                    source_id,
-                    feed_entry_uid = %meta.feed_entry_uid,
-                    "link dedup lookup failed: {error}"
-                );
-                continue;
-            }
-        }
-
         let new_entry = NewFeedEntry {
             source_id,
             feed_entry_uid: meta.feed_entry_uid.clone(),
@@ -570,8 +572,8 @@ async fn process_entries(
             discovered_at: now,
         };
 
-        match ctx.feed_entry_repo.insert_if_new(&new_entry).await {
-            Ok(Some(entry_id)) => {
+        match ctx.feed_entry_repo.insert_deduplicated(&new_entry).await {
+            Ok(FeedEntryInsertOutcome::Inserted(entry_id)) => {
                 outcome.entries_inserted += 1;
                 tracing::info!(
                     target = "feed_entry.transition",
@@ -581,9 +583,17 @@ async fn process_entries(
                     reason = "ingest_discovered"
                 );
             }
-            Ok(None) => {
+            Ok(FeedEntryInsertOutcome::UidDuplicate) => {
                 outcome.entries_uid_dup += 1;
                 uid_dup_hits.push(json!({ "feed_entry_uid": new_entry.feed_entry_uid }));
+            }
+            Ok(FeedEntryInsertOutcome::LinkDuplicate) => {
+                outcome.entries_link_dup += 1;
+                link_dup_hits.push(json!({
+                    "feed_entry_uid": new_entry.feed_entry_uid,
+                    "link_hash": new_entry.link_hash,
+                    "normalized_link": new_entry.normalized_link,
+                }));
             }
             Err(error) => {
                 tracing::warn!(
@@ -591,6 +601,8 @@ async fn process_entries(
                     feed_entry_uid = %new_entry.feed_entry_uid,
                     "feed entry insert failed: {error}"
                 );
+                insert_error = Some(error);
+                break;
             }
         }
     }
@@ -609,6 +621,11 @@ async fn process_entries(
                 })),
             )
             .await;
+    }
+
+    match insert_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 

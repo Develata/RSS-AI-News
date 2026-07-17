@@ -8,7 +8,9 @@ use rss_ai_news_config::CategoryConfig;
 use rss_ai_news_domain::link_normalizer::normalize_link;
 use rss_ai_news_domain::model::FeedSource;
 use rss_ai_news_domain::state::FeedSourceStatus;
-use rss_ai_news_storage::{LeaseGuardedWriteOutcome, UpdateContentHashOutcome};
+use rss_ai_news_storage::{
+    LeaseGuardedWriteOutcome, UpdateContentHashOutcome, UpdateLinkHashOutcome,
+};
 use time::OffsetDateTime;
 
 use crate::error::RuntimeError;
@@ -47,15 +49,17 @@ impl ReindexFlow {
                 };
                 if normalized.link_hash == row.link_hash {
                     summary.unchanged += 1;
-                } else if self
-                    .ctx
-                    .feed_entry_repo
-                    .update_link_hash(row.id, &normalized.link_hash)
-                    .await?
-                {
-                    summary.updated += 1;
                 } else {
-                    summary.errors += 1;
+                    match self
+                        .ctx
+                        .feed_entry_repo
+                        .update_link_hash(row.id, &normalized.link_hash)
+                        .await?
+                    {
+                        UpdateLinkHashOutcome::Updated => summary.updated += 1,
+                        UpdateLinkHashOutcome::ConflictShadowed => summary.conflict_skipped += 1,
+                        UpdateLinkHashOutcome::Missing => summary.errors += 1,
+                    }
                 }
             }
             self.checkpoint(job_id, owner, after_id).await?;

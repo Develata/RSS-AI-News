@@ -15,14 +15,11 @@
 #   3. `docker compose up -d` 启动；首次需要先 migrate（见下）
 #
 # 注意：本 compose 仅启动 scheduler 长驻容器；首次 migrate / 手动 doctor
-# 仍建议用一次性 `docker compose run --rm` + runtime image：
-#   docker compose -f docker-compose.runtime-cli.yml --profile cli run \
-#     --rm rss-ai-news --config-dir /app/configs migrate run
-# 或者直接：
+# 使用同目录 `.env` 与 mounts 直接运行 runtime image：
 #   docker run --rm --env-file .env \
 #     -v "$(pwd)/configs:/app/configs:ro" \
 #     -v "$(pwd)/data:/app/data" \
-#     ghcr.io/develata/rss-ai-news:0.1.0 \
+#     ghcr.io/develata/rss-ai-news:0.7.0 \
 #     --config-dir /app/configs migrate run
 
 networks:
@@ -34,13 +31,13 @@ services:
     container_name: rss-ai-news-scheduler
     # scheduler image：runtime 之上叠了一层 supercronic + entrypoint。
     # 与 runtime 镜像版本对齐：发版时 release workflow 同步推两个 image。
-    image: ghcr.io/develata/rss-ai-news:0.1.0-scheduler
+    image: ghcr.io/develata/rss-ai-news:0.7.0-scheduler
     restart: unless-stopped
     env_file:
       - .env
     environment:
       # 容器内时区——cron 表达式按此时区解析
-      - TZ=${TIME_ZONE:-Asia/Shanghai}
+      - TZ=${TZ:-Asia/Shanghai}
       # PostgreSQL 连接（推荐）；走 SQLite 时不填、并把 configs/app.toml
       # 的 [database].driver 改回 "sqlite"
       - DATABASE_URL=${DATABASE_URL}

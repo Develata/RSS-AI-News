@@ -1,7 +1,7 @@
 //! W11-P3-E-2：[`FeedEntryRepo`] PG 分支冒烟。
 //!
 //! 覆盖（基于 P3-C 模板）：
-//!   - `insert_if_new` ON CONFLICT DO NOTHING + 二次返 None
+//!   - `insert_deduplicated` 对 UID/link conflict 的 typed outcome 与并发原子性
 //!   - `exists_by_link_hash` CASE WHEN EXISTS decode i32（PG 路径）
 //!   - `claim_pending_fetch` → `release_success` lease 推进
 //!   - `claim_pending_fetch` 确定性 SKIP LOCKED 验证（参考 P3-C-fix1 H2 模板）
@@ -13,8 +13,9 @@ mod common;
 
 use common::pg::{PgTestContext, make_pg_test_pool};
 use rss_ai_news_storage::{
-    ClaimRequest, FeedEntryRepo, FeedEntryRepository, NewFeedEntry, RecentFeedEntryFilter,
-    ResetFailedFilter, StoragePool, ensure_migration_state_exact,
+    ClaimRequest, FeedEntryInsertOutcome, FeedEntryRepo, FeedEntryRepository, NewFeedEntry,
+    RecentFeedEntryFilter, ResetFailedFilter, StoragePool, UpdateLinkHashOutcome,
+    ensure_migration_state_exact,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -86,6 +87,24 @@ fn new_feed_entry(source_id: i64, uid: &str) -> NewFeedEntry {
     }
 }
 
+fn new_feed_entry_with_link(
+    source_id: i64,
+    uid: &str,
+    normalized_link: &str,
+    link_hash: &str,
+) -> NewFeedEntry {
+    NewFeedEntry {
+        source_id,
+        feed_entry_uid: uid.to_string(),
+        normalized_link: normalized_link.to_string(),
+        link_hash: link_hash.to_string(),
+        title_raw: format!("Title {uid}"),
+        summary_raw: Some("Summary".to_string()),
+        published_at: None,
+        discovered_at: OffsetDateTime::now_utc(),
+    }
+}
+
 #[tokio::test]
 #[ignore = "需要 docker daemon"]
 async fn pg_insert_if_new_returns_none_on_duplicate() {
@@ -108,6 +127,127 @@ async fn pg_insert_if_new_returns_none_on_duplicate() {
     let found = repo.find_by_id(first).await.unwrap().unwrap();
     assert_eq!(found.feed_entry_uid, "uid-1");
     assert_eq!(found.state, "pending_fetch");
+
+    ctx.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_concurrent_cross_source_link_insert_has_one_canonical_winner() {
+    let ctx = make_pg_test_pool().await;
+    let source_a = seed_feed_source(&ctx, "link-race-a").await;
+    let source_b = seed_feed_source(&ctx, "link-race-b").await;
+    let repo = FeedEntryRepo::new_with_storage(ctx.storage_pool().clone());
+    let entry_a = new_feed_entry_with_link(
+        source_a,
+        "link-race-a",
+        "https://example.com/shared-race",
+        "shared-race-hash",
+    );
+    let entry_b = new_feed_entry_with_link(
+        source_b,
+        "link-race-b",
+        "https://example.com/shared-race",
+        "shared-race-hash",
+    );
+
+    let (left, right) = tokio::join!(
+        repo.insert_deduplicated(&entry_a),
+        repo.insert_deduplicated(&entry_b)
+    );
+    let outcomes = [left.unwrap(), right.unwrap()];
+
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, FeedEntryInsertOutcome::Inserted(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, FeedEntryInsertOutcome::LinkDuplicate))
+            .count(),
+        1
+    );
+
+    let canonical_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM feed_entries WHERE link_hash = $1 AND link_dedup_shadow = FALSE",
+    )
+    .bind("shared-race-hash")
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    assert_eq!(canonical_count, 1);
+
+    ctx.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_chained_link_hash_moves_promote_remaining_shadow() {
+    let ctx = make_pg_test_pool().await;
+    let source_id = seed_feed_source(&ctx, "link-chain").await;
+    let repo = FeedEntryRepo::new_with_storage(ctx.storage_pool().clone());
+
+    let moving_canonical = match repo
+        .insert_deduplicated(&new_feed_entry_with_link(
+            source_id,
+            "chain-canonical",
+            "https://example.com/chain-canonical",
+            "chain-shared",
+        ))
+        .await
+        .unwrap()
+    {
+        FeedEntryInsertOutcome::Inserted(id) => id,
+        other => panic!("expected insert, got {other:?}"),
+    };
+    let remaining = match repo
+        .insert_deduplicated(&new_feed_entry_with_link(
+            source_id,
+            "chain-remaining",
+            "https://example.com/chain-remaining",
+            "chain-old",
+        ))
+        .await
+        .unwrap()
+    {
+        FeedEntryInsertOutcome::Inserted(id) => id,
+        other => panic!("expected insert, got {other:?}"),
+    };
+
+    assert_eq!(
+        repo.update_link_hash(remaining, "chain-shared")
+            .await
+            .unwrap(),
+        UpdateLinkHashOutcome::ConflictShadowed
+    );
+    assert_eq!(
+        repo.update_link_hash(moving_canonical, "chain-moved")
+            .await
+            .unwrap(),
+        UpdateLinkHashOutcome::Updated
+    );
+
+    let remaining_shadow: bool =
+        sqlx::query_scalar("SELECT link_dedup_shadow FROM feed_entries WHERE id = $1")
+            .bind(remaining)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+    assert!(!remaining_shadow, "remaining row must be promoted");
+    let invalid_groups: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (\
+             SELECT link_hash FROM feed_entries GROUP BY link_hash \
+             HAVING SUM(CASE WHEN link_dedup_shadow = FALSE THEN 1 ELSE 0 END) <> 1\
+         ) AS invalid",
+    )
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    assert_eq!(invalid_groups, 0);
 
     ctx.cleanup().await;
 }

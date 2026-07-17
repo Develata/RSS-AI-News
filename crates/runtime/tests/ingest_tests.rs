@@ -87,6 +87,52 @@ async fn single_source_200_inserts_all_entries() {
 }
 
 #[tokio::test]
+async fn feed_entry_persist_error_marks_source_failed() {
+    let (_dir, pool) = make_test_pool().await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_id = insert_source(
+        &pool,
+        config_id,
+        "persist-fail",
+        "https://example.com/fail.xml",
+    )
+    .await;
+    sqlx::query(
+        "CREATE TRIGGER fail_feed_entry_insert BEFORE INSERT ON feed_entries \
+         BEGIN SELECT RAISE(ABORT, 'forced feed entry persist failure'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let flow = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&["persist-fail"]),
+        responses([(source_id, ok_payload(source_id, RSS_BODY))]),
+    );
+
+    let summary = flow.run(IngestOptions::default()).await;
+    assert_eq!(summary.sources_succeeded, 0);
+    assert_eq!(summary.sources_failed, 1);
+    assert_eq!(summary.per_source[0].status, IngestSourceStatus::Failed);
+    let source_failures: i64 =
+        sqlx::query_scalar("SELECT consecutive_failures FROM feed_sources WHERE id = ?")
+            .bind(source_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(source_failures, 1);
+    let event_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM run_events WHERE event_kind = 'source_persist_failed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(event_count, 1);
+}
+
+#[tokio::test]
 async fn single_source_304_marks_not_modified_no_entries() {
     let (_dir, pool) = make_test_pool().await;
     let config_id = insert_config_rule(&pool).await;

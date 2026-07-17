@@ -30,6 +30,10 @@ const PINNED_UP_MIGRATIONS: &[(&str, &str)] = &[
         "7f919c78bf78a97ae8396ae5c26f6c8a7197ab5b0fd9098da2cca18fbe367f6b",
     ),
     (
+        "migrations/sqlite/0004_feed_entry_link_dedup_atomicity.up.sql",
+        "bd3974a593eb6d72508f679d040952279a4d1b8f39cc059860f35d5aed054dc4",
+    ),
+    (
         "migrations/postgres/0001_init.up.sql",
         "f4376d3b88134b090de3634a824a1934f691aab37c3971b6b6247010869d40ef",
     ),
@@ -40,6 +44,10 @@ const PINNED_UP_MIGRATIONS: &[(&str, &str)] = &[
     (
         "migrations/postgres/0003_ai_effective_model_id.up.sql",
         "7f919c78bf78a97ae8396ae5c26f6c8a7197ab5b0fd9098da2cca18fbe367f6b",
+    ),
+    (
+        "migrations/postgres/0004_feed_entry_link_dedup_atomicity.up.sql",
+        "77aa6e7d980ca444b5523712f84d35041e78f56d3b898daf2878b4ae23a08c30",
     ),
 ];
 

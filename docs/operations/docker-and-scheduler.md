@@ -6,12 +6,13 @@ CI release workflow（push tag `v*` 触发）同时发布两套镜像：
 
 | 镜像 | tag 示例 | 入口 | 用途 |
 |---|---|---|---|
-| runtime | `ghcr.io/develata/rss-ai-news:0.4.0` | `rss-ai-news` 二进制直跑 | 一次性命令（migrate / ingest / doctor 等） |
-| scheduler | `ghcr.io/develata/rss-ai-news-scheduler:0.4.0` | `scheduler-entrypoint.sh` + supercronic | 常驻容器按 cron 触发 |
+| runtime | `ghcr.io/develata/rss-ai-news:0.7.0` | `rss-ai-news` 二进制直跑 | 一次性命令（migrate / ingest / doctor 等） |
+| scheduler | `ghcr.io/develata/rss-ai-news:0.7.0-scheduler` | `scheduler-entrypoint.sh` + supercronic | 常驻容器按 cron 触发 |
 
 镜像 tag 规则（`docker/metadata-action`）：
-- 稳定版 `vX.Y.Z` → `X.Y.Z` + `X.Y` + `X` + `latest`
+- 稳定版 `vX.Y.Z` → `X.Y.Z` + `X.Y` + `latest`；scheduler 为各 tag 加 `-scheduler`
 - 预发 `vX.Y.Z-rc.N` → 仅完整版本号，**不**打 `latest`
+- workflow 不维护 `X` major-only alias
 
 ## 一次性 compose（宿主 cron 接管）
 
@@ -83,7 +84,7 @@ entrypoint 在内存里拼一行 crontab 给 supercronic。适合简单场景。
 docker run --rm --env-file .env \
   -v "$(pwd)/configs:/app/configs:ro" \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/develata/rss-ai-news:0.4.0 \
+  ghcr.io/develata/rss-ai-news:0.7.0 \
   --config-dir /app/configs migrate run
 ```
 

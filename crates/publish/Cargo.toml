@@ -8,7 +8,7 @@ rss-ai-news-domain.workspace = true
 async-trait = "0.1"
 base64 = "0.22"
 octocrab.workspace = true
-# octocrab 0.44 `personal_token` accepts `impl Into<secrecy::SecretString>`;
+# octocrab 0.54 `personal_token` accepts `impl Into<secrecy::SecretString>`;
 # we materialise its argument at the boundary from our own SecretString so
 # the raw token is never held as a plain `String` outside of that call site.
 secrecy = "0.10"

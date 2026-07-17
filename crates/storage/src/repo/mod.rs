@@ -30,9 +30,9 @@ pub use article_ai_result::{
     ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome,
 };
 pub use feed_entry::{
-    ClaimedFeedEntry, FeedEntry, FeedEntryRepo, FeedEntryRepository, LinkHashReindexCandidate,
-    NewFeedEntry, RecentFeedEntry, RecentFeedEntryFilter, RecentFeedEntryRepository,
-    ResetFailedFilter, ResetFailedOutcome,
+    ClaimedFeedEntry, FeedEntry, FeedEntryInsertOutcome, FeedEntryRepo, FeedEntryRepository,
+    LinkHashReindexCandidate, NewFeedEntry, RecentFeedEntry, RecentFeedEntryFilter,
+    RecentFeedEntryRepository, ResetFailedFilter, ResetFailedOutcome, UpdateLinkHashOutcome,
 };
 pub use feed_source::{
     FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome, RecentFeedSourceHealth,

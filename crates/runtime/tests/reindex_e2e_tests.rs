@@ -86,9 +86,9 @@ async fn reindex_link_hash_batch_size_one_processes_all_rows_and_checkpoints_las
         "https://example.com/feed.xml",
     )
     .await;
-    common::seed_pending_fetch_entry(&pool, source, "b1", "wrong", None).await;
-    common::seed_pending_fetch_entry(&pool, source, "b2", "wrong", None).await;
-    let last_id = common::seed_pending_fetch_entry(&pool, source, "b3", "wrong", None).await;
+    common::seed_pending_fetch_entry(&pool, source, "b1", "wrong-b1", None).await;
+    common::seed_pending_fetch_entry(&pool, source, "b2", "wrong-b2", None).await;
+    let last_id = common::seed_pending_fetch_entry(&pool, source, "b3", "wrong-b3", None).await;
 
     let summary = reindex(&pool)
         .run(reindex_opts(ReindexTarget::LinkHash, 1))
@@ -347,9 +347,9 @@ async fn reindex_link_hash_partial_failure_continues_processing_remaining_rows()
         "https://example.com/feed.xml",
     )
     .await;
-    common::seed_pending_fetch_entry(&pool, source, "p1", "wrong", None).await;
-    let bad_id = common::seed_pending_fetch_entry(&pool, source, "p2", "wrong", None).await;
-    common::seed_pending_fetch_entry(&pool, source, "p3", "wrong", None).await;
+    common::seed_pending_fetch_entry(&pool, source, "p1", "wrong-p1", None).await;
+    let bad_id = common::seed_pending_fetch_entry(&pool, source, "p2", "wrong-p2", None).await;
+    common::seed_pending_fetch_entry(&pool, source, "p3", "wrong-p3", None).await;
     sqlx::query("UPDATE feed_entries SET normalized_link = 'not a url' WHERE id = ?")
         .bind(bad_id)
         .execute(&pool)
@@ -370,7 +370,7 @@ async fn reindex_link_hash_partial_failure_continues_processing_remaining_rows()
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(bad_link_hash, "wrong", "错误行的 link_hash 不应被改写");
+    assert_eq!(bad_link_hash, "wrong-p2", "错误行的 link_hash 不应被改写");
 
     // partial failure 不阻止 finish_reindex_tx 走 promote 路径——这是
     // cli-semantics §4.8 line 325 的契约：reindex run 在有 errors 的情况下

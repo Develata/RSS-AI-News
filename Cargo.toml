@@ -16,7 +16,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.7.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Develata/RSS-AI-News"
@@ -91,7 +91,7 @@ ulid = "1"
 dotenvy = "0.15"
 
 # Feed parsing
-feed-rs = "2"
+feed-rs = "2.4"
 
 # Testing
 tempfile = "3"
@@ -100,7 +100,9 @@ tempfile = "3"
 async-openai = "0.27"
 
 # GitHub API
-octocrab = "0.44"
+# Octocrab 0.54 即使 personal-token path 也要求一个 JWT backend；选择 AWS-LC，
+# 避免 jwt-rust-crypto 把无修复版 RUSTSEC-2023-0071 的 RSA 拉进 active graph。
+octocrab = { version = "0.54", default-features = false, features = ["follow-redirect", "retry", "rustls", "timeout", "tracing", "default-client", "rustls-ring", "jwt-aws-lc-rs"] }
 
 # HTML parsing
 scraper = "0.22"

@@ -259,8 +259,32 @@ ORDER BY id ASC
 LIMIT $2
 "#;
 
+pub(super) const LOCK_FEED_ENTRIES_FOR_REINDEX_PG_SQL: &str =
+    "LOCK TABLE feed_entries IN SHARE ROW EXCLUSIVE MODE";
+
+pub(super) const ACQUIRE_LINK_HASH_WRITE_LOCK_SQL: &str =
+    "UPDATE feed_entries SET id = id WHERE id = $1";
+
+pub(super) const SELECT_LINK_HASH_BY_ID_SQL: &str =
+    "SELECT link_hash FROM feed_entries WHERE id = $1";
+
+pub(super) const DEMOTE_LINK_HASH_GROUPS_SQL: &str = r#"
+UPDATE feed_entries
+SET link_dedup_shadow = TRUE, updated_at = $1
+WHERE link_hash IN ($2, $3) AND link_dedup_shadow = FALSE
+"#;
+
 pub(super) const UPDATE_LINK_HASH_SQL: &str = r#"
 UPDATE feed_entries
 SET link_hash = $1, updated_at = $2
 WHERE id = $3
 "#;
+
+pub(super) const PROMOTE_LINK_HASH_CANONICAL_SQL: &str = r#"
+UPDATE feed_entries
+SET link_dedup_shadow = FALSE, updated_at = $1
+WHERE id = (SELECT MIN(id) FROM feed_entries WHERE link_hash = $2)
+"#;
+
+pub(super) const SELECT_LINK_HASH_SHADOW_BY_ID_SQL: &str =
+    "SELECT link_dedup_shadow FROM feed_entries WHERE id = $1";

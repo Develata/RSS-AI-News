@@ -93,6 +93,15 @@ pub trait XxxRepository: Send + Sync {
 `repo/mod.rs` 对每个三件套对象声明 `pub mod <obj>; mod <obj>_impl; mod <obj>_sql;`，
 并保持原 `pub use <obj>::{...}` 逐字不变——对外 API 与是否拆分无关。
 
+### 4.2 feed entry 原子 link dedup
+
+`FeedEntryRepository::insert_deduplicated` 以单条 `INSERT .. ON CONFLICT DO NOTHING` 同时处理
+`(source_id, feed_entry_uid)` 与 canonical `link_hash` uniqueness，并返回
+`Inserted / UidDuplicate / LinkDuplicate` typed outcome。migration 0004 新增
+`link_dedup_shadow`：每组历史重复 `link_hash` 按最小 id 保留一条 canonical，其余行保留原数据并
+标 shadow；partial unique index 仅约束 canonical rows。由此跨源并发写入由数据库唯一约束裁决，
+不再存在 SELECT→INSERT TOCTOU 窗口。
+
 **何时分裂方言 SQL**：绝大多数 const 跨方言逐字等价，单条 `pub(super) const` 共享即可。
 仅当某条 SQL 在 PG 上需要 `FOR UPDATE SKIP LOCKED`（claim 子查询，§6.4 并发契约）而 SQLite
 不支持时，才分裂为 `<NAME>_SQLITE_SQL` / `<NAME>_PG_SQL` 两条 const，由对应 `sqlite_*` /
@@ -231,7 +240,9 @@ pub async fn check(pool: &StoragePool) -> Result<MigrationStatus, StorageError>;
 ```
 
 三类 target：
-- `link_hash` — 重算所有 feed_entries.link_hash（升级 normalizer 算法时）
+- `link_hash` — 重算所有 feed_entries.link_hash（升级 normalizer 算法时）；每次 move 在事务内
+  串行化写路径，对 old/new groups 按最小 id 原子重选 canonical；candidate 非最小 id 时计入
+  `conflict_skipped`，collision chain 不留下 shadow-only group
 - `content_hash` — 重算所有 articles.content_hash（升级正文规范化算法时）
 - `categories` — 重算 article→category 关联（升级分类规则时）
 

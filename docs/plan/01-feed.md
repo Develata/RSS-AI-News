@@ -126,8 +126,11 @@ runtime 聚合一条 `entry_dedup_skipped` event。
 
 ### 5.2 第二层：normalized_link
 
-INSERT 前 SELECT `feed_entries WHERE link_hash = ? AND source_id != ?`（跨源去重）。命中**不产生
-新行**，聚合到同一条 dedup event。
+INSERT 直接写入 `feed_entries`：数据库以 `(source_id, feed_entry_uid)` 唯一键判定同源 UID 重复，
+并以 `link_hash` canonical partial unique index 判定跨源 normalized-link 重复。两种 conflict 都由
+同一条 `INSERT .. ON CONFLICT DO NOTHING` 原子裁决，repository 返回 typed UID/link outcome；命中
+**不产生新行**，聚合到同一条 dedup event。迁移保留存量重复行并将非最小 id 标为
+`link_dedup_shadow`，避免删除历史 audit/state/article 关系。
 
 第三层 `content_hash` 在正文入库时判定，详见 [./02-extract.md](./02-extract.md)。
 

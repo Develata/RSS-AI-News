@@ -580,7 +580,7 @@ scheduler 镜像在 runtime 之上叠了一层 [supercronic](https://github.com/
 适用场景：在 1panel / Portainer 这类面板里希望容器一直 Running、不接外部 cron 的环境。一份 compose 参考见 `docker/docker-compose.scheduler.yml`。最少 `.env` 配置：
 
 ```dotenv
-TIME_ZONE=Asia/Shanghai
+TZ=Asia/Shanghai
 DATABASE_URL=postgres://user:pass@host:5432/dbname
 OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=https://api.openai.com/v1

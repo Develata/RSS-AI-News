@@ -86,4 +86,4 @@
 | AC-C-06 | [migrate.md](./commands/migrate.md) | passing |
 | AC-C-07 | [rebuild-report.md](./commands/rebuild-report.md) | passing |
 | AC-C-08 | [scheduler.md](./commands/scheduler.md) | partial |
-| AC-C-09 | [recent-entries.md](./commands/recent-entries.md) | partial |
+| AC-C-09 | [recent-entries.md](./commands/recent-entries.md) | passing |

@@ -12,7 +12,7 @@
 - runtime 镜像 vs scheduler 镜像的二元发布
 - supercronic 外挂调度形态（crontab 文件 / env 单行）
 - GHCR 镜像命名 + 版本规则
-- CI 四 job 矩阵
+- CI 五 job 矩阵
 - SQLite → PostgreSQL 切换路径
 
 **不覆盖**：
@@ -28,12 +28,12 @@ push tag `v*` 时同时构建发布两套镜像：
 | 镜像 | 入口 | 用途 |
 |---|---|---|
 | `ghcr.io/develata/rss-ai-news:<tag>` | `rss-ai-news` 二进制直跑 | 一次性命令（`migrate` / `ingest` / `doctor` 等） |
-| `ghcr.io/develata/rss-ai-news-scheduler:<tag>` | `scheduler-entrypoint.sh` + supercronic | 常驻容器按 cron 触发 |
+| `ghcr.io/develata/rss-ai-news:<tag>-scheduler` | `scheduler-entrypoint.sh` + supercronic | 常驻容器按 cron 触发 |
 
 底层共享同一 builder stage；scheduler 镜像只在 runtime 镜像基础上多装 supercronic。
 
 镜像标签规则（`docker/metadata-action`）：
-- `vX.Y.Z` → `X.Y.Z` + `X.Y` + `X` + `latest`（仅 stable）
+- `vX.Y.Z` → `X.Y.Z` + `X.Y` + `latest`（仅 stable；workflow 不维护 `X` major-only alias）
 - `vX.Y.Z-rc.N` / `vX.Y.Z-alpha.N` → 仅完整版本号，**不**打 `latest`
 
 ## 3. Dockerfile multi-stage
@@ -126,7 +126,7 @@ supercronic 把每个 cron job 的 stdout/stderr 透传到自身 stdout，
 docker run --rm --env-file .env \
   -v "$(pwd)/configs:/app/configs:ro" \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/develata/rss-ai-news:0.3.0 \
+  ghcr.io/develata/rss-ai-news:0.7.0 \
   --config-dir /app/configs migrate run
 ```
 
@@ -134,13 +134,14 @@ scheduler 容器不会在启动时自动 migrate（避免脏数据 / 误升级�
 
 ## 6. CI workflow
 
-[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) 四 job 并行（无 `needs:` 链）：
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) 五 job 并行（无 `needs:` 链）：
 
 | Job | 验证项 |
 |---|---|
-| `lint` | `cargo fmt --check` + `cargo clippy --workspace -- -D warnings` |
+| `lint` | `cargo fmt --check` + `cargo clippy --workspace -- -D warnings` + swallowed-error / dependency-security gates |
 | `test` | `cargo test --workspace`（SQLite path） |
-| `migrate` | postgres 服务 + `migrate run` 端到端 |
+| `migration-smoke` | SQLite migrate run + `doctor` / `validate-config` smoke |
+| `test-pg` | PostgreSQL service + PG-only integration / migration checks |
 | `docker-build` | `docker buildx build` 构建（不 push）验证 Dockerfile 不烂 |
 
 并发取消（`concurrency.cancel-in-progress: true`）：同分支后续 push 自动取消前一次 run。

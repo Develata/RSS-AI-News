@@ -36,6 +36,24 @@ pub struct NewFeedEntry {
     pub discovered_at: OffsetDateTime,
 }
 
+/// INSERT 的原子去重结果。`link_hash` 与 `(source_id, feed_entry_uid)` 都由
+/// 数据库唯一约束裁决；runtime 不再用 SELECT→INSERT 预检查决定语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedEntryInsertOutcome {
+    Inserted(i64),
+    UidDuplicate,
+    LinkDuplicate,
+}
+
+/// link_hash reindex 的写入结果。若新 hash 已被另一 canonical row 占有，
+/// 当前 row 会保留但转为 shadow，避免删除历史审计/关联数据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateLinkHashOutcome {
+    Updated,
+    ConflictShadowed,
+    Missing,
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct FeedEntry {
     pub id: i64,
@@ -124,7 +142,20 @@ pub trait RecentFeedEntryRepository: Send + Sync {
 
 #[async_trait]
 pub trait FeedEntryRepository: Send + Sync {
-    async fn insert_if_new(&self, entry: &NewFeedEntry) -> Result<Option<i64>, StorageError>;
+    async fn insert_deduplicated(
+        &self,
+        entry: &NewFeedEntry,
+    ) -> Result<FeedEntryInsertOutcome, StorageError>;
+
+    /// 兼容旧调用面：任一 dedup conflict 都映射为 `None`。需要区分 UID/link
+    /// 的 runtime 应调用 [`Self::insert_deduplicated`]。
+    async fn insert_if_new(&self, entry: &NewFeedEntry) -> Result<Option<i64>, StorageError> {
+        Ok(match self.insert_deduplicated(entry).await? {
+            FeedEntryInsertOutcome::Inserted(id) => Some(id),
+            FeedEntryInsertOutcome::UidDuplicate | FeedEntryInsertOutcome::LinkDuplicate => None,
+        })
+    }
+
     async fn exists_by_link_hash(&self, link_hash: &str) -> Result<bool, StorageError>;
     async fn find_by_id(&self, id: i64) -> Result<Option<FeedEntry>, StorageError>;
     async fn list_recent(
@@ -193,7 +224,11 @@ pub trait FeedEntryRepository: Send + Sync {
         after_id: i64,
         batch_size: u32,
     ) -> Result<Vec<LinkHashReindexCandidate>, StorageError>;
-    async fn update_link_hash(&self, id: i64, new_link_hash: &str) -> Result<bool, StorageError>;
+    async fn update_link_hash(
+        &self,
+        id: i64,
+        new_link_hash: &str,
+    ) -> Result<UpdateLinkHashOutcome, StorageError>;
 }
 
 #[derive(Debug, Clone)]

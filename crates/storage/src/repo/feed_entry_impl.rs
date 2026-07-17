@@ -11,17 +11,19 @@ use time::{Duration, OffsetDateTime, UtcOffset};
 use crate::{ClaimRequest, ReleaseFailureOutcome, StorageError, StoragePool, classify_db_error};
 
 use super::feed_entry::{
-    ClaimedFeedEntry, FeedEntry, FeedEntryRepo, FeedEntryRepository, LinkHashReindexCandidate,
-    NewFeedEntry, RecentFeedEntry, RecentFeedEntryFilter, RecentFeedEntryRepository,
-    ResetFailedFilter, ResetFailedOutcome,
+    ClaimedFeedEntry, FeedEntry, FeedEntryInsertOutcome, FeedEntryRepo, FeedEntryRepository,
+    LinkHashReindexCandidate, NewFeedEntry, RecentFeedEntry, RecentFeedEntryFilter,
+    RecentFeedEntryRepository, ResetFailedFilter, ResetFailedOutcome, UpdateLinkHashOutcome,
 };
 use super::feed_entry_sql::{
-    CLAIM_PENDING_FETCH_PG_SQL, CLAIM_PENDING_FETCH_SQLITE_SQL, COUNT_FEED_ENTRIES_IN_WINDOW_SQL,
-    EXISTS_BY_LINK_HASH_SQL, INSERT_FEED_ENTRY_SQL, LIST_FOR_LINK_HASH_REINDEX_SQL,
-    LIST_RECENT_FEED_ENTRIES_PG_SQL, LIST_RECENT_FEED_ENTRIES_SQLITE_SQL,
-    RECLAIM_FEED_ENTRY_LEASES_SQL, RELEASE_DEDUP_SKIPPED_SQL, RELEASE_FALLBACK_PERSISTED_SQL,
-    RELEASE_FEED_FAILURE_SQL, RELEASE_FEED_RETRYABLE_FAILURE_SQL, RELEASE_SUCCESS_SQL,
-    RESET_FAILED_IN_WINDOW_SQL, SELECT_FEED_ENTRY_BY_ID_SQL, TERMINALIZE_EXHAUSTED_FEED_SQL,
+    ACQUIRE_LINK_HASH_WRITE_LOCK_SQL, CLAIM_PENDING_FETCH_PG_SQL, CLAIM_PENDING_FETCH_SQLITE_SQL,
+    COUNT_FEED_ENTRIES_IN_WINDOW_SQL, DEMOTE_LINK_HASH_GROUPS_SQL, EXISTS_BY_LINK_HASH_SQL,
+    INSERT_FEED_ENTRY_SQL, LIST_FOR_LINK_HASH_REINDEX_SQL, LIST_RECENT_FEED_ENTRIES_PG_SQL,
+    LIST_RECENT_FEED_ENTRIES_SQLITE_SQL, LOCK_FEED_ENTRIES_FOR_REINDEX_PG_SQL,
+    PROMOTE_LINK_HASH_CANONICAL_SQL, RECLAIM_FEED_ENTRY_LEASES_SQL, RELEASE_DEDUP_SKIPPED_SQL,
+    RELEASE_FALLBACK_PERSISTED_SQL, RELEASE_FEED_FAILURE_SQL, RELEASE_FEED_RETRYABLE_FAILURE_SQL,
+    RELEASE_SUCCESS_SQL, RESET_FAILED_IN_WINDOW_SQL, SELECT_FEED_ENTRY_BY_ID_SQL,
+    SELECT_LINK_HASH_BY_ID_SQL, SELECT_LINK_HASH_SHADOW_BY_ID_SQL, TERMINALIZE_EXHAUSTED_FEED_SQL,
     UPDATE_LINK_HASH_SQL,
 };
 
@@ -42,10 +44,13 @@ impl RecentFeedEntryRepository for FeedEntryRepo {
 
 #[async_trait]
 impl FeedEntryRepository for FeedEntryRepo {
-    async fn insert_if_new(&self, entry: &NewFeedEntry) -> Result<Option<i64>, StorageError> {
+    async fn insert_deduplicated(
+        &self,
+        entry: &NewFeedEntry,
+    ) -> Result<FeedEntryInsertOutcome, StorageError> {
         match &self.pool {
-            StoragePool::Sqlite(p) => sqlite_insert_if_new(p, entry).await,
-            StoragePool::Postgres(p) => pg_insert_if_new(p, entry).await,
+            StoragePool::Sqlite(p) => sqlite_insert_deduplicated(p, entry).await,
+            StoragePool::Postgres(p) => pg_insert_deduplicated(p, entry).await,
         }
     }
 
@@ -210,7 +215,11 @@ impl FeedEntryRepository for FeedEntryRepo {
         }
     }
 
-    async fn update_link_hash(&self, id: i64, new_link_hash: &str) -> Result<bool, StorageError> {
+    async fn update_link_hash(
+        &self,
+        id: i64,
+        new_link_hash: &str,
+    ) -> Result<UpdateLinkHashOutcome, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => sqlite_update_link_hash(p, id, new_link_hash).await,
             StoragePool::Postgres(p) => pg_update_link_hash(p, id, new_link_hash).await,
@@ -220,11 +229,11 @@ impl FeedEntryRepository for FeedEntryRepo {
 
 // ── SQLite helper ──────────────────────────────────────────────
 
-async fn sqlite_insert_if_new(
+async fn sqlite_insert_deduplicated(
     pool: &SqlitePool,
     entry: &NewFeedEntry,
-) -> Result<Option<i64>, StorageError> {
-    sqlx::query_scalar::<_, i64>(INSERT_FEED_ENTRY_SQL)
+) -> Result<FeedEntryInsertOutcome, StorageError> {
+    match sqlx::query_scalar::<_, i64>(INSERT_FEED_ENTRY_SQL)
         .bind(entry.source_id)
         .bind(&entry.feed_entry_uid)
         .bind(&entry.normalized_link)
@@ -235,7 +244,11 @@ async fn sqlite_insert_if_new(
         .bind(entry.discovered_at)
         .fetch_optional(pool)
         .await
-        .map_err(|error| classify_insert_error(error, entry))
+    {
+        Ok(Some(id)) => Ok(FeedEntryInsertOutcome::Inserted(id)),
+        Ok(None) => Ok(FeedEntryInsertOutcome::UidDuplicate),
+        Err(error) => classify_link_insert_error(error, entry),
+    }
 }
 
 async fn sqlite_exists_by_link_hash(
@@ -466,24 +479,91 @@ async fn sqlite_update_link_hash(
     pool: &SqlitePool,
     id: i64,
     new_link_hash: &str,
-) -> Result<bool, StorageError> {
-    let result = sqlx::query(UPDATE_LINK_HASH_SQL)
-        .bind(new_link_hash)
-        .bind(OffsetDateTime::now_utc())
+) -> Result<UpdateLinkHashOutcome, StorageError> {
+    let now = OffsetDateTime::now_utc();
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+
+    // SQLite 的 transaction 默认 DEFERRED；第一条 no-op UPDATE 先取得写锁，
+    // 再读取 old hash，避免 SELECT→write upgrade 与并发 writer 交错。
+    let locked = sqlx::query(ACQUIRE_LINK_HASH_WRITE_LOCK_SQL)
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(StorageError::from)?;
-    Ok(result.rows_affected() == 1)
+    if locked.rows_affected() == 0 {
+        return Ok(UpdateLinkHashOutcome::Missing);
+    }
+    let old_link_hash = sqlx::query_scalar::<_, String>(SELECT_LINK_HASH_BY_ID_SQL)
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+
+    let outcome =
+        reconcile_link_hash_move_sqlite(&mut tx, id, &old_link_hash, new_link_hash, now).await?;
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(outcome)
+}
+
+async fn reconcile_link_hash_move_sqlite(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: i64,
+    old_link_hash: &str,
+    new_link_hash: &str,
+    now: OffsetDateTime,
+) -> Result<UpdateLinkHashOutcome, StorageError> {
+    sqlx::query(DEMOTE_LINK_HASH_GROUPS_SQL)
+        .bind(now)
+        .bind(old_link_hash)
+        .bind(new_link_hash)
+        .execute(&mut **tx)
+        .await
+        .map_err(StorageError::from)?;
+    sqlx::query(UPDATE_LINK_HASH_SQL)
+        .bind(new_link_hash)
+        .bind(now)
+        .bind(id)
+        .execute(&mut **tx)
+        .await
+        .map_err(StorageError::from)?;
+    promote_link_hash_canonical_sqlite(tx, old_link_hash, now).await?;
+    if new_link_hash != old_link_hash {
+        promote_link_hash_canonical_sqlite(tx, new_link_hash, now).await?;
+    }
+
+    let shadow = sqlx::query_scalar::<_, bool>(SELECT_LINK_HASH_SHADOW_BY_ID_SQL)
+        .bind(id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(if shadow {
+        UpdateLinkHashOutcome::ConflictShadowed
+    } else {
+        UpdateLinkHashOutcome::Updated
+    })
+}
+
+async fn promote_link_hash_canonical_sqlite(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    link_hash: &str,
+    now: OffsetDateTime,
+) -> Result<(), StorageError> {
+    sqlx::query(PROMOTE_LINK_HASH_CANONICAL_SQL)
+        .bind(now)
+        .bind(link_hash)
+        .execute(&mut **tx)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(())
 }
 
 // ── PostgreSQL helper（W11-P3-E-2） ─────────────────────────────
 
-async fn pg_insert_if_new(
+async fn pg_insert_deduplicated(
     pool: &PgPool,
     entry: &NewFeedEntry,
-) -> Result<Option<i64>, StorageError> {
-    sqlx::query_scalar::<_, i64>(INSERT_FEED_ENTRY_SQL)
+) -> Result<FeedEntryInsertOutcome, StorageError> {
+    match sqlx::query_scalar::<_, i64>(INSERT_FEED_ENTRY_SQL)
         .bind(entry.source_id)
         .bind(&entry.feed_entry_uid)
         .bind(&entry.normalized_link)
@@ -494,7 +574,11 @@ async fn pg_insert_if_new(
         .bind(entry.discovered_at)
         .fetch_optional(pool)
         .await
-        .map_err(|error| classify_insert_error(error, entry))
+    {
+        Ok(Some(id)) => Ok(FeedEntryInsertOutcome::Inserted(id)),
+        Ok(None) => Ok(FeedEntryInsertOutcome::UidDuplicate),
+        Err(error) => classify_link_insert_error(error, entry),
+    }
 }
 
 async fn pg_exists_by_link_hash(pool: &PgPool, link_hash: &str) -> Result<bool, StorageError> {
@@ -716,18 +800,80 @@ async fn pg_update_link_hash(
     pool: &PgPool,
     id: i64,
     new_link_hash: &str,
-) -> Result<bool, StorageError> {
-    let result = sqlx::query(UPDATE_LINK_HASH_SQL)
-        .bind(new_link_hash)
-        .bind(OffsetDateTime::now_utc())
-        .bind(id)
-        .execute(pool)
+) -> Result<UpdateLinkHashOutcome, StorageError> {
+    let now = OffsetDateTime::now_utc();
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    sqlx::query(LOCK_FEED_ENTRIES_FOR_REINDEX_PG_SQL)
+        .execute(&mut *tx)
         .await
         .map_err(StorageError::from)?;
-    Ok(result.rows_affected() == 1)
+
+    let Some(old_link_hash) = sqlx::query_scalar::<_, String>(SELECT_LINK_HASH_BY_ID_SQL)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StorageError::from)?
+    else {
+        return Ok(UpdateLinkHashOutcome::Missing);
+    };
+
+    sqlx::query(DEMOTE_LINK_HASH_GROUPS_SQL)
+        .bind(now)
+        .bind(&old_link_hash)
+        .bind(new_link_hash)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    sqlx::query(UPDATE_LINK_HASH_SQL)
+        .bind(new_link_hash)
+        .bind(now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    promote_link_hash_canonical_pg(&mut tx, &old_link_hash, now).await?;
+    if new_link_hash != old_link_hash {
+        promote_link_hash_canonical_pg(&mut tx, new_link_hash, now).await?;
+    }
+
+    let shadow = sqlx::query_scalar::<_, bool>(SELECT_LINK_HASH_SHADOW_BY_ID_SQL)
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(if shadow {
+        UpdateLinkHashOutcome::ConflictShadowed
+    } else {
+        UpdateLinkHashOutcome::Updated
+    })
+}
+
+async fn promote_link_hash_canonical_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    link_hash: &str,
+    now: OffsetDateTime,
+) -> Result<(), StorageError> {
+    sqlx::query(PROMOTE_LINK_HASH_CANONICAL_SQL)
+        .bind(now)
+        .bind(link_hash)
+        .execute(&mut **tx)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(())
 }
 
 // ── helpers ────────────────────────────────────────────────────
+
+fn classify_link_insert_error(
+    error: sqlx::Error,
+    entry: &NewFeedEntry,
+) -> Result<FeedEntryInsertOutcome, StorageError> {
+    match classify_insert_error(error, entry) {
+        StorageError::Conflict { .. } => Ok(FeedEntryInsertOutcome::LinkDuplicate),
+        error => Err(error),
+    }
+}
 
 fn classify_insert_error(error: sqlx::Error, entry: &NewFeedEntry) -> StorageError {
     classify_db_error(

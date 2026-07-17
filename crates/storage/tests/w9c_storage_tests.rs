@@ -7,7 +7,7 @@ use rss_ai_news_domain::{
 use rss_ai_news_storage::{
     ArticleRepo, ArticleRepository, ClaimRequest, FeedEntryRepo, FeedEntryRepository,
     FeedSourceRepo, FeedSourceRepository, NewRawArtifact, RawArtifactRepo, RawArtifactRepository,
-    ResetFailedFilter, UpdateContentHashOutcome,
+    ResetFailedFilter, UpdateContentHashOutcome, UpdateLinkHashOutcome,
 };
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
@@ -210,7 +210,10 @@ async fn update_link_hash_success() {
     let id = common::insert_feed_entry(&pool, source_id, "a", "old").await;
     let repo = FeedEntryRepo::new(pool.clone());
 
-    assert!(repo.update_link_hash(id, "new").await.unwrap());
+    assert_eq!(
+        repo.update_link_hash(id, "new").await.unwrap(),
+        UpdateLinkHashOutcome::Updated
+    );
     assert_eq!(entry_link_hash(&pool, id).await, "new");
 }
 
@@ -219,7 +222,64 @@ async fn update_link_hash_missing_false() {
     let (_dir, pool) = common::make_test_pool().await;
     let repo = FeedEntryRepo::new(pool);
 
-    assert!(!repo.update_link_hash(99, "new").await.unwrap());
+    assert_eq!(
+        repo.update_link_hash(99, "new").await.unwrap(),
+        UpdateLinkHashOutcome::Missing
+    );
+}
+
+#[tokio::test]
+async fn update_link_hash_conflict_marks_shadow() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let source_id = common::seed_source(&pool).await;
+    let canonical = common::insert_feed_entry(&pool, source_id, "canonical", "shared").await;
+    let candidate = common::insert_feed_entry(&pool, source_id, "candidate", "old").await;
+    let repo = FeedEntryRepo::new(pool.clone());
+
+    assert_eq!(
+        repo.update_link_hash(candidate, "shared").await.unwrap(),
+        UpdateLinkHashOutcome::ConflictShadowed
+    );
+    assert_eq!(entry_link_hash(&pool, candidate).await, "shared");
+    assert!(!entry_link_shadow(&pool, canonical).await);
+    assert!(entry_link_shadow(&pool, candidate).await);
+}
+
+#[tokio::test]
+async fn chained_link_hash_moves_promote_remaining_shadow() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let source_id = common::seed_source(&pool).await;
+    let moving_canonical = common::insert_feed_entry(&pool, source_id, "canonical", "shared").await;
+    let remaining = common::insert_feed_entry(&pool, source_id, "remaining", "old").await;
+    let repo = FeedEntryRepo::new(pool.clone());
+
+    assert_eq!(
+        repo.update_link_hash(remaining, "shared").await.unwrap(),
+        UpdateLinkHashOutcome::ConflictShadowed
+    );
+    assert!(entry_link_shadow(&pool, remaining).await);
+
+    assert_eq!(
+        repo.update_link_hash(moving_canonical, "moved")
+            .await
+            .unwrap(),
+        UpdateLinkHashOutcome::Updated
+    );
+    assert!(
+        !entry_link_shadow(&pool, remaining).await,
+        "old group 只剩 shadow 时必须在同一 transaction 内 promote"
+    );
+
+    let invalid_groups: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (\
+             SELECT link_hash FROM feed_entries GROUP BY link_hash \
+             HAVING SUM(CASE WHEN link_dedup_shadow = 0 THEN 1 ELSE 0 END) <> 1\
+         )",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(invalid_groups, 0, "每个非空 hash group 恰一 canonical");
 }
 
 #[tokio::test]
@@ -384,6 +444,15 @@ async fn entry_link_hash(pool: &SqlitePool, id: i64) -> String {
         .fetch_one(pool)
         .await
         .unwrap()
+}
+
+async fn entry_link_shadow(pool: &SqlitePool, id: i64) -> bool {
+    let value: i64 = sqlx::query_scalar("SELECT link_dedup_shadow FROM feed_entries WHERE id = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    value != 0
 }
 
 async fn insert_article_with_hash(pool: &SqlitePool, hash: &str) -> i64 {

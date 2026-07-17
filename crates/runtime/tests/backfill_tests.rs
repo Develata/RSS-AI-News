@@ -216,11 +216,12 @@ async fn seed_failed_entry(pool: &SqlitePool, state: &str, created_at: OffsetDat
         "https://example.com/feed.xml",
     )
     .await;
+    let link_hash = format!("link-{source}");
     let id = common::seed_pending_fetch_entry(
         pool,
         source,
         &format!("uid-{state}-{created_at}"),
-        "link",
+        &link_hash,
         None,
     )
     .await;

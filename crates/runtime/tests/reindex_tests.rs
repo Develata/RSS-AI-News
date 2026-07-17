@@ -83,6 +83,72 @@ async fn reindex_link_hash_invalid_url_counted_errors() {
 }
 
 #[tokio::test]
+async fn reindex_link_hash_dry_run_matches_collision_chain_and_final_invariant() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let source = common::insert_source(
+        &pool,
+        common::insert_config_rule(&pool).await,
+        "link-chain",
+        "https://example.com/feed.xml",
+    )
+    .await;
+    let first_url = "https://example.com/link-chain-first";
+    let second_url = "https://example.com/link-chain-second";
+    let first_final = rss_ai_news_domain::link_normalizer::normalize_link(first_url)
+        .unwrap()
+        .link_hash;
+    let second_final = rss_ai_news_domain::link_normalizer::normalize_link(second_url)
+        .unwrap()
+        .link_hash;
+
+    let first =
+        common::seed_pending_fetch_entry(&pool, source, "link-chain-first", "old-first", None)
+            .await;
+    let second =
+        common::seed_pending_fetch_entry(&pool, source, "link-chain-second", &first_final, None)
+            .await;
+    sqlx::query("UPDATE feed_entries SET normalized_link = ? WHERE id = ?")
+        .bind(first_url)
+        .bind(first)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE feed_entries SET normalized_link = ? WHERE id = ?")
+        .bind(second_url)
+        .bind(second)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let opts = reindex_opts(ReindexTarget::LinkHash, 1);
+    let dry = reindex(&pool).dry_run(opts.clone()).await.unwrap();
+    let real = reindex(&pool).run(opts).await.unwrap();
+    assert_eq!(dry.scanned, real.scanned);
+    assert_eq!(dry.updated, real.updated);
+    assert_eq!(dry.unchanged, real.unchanged);
+    assert_eq!(dry.conflict_skipped, real.conflict_skipped);
+    assert_eq!(dry.errors, real.errors);
+    assert_eq!(real.updated, 2);
+
+    let rows: Vec<(String, bool)> =
+        sqlx::query_as("SELECT link_hash, link_dedup_shadow FROM feed_entries ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, vec![(first_final, false), (second_final, false)]);
+    let invalid_groups: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (\
+             SELECT link_hash FROM feed_entries GROUP BY link_hash \
+             HAVING SUM(CASE WHEN link_dedup_shadow = 0 THEN 1 ELSE 0 END) <> 1\
+         )",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(invalid_groups, 0);
+}
+
+#[tokio::test]
 async fn reindex_content_hash_updates_when_body_text_diff() {
     let (_dir, pool) = common::make_test_pool().await;
     common::seed_persisted_article(&pool, "old-hash", "T", "new body").await;

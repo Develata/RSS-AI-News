@@ -1,7 +1,7 @@
 //! `reindex --dry-run`：仅扫描 + 内存等价计算，不调任何写 API。
 //! 判别逻辑与 [`super::execute`] 的真实 run 完全一致，保证数字可信。
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use rss_ai_news_config::CategoryConfig;
 use rss_ai_news_domain::link_normalizer::normalize_link;
@@ -97,28 +97,57 @@ impl ReindexFlow {
         summary: &mut ReindexSummary,
     ) -> Result<(), RuntimeError> {
         let mut after_id = 0i64;
+        let mut rows = Vec::new();
         loop {
-            let rows = self
+            let batch = self
                 .ctx
                 .feed_entry_repo
                 .list_for_link_hash_reindex(after_id, batch_size.max(1))
                 .await?;
-            if rows.is_empty() {
+            if batch.is_empty() {
                 break;
             }
-            for row in rows {
-                after_id = row.id;
-                summary.scanned += 1;
-                match normalize_link(&row.normalized_link) {
-                    Ok(normalized) => {
-                        if normalized.link_hash == row.link_hash {
-                            summary.unchanged += 1;
-                        } else {
-                            summary.updated += 1;
-                        }
-                    }
-                    Err(_) => summary.errors += 1,
+            after_id = batch.last().expect("non-empty batch").id;
+            rows.extend(batch);
+        }
+
+        // Real run 的每次 move 都在 storage transaction 内对 old/new 两组按
+        // 最小 id 重选 canonical。Dry-run 先建立全表 group membership，再按
+        // 相同 id 顺序模拟 move，故 collision chain 与真实 outcome 等价。
+        let mut groups: HashMap<String, BTreeSet<i64>> = HashMap::new();
+        for row in &rows {
+            groups
+                .entry(row.link_hash.clone())
+                .or_default()
+                .insert(row.id);
+        }
+
+        for row in rows {
+            summary.scanned += 1;
+            let normalized = match normalize_link(&row.normalized_link) {
+                Ok(normalized) => normalized,
+                Err(_) => {
+                    summary.errors += 1;
+                    continue;
                 }
+            };
+            if normalized.link_hash == row.link_hash {
+                summary.unchanged += 1;
+                continue;
+            }
+
+            if let Some(old_group) = groups.get_mut(&row.link_hash) {
+                old_group.remove(&row.id);
+                if old_group.is_empty() {
+                    groups.remove(&row.link_hash);
+                }
+            }
+            let new_group = groups.entry(normalized.link_hash).or_default();
+            new_group.insert(row.id);
+            if new_group.first().copied() == Some(row.id) {
+                summary.updated += 1;
+            } else {
+                summary.conflict_skipped += 1;
             }
         }
         Ok(())
