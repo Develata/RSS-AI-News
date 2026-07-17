@@ -14,12 +14,16 @@ mod common;
 use common::pg::{PgTestContext, make_pg_test_pool};
 use rss_ai_news_storage::{
     ClaimRequest, FeedEntryRepo, FeedEntryRepository, NewFeedEntry, RecentFeedEntryFilter,
-    ResetFailedFilter,
+    ResetFailedFilter, StoragePool, ensure_migration_state_exact,
 };
-use time::OffsetDateTime;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 fn lease_expires(now: OffsetDateTime) -> OffsetDateTime {
     now + time::Duration::minutes(5)
+}
+
+fn parse_timestamp(value: &str) -> OffsetDateTime {
+    OffsetDateTime::parse(value, &Rfc3339).expect("valid RFC3339 test timestamp")
 }
 
 async fn seed_article(ctx: &PgTestContext, hash: &str, entry_id: i64) -> i64 {
@@ -283,7 +287,9 @@ async fn pg_recent_entries_matches_sqlite_contract() {
         .unwrap();
 
     let repo = FeedEntryRepo::new_with_storage(ctx.storage_pool().clone());
-    let discovered_at = OffsetDateTime::from_unix_timestamp(2_000).unwrap();
+    let exact_boundary = OffsetDateTime::from_unix_timestamp(2_000).unwrap();
+    let offset_boundary = parse_timestamp("1970-01-01T01:33:20+01:00");
+    assert_eq!(offset_boundary, exact_boundary);
     for (source, uid) in [
         (p20, "p20"),
         (p10, "p10"),
@@ -292,7 +298,7 @@ async fn pg_recent_entries_matches_sqlite_contract() {
         (p10, "dedup"),
     ] {
         let mut entry = new_feed_entry(source, uid);
-        entry.discovered_at = discovered_at;
+        entry.discovered_at = exact_boundary;
         let id = repo.insert_if_new(&entry).await.unwrap().unwrap();
         if uid == "dedup" {
             sqlx::query("UPDATE feed_entries SET state = 'dedup_skipped' WHERE id = $1")
@@ -303,19 +309,97 @@ async fn pg_recent_entries_matches_sqlite_contract() {
         }
     }
 
+    let mut fractional = new_feed_entry(p10, "fractional-offset");
+    fractional.discovered_at = parse_timestamp("1970-01-01T01:33:20.500+01:00");
+    repo.insert_if_new(&fractional).await.unwrap().unwrap();
+
+    let mut older = new_feed_entry(p10, "older-offset");
+    older.discovered_at = parse_timestamp("1970-01-01T01:33:19.999+01:00");
+    repo.insert_if_new(&older).await.unwrap().unwrap();
+
     let rows = repo
         .list_recent(&RecentFeedEntryFilter {
             category_key: "ai".to_string(),
-            discovered_after: discovered_at,
+            discovered_after: offset_boundary,
             max_rows: 10,
         })
         .await
         .expect("PG recent projection");
 
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].source_key, "src-recent-p10");
-    assert_eq!(rows[0].source_priority, 10);
-    assert_eq!(rows[1].source_key, "src-recent-p20");
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].title, "Title fractional-offset");
+    assert_eq!(rows[0].discovered_at, fractional.discovered_at);
+    assert_eq!(rows[1].source_key, "src-recent-p10");
+    assert_eq!(rows[1].source_priority, 10);
+    assert_eq!(rows[1].discovered_at, exact_boundary);
+    assert_eq!(rows[2].source_key, "src-recent-p20");
+    assert_eq!(rows[2].discovered_at, exact_boundary);
+    ctx.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_recent_entries_read_only_pool_enforces_session_and_rejects_writes() {
+    let ctx = make_pg_test_pool().await;
+    let source_id = seed_feed_source(&ctx, "recent-read-only").await;
+    let writer_repo = FeedEntryRepo::new_with_storage(ctx.storage_pool().clone());
+    writer_repo
+        .insert_if_new(&new_feed_entry(source_id, "read-only-row"))
+        .await
+        .expect("seed through writer pool")
+        .expect("new row");
+    let priority_before: i32 =
+        sqlx::query_scalar("SELECT priority FROM feed_sources WHERE id = $1")
+            .bind(source_id)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .expect("priority before rejected write");
+
+    let read_only = ctx.read_only_storage_pool().await;
+    ensure_migration_state_exact(&read_only)
+        .await
+        .expect("read-only pool can inspect exact migration state");
+    let read_only_pg = match &read_only {
+        StoragePool::Postgres(pool) => pool,
+        StoragePool::Sqlite(_) => panic!("PG fixture returned SQLite read-only pool"),
+    };
+    let setting: String = sqlx::query_scalar("SHOW default_transaction_read_only")
+        .fetch_one(read_only_pg)
+        .await
+        .expect("read session default_transaction_read_only");
+    assert_eq!(setting, "on");
+
+    let reader_repo = FeedEntryRepo::new_with_storage(read_only.clone());
+    let rows = reader_repo
+        .list_recent(&RecentFeedEntryFilter {
+            category_key: "ai".to_string(),
+            discovered_after: OffsetDateTime::UNIX_EPOCH,
+            max_rows: 10,
+        })
+        .await
+        .expect("projection SELECT through PG read-only pool");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].title, "Title read-only-row");
+
+    let error = sqlx::query("UPDATE feed_sources SET priority = priority + 1 WHERE id = $1")
+        .bind(source_id)
+        .execute(read_only_pg)
+        .await
+        .expect_err("read-only command pool must reject UPDATE");
+    let sqlstate = error
+        .as_database_error()
+        .and_then(|database_error| database_error.code())
+        .map(|code| code.into_owned());
+    assert_eq!(sqlstate.as_deref(), Some("25006"));
+
+    let priority_after: i32 = sqlx::query_scalar("SELECT priority FROM feed_sources WHERE id = $1")
+        .bind(source_id)
+        .fetch_one(ctx.pg_pool())
+        .await
+        .expect("priority after rejected write");
+    assert_eq!(priority_after, priority_before);
+
+    read_only_pg.close().await;
     ctx.cleanup().await;
 }
 

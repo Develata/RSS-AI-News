@@ -96,6 +96,7 @@ struct PgEndpoint {
 /// 清理；不抛错。
 pub struct PgTestContext {
     pool: StoragePool,
+    database_url: String,
     schema: String,
     /// 留 admin pool 引用——drop cleanup 时需要在 admin pool 上跑 DROP SCHEMA，
     /// 而不能用即将关闭的业务 pool。clone 仅是 Arc 增引用，开销可忽略。
@@ -109,6 +110,13 @@ impl PgTestContext {
     /// 业务 pool（已嵌入 `search_path`，所有连接自动落在 `self.schema`）。
     pub fn storage_pool(&self) -> &StoragePool {
         &self.pool
+    }
+
+    /// 使用与业务 pool 相同 schema 构造 command-grade read-only pool。
+    pub async fn read_only_storage_pool(&self) -> StoragePool {
+        StoragePool::build_read_only(&self.database_url, 5_000)
+            .await
+            .expect("build per-test read-only pg pool")
     }
 
     /// 拿底层 `PgPool` 引用（断言 variant）；用于需要直接执行原生 SQL 的测试。
@@ -227,6 +235,7 @@ pub async fn make_pg_test_pool() -> PgTestContext {
 
     PgTestContext {
         pool: storage,
+        database_url: url,
         schema,
         admin,
         cleaned: AtomicBool::new(false),
