@@ -4,7 +4,7 @@
 
 | 工具 | 版本 | 备注 |
 |---|---|---|
-| Rust toolchain | `1.94.0`（与 `.github/workflows/ci.yml` 的 `RUST_TOOLCHAIN` 一致） | `rustup install 1.94.0` |
+| Rust toolchain | `1.97.0`（与 `.github/workflows/ci.yml` 的 `RUST_TOOLCHAIN` 一致） | `rustup install 1.97.0` |
 | cargo | 随 toolchain | |
 | SQLite | 任意现代版 | sqlx 携带 bundled 驱动可省略本地装 |
 | PostgreSQL（可选） | `pg16` 与 CI 一致 | 本地纯 SQLite 开发不需要 |

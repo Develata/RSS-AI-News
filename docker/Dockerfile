@@ -3,7 +3,7 @@
 ############################
 # Stage 1: deps cache
 ############################
-FROM rust:1.94.0-slim-bookworm AS deps
+FROM rust:1.97.0-slim-bookworm AS deps
 
 WORKDIR /app
 

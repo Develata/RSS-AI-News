@@ -74,7 +74,7 @@ deps    →  builder  →  runtime
 
 ### 3.5 Rust 工具链
 
-`RUST_TOOLCHAIN=1.94.0` 在 Dockerfile 与 `.github/workflows/{ci,release}.yml` 三处保持一致。
+`RUST_TOOLCHAIN=1.97.0` 在 Dockerfile 与 `.github/workflows/{ci,release}.yml` 三处保持一致。
 升级时三处同步改一次，避免 CI 通过但镜像构建失败的版本错位。
 
 ## 4. scheduler 入口

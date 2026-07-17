@@ -32,7 +32,7 @@ permissions:
   contents: read
   packages: write   # 推 GHCR 需要
 env:
-  RUST_TOOLCHAIN: "1.94.0"     # 与 ci.yml 保持一致
+  RUST_TOOLCHAIN: "1.97.0"     # 与 ci.yml 保持一致
   IMAGE_NAME: ghcr.io/${{ github.repository }}   # 自动 lowercase
 ```
 

@@ -599,7 +599,7 @@ impl PublishFlow {
             }
         };
 
-        for (item, artifact) in prepared.into_iter().zip(batch.artifacts.into_iter()) {
+        for (item, artifact) in prepared.into_iter().zip(batch.artifacts) {
             let extras = PublishAdvanceExtras {
                 local_path: None,
                 remote_target: artifact.remote_target.clone(),

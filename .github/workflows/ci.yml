@@ -17,7 +17,7 @@ env:
   RUST_BACKTRACE: 1
   # Pin once. Bumping is a deliberate single-line change; keeps Dockerfile and
   # all four jobs in lockstep.
-  RUST_TOOLCHAIN: "1.94.0"
+  RUST_TOOLCHAIN: "1.97.0"
 
 # All four jobs are independent on purpose: each prepares its own toolchain /
 # cache and validates a different surface (style, behavior, migration, image).

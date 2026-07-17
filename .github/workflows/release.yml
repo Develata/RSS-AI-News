@@ -16,7 +16,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # 与 ci.yml 保持一致；bump 时同步两处。
-  RUST_TOOLCHAIN: "1.94.0"
+  RUST_TOOLCHAIN: "1.97.0"
   # GHCR 镜像名：ghcr.io/<owner>/<repo>。docker/metadata-action 会自动 lowercase
   # github.repository（`Develata/RSS-AI-News` -> `develata/rss-ai-news`）。
   IMAGE_NAME: ghcr.io/${{ github.repository }}
