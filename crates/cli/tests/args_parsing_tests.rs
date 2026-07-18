@@ -228,10 +228,30 @@ fn args_parsing_parses_recent_entries_defaults() {
     match cli.command {
         Command::RecentEntries(args) => {
             assert_eq!(args.discovered_after.unix_timestamp(), 0);
+            assert!(args.published_after.is_none());
             assert_eq!(
                 args.limit,
                 rss_ai_news_runtime::DEFAULT_RECENT_ENTRIES_LIMIT
             );
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn args_parsing_parses_recent_entries_published_after() {
+    let cli = Cli::try_parse_from([
+        "rss-ai-news",
+        "recent-entries",
+        "--discovered-after",
+        "1970-01-01T00:00:00Z",
+        "--published-after",
+        "1970-01-02T00:00:00+00:00",
+    ])
+    .expect("parse recent-entries published cutoff");
+    match cli.command {
+        Command::RecentEntries(args) => {
+            assert_eq!(args.published_after.unwrap().unix_timestamp(), 86_400);
         }
         other => panic!("unexpected command: {other:?}"),
     }

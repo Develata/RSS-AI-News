@@ -23,6 +23,7 @@ pub struct RecentEntriesFlow {
 pub struct RecentEntriesOptions {
     pub category_key: String,
     pub discovered_after: OffsetDateTime,
+    pub published_after: Option<OffsetDateTime>,
     pub limit: u32,
 }
 
@@ -33,6 +34,7 @@ pub struct RecentEntriesResult {
     pub generated_at: OffsetDateTime,
     pub category: String,
     pub discovered_after: OffsetDateTime,
+    pub published_after: Option<OffsetDateTime>,
     pub limit: u32,
     pub truncated: bool,
     pub source_health_truncated: bool,
@@ -73,6 +75,7 @@ impl RecentEntriesFlow {
             .list_recent(&RecentFeedEntryFilter {
                 category_key: options.category_key.clone(),
                 discovered_after: options.discovered_after,
+                published_after: options.published_after,
                 max_rows: options.limit + 1,
             })
             .await?;
@@ -83,6 +86,7 @@ impl RecentEntriesFlow {
             generated_at: OffsetDateTime::now_utc(),
             category: options.category_key,
             discovered_after: options.discovered_after,
+            published_after: options.published_after,
             limit: options.limit,
             truncated,
             source_health_truncated,

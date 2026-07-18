@@ -19,6 +19,7 @@ pub struct RecentEntriesCommandSummary {
     pub generated_at: String,
     pub category: String,
     pub discovered_after: String,
+    pub published_after: Option<String>,
     pub limit: u32,
     pub truncated: bool,
     pub source_health_truncated: bool,
@@ -52,6 +53,9 @@ impl CommandSummary for RecentEntriesCommandSummary {
     fn render_pretty(&self, writer: &mut dyn Write) -> io::Result<()> {
         writeln!(writer, "Recent entries for {}:", self.category)?;
         writeln!(writer, "  Discovered after: {}", self.discovered_after)?;
+        if let Some(published_after) = &self.published_after {
+            writeln!(writer, "  Published after: {published_after}")?;
+        }
         writeln!(
             writer,
             "  Sources: {}{}",
@@ -98,6 +102,7 @@ pub async fn run(
         .execute(RecentEntriesOptions {
             category_key: category,
             discovered_after: args.discovered_after,
+            published_after: args.published_after,
             limit: args.limit,
         })
         .await
@@ -141,10 +146,11 @@ fn summary_from_result(
         .collect::<Result<Vec<_>, CliError>>()?;
 
     Ok(RecentEntriesCommandSummary {
-        schema_version: 1,
+        schema_version: 2,
         generated_at: rfc3339(result.generated_at)?,
         category: result.category,
         discovered_after: rfc3339(result.discovered_after)?,
+        published_after: optional_rfc3339(result.published_after)?,
         limit: result.limit,
         truncated: result.truncated,
         source_health_truncated: result.source_health_truncated,

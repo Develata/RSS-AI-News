@@ -83,6 +83,7 @@ pub struct FeedEntry {
 pub struct RecentFeedEntryFilter {
     pub category_key: String,
     pub discovered_after: OffsetDateTime,
+    pub published_after: Option<OffsetDateTime>,
     pub max_rows: u32,
 }
 

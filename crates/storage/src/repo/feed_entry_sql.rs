@@ -58,7 +58,28 @@ WITH recent_candidates AS (
            CASE
                WHEN instr(fe.discovered_at, '.') = 0 THEN 0.0
                ELSE CAST('0' || substr(fe.discovered_at, instr(fe.discovered_at, '.')) AS REAL)
-           END AS discovered_fraction
+           END AS discovered_fraction,
+           CASE
+               WHEN fe.published_at IS NULL THEN NULL
+               ELSE CAST(
+                   strftime(
+                       '%s',
+                       CASE
+                           WHEN instr(fe.published_at, '.') = 0 THEN fe.published_at
+                           ELSE substr(fe.published_at, 1, instr(fe.published_at, '.') - 1)
+                                || CASE
+                                       WHEN substr(fe.published_at, -1) = 'Z' THEN 'Z'
+                                       ELSE substr(fe.published_at, -6)
+                                   END
+                       END
+                   ) AS INTEGER
+               )
+           END AS published_epoch_second,
+           CASE
+               WHEN fe.published_at IS NULL THEN NULL
+               WHEN instr(fe.published_at, '.') = 0 THEN 0.0
+               ELSE CAST('0' || substr(fe.published_at, instr(fe.published_at, '.')) AS REAL)
+           END AS published_fraction
     FROM feed_entries AS fe
     JOIN feed_sources AS fs ON fs.id = fe.source_id
     WHERE fs.category_key = $1
@@ -75,13 +96,16 @@ SELECT id,
        discovered_at,
        state
 FROM recent_candidates
-WHERE discovered_epoch_second > $3
-   OR (discovered_epoch_second = $3 AND discovered_fraction >= $4)
+WHERE (discovered_epoch_second > $3
+       OR (discovered_epoch_second = $3 AND discovered_fraction >= $4))
+  AND ($5 IS NULL
+       OR published_epoch_second > $5
+       OR (published_epoch_second = $5 AND published_fraction >= $6))
 ORDER BY discovered_epoch_second DESC,
          discovered_fraction DESC,
          source_priority ASC,
          id DESC
-LIMIT $5
+LIMIT $7
 "#;
 
 pub(super) const LIST_RECENT_FEED_ENTRIES_PG_SQL: &str = r#"
@@ -98,9 +122,10 @@ JOIN feed_sources fs ON fs.id = fe.source_id
 WHERE fs.category_key = $1
   AND fs.status = 'active'
   AND fe.discovered_at >= $2
+  AND ($3::TIMESTAMPTZ IS NULL OR fe.published_at >= $3)
   AND fe.state <> 'dedup_skipped'
 ORDER BY fe.discovered_at DESC, fs.priority ASC, fe.id DESC
-LIMIT $3
+LIMIT $4
 "#;
 
 /// SQLite claim：子查询无 `FOR UPDATE`（语法不支持，整库写锁兜底）。

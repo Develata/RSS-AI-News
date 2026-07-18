@@ -73,8 +73,9 @@ fn recent_entries_json_envelope_matches_contract() {
     assert_eq!(envelope["command"], "recent-entries");
     assert_eq!(envelope["status"], "success");
     assert_eq!(envelope["errors"], json!([]));
-    assert_eq!(envelope["summary"]["schema_version"], 1);
+    assert_eq!(envelope["summary"]["schema_version"], 2);
     assert_eq!(envelope["summary"]["category"], "daily-math");
+    assert_eq!(envelope["summary"]["published_after"], json!(null));
     assert_eq!(
         envelope["summary"]["discovered_after"],
         "2026-07-14T23:30:00Z"
@@ -313,10 +314,11 @@ fn migrate_summary() -> MigrateCommandSummary {
 
 fn recent_entries_summary() -> RecentEntriesCommandSummary {
     RecentEntriesCommandSummary {
-        schema_version: 1,
+        schema_version: 2,
         generated_at: "2026-07-17T23:30:00Z".to_string(),
         category: "daily-math".to_string(),
         discovered_after: "2026-07-14T23:30:00Z".to_string(),
+        published_after: None,
         limit: 50,
         truncated: false,
         source_health_truncated: false,

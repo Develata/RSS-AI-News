@@ -26,6 +26,7 @@ async fn recent_entries_limit_plus_one_sets_truncated() {
         .execute(RecentEntriesOptions {
             category_key: "daily-math".to_string(),
             discovered_after: fixed_time(0),
+            published_after: None,
             limit: 2,
         })
         .await
@@ -79,6 +80,7 @@ async fn recent_entries_source_health_is_bounded_and_truncated() {
         .execute(RecentEntriesOptions {
             category_key: "daily-math".to_string(),
             discovered_after: fixed_time(0),
+            published_after: None,
             limit: 1,
         })
         .await
@@ -118,6 +120,7 @@ async fn recent_entries_flow_rejects_out_of_range_limit() {
             .execute(RecentEntriesOptions {
                 category_key: "daily-math".to_string(),
                 discovered_after: fixed_time(0),
+                published_after: None,
                 limit,
             })
             .await

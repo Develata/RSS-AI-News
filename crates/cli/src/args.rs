@@ -241,6 +241,8 @@ pub struct RebuildReportArgs {
 pub struct RecentEntriesArgs {
     #[arg(long = "discovered-after", value_parser = parse_rfc3339)]
     pub discovered_after: OffsetDateTime,
+    #[arg(long = "published-after", value_parser = parse_rfc3339)]
+    pub published_after: Option<OffsetDateTime>,
     #[arg(
         long,
         default_value_t = rss_ai_news_runtime::DEFAULT_RECENT_ENTRIES_LIMIT,

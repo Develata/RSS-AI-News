@@ -61,6 +61,48 @@ async fn recent_entries_uses_inclusive_discovered_after() {
 }
 
 #[tokio::test]
+async fn recent_entries_uses_inclusive_optional_published_after() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let source = seed_recent_source(&pool, "published-cutoff", 10).await;
+    let discovered_at = fixed_time(5_000);
+    let cases = [
+        ("after", Some("2024-01-01T00:00:00.5Z")),
+        ("at-offset", Some("2024-01-01T08:00:00.25+08:00")),
+        ("before", Some("2024-01-01T00:00:00.249Z")),
+        ("missing", None),
+    ];
+    for (title, published_at) in cases {
+        let id = insert_entry(&pool, source, title, discovered_at, "pending_fetch").await;
+        if let Some(published_at) = published_at {
+            sqlx::query("UPDATE feed_entries SET published_at = ? WHERE id = ?")
+                .bind(published_at)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("set published_at fixture");
+        }
+    }
+    let published_after = OffsetDateTime::parse("2024-01-01T00:00:00.25Z", &Rfc3339).unwrap();
+
+    let rows = FeedEntryRepo::new(pool.clone())
+        .list_recent(&RecentFeedEntryFilter {
+            category_key: "daily-math".to_string(),
+            discovered_after: fixed_time(0),
+            published_after: Some(published_after),
+            max_rows: 10,
+        })
+        .await
+        .expect("filter by published_at instant");
+    let mut titles = rows
+        .iter()
+        .map(|row| row.title.as_str())
+        .collect::<Vec<_>>();
+    titles.sort_unstable();
+    assert_eq!(titles, vec!["after", "at-offset"]);
+    assert!(rows.iter().all(|row| row.published_at.is_some()));
+}
+
+#[tokio::test]
 async fn recent_entries_sqlite_orders_fractional_and_offset_timestamps_by_instant() {
     let (_dir, pool) = common::make_test_pool().await;
     let source = seed_recent_source(&pool, "timestamp-parity", 10).await;
@@ -246,6 +288,7 @@ async fn recent_entries_can_read_while_sqlite_writer_is_active() {
         repo.list_recent(&RecentFeedEntryFilter {
             category_key: "daily-math".to_string(),
             discovered_after: fixed_time(0),
+            published_after: None,
             max_rows: 10,
         }),
     )
@@ -286,6 +329,8 @@ async fn recent_entries_query_plan_uses_existing_indexes() {
         .bind(fixed_time(0) - Duration::days(1))
         .bind(0_i64)
         .bind(0.0_f64)
+        .bind(Option::<i64>::None)
+        .bind(Option::<f64>::None)
         .bind(201_i64)
         .fetch_all(&pool)
         .await
@@ -337,6 +382,7 @@ async fn recent(
         .list_recent(&RecentFeedEntryFilter {
             category_key: category_key.to_string(),
             discovered_after,
+            published_after: None,
             max_rows,
         })
         .await

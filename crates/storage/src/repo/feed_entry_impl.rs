@@ -278,12 +278,20 @@ async fn sqlite_list_recent(
     let discovered_after = filter.discovered_after.to_offset(UtcOffset::UTC);
     let coarse_lower_bound = discovered_after.saturating_sub(Duration::days(1));
     let fractional_second = f64::from(discovered_after.nanosecond()) / 1_000_000_000.0;
+    let published_after = filter
+        .published_after
+        .map(|value| value.to_offset(UtcOffset::UTC));
+    let published_epoch_second = published_after.map(OffsetDateTime::unix_timestamp);
+    let published_fraction =
+        published_after.map(|value| f64::from(value.nanosecond()) / 1_000_000_000.0);
 
     sqlx::query_as::<_, RecentFeedEntry>(LIST_RECENT_FEED_ENTRIES_SQLITE_SQL)
         .bind(&filter.category_key)
         .bind(coarse_lower_bound)
         .bind(discovered_after.unix_timestamp())
         .bind(fractional_second)
+        .bind(published_epoch_second)
+        .bind(published_fraction)
         .bind(i64::from(filter.max_rows))
         .fetch_all(pool)
         .await
@@ -605,6 +613,7 @@ async fn pg_list_recent(
     sqlx::query_as::<_, RecentFeedEntry>(LIST_RECENT_FEED_ENTRIES_PG_SQL)
         .bind(&filter.category_key)
         .bind(filter.discovered_after)
+        .bind(filter.published_after)
         .bind(i64::from(filter.max_rows))
         .fetch_all(pool)
         .await

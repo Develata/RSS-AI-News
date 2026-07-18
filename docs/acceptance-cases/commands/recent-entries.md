@@ -11,6 +11,7 @@ rss-ai-news \
   --output-format json \
   recent-entries \
   --discovered-after 2026-07-14T23:30:00Z \
+  --published-after 2026-06-01T00:00:00Z \
   --limit 50
 ```
 
@@ -22,9 +23,10 @@ rss-ai-news \
 
 - 全局 `--category/-C`：本命令必填；缺失为 user error。
 - `--discovered-after <RFC3339>`：必填，按 `discovered_at >= value` inclusive 过滤。
+- `--published-after <RFC3339>`：可选，按 `published_at >= value` inclusive 过滤；提供时排除 `published_at = NULL`。
 - `--limit <1..=200>`：默认 50；内部读取 `limit + 1` 判断 `truncated`。
 - 全局 `--dry-run`：合法 no-op；本命令本身已经严格只读。
-- v1 不提供 OFFSET/cursor、state filter、source filter 或 `published_at` filter。
+- v2 不提供 OFFSET/cursor、state filter 或 source filter。
 
 ### 数据选择
 
@@ -34,16 +36,17 @@ JOIN feed_sources fs ON fs.id = fe.source_id
 WHERE fs.category_key = :category
   AND fs.status = 'active'
   AND fe.discovered_at >= :discovered_after
+  AND (:published_after IS NULL OR fe.published_at >= :published_after)
   AND fe.state <> 'dedup_skipped'
 ORDER BY fe.discovered_at DESC, fs.priority ASC, fe.id DESC
 LIMIT :limit_plus_one
 ```
 
-`published_at` 可空且来源时钟不可信，只作为输出字段，不作为默认时间窗口或排序键。SQLite 中 sqlx 把时间编码为变长 RFC3339 TEXT；实现必须以 instant 语义精确比较/排序，不能直接依赖 TEXT lexical order，并以一日 coarse lower bound 继续利用现有 `(source_id, discovered_at)` index。
+`published_at` 可空且来源时钟不可信，因此默认不参与过滤或排序；只有 consumer 显式提供 `--published-after` 时才作为 freshness gate。SQLite 中 sqlx 把时间编码为变长 RFC3339 TEXT；实现必须以 instant 语义精确比较/排序，不能直接依赖 TEXT lexical order，并以一日 coarse lower bound 继续利用现有 `(source_id, discovered_at)` index。
 
 active source health 使用独立固定 projection，最多返回 500 行；内部读取 501 行判断 `source_health_truncated`。`source_key` 与 `last_error_kind` 分别最多输出 256/128 个数据库字符。
 
-### JSON summary schema v1
+### JSON summary schema v2
 
 现有 `OutputWriter` envelope 保持不变：
 
@@ -52,10 +55,11 @@ active source health 使用独立固定 projection，最多返回 500 行；内�
   "command": "recent-entries",
   "status": "success",
   "summary": {
-    "schema_version": 1,
+    "schema_version": 2,
     "generated_at": "2026-07-17T23:30:00Z",
     "category": "daily-math",
     "discovered_after": "2026-07-14T23:30:00Z",
+    "published_after": "2026-06-01T00:00:00Z",
     "limit": 50,
     "truncated": false,
     "source_health_truncated": false,
@@ -86,7 +90,7 @@ active source health 使用独立固定 projection，最多返回 500 行；内�
 }
 ```
 
-v1 不输出 `summary_raw`、完整 `last_error`、feed secret、AI result、score 或 publish state。
+v2 不输出 `summary_raw`、完整 `last_error`、feed secret、AI result、score 或 publish state。未提供 cutoff 时 `published_after` 为 `null`。
 
 ## 严格 read-only 不变量
 
@@ -112,6 +116,7 @@ v1 不输出 `summary_raw`、完整 `last_error`、feed secret、AI result、sco
 | RE-DB-004 | storage | `dedup_skipped` 与其它 state | 仅排除 `dedup_skipped` | `recent_entries_excludes_dedup_skipped` |
 | RE-DB-005 | storage | limit N 且 N+1 rows | 返回 N，`truncated=true` | `recent_entries_limit_plus_one_sets_truncated` |
 | RE-DB-006 | storage | `Z`/offset/变长 fraction | 按 instant 精确过滤与排序 | `recent_entries_sqlite_orders_fractional_and_offset_timestamps_by_instant` |
+| RE-DB-007 | storage | optional published cutoff + NULL/offset/fraction fixture | inclusive instant filter；NULL 与旧条目排除 | `recent_entries_uses_inclusive_optional_published_after` |
 | RE-SRC-001 | runtime | 501 active sources + oversized error kind | 返回 500，health truncated，字段有界 | `recent_entries_source_health_is_bounded_and_truncated` |
 | RE-RO-001 | pool | SQLite path 不存在 | 失败且文件仍不存在 | `read_only_sqlite_pool_does_not_create_missing_db` |
 | RE-RO-002 | pool | read-only SQLite 执行 UPDATE | 返回 readonly error | `read_only_sqlite_pool_rejects_writes` |
@@ -137,9 +142,9 @@ v1 不输出 `summary_raw`、完整 `last_error`、feed secret、AI result、sco
 
 ## 当前状态
 
-`passing`
+`passing` for local SQLite/CLI/runtime gates; PostgreSQL execution remains a release gate.
 
-contract、实现与自动化 evidence 已闭环：USTC107 上 `fmt/check/clippy/test --workspace/release build` 及 100k-row resource smoke 已通过；GitHub Actions Docker-backed PostgreSQL gate 已验证 native `TIMESTAMPTZ` offset/fraction/boundary parity，并确认 command-grade read-only pool 的 `default_transaction_read_only=on`、写操作以 SQLSTATE `25006` 拒绝且数据不变。
+Local `fmt/check/clippy/test --workspace` and the 100k-row resource smoke pass. The Docker-backed PostgreSQL test now covers both discovered and optional published cutoff parity, but this host has no Docker daemon: that updated test is compile-checked here and must execute in the PostgreSQL CI lane before release.
 
 ## 相关文档
 

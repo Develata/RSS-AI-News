@@ -457,10 +457,25 @@ async fn pg_recent_entries_matches_sqlite_contract() {
     older.discovered_at = parse_timestamp("1970-01-01T01:33:19.999+01:00");
     repo.insert_if_new(&older).await.unwrap().unwrap();
 
+    sqlx::query(
+        "UPDATE feed_entries SET published_at = CASE \
+         WHEN feed_entry_uid = 'fractional-offset' THEN $1 \
+         WHEN feed_entry_uid = 'p10' THEN $2 \
+         WHEN feed_entry_uid = 'p20' THEN $3 \
+         ELSE published_at END",
+    )
+    .bind(parse_timestamp("1970-01-01T01:33:20.500+01:00"))
+    .bind(offset_boundary)
+    .bind(offset_boundary - time::Duration::seconds(1))
+    .execute(ctx.pg_pool())
+    .await
+    .unwrap();
+
     let rows = repo
         .list_recent(&RecentFeedEntryFilter {
             category_key: "ai".to_string(),
             discovered_after: offset_boundary,
+            published_after: None,
             max_rows: 10,
         })
         .await
@@ -474,6 +489,24 @@ async fn pg_recent_entries_matches_sqlite_contract() {
     assert_eq!(rows[1].discovered_at, exact_boundary);
     assert_eq!(rows[2].source_key, "src-recent-p20");
     assert_eq!(rows[2].discovered_at, exact_boundary);
+
+    let published_rows = repo
+        .list_recent(&RecentFeedEntryFilter {
+            category_key: "ai".to_string(),
+            discovered_after: offset_boundary,
+            published_after: Some(offset_boundary),
+            max_rows: 10,
+        })
+        .await
+        .expect("PG recent published cutoff projection");
+    assert_eq!(published_rows.len(), 2);
+    assert_eq!(published_rows[0].title, "Title fractional-offset");
+    assert_eq!(published_rows[1].title, "Title p10");
+    assert!(published_rows.iter().all(|entry| {
+        entry
+            .published_at
+            .is_some_and(|value| value >= offset_boundary)
+    }));
     ctx.cleanup().await;
 }
 
@@ -514,6 +547,7 @@ async fn pg_recent_entries_read_only_pool_enforces_session_and_rejects_writes() 
         .list_recent(&RecentFeedEntryFilter {
             category_key: "ai".to_string(),
             discovered_after: OffsetDateTime::UNIX_EPOCH,
+            published_after: None,
             max_rows: 10,
         })
         .await

@@ -160,6 +160,7 @@ impl Fixture {
     fn cli(&self, dry_run: bool) -> Cli {
         let args = RecentEntriesArgs {
             discovered_after: OffsetDateTime::from_unix_timestamp(0).unwrap(),
+            published_after: None,
             limit: 50,
         };
         Cli {
