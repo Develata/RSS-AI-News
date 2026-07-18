@@ -4,7 +4,7 @@
 
 - Date: 2026-07-18
 - Owner: main
-- Scope: `v0.7.0..v0.7.1` tag-ready candidate
+- Scope: released `v0.7.1` with one explicit remote-execution verification gap
 
 ## Done
 
@@ -26,17 +26,18 @@
   - Evidence SHA-256: `fddfdb9fa4bfada2d1ae8c4020a91c5cf5c00155911bb61967e19c06670c8250`
 - Release binary: `rss-ai-news 0.7.1`.
   - SHA-256: `e670ccf6d65f2677210c64700bb8468c06de439e1ecdcb68abf97669edb6eeef`
-- Independent Codex review: product cutoff/coupling PASS; fail-fast and explicit/inherited credential redaction findings closed; final closure PASS. Procedural blockers remain commit/remote evidence sequencing only.
+- Independent Codex review: product cutoff/coupling PASS; fail-fast and explicit/inherited credential redaction findings closed; final closure PASS.
 - GitHub CI exact head SHA `c26ac97afddb1624f7b27eef9fb284fb33c18a65`: [run 29650615837](https://github.com/Develata/RSS-AI-News/actions/runs/29650615837), 5/5 jobs PASS（fmt/clippy、workspace、SQLite migration、PostgreSQL、Docker）。
+- Evidence/tag commit `3f13e956763c2a41c86df6e0d609a39b2418c0ef`: [CI run 29650877546](https://github.com/Develata/RSS-AI-News/actions/runs/29650877546), 5/5 jobs PASS。
+- Remote annotated tag object `76596b12d667c0b841a9f73b5e735ffbaa0234d4` peels to `3f13e956763c2a41c86df6e0d609a39b2418c0ef`。
+- Tag [release run 29651042474](https://github.com/Develata/RSS-AI-News/actions/runs/29651042474): runtime + scheduler GHCR push PASS。
+- Runtime OCI index: `sha256:eda3ead30fc9788bf7da1ef238c997b5e562dd645fe429a561c86e36fc220eb7`；scheduler index: `sha256:46a391303e229af542ebf85bf21759e9a2f1108f7324c7f839c33490fa272683`；semver/minor/latest alias assertions PASS。
 
 ## Blocked / Pending
 
-- Commit/push this docs-only evidence snapshot and gate its exact SHA.
-- Push annotated `v0.7.1`, wait for the tag-triggered release workflow, and read back remote tag/image manifests.
+- Remote image execution smoke remains open: local Docker daemon is unavailable, and host approval to extract/execute the CI binary from GHCR was not granted. No retry or bypass was attempted.
 
 ## Next entry point
 
-1. Exact-path stage and commit the release report + handoff evidence update.
-2. Push `main`; gate on the evidence commit SHA CI.
-3. Create/push annotated `v0.7.1` at that exact commit.
-4. Gate the tag workflow and read back remote tag + runtime/scheduler image manifests.
+1. In a trusted environment with a Docker daemon, run the immutable runtime image by digest with `--version` and `--help`.
+2. Record the result in a follow-up report update; no code/tag change is required.
