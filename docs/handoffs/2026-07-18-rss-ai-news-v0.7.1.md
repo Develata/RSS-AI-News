@@ -4,7 +4,7 @@
 
 - Date: 2026-07-18
 - Owner: main
-- Scope: released `v0.7.1` with one explicit remote-execution verification gap
+- Scope: released and fully verified `v0.7.1`
 
 ## Done
 
@@ -32,12 +32,12 @@
 - Remote annotated tag object `76596b12d667c0b841a9f73b5e735ffbaa0234d4` peels to `3f13e956763c2a41c86df6e0d609a39b2418c0ef`。
 - Tag [release run 29651042474](https://github.com/Develata/RSS-AI-News/actions/runs/29651042474): runtime + scheduler GHCR push PASS。
 - Runtime OCI index: `sha256:eda3ead30fc9788bf7da1ef238c997b5e562dd645fe429a561c86e36fc220eb7`；scheduler index: `sha256:46a391303e229af542ebf85bf21759e9a2f1108f7324c7f839c33490fa272683`；semver/minor/latest alias assertions PASS。
+- Authorized remote binary execution smoke: runtime child manifest `sha256:4a6bcd0d3fedb0b773d66559fb1900ad2708c01b4eda491818b4d14373638d29` and scheduler child manifest `sha256:01ec24be204a1831058bb1c16911233b56f17137fd6485f2ea1a56b8501fd1e5` were fetched from GHCR with every consumed digest verified. Both embedded binaries have SHA-256 `6c15b9fb593f268425efe39228c435a5fffebce743d088e4a568ca324b68ecbc`; both `--version` and `--help` exited `0` under a minimal non-secret environment. Evidence: `/opt/data/tmp/rss-ai-news-v0.7.1-remote-smoke.json`, SHA-256 `18e1df17501922b45da6fdbbb7f69ffe57bcae5b4cf3a1039d00fc0142bfc7d4`。
 
 ## Blocked / Pending
 
-- Remote image execution smoke remains open: local Docker daemon is unavailable, and host approval to extract/execute the CI binary from GHCR was not granted. No retry or bypass was attempted.
+- None.
 
 ## Next entry point
 
-1. In a trusted environment with a Docker daemon, run the immutable runtime image by digest with `--version` and `--help`.
-2. Record the result in a follow-up report update; no code/tag change is required.
+No v0.7.1 follow-up is required.
