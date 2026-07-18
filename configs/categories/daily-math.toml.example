@@ -1,0 +1,132 @@
+schema_version = "1"
+
+# Quality-first discovery pool for Develata's daily mathematics journal.
+# Feed activity is not a quality criterion: a quiet but authoritative archive
+# remains enabled as long as the endpoint is healthy and provenance is clear.
+[category]
+key = "daily-math"
+display_name = "Daily Mathematics Discovery"
+priority = 10
+
+[category.publish_override]
+max_items_per_report = 30
+min_importance_score = 40
+include_unscored = false
+
+# Broad, first-person mathematical exposition.
+[[sources]]
+key = "person.terence-tao.whats-new"
+display_name = "Terence Tao — What's New"
+feed_url = "https://terrytao.wordpress.com/feed/"
+feed_kind = "rss"
+priority = 10
+enabled = true
+
+[[sources]]
+key = "person.timothy-gowers.web-log"
+display_name = "Timothy Gowers's Weblog"
+feed_url = "https://gowers.wordpress.com/feed/"
+feed_kind = "rss"
+priority = 10
+enabled = true
+
+[[sources]]
+key = "person.gil-kalai.combinatorics-and-more"
+display_name = "Gil Kalai — Combinatorics and More"
+feed_url = "https://gilkalai.wordpress.com/feed/"
+feed_kind = "rss"
+priority = 10
+enabled = true
+
+# Theory, combinatorics, probability, computation, and mathematical physics.
+[[sources]]
+key = "person.luca-trevisan.in-theory"
+display_name = "Luca Trevisan — In Theory"
+feed_url = "https://lucatrevisan.wordpress.com/feed/"
+feed_kind = "rss"
+priority = 20
+enabled = true
+
+[[sources]]
+key = "person.richard-lipton.godels-lost-letter"
+display_name = "Richard Lipton — Gödel's Lost Letter"
+feed_url = "https://rjlipton.com/feed/"
+feed_kind = "rss"
+priority = 20
+enabled = true
+
+[[sources]]
+key = "person.scott-aaronson.shtetl-optimized"
+display_name = "Scott Aaronson — Shtetl-Optimized"
+feed_url = "https://scottaaronson.blog/?feed=rss2"
+feed_kind = "rss"
+priority = 20
+enabled = true
+
+[[sources]]
+key = "person.john-baez.azimuth"
+display_name = "John Baez — Azimuth"
+feed_url = "https://johncarlosbaez.wordpress.com/feed/"
+feed_kind = "rss"
+priority = 20
+enabled = true
+
+[[sources]]
+key = "person.emmanuel-kowalski.persiflage"
+display_name = "Emmanuel Kowalski — Persiflage"
+feed_url = "https://blogs.ethz.ch/kowalski/feed/"
+feed_kind = "rss"
+priority = 20
+enabled = true
+
+[[sources]]
+key = "person.peter-woit.not-even-wrong"
+display_name = "Peter Woit — Not Even Wrong"
+feed_url = "https://www.math.columbia.edu/~woit/wordpress/?feed=rss2"
+feed_kind = "rss"
+priority = 30
+enabled = true
+
+# Editorial and institutional discovery. These are discovery surfaces, not
+# quotation authority; downstream use must still open and verify the original.
+[[sources]]
+key = "publication.quanta"
+display_name = "Quanta Magazine"
+feed_url = "https://api.quantamagazine.org/feed/"
+feed_kind = "rss"
+priority = 20
+enabled = true
+
+[[sources]]
+key = "organization.simons-foundation"
+display_name = "Simons Foundation"
+feed_url = "https://www.simonsfoundation.org/feed/"
+feed_kind = "rss"
+priority = 30
+enabled = true
+
+# Official arXiv category feeds are high-volume discovery surfaces. The
+# rss-ai-news scorer should filter them; feed entries are never citation proof.
+[[sources]]
+key = "archive.arxiv.math-pr"
+display_name = "arXiv math.PR — Probability"
+feed_url = "https://rss.arxiv.org/rss/math.PR"
+feed_kind = "rss"
+priority = 30
+enabled = true
+
+[[sources]]
+key = "archive.arxiv.math-co"
+display_name = "arXiv math.CO — Combinatorics"
+feed_url = "https://rss.arxiv.org/rss/math.CO"
+feed_kind = "rss"
+priority = 30
+enabled = true
+
+[[sources]]
+key = "archive.arxiv.math-mg"
+display_name = "arXiv math.MG — Metric Geometry"
+feed_url = "https://rss.arxiv.org/rss/math.MG"
+feed_kind = "rss"
+priority = 40
+enabled = true
