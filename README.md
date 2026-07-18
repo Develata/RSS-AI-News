@@ -1,5 +1,7 @@
 # RSS-AI-News
 
+当前版本：`v0.7.1`。
+
 RSS-AI-News 是一个一次性运行的 RSS 新闻处理 CLI。它按外部调度触发，完成：
 
 ```text
@@ -97,7 +99,7 @@ docker compose --profile debug -f docker/docker-compose.yml run --rm rss-ai-news
 
 #### 本地运行
 
-需要 Rust 1.88+。
+需要 Rust 1.97.0（仓库由 `rust-toolchain.toml` 固定）。
 
 ```bash
 cargo build --release --bin rss-ai-news
@@ -292,6 +294,53 @@ rss-ai-news --config-dir configs --category ai rebuild-report --date 2026-05-18 
 ```
 
 该命令基于已冻结的发布快照重新渲染 Markdown，不重新抓取 RSS，也不重新调用 AI。
+
+### 导出下游 discovery 候选
+
+`recent-entries` 是严格只读的 bounded projection：不抓网络、不运行 AI、不发布，只从现有数据库导出候选与 active-source health。
+
+```bash
+rss-ai-news \
+  --config-dir configs \
+  --category daily-math \
+  --output-format json \
+  recent-entries \
+  --discovered-after 2026-07-01T00:00:00Z \
+  --limit 80
+```
+
+`--published-after <RFC3339>` 是 **opt-in** cutoff：不显式提供时内部值为 `None`，完全不按文章发布时间过滤。只有 consumer 明确需要 freshness policy 时才传入：
+
+```bash
+rss-ai-news \
+  --config-dir configs \
+  --category ai \
+  --output-format json \
+  recent-entries \
+  --discovered-after 2026-07-01T00:00:00Z \
+  --published-after 2026-06-01T00:00:00Z
+```
+
+### 开发者：Rust 验收矩阵
+
+仓库提供独立 `rss-ai-news-acceptance` tooling crate；它不依赖任何 product crate，通过公开进程边界自动编排验收：
+
+```bash
+# 枚举 profiles / lanes
+cargo acceptance list
+
+# credential-free pre-tag matrix：static / workspace / SQLite+CLI / release identity
+cargo acceptance run --profile local --expected-version 0.7.1
+
+# 包含 PostgreSQL 与 Docker；缺 prerequisite 直接失败
+DATABASE_URL='postgres://...' \
+  cargo acceptance run --profile full --expected-version 0.7.1
+
+# 机器可读 evidence；不执行命令、不创建 smoke resources
+cargo acceptance --format json run --profile full --expected-version 0.7.1 --dry-run
+```
+
+完整 lane contract、cleanup 与 exit semantics 见 [`docs/operations/acceptance-matrix.md`](docs/operations/acceptance-matrix.md)。
 
 ## 配置说明
 
@@ -676,6 +725,7 @@ rss-ai-news [global flags] <command>
 | 改了去重 / 评分规则要重算历史 | `reindex --target {link_hash\|content_hash\|categories\|all} --dry-run` 先看影响面，再去掉 `--dry-run` 真跑 |
 | 数据库刚导入历史，想补正文 / AI | `backfill --target extract` / `backfill --target ai` |
 | 想重发同一天报告做版本对比 | `rebuild-report --date YYYY-MM-DD --output <新文件>` |
+| 下游流水线只读导出候选 | `recent-entries --discovered-after <RFC3339>`；仅需 freshness cutoff 时追加 `--published-after` |
 | 调度器报错时定位是配置还是网络 | `doctor` 看 status；exit 78 = 配置；exit 1 = 运行期 |
 
 ## 子命令速查
@@ -688,12 +738,14 @@ rss-ai-news [global flags] <command>
 | `ingest` | 抓取 feed、去重、抓正文、入库 |
 | `ai-run` | 对待处理文章调用 AI 并写回结果 |
 | `publish` | 选稿、冻结快照、渲染并发布报告 |
+| `publish-all` | 对所有启用分类逐一发布 |
 | `run` | 串联执行 `ingest -> ai-run -> publish` |
 | `doctor` | 健康检查 |
 | `rebuild-report` | 基于发布快照重新渲染报告 |
 | `backfill` | 对历史数据补跑正文提取或 AI |
 | `replay` | 从 raw artifact 回放 feed/html/AI 解析 |
 | `reindex` | 重算派生字段或规则版本 |
+| `recent-entries` | 严格只读导出最近发现的 entries 与 source health；publication cutoff 默认关闭 |
 
 查看完整参数：
 
@@ -798,22 +850,15 @@ rss-ai-news --config-dir configs publish --date 2026-05-18 --force
 rss-ai-news --config-dir configs validate-config
 ```
 
-## 当前版本状态（v0.1.0）
+## 当前版本状态（v0.7.1）
 
-已实装：
+- production graph：11 个 library crates + 1 个 single-shot binary；SQLite / PostgreSQL 双方言。
+- CLI：13 个顶层子命令；`recent-entries` 提供 read-only discovery surface，`--published-after` 默认关闭。
+- development tooling：独立 Rust acceptance matrix，覆盖 6 lanes、local/full profiles 与 JSON evidence。
+- CI：lint / workspace test / SQLite migration smoke / PostgreSQL / Docker 5 个并行 jobs。
+- release：runtime + scheduler GHCR images；版本、README、lockfile 与 binary identity 在 pre-tag matrix 中联动检查。
 
-- SQLite 与 PostgreSQL 双方言存储（参见 `docs/plan/05-storage.md`）。
-- 10 个 CLI 子命令（含 `doctor` / `replay` / `reindex --dry-run`）。
-- 可配置发布路径与 Markdown 模板（`[publish.template]`）。
-- 双 backend `doctor` / `replay`。
-- Prometheus `/metrics` HTTP endpoint（空 registry 占位，业务 counter 接入留 v0.2）。
-- 双 GitHub Actions CI job：`cargo test`（默认 SQLite）+ `test (postgres)`（service container + `--test-threads=1`）。
-
-v0.2 follow-up：
-
-- 全局 `--dry-run` 全子命令覆盖（v0.1.0 仅 `reindex --dry-run`，其他子命令带 `--dry-run` 返 `DryRunNotImplemented` exit 1）。
-- 业务侧 metrics counter / histogram 全栈接入。
-- `replay` 输出格式扩展（v0.1.0 主要面向开发期诊断）。
+完整发布快照见 [`docs/reports/releases/v0.7.1.md`](docs/reports/releases/v0.7.1.md)。
 
 ## 更多文档
 

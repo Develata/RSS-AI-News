@@ -1,0 +1,2 @@
+[alias]
+acceptance = "run --locked --package rss-ai-news-acceptance --"

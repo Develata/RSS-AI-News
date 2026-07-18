@@ -13,6 +13,7 @@
 | [docker-and-scheduler.md](./docker-and-scheduler.md) | multi-stage 镜像 + scheduler 容器 + 外挂 cron |
 | [postgres-deployment.md](./postgres-deployment.md) | driver=postgres 切换 + 端到端 PG 部署 |
 | [ci-and-release.md](./ci-and-release.md) | GitHub Actions workflow + GHCR + 版本流程 |
+| [acceptance-matrix.md](./acceptance-matrix.md) | Rust CLI 化 local/full 验收矩阵 + JSON evidence |
 | [troubleshooting.md](./troubleshooting.md) | doctor 用法 + 常见故障定位 |
 
 ## 与其它目录的关系

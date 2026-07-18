@@ -36,14 +36,15 @@
       :notes "解析 clap Cli + 全局 flag + 子命令分派；持有 WorkerGuard 到进程结束。")
 
 (node :id cli-commands
-      :label "12 个子命令模块"
+      :label "13 个子命令模块"
       :layer instruction-interface
       :crate cli
       :path "crates/cli/src/commands/"
       :kind module
       :state active
       :notes "ai_run / backfill / doctor / ingest / migrate / publish / publish_all /
-              rebuild_report / reindex / replay / run / validate_config（12 个 .rs，加 mod.rs 共 13 个文件）。
+              rebuild_report / reindex / replay / run / validate_config / recent_entries
+              （13 个 command .rs，加 mod.rs 共 14 个文件）。
               对应 acceptance-cases/commands/*.md。")
 
 ;; ====================================================================
@@ -156,6 +157,17 @@
       :downstream (report-crate publish-crate repo-publish-record)
       :state active
       :notes "字节相等重建保证由 report::rebuild 实现。")
+
+(node :id flow-recent-entries
+      :label "RecentEntriesFlow"
+      :layer flow-coord
+      :crate runtime
+      :path "crates/runtime/src/flows/recent_entries.rs"
+      :kind struct
+      :upstream (cli-commands)
+      :downstream (repo-feed-source repo-feed-entry)
+      :state active
+      :notes "只读 projection；独立持有最小 read-only repository traits，不构造完整 RunContext。")
 
 (node :id runtime-error
       :label "RuntimeError enum"
@@ -503,7 +515,17 @@
       :path ".github/workflows/ci.yml"
       :kind module
       :state active
-      :notes "4 个并行 job：lint / test / migrate（含 PG service）/ docker-build。")
+      :notes "5 个并行 job：lint / test / migration-smoke / test-pg / docker-build。")
+
+(node :id acceptance-matrix-cli
+      :label "Rust acceptance matrix CLI"
+      :layer development-tooling
+      :crate rss-ai-news-acceptance
+      :path "tools/acceptance/src/"
+      :kind module
+      :downstream ()
+      :state active
+      :notes "零 product-crate 依赖；通过 Cargo/.ci/product CLI/PostgreSQL/Docker/release identity 外部边界编排 local/full profiles。")
 
 (node :id release-workflow
       :label "GitHub Actions Release"

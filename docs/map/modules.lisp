@@ -1,4 +1,4 @@
-;;; modules.lisp — 12 crate 模块清单
+;;; modules.lisp — 12 个 production crate + 1 个 development-tooling crate
 ;;;
 ;;; 格式说明见 map/README.md。本文件只描述 crate 节点 + crate 间依赖关系。
 ;;; 单个 crate 内部的关键符号 / Flow / 状态机见 architecture-plan.lisp 与
@@ -22,7 +22,7 @@
        :path "crates/cli/"
        :downstream (domain config runtime storage feed extractor ai publish observability)
        :state active
-       :notes "12 个子命令（ingest / ai-run / publish / publish-all / run / migrate / validate-config / doctor / replay / backfill / reindex / rebuild-report）。
+       :notes "13 个子命令（ingest / ai-run / publish / publish-all / run / migrate / validate-config / doctor / replay / backfill / reindex / rebuild-report / recent-entries）。
                入口 crates/cli/src/lib.rs::run。args.rs 维护 clap derive 结构。
                注意：cli 不直接拉 report，渲染发生在 runtime/flows/publish/ 中调 report crate。
                注意：没有独立的 `extract` 子命令 —— 抓正文与抓 feed 合并在 `ingest`、`run`、`replay --kind=html`、`backfill --target=extract` 等入口里。")
@@ -56,7 +56,7 @@
        :path "crates/runtime/"
        :downstream (domain config storage feed extractor ai report publish observability)
        :state active
-       :notes "8 个 Flow 模块对应主链路 + reindex + backfill + rebuild_report。
+       :notes "9 个 Flow 模块对应主链路 + reindex + backfill + rebuild_report + recent_entries。
                RunContext 是接缝点：承载 6 capability clients + 10 Repository traits。
                events.rs::RunEventEmitter 强制 redaction。
                artifact.rs::ArtifactWriter 控制 raw_artifacts 留档。
@@ -132,3 +132,11 @@
                redact：URL userinfo / Bearer / JSON 键名匹配（api_key / token / secret / password / access_key）。
                health：HealthCheck trait + doctor 子命令。
                详见 plan/07-observability.md。")
+
+(crate :id acceptance-tooling
+       :label "仓库级 Rust acceptance matrix CLI"
+       :layer development-tooling
+       :path "tools/acceptance/"
+       :downstream ()
+       :state active
+       :notes "不依赖任何 product crate；只编排 Cargo/.ci/product CLI/PostgreSQL/Docker/release identity gates。不会进入 runtime/scheduler images。")

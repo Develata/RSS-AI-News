@@ -1,6 +1,10 @@
 /target
 /.codex-tmp/
 
+# Rust / linker crash dumps
+/core
+/core.*
+
 # CodeGraph 本机索引（tree-sitter 知识图谱，可随时重建）
 /.codegraph/
 

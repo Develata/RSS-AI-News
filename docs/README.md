@@ -1,6 +1,6 @@
 # RSS-AI-News 文档
 
-本目录是 RSS-AI-News 的设计与运维文档真相源。当前版本：v0.3.0（细节优化期）。
+本目录是 RSS-AI-News 的设计与运维文档真相源。当前版本：v0.7.1。
 
 ## 项目一句话定位
 
@@ -27,7 +27,8 @@
 1. [operations/cli-reference.md](./operations/cli-reference.md) — 所有子命令 + flag + exit code
 2. [operations/docker-and-scheduler.md](./operations/docker-and-scheduler.md) — Docker + 外挂 cron
 3. [operations/postgres-deployment.md](./operations/postgres-deployment.md) — PG 切换
-4. [operations/troubleshooting.md](./operations/troubleshooting.md) — doctor + 常见故障
+4. [operations/acceptance-matrix.md](./operations/acceptance-matrix.md) — Rust pre-tag/full 验收矩阵
+5. [operations/troubleshooting.md](./operations/troubleshooting.md) — doctor + 常见故障
 
 ### 我要做架构评审 / 复盘决策
 

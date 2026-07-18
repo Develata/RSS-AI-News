@@ -223,6 +223,17 @@
       :notes "用当前模板 + 冻结 snapshot 重新渲染。
               snapshot 不变 → 字节相等；模板变 → 字节差异即影响范围。")
 
+(node :id recent-entries-command
+      :label "recent-entries read-only projection"
+      :layer instruction-interface
+      :crate cli
+      :path "plan/09-cli-and-runtime.md"
+      :kind function
+      :upstream (cli-main)
+      :downstream (flow-recent-entries repo-feed-source repo-feed-entry)
+      :state active
+      :notes "按 category/discovered_after 导出有界 entry + source health；published_after 仅在 consumer 显式提供时启用。")
+
 ;; ====================================================================
 ;; CLI surface（plan/09）
 ;; ====================================================================
@@ -237,6 +248,7 @@
       :downstream (cli-ingest cli-extract cli-ai-run cli-publish cli-publish-all
                    cli-run cli-migrate cli-validate-config cli-doctor
                    replay-command backfill-command reindex-command rebuild-report-command
+                   recent-entries-command
                    config-loader observability-stack runtime-context)
       :state active
       :notes "main.rs 仅一行：rss_ai_news_cli::run().await.into_process_exit()。")

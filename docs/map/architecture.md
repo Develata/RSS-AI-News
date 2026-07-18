@@ -6,7 +6,7 @@
 ## 整体形态
 
 - 一只 **single-shot CLI**（`rss-ai-news`），每次 run 完成一段流水线后退出
-- 11 个 library crate + 1 个根 binary = workspace 共 12 crate
+- production graph 为 11 个 library crate + 1 个根 binary；workspace 另含 1 个零 product-crate 依赖的 acceptance tooling crate
 - 主链路 5 段：`ingest → extract → ai-run → publish → publish-remote`
 - 调度外挂（外挂 cron / supercronic 镜像），见 [../plan/13-non-goals.md](../plan/13-non-goals.md)
 
@@ -29,6 +29,10 @@
 
 跨层调用规则：上层调下层、同层调同层、**禁止下层反向调上层**。`observability`
 是显式横向，可被任一层使用。
+
+仓库级验收编排位于 `tools/acceptance/`，处于 development tooling boundary；它只通过
+Cargo、product CLI、PostgreSQL URL 与 Docker CLI 验收 production graph，不被任何 product
+crate 或 runtime image 依赖。
 
 ## 主链路一图
 

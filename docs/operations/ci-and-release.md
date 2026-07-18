@@ -124,10 +124,11 @@ docker compose -f docker-compose.scheduler.yml up -d --force-recreate
 | v0.6.0 | 2026-06-17 | [../reports/releases/v0.6.0.md](../reports/releases/v0.6.0.md) |
 | v0.6.1 | 2026-06-19 | patch（未单独 report） |
 | v0.6.2 | 2026-06-19 | patch（未单独 report） |
+| v0.7.0 | 2026-07-17 | [../reports/releases/v0.7.0.md](../reports/releases/v0.7.0.md) |
 
-pre-tag candidate：[v0.7.0](../reports/releases/v0.7.0.md)（尚未创建 tag / images）。
+pre-tag candidate：[v0.7.1](../reports/releases/v0.7.1.md)。
 
-> 当前约定：minor / major release 写 report；patch（修 bug、不影响 surface）不写。
+> 当前约定：minor / major release 写 report；纯 bugfix patch 可不写。改变公开 surface 或 release tooling 的 patch 仍写 report。
 
 ## 相关文档
 

@@ -20,6 +20,7 @@ COPY crates/ai/Cargo.toml          crates/ai/Cargo.toml
 COPY crates/report/Cargo.toml      crates/report/Cargo.toml
 COPY crates/publish/Cargo.toml     crates/publish/Cargo.toml
 COPY crates/observability/Cargo.toml crates/observability/Cargo.toml
+COPY tools/acceptance/Cargo.toml      tools/acceptance/Cargo.toml
 
 # Create stub sources so cargo can resolve and pre-build deps.
 RUN set -eux; \
@@ -28,7 +29,9 @@ RUN set -eux; \
     for c in cli domain config runtime storage feed extractor ai report publish observability; do \
         mkdir -p "crates/$c/src"; \
         : > "crates/$c/src/lib.rs"; \
-    done
+    done; \
+    mkdir -p tools/acceptance/src; \
+    echo 'fn main() {}' > tools/acceptance/src/main.rs
 
 # Pre-build dependencies. Allowed to fail on stub bodies; the goal is to populate
 # the registry / git / target caches.

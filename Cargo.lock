@@ -2936,7 +2936,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "rss-ai-news-cli",
  "rss-ai-news-config",
@@ -2948,8 +2948,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss-ai-news-acceptance"
+version = "0.7.1"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rss-ai-news-ai"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-openai",
  "async-trait",
@@ -2966,7 +2975,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-cli"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "clap",
@@ -2997,7 +3006,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-config"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "dotenvy",
@@ -3013,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-domain"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3026,7 +3035,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-extractor"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3045,7 +3054,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-feed"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3062,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-observability"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "fs2",
@@ -3089,7 +3098,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-publish"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -3107,7 +3116,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-report"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "rss-ai-news-domain",
@@ -3123,7 +3132,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-runtime"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "fastrand",
@@ -3150,7 +3159,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-storage"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "rss-ai-news-domain",
