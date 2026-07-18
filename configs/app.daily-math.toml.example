@@ -1,0 +1,114 @@
+schema_version = "1"
+
+# Dedicated discovery-only deployment for Develata's daily mathematics journal.
+# Runtime copy: server-configs/daily-math/configs/app.toml
+[database]
+driver = "sqlite"
+sqlite_path = "/opt/gitclone/rss-ai-news/server-configs/daily-math/data/rss-ai-news.db"
+max_connections = 3
+busy_timeout_ms = 5000
+
+[http]
+user_agent = "RSS-AI-News/Daily-Math-Discovery"
+timeout_seconds = 30
+max_retries = 3
+retry_backoff_base_ms = 1000
+concurrent_feeds = 6
+concurrent_fetches = 3
+
+[ai]
+enabled = false
+model = "disabled"
+fallback_models = []
+max_tokens = 4096
+temperature = 0.0
+request_timeout_seconds = 60
+max_input_chars = 8000
+
+[ai.rate_limit]
+requests_per_minute = 1
+tokens_per_minute = 0
+
+[publish]
+target_timezone = "Asia/Shanghai"
+github_owner = ""
+github_repo = ""
+github_branch = "main"
+github_path_prefix = "archive"
+local_output_dir = "/opt/gitclone/rss-ai-news/server-configs/daily-math/output"
+include_unscored = true
+max_items_per_report = 30
+min_importance_score = 0
+candidate_window_hours = 72
+
+[publish.template]
+path_template = "{CATEGORY_KEY}/{YYYY}/{YYYYMMDD}.md"
+frontmatter_template = """
+---
+title: {date}
+date: {date}
+excerpt: {excerpt_yaml}
+---
+"""
+report_template = """
+{frontmatter}
+# {title_md}
+{excerpt_block}
+{items}
+"""
+item_template = """
+## {item_title_md}{score_badge}
+
+{tags_block}- **Source:** `{source_code}` | [阅读原文]({url_md})
+
+> [摘要]
+{summary_blockquote}
+
+---
+
+"""
+
+[dedup]
+enable_link_dedup = true
+enable_content_dedup = true
+link_normalizer_version = "1"
+
+[extractor]
+strategy_order = ["readability", "summary_fallback"]
+max_body_bytes = 1048576
+feed_max_body_bytes = 5242880
+min_body_chars = 100
+
+[lease]
+fetch_duration_seconds = 300
+ai_duration_seconds = 600
+publish_duration_seconds = 600
+reclaim_interval_seconds = 120
+
+[retry]
+feed_entry_max_attempts = 5
+ai_max_attempts = 1
+publish_max_attempts = 3
+
+[runtime]
+max_batches_per_run = 1
+
+[artifact]
+retention_policy = "off"
+sample_rate = 0.0
+inline_threshold_bytes = 65536
+file_storage_dir = "/opt/gitclone/rss-ai-news/server-configs/daily-math/data/artifacts"
+ttl_days = 7
+
+[observability]
+log_level = "info"
+log_format = "json"
+log_file = ""
+enable_metrics = false
+metrics_bind = "127.0.0.1:9090"
+
+[doctor]
+stuck_reindex_pending_secs = 3600
+silent_source_max_age_secs = 172800
+silent_source_max_consecutive_failures = 10
+pending_backlog_warn_threshold = 1000

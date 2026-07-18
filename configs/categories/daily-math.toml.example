@@ -10,8 +10,8 @@ priority = 10
 
 [category.publish_override]
 max_items_per_report = 30
-min_importance_score = 40
-include_unscored = false
+min_importance_score = 0
+include_unscored = true
 
 # Broad, first-person mathematical exposition.
 [[sources]]
@@ -105,28 +105,22 @@ feed_kind = "rss"
 priority = 30
 enabled = true
 
-# Official arXiv category feeds are high-volume discovery surfaces. The
-# rss-ai-news scorer should filter them; feed entries are never citation proof.
+# Narrow, first-person interview and lecture feeds. Dormancy is acceptable:
+# their role is durable mathematical thought rather than a daily news quota.
 [[sources]]
-key = "archive.arxiv.math-pr"
-display_name = "arXiv math.PR — Probability"
-feed_url = "https://rss.arxiv.org/rss/math.PR"
+key = "interview.quanta-joy-of-why"
+display_name = "Quanta — The Joy of Why"
+feed_url = "https://joy.quantamagazine.org"
+site_url = "https://www.quantamagazine.org/tag/the-joy-of-why/"
 feed_kind = "rss"
-priority = 30
+priority = 10
 enabled = true
 
 [[sources]]
-key = "archive.arxiv.math-co"
-display_name = "arXiv math.CO — Combinatorics"
-feed_url = "https://rss.arxiv.org/rss/math.CO"
+key = "lecture.oxford-secrets-of-mathematics"
+display_name = "Oxford — The Secrets of Mathematics"
+feed_url = "https://podcasts.ox.ac.uk/feeds/ec56aa75-6949-4359-8b58-34f477314993/audio.xml"
+site_url = "https://podcasts.ox.ac.uk/series/secrets-mathematics"
 feed_kind = "rss"
-priority = 30
-enabled = true
-
-[[sources]]
-key = "archive.arxiv.math-mg"
-display_name = "arXiv math.MG — Metric Geometry"
-feed_url = "https://rss.arxiv.org/rss/math.MG"
-feed_kind = "rss"
-priority = 40
+priority = 10
 enabled = true
