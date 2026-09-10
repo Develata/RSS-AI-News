@@ -1,3 +1,4 @@
+use rss_ai_news_storage::RuleVersionRepository;
 use std::{
     io::{self, Write},
     path::PathBuf,
@@ -10,7 +11,7 @@ use serde::Serialize;
 use crate::{
     args::{Cli, RebuildReportArgs},
     commands::backfill::parse_date_start,
-    context_factory::build_run_context,
+    context_factory::{build_rebuild_report_deps, open_read_storage},
     error::CliError,
     output::CommandSummary,
 };
@@ -45,7 +46,9 @@ pub async fn run(
 ) -> Result<RebuildReportCommandSummary, CliError> {
     let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
-    let ctx = build_run_context("rebuild-report", &loaded, None).await?;
+    let pool = open_read_storage(&loaded).await?;
+    let ctx = build_rebuild_report_deps(&loaded, &pool)?;
+    let rule_version_repo = rss_ai_news_storage::RuleVersionRepo::new_with_storage(pool.clone());
 
     let record = if let Some(id) = args.publish_id {
         ctx.publish_record_repo
@@ -65,8 +68,7 @@ pub async fn run(
         // F15-3: rebuild-report 仅用 render_version 重建 idempotency key，
         // 走 active_rule_or_register 读路径；force 模式由 publish 命令
         // 单独负责，不在 rebuild-report 复制语义。
-        let render_version = ctx
-            .rule_version_repo
+        let render_version = rule_version_repo
             .active_rule_or_register("render", "default", "default render", "v1")
             .await?;
         let key = PublishFlow::build_idempotency_key(&category.category.key, date, render_version);

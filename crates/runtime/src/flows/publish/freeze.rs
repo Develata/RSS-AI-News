@@ -39,7 +39,7 @@ impl PublishFlow {
         opts: PublishFreezeOptions,
     ) -> PublishFreezeOutcome {
         let emitter = RunEventEmitter {
-            run_id: &self.ctx.run_id,
+            run_id: &self.ctx.run.run_id,
             stage: "publish",
             repo: self.ctx.event_repo.as_ref(),
         };
@@ -64,10 +64,10 @@ impl PublishFlow {
             now,
             lease_expires_at: lease_expires_at(
                 now,
-                Duration::seconds(self.ctx.app.lease.publish_duration_seconds as i64),
+                Duration::seconds(self.ctx.lease.publish_duration_seconds as i64),
             ),
             batch_size: 1,
-            max_attempts: self.ctx.app.retry.publish_max_attempts,
+            max_attempts: self.ctx.retry.publish_max_attempts,
         };
         let claimed_result = if let Some(publish_record_id) = publish_record_id {
             self.ctx

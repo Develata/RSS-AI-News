@@ -6,25 +6,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_domain::dto::extract::{ArticleFetchTask, ExtractedArticle};
-use rss_ai_news_domain::dto::feed::FeedFetchRequest;
 use rss_ai_news_domain::state::{ContentQuality, ExtractorStrategy};
 use rss_ai_news_extractor::{ContentStrategy, ExtractorError, HtmlFetcher, RawHtmlFetch};
-use rss_ai_news_feed::fetcher::RawFeedFetch;
-use rss_ai_news_feed::{FeedError, FeedFetcher};
-use rss_ai_news_publish::LocalFsTarget;
-use rss_ai_news_runtime::{
-    ExtractEntryStatus, ExtractFlow, ExtractOptions, RunContext, RunContextDeps,
-};
-use rss_ai_news_storage::{
-    ArticleAiResultRepo, ArticleRepo, ArticleRepository, FeedEntryRepo, FeedSourceRepo, NewArticle,
-    PublishItemRepo, PublishRecordRepo, RawArtifactRepo, RunEventRepo,
-};
+use rss_ai_news_runtime::{ExtractEntryStatus, ExtractFlow, ExtractOptions};
+use rss_ai_news_storage::{ArticleRepo, ArticleRepository, NewArticle};
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
 
 use common::{
-    DummyAiClient, app_config, insert_config_rule, insert_source, make_test_pool,
-    seed_extractor_rule_version, seed_pending_fetch_entry,
+    app_config, insert_config_rule, insert_source, make_test_pool, seed_extractor_rule_version,
+    seed_pending_fetch_entry,
 };
 
 struct MockHtmlFetcher {
@@ -63,17 +54,6 @@ impl ContentStrategy for MockStrategy {
         final_url: &str,
     ) -> Result<ExtractedArticle, ExtractorError> {
         (self.extract_fn)(task, html_bytes, final_url)
-    }
-}
-
-struct DummyFeedFetcher;
-
-#[async_trait]
-impl FeedFetcher for DummyFeedFetcher {
-    async fn fetch_raw(&self, _req: &FeedFetchRequest) -> Result<RawFeedFetch, FeedError> {
-        Err(FeedError::ConnectionFailed {
-            source: "extract tests do not fetch feeds".to_string(),
-        })
     }
 }
 
@@ -539,29 +519,13 @@ fn flow(
     strategies: Vec<Arc<dyn ContentStrategy>>,
 ) -> ExtractFlow {
     let app = Arc::new(app_config(RetentionPolicy::Always, 1));
-    let ctx = Arc::new(RunContext::new_for_stage(
-        "extract",
+    let ctx = Arc::new(common::extract_deps(
+        pool,
         app,
-        RunContextDeps {
-            feed_fetcher: Arc::new(DummyFeedFetcher),
-            html_fetcher: Arc::new(MockHtmlFetcher {
-                responses: Mutex::new(responses),
-            }),
-            strategies,
-            ai_client: Arc::new(DummyAiClient),
-            publish_target_local: Arc::new(LocalFsTarget::new(std::env::temp_dir())),
-            publish_target_remote: None,
-            feed_source_repo: Arc::new(FeedSourceRepo::new(pool.clone())),
-            feed_entry_repo: Arc::new(FeedEntryRepo::new(pool.clone())),
-            article_repo: Arc::new(ArticleRepo::new(pool.clone())),
-            ai_result_repo: Arc::new(ArticleAiResultRepo::new(pool.clone())),
-            publish_record_repo: Arc::new(PublishRecordRepo::new(pool.clone())),
-            publish_item_repo: Arc::new(PublishItemRepo::new(pool.clone())),
-            artifact_repo: Arc::new(RawArtifactRepo::new(pool.clone())),
-            event_repo: Arc::new(RunEventRepo::new(pool.clone())),
-            rule_version_repo: Arc::new(rss_ai_news_storage::RuleVersionRepo::new(pool.clone())),
-            reindex_job_repo: Arc::new(rss_ai_news_storage::ReindexJobRepo::new(pool)),
-        },
+        Arc::new(MockHtmlFetcher {
+            responses: Mutex::new(responses),
+        }),
+        strategies,
     ));
     ExtractFlow::new(ctx)
 }

@@ -24,7 +24,7 @@ use serde::Serialize;
 use crate::{
     args::{Cli, ReindexArgs},
     commands::backfill::sha256_hex,
-    context_factory::build_run_context,
+    context_factory::{build_reindex_deps, open_write_storage},
     error::CliError,
     output::CommandSummary,
 };
@@ -148,7 +148,8 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
             .ok_or_else(|| CliError::ReindexAbortInvalidJobId { raw: raw.clone() })?;
 
         let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
-        let ctx = build_run_context("reindex", &loaded, None).await?;
+        let pool = open_write_storage(&loaded).await?;
+        let ctx = build_reindex_deps(&loaded, &pool)?;
         let outcome = ReindexFlow::new(ctx)
             .abort(job_id, "cli reindex --abort")
             .await?;
@@ -167,7 +168,8 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
 
     let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
-    let ctx = build_run_context("reindex", &loaded, None).await?;
+    let pool = open_write_storage(&loaded).await?;
+    let ctx = build_reindex_deps(&loaded, &pool)?;
 
     // F15-10：dry-run 与真实 run 共用 build_run_context（dry-run 仅读不写，
     // 复用同一 RunContext 没有副作用）。

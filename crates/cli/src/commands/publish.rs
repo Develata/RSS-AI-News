@@ -1,3 +1,4 @@
+use rss_ai_news_storage::RuleVersionRepository;
 use std::io::{self, Write};
 
 use rss_ai_news_config::{self as config, CategoryConfig};
@@ -12,7 +13,7 @@ use time::OffsetDateTime;
 use crate::{
     args::{Cli, PublishArgs},
     commands::backfill::parse_date_start,
-    context_factory::build_run_context,
+    context_factory::{build_publish_deps, open_write_storage},
     error::CliError,
     output::CommandSummary,
 };
@@ -62,7 +63,9 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
     if args.date.is_some() {
         let _ = parse_date_start(args.date.as_deref())?;
     }
-    let ctx = build_run_context("publish", &loaded, None).await?;
+    let pool = open_write_storage(&loaded).await?;
+    let ctx = build_publish_deps(&loaded, &pool, args.local_only)?;
+    let rule_version_repo = rss_ai_news_storage::RuleVersionRepo::new_with_storage(pool.clone());
     let flow = PublishFlow::new(ctx.clone());
     let mode = if args.local_only || ctx.publish_target_remote.is_none() {
         "local"
@@ -80,16 +83,15 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
             date,
             OffsetDateTime::now_utc().unix_timestamp()
         );
-        ctx.rule_version_repo
+        rule_version_repo
             .get_or_create("render", &force_tag, "force render trace", "v1")
             .await?
     } else {
-        ctx.rule_version_repo
+        rule_version_repo
             .active_rule_or_register("render", "default", "default render", "v1")
             .await?
     };
-    let selection_policy_version = ctx
-        .rule_version_repo
+    let selection_policy_version = rule_version_repo
         .active_rule_or_register(
             "selection_policy",
             "default",

@@ -7,9 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// FeedEntry processing state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum FeedEntryState {
     Discovered,
     DedupSkipped,
@@ -22,9 +21,8 @@ pub enum FeedEntryState {
 }
 
 /// Article lifecycle state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum ArticleState {
     Persisted,
     AiPending,
@@ -36,9 +34,8 @@ pub enum ArticleState {
 }
 
 /// AI result processing state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum AiResultState {
     Pending,
     Running,
@@ -48,9 +45,8 @@ pub enum AiResultState {
 }
 
 /// Publish record state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum PublishState {
     Pending,
     SnapshotFrozen,
@@ -62,9 +58,8 @@ pub enum PublishState {
 }
 
 /// Feed source status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum FeedSourceStatus {
     Active,
     Paused,
@@ -72,9 +67,8 @@ pub enum FeedSourceStatus {
 }
 
 /// Feed format kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum FeedKind {
     Rss,
     Atom,
@@ -83,9 +77,8 @@ pub enum FeedKind {
 }
 
 /// Dedup decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum DedupDecision {
     Fresh,
     UidDup,
@@ -94,18 +87,16 @@ pub enum DedupDecision {
 }
 
 /// Extractor strategy used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum ExtractorStrategy {
     Readability,
     SummaryFallback,
 }
 
 /// Content quality assessment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum ContentQuality {
     High,
     Medium,
@@ -113,9 +104,8 @@ pub enum ContentQuality {
 }
 
 /// Raw artifact kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum ArtifactKind {
     FeedPayload,
     HtmlPayload,
@@ -123,9 +113,8 @@ pub enum ArtifactKind {
 }
 
 /// Backfill target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum BackfillTarget {
     Extract,
     Ai,
@@ -139,9 +128,8 @@ pub enum BackfillTarget {
 ///   `active_rule(kind)` ignore these rows.
 /// - `Superseded`: replaced by a newer `Active` row; preserved for audit
 ///   joins. `retired_at` is non-NULL for these rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum RuleVersionStatus {
     Pending,
     Active,
@@ -150,9 +138,8 @@ pub enum RuleVersionStatus {
 
 /// Reindex job state machine. See `docs/design/state-machine.md` §6.2
 /// (reindex_job state set) + `storage-schema.md` §4.10 (`reindex_jobs.state`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum ReindexJobState {
     Pending,
     Running,
@@ -167,10 +154,9 @@ pub enum ReindexJobState {
 ///
 /// String form is **snake_case** (`link_hash` / `content_hash` /
 /// `categories`) per `internal-dto-contracts.md` §8 — uniform with all other
-/// domain enums across serde, sqlx, run_events, and CLI input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+/// domain enums across serde, persistence, run_events, and CLI input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum ReindexTarget {
     LinkHash,
     ContentHash,
@@ -179,21 +165,26 @@ pub enum ReindexTarget {
 
 impl fmt::Display for ReindexTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = serde_json::to_value(self)
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_else(|| format!("{self:?}"));
-        f.write_str(&s)
+        f.write_str(match self {
+            Self::LinkHash => "link_hash",
+            Self::ContentHash => "content_hash",
+            Self::Categories => "categories",
+        })
     }
 }
 
 impl fmt::Display for FeedEntryState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = serde_json::to_value(self)
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_else(|| format!("{self:?}"));
-        f.write_str(&s)
+        f.write_str(match self {
+            Self::Discovered => "discovered",
+            Self::DedupSkipped => "dedup_skipped",
+            Self::PendingFetch => "pending_fetch",
+            Self::Fetching => "fetching",
+            Self::Extracting => "extracting",
+            Self::Persisted => "persisted",
+            Self::FallbackPersisted => "fallback_persisted",
+            Self::Failed => "failed",
+        })
     }
 }
 
@@ -363,6 +354,25 @@ mod tests {
         assert_eq!(ReindexTarget::LinkHash.to_string(), "link_hash");
         assert_eq!(ReindexTarget::ContentHash.to_string(), "content_hash");
         assert_eq!(ReindexTarget::Categories.to_string(), "categories");
+    }
+
+    #[test]
+    fn feed_entry_state_display_matches_serialized_name() {
+        for state in [
+            FeedEntryState::Discovered,
+            FeedEntryState::DedupSkipped,
+            FeedEntryState::PendingFetch,
+            FeedEntryState::Fetching,
+            FeedEntryState::Extracting,
+            FeedEntryState::Persisted,
+            FeedEntryState::FallbackPersisted,
+            FeedEntryState::Failed,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&state).unwrap(),
+                format!("\"{state}\""),
+            );
+        }
     }
 
     #[test]

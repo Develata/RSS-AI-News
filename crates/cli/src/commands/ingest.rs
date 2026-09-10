@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::{
     args::{Cli, IngestArgs},
-    context_factory::build_run_context,
+    context_factory::{build_extract_deps, build_ingest_deps, open_write_storage},
     error::CliError,
     output::CommandSummary,
 };
@@ -75,7 +75,8 @@ pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, C
     let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let started = Instant::now();
-    let ctx = build_run_context("ingest", &loaded, None).await?;
+    let pool = open_write_storage(&loaded).await?;
+    let ctx = build_ingest_deps(&loaded, &pool)?;
 
     let ingest_flow =
         IngestFlow::with_source_secrets(ctx.clone(), categories, loaded.source_secrets.clone());
@@ -84,16 +85,16 @@ pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, C
     let extract_summary = if args.skip_fetch {
         ExtractSummary::default()
     } else {
-        let extract_flow = ExtractFlow::new(ctx.clone());
+        let extract_flow = ExtractFlow::new(build_extract_deps(&loaded, &pool, ctx.run.clone())?);
         extract_flow
             .run(ExtractOptions {
                 batch_size: args.batch_size,
-                max_attempts: ctx.app.retry.feed_entry_max_attempts,
+                max_attempts: loaded.app.retry.feed_entry_max_attempts,
                 // F6-3: 从 app.runtime.max_batches_per_run 取生效值。
                 // `--max-batches` 已经由 CliOverrides::apply_to_app
                 // 覆盖到该字段（F5-6），所以此处只是把 CLI > config > 默认
                 // 三层解析的结果直传到 flow。
-                max_batches: ctx.app.runtime.max_batches_per_run,
+                max_batches: loaded.app.runtime.max_batches_per_run,
             })
             .await
     };

@@ -12,10 +12,7 @@ rss-ai-news-extractor.workspace = true
 rss-ai-news-ai.workspace = true
 rss-ai-news-report.workspace = true
 rss-ai-news-publish.workspace = true
-# Used by RunEventEmitter to redact secrets from `context_json` payloads
-# before they hit the run_events table (W2-B-4 / error-and-observability
-# §4.2). Pulls in only the redact module — no transitive deps on cli/
-# storage/runtime, so no dependency cycle is introduced.
+# Tracing/metrics/redaction and generic health types; concrete checks live here.
 rss-ai-news-observability.workspace = true
 async-trait = "0.1"
 serde_json.workspace = true
@@ -29,7 +26,11 @@ time.workspace = true
 ulid.workspace = true
 sqlx.workspace = true
 
+reqwest.workspace = true
+fs2.workspace = true
+
 [dev-dependencies]
+wiremock = "0.6"
 rss-ai-news-ai.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio", "macros"] }

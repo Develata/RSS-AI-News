@@ -28,7 +28,7 @@ impl ReindexFlow {
         reason: &str,
     ) -> Result<ReindexAbortOutcome, RuntimeError> {
         let emitter = RunEventEmitter {
-            run_id: &self.ctx.run_id,
+            run_id: &self.ctx.run.run_id,
             stage: "reindex",
             repo: self.ctx.event_repo.as_ref(),
         };

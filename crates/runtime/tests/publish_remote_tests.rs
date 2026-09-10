@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rss_ai_news_config::RetentionPolicy;
-use rss_ai_news_domain::dto::feed::FeedFetchRequest;
 use rss_ai_news_domain::dto::publish::RenderedReport;
-use rss_ai_news_feed::{FeedError, FeedFetcher};
 use rss_ai_news_publish::{
     LocalFsTarget, PublishError, PublishTarget, PublishedArtifact, PublishedBatchArtifact,
 };
@@ -17,9 +15,7 @@ use rss_ai_news_runtime::{
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
-use common::{
-    app_config, full_context_with_publish_targets, make_test_pool, seed_rendered_publish_record,
-};
+use common::{app_config, make_test_pool, publish_deps, seed_rendered_publish_record};
 
 #[tokio::test]
 async fn publish_remote_succeeds_promotes_articles() {
@@ -195,11 +191,9 @@ async fn seed_stored_local_publish_record(pool: &SqlitePool) -> i64 {
 fn flow(pool: SqlitePool, remote_target: Option<Arc<dyn PublishTarget>>) -> PublishFlow {
     let app = Arc::new(app_config(RetentionPolicy::Always, 1));
     let output_dir = tempfile::tempdir().unwrap();
-    let ctx = Arc::new(full_context_with_publish_targets(
-        "publish",
+    let ctx = Arc::new(publish_deps(
         pool,
         app,
-        Arc::new(DummyFeedFetcher),
         Arc::new(LocalFsTarget::new(output_dir.path().to_path_buf())),
         remote_target,
     ));
@@ -345,19 +339,5 @@ struct MockAuthFailTarget;
 impl PublishTarget for MockAuthFailTarget {
     async fn publish(&self, _report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
         Err(PublishError::GitHubAuthFailed("bad token".to_string()))
-    }
-}
-
-struct DummyFeedFetcher;
-
-#[async_trait]
-impl FeedFetcher for DummyFeedFetcher {
-    async fn fetch_raw(
-        &self,
-        _request: &FeedFetchRequest,
-    ) -> Result<rss_ai_news_feed::fetcher::RawFeedFetch, FeedError> {
-        Err(FeedError::ConnectionFailed {
-            source: "publish tests do not fetch feeds".to_string(),
-        })
     }
 }

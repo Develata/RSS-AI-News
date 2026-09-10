@@ -597,11 +597,9 @@ async fn dry_run_categories_counts_would_archive_without_writing() {
 }
 
 fn reindex(pool: &SqlitePool) -> ReindexFlow {
-    ReindexFlow::new(Arc::new(common::full_context(
-        "reindex",
+    ReindexFlow::new(Arc::new(common::reindex_deps(
         pool.clone(),
         Arc::new(common::app_config(RetentionPolicy::Always, 1)),
-        Arc::new(common::DummyFeedFetcher),
     )))
 }
 

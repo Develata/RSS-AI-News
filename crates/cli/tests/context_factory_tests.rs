@@ -1,17 +1,10 @@
-//! W14-B codex P2 回归：composition root 全局 AI client 守卫。
-//!
-//! 放宽全局凭证 gate 后，"全部板块自带凭证 + 遗留全局 OPENAI_API_KEY +
-//! 全局 OPENAI_BASE_URL 缺省"是合法配置；build_run_context 的全局分支
-//! 必须同时校验 key + base，否则会拿空串 api_base 构造 OpenAiCompatClient
-//! → InvalidConfig，让 ingest/publish 等不调 AI 的命令死在 ctx 构造期。
-//!
-//! 测试密闭性（codex 复审 P2）：直接构造 LoadedConfig / AiCredentials，
-//! 不走 config::load——后者优先读进程环境（DATABASE_URL / OPENAI_BASE_URL
-//! 等会污染断言或让 sqlite driver 与外部 postgres URL 错配误失败）。
+//! Storage composition-root regression tests: config rotation stays explicit,
+//! and opening write storage does not require AI clients or credentials.
+//! LoadedConfig is constructed directly to avoid process-environment pollution.
 
-use rss_ai_news_cli::context_factory::build_run_context;
+use rss_ai_news_cli::context_factory::open_write_storage;
 use rss_ai_news_config::{
-    AiCredentials, AppConfig, CategoryConfig, CliOverrides, EnvConfig, LoadedConfig, SourceSecrets,
+    AppConfig, CategoryConfig, CliOverrides, EnvConfig, LoadedConfig, SourceSecrets,
 };
 use rss_ai_news_domain::SecretString;
 use rss_ai_news_storage::{
@@ -20,29 +13,15 @@ use rss_ai_news_storage::{
 use tempfile::TempDir;
 
 #[tokio::test]
-async fn global_branch_without_base_url_falls_back_to_null_client() {
+async fn opening_write_storage_does_not_require_complete_ai_credentials() {
     let temp = TempDir::new().expect("temp dir");
     let loaded = loaded_config(&temp);
-
-    // 不变量自检：场景 = 遗留全局 key 存在、全局 base 缺省（密闭构造保证，
-    // 与进程环境无关）。
     assert!(loaded.env.openai_api_key.is_some());
     assert!(loaded.env.openai_base_url.is_none());
 
-    // 修复前：全局分支只查 key → 空串 api_base → InvalidConfig 直接失败。
-    build_run_context("test-global", &loaded, None)
+    open_write_storage(&loaded)
         .await
-        .expect("incomplete global credentials must fall back to NullAiClient, not fail");
-
-    // Some(板块凭证) 路径照常装配（凭证折叠/解析逻辑由 config crate
-    // credentials 测试覆盖，此处直接构造）。
-    let credentials = AiCredentials {
-        base_url: "https://api.deepseek.com/v1".to_string(),
-        api_key: SecretString::new("sk-deepseek"),
-    };
-    build_run_context("test-category", &loaded, Some(credentials))
-        .await
-        .expect("category credentials build the client");
+        .expect("storage startup must be independent of incomplete AI credentials");
 }
 
 /// W16 P2（docs/plan/16-config-versioning.md §5/§7）：启动期 seed 的 sha-keyed
@@ -53,13 +32,13 @@ async fn startup_seed_rotates_active_config_to_current_sha() {
 
     let mut loaded = loaded_config(&temp);
     loaded.config_sha256 = "a".repeat(64);
-    build_run_context("test-rotate-a", &loaded, None)
+    open_write_storage(&loaded)
         .await
         .expect("first build seeds sha A");
 
     let mut loaded = loaded_config(&temp);
     loaded.config_sha256 = "b".repeat(64);
-    build_run_context("test-rotate-b", &loaded, None)
+    open_write_storage(&loaded)
         .await
         .expect("second build rotates to sha B");
 
@@ -105,7 +84,7 @@ async fn startup_seed_supersedes_bootstrap_placeholder() {
 
     let mut loaded = loaded_config(&temp);
     loaded.config_sha256 = "c".repeat(64);
-    build_run_context("test-heal", &loaded, None)
+    open_write_storage(&loaded)
         .await
         .expect("build on placeholder db");
 
@@ -121,7 +100,7 @@ async fn startup_seed_supersedes_bootstrap_placeholder() {
     );
 }
 
-/// 打开与 build_run_context 同一 sqlite 文件的校验连接（顺带跑 migrations，
+/// 打开与 open_write_storage 同一 sqlite 文件的校验连接（顺带跑 migrations，
 /// 供"先预置数据再启动"的场景使用；migrations 幂等）。
 async fn verify_pool(temp: &TempDir) -> sqlx::SqlitePool {
     let db_path = temp.path().join("rss.sqlite");

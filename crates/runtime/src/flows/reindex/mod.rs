@@ -11,7 +11,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 
-use crate::context::RunContext;
+use crate::context::ReindexDeps;
 use crate::error::RuntimeError;
 use crate::events::RunEventEmitter;
 use crate::flows::maintenance::emit_maintenance_outcome;
@@ -25,17 +25,17 @@ pub use dto::*;
 pub use rss_ai_news_domain::state::ReindexTarget;
 
 pub struct ReindexFlow {
-    ctx: Arc<RunContext>,
+    ctx: Arc<ReindexDeps>,
 }
 
 impl ReindexFlow {
-    pub fn new(ctx: Arc<RunContext>) -> Self {
+    pub fn new(ctx: Arc<ReindexDeps>) -> Self {
         Self { ctx }
     }
 
     pub async fn run(&self, opts: ReindexOptions) -> Result<ReindexSummary, RuntimeError> {
         let emitter = RunEventEmitter {
-            run_id: &self.ctx.run_id,
+            run_id: &self.ctx.run.run_id,
             stage: "reindex",
             repo: self.ctx.event_repo.as_ref(),
         };
@@ -93,7 +93,7 @@ impl ReindexFlow {
         let claim_now = OffsetDateTime::now_utc();
         let claim_lease = lease_expires_at(
             claim_now,
-            Duration::seconds(self.ctx.app.lease.ai_duration_seconds as i64),
+            Duration::seconds(self.ctx.lease.ai_duration_seconds as i64),
         );
         let claimed = self
             .ctx

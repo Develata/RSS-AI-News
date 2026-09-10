@@ -16,7 +16,7 @@ use rss_ai_news_storage::NewPublishRecord;
 use serde_json::json;
 use time::OffsetDateTime;
 
-use crate::context::RunContext;
+use crate::context::PublishDeps;
 use crate::events::RunEventEmitter;
 use crate::flows::maintenance::emit_maintenance_outcome;
 
@@ -29,11 +29,11 @@ mod store_local;
 pub use dto::*;
 
 pub struct PublishFlow {
-    ctx: Arc<RunContext>,
+    ctx: Arc<PublishDeps>,
 }
 
-fn render_templates_from_ctx(ctx: &RunContext, path_template: Option<&str>) -> RenderTemplates {
-    let template = &ctx.app.publish.template;
+fn render_templates_from_ctx(ctx: &PublishDeps, path_template: Option<&str>) -> RenderTemplates {
+    let template = &ctx.template;
     RenderTemplates {
         path_template: path_template
             .filter(|path_template| !path_template.trim().is_empty())
@@ -46,7 +46,7 @@ fn render_templates_from_ctx(ctx: &RunContext, path_template: Option<&str>) -> R
 }
 
 impl PublishFlow {
-    pub fn new(ctx: Arc<RunContext>) -> Self {
+    pub fn new(ctx: Arc<PublishDeps>) -> Self {
         Self { ctx }
     }
 
@@ -116,7 +116,7 @@ impl PublishFlow {
         let swept = self
             .ctx
             .publish_record_repo
-            .terminalize_exhausted(self.ctx.app.retry.publish_max_attempts, now)
+            .terminalize_exhausted(self.ctx.retry.publish_max_attempts, now)
             .await;
         emit_maintenance_outcome(emitter, "publish_records", reclaimed, Some(swept)).await;
     }

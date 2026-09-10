@@ -3,11 +3,8 @@ mod common;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_domain::Score0To100;
-use rss_ai_news_domain::dto::feed::FeedFetchRequest;
-use rss_ai_news_feed::{FeedError, FeedFetcher};
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishFreezeStatus, PublishInitOptions, PublishInitOutcome,
 };
@@ -15,7 +12,7 @@ use rss_ai_news_storage::{PublishItemRepo, PublishItemRepository};
 use sqlx::SqlitePool;
 
 use common::{
-    app_config, full_context, insert_config_rule, make_test_pool, seed_ai_succeeded_article,
+    app_config, insert_config_rule, make_test_pool, publish_deps, seed_ai_succeeded_article,
     seed_persisted_article_for_passthrough,
 };
 
@@ -265,11 +262,11 @@ async fn freeze_run_start_maintenance_sweeps_exhausted_pending_record() {
 
 fn flow(pool: SqlitePool) -> PublishFlow {
     let app = Arc::new(app_config(RetentionPolicy::Always, 1));
-    let ctx = Arc::new(full_context(
-        "publish",
+    let ctx = Arc::new(publish_deps(
         pool,
         app,
-        Arc::new(DummyFeedFetcher),
+        Arc::new(rss_ai_news_publish::LocalFsTarget::new(std::env::temp_dir())),
+        None,
     ));
     PublishFlow::new(ctx)
 }
@@ -360,18 +357,4 @@ async fn assert_article_state(pool: &SqlitePool, id: i64, expected: &str) {
         .await
         .unwrap();
     assert_eq!(state, expected);
-}
-
-struct DummyFeedFetcher;
-
-#[async_trait]
-impl FeedFetcher for DummyFeedFetcher {
-    async fn fetch_raw(
-        &self,
-        _request: &FeedFetchRequest,
-    ) -> Result<rss_ai_news_feed::fetcher::RawFeedFetch, FeedError> {
-        Err(FeedError::ConnectionFailed {
-            source: "publish tests do not fetch feeds".to_string(),
-        })
-    }
 }

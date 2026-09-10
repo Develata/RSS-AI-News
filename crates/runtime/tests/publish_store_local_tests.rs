@@ -3,18 +3,15 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use rss_ai_news_config::RetentionPolicy;
-use rss_ai_news_domain::dto::feed::FeedFetchRequest;
-use rss_ai_news_feed::{FeedError, FeedFetcher};
 use rss_ai_news_publish::LocalFsTarget;
 use rss_ai_news_runtime::{PublishFlow, PublishStoreLocalOptions, PublishStoreLocalStatus};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
 use common::{
-    MockFailingTarget, MockOnceRetryableThenInner, app_config, full_context_with_publish_target,
-    make_test_pool, seed_rendered_publish_record,
+    MockFailingTarget, MockOnceRetryableThenInner, app_config, make_test_pool, publish_deps,
+    seed_rendered_publish_record,
 };
 
 #[tokio::test]
@@ -228,13 +225,7 @@ async fn store_local_retryable_failure_keeps_rendered_state_and_reclaim_succeeds
 
 fn flow(pool: SqlitePool, target: Arc<dyn rss_ai_news_publish::PublishTarget>) -> PublishFlow {
     let app = Arc::new(app_config(RetentionPolicy::Always, 1));
-    let ctx = Arc::new(full_context_with_publish_target(
-        "publish",
-        pool,
-        app,
-        Arc::new(DummyFeedFetcher),
-        target,
-    ));
+    let ctx = Arc::new(publish_deps(pool, app, target, None));
     PublishFlow::new(ctx)
 }
 
@@ -270,18 +261,4 @@ fn store_opts(generated_at: OffsetDateTime) -> PublishStoreLocalOptions {
 
 fn fixed_time() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(0).unwrap()
-}
-
-struct DummyFeedFetcher;
-
-#[async_trait]
-impl FeedFetcher for DummyFeedFetcher {
-    async fn fetch_raw(
-        &self,
-        _request: &FeedFetchRequest,
-    ) -> Result<rss_ai_news_feed::fetcher::RawFeedFetch, FeedError> {
-        Err(FeedError::ConnectionFailed {
-            source: "publish tests do not fetch feeds".to_string(),
-        })
-    }
 }

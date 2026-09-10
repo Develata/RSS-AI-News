@@ -4,11 +4,11 @@ use rss_ai_news_domain::dto::publish::RenderedReport;
 use rss_ai_news_report::{RenderConfig, RenderTemplates, rebuild_markdown};
 use time::OffsetDateTime;
 
-use crate::context::RunContext;
+use crate::context::RebuildReportDeps;
 use crate::error::RuntimeError;
 
 pub struct RebuildReportFlow {
-    ctx: Arc<RunContext>,
+    ctx: Arc<RebuildReportDeps>,
 }
 
 #[derive(Debug, Clone)]
@@ -20,7 +20,7 @@ pub struct RebuildReportOptions {
 }
 
 impl RebuildReportFlow {
-    pub fn new(ctx: Arc<RunContext>) -> Self {
+    pub fn new(ctx: Arc<RebuildReportDeps>) -> Self {
         Self { ctx }
     }
 
@@ -59,8 +59,8 @@ impl RebuildReportFlow {
     }
 }
 
-fn render_templates_from_ctx(ctx: &RunContext) -> RenderTemplates {
-    let template = &ctx.app.publish.template;
+fn render_templates_from_ctx(ctx: &RebuildReportDeps) -> RenderTemplates {
+    let template = &ctx.template;
     RenderTemplates {
         path_template: template.path_template.clone(),
         frontmatter_template: template.frontmatter_template.clone(),

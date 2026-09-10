@@ -9,25 +9,16 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 prometheus.workspace = true
 tokio = { workspace = true, features = ["net", "io-util"] }
-thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
 once_cell.workspace = true
 regex.workspace = true
 async-trait = "0.1"
-reqwest.workspace = true
-sqlx.workspace = true
-fs2.workspace = true
-time.workspace = true
-rss-ai-news-config.workspace = true
-rss-ai-news-storage.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
-wiremock = "0.6"
 tempfile.workspace = true
-rss-ai-news-domain.workspace = true
 
 [lints]
 workspace = true

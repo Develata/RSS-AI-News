@@ -7,20 +7,12 @@ use async_trait::async_trait;
 use rss_ai_news_ai::{AiClient, AiError, AiResponse, AiTask, TokenUsage};
 use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_domain::Score0To100;
-use rss_ai_news_domain::dto::feed::FeedFetchRequest;
-use rss_ai_news_feed::fetcher::RawFeedFetch;
-use rss_ai_news_feed::{FeedError, FeedFetcher};
-use rss_ai_news_publish::LocalFsTarget;
-use rss_ai_news_runtime::{AiRunFlow, AiRunOptions, RunContext, RunContextDeps};
-use rss_ai_news_storage::{
-    ArticleAiResultRepo, ArticleRepo, FeedEntryRepo, FeedSourceRepo, PublishItemRepo,
-    PublishRecordRepo, RawArtifactRepo, RunEventRepo,
-};
+use rss_ai_news_runtime::{AiRunFlow, AiRunOptions};
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Mutex;
 
-use common::{DummyHtmlFetcher, app_config, make_test_pool, seed_persisted_article};
+use common::{app_config, make_test_pool, seed_persisted_article};
 
 #[tokio::test]
 async fn task_gen_inserts_pending_and_advances_article_to_ai_pending() {
@@ -438,28 +430,7 @@ async fn process_run_start_maintenance_is_silent_when_nothing_to_do() {
 
 fn flow(pool: SqlitePool, ai_client: Arc<MockAiClient>) -> AiRunFlow {
     let app = Arc::new(app_config(RetentionPolicy::Always, 1));
-    let ctx = Arc::new(RunContext::new_for_stage(
-        "ai_run",
-        app,
-        RunContextDeps {
-            feed_fetcher: Arc::new(DummyFeedFetcher),
-            html_fetcher: Arc::new(DummyHtmlFetcher),
-            strategies: Vec::new(),
-            ai_client,
-            publish_target_local: Arc::new(LocalFsTarget::new(std::env::temp_dir())),
-            publish_target_remote: None,
-            feed_source_repo: Arc::new(FeedSourceRepo::new(pool.clone())),
-            feed_entry_repo: Arc::new(FeedEntryRepo::new(pool.clone())),
-            article_repo: Arc::new(ArticleRepo::new(pool.clone())),
-            ai_result_repo: Arc::new(ArticleAiResultRepo::new(pool.clone())),
-            publish_record_repo: Arc::new(PublishRecordRepo::new(pool.clone())),
-            publish_item_repo: Arc::new(PublishItemRepo::new(pool.clone())),
-            artifact_repo: Arc::new(RawArtifactRepo::new(pool.clone())),
-            event_repo: Arc::new(RunEventRepo::new(pool.clone())),
-            rule_version_repo: Arc::new(rss_ai_news_storage::RuleVersionRepo::new(pool.clone())),
-            reindex_job_repo: Arc::new(rss_ai_news_storage::ReindexJobRepo::new(pool)),
-        },
-    ));
+    let ctx = Arc::new(common::ai_deps(pool, app, ai_client));
     AiRunFlow::new(ctx)
 }
 
@@ -551,17 +522,6 @@ impl AiClient for MockAiClient {
             }),
             MockAiResult::Error(error) => Err(error),
         }
-    }
-}
-
-struct DummyFeedFetcher;
-
-#[async_trait]
-impl FeedFetcher for DummyFeedFetcher {
-    async fn fetch_raw(&self, _req: &FeedFetchRequest) -> Result<RawFeedFetch, FeedError> {
-        Err(FeedError::ConnectionFailed {
-            source: "dummy".to_string(),
-        })
     }
 }
 

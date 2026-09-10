@@ -11,7 +11,7 @@ use time::{Duration, OffsetDateTime};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::context::RunContext;
+use crate::context::AiDeps;
 use crate::events::RunEventEmitter;
 use crate::flows::maintenance::emit_maintenance_outcome;
 
@@ -22,18 +22,18 @@ mod release;
 pub use dto::*;
 
 pub struct AiRunFlow {
-    ctx: Arc<RunContext>,
+    ctx: Arc<AiDeps>,
 }
 
 impl AiRunFlow {
-    pub fn new(ctx: Arc<RunContext>) -> Self {
+    pub fn new(ctx: Arc<AiDeps>) -> Self {
         Self { ctx }
     }
 
     /// Phase 1：扫描一页 `articles.state='persisted'` 并创建 pending AI 任务。
     pub async fn task_gen(&self, opts: &AiRunOptions) -> TaskGenSummary {
         let emitter = RunEventEmitter {
-            run_id: &self.ctx.run_id,
+            run_id: &self.ctx.run.run_id,
             stage: "ai_run",
             repo: self.ctx.event_repo.as_ref(),
         };
@@ -135,7 +135,7 @@ impl AiRunFlow {
     /// Phase 2：claim pending AI 任务，并发调用 AI、写 artifact、解析并 release。
     pub async fn process_ai_tasks(&self, opts: &AiRunOptions) -> AiProcessSummary {
         let emitter = RunEventEmitter {
-            run_id: &self.ctx.run_id,
+            run_id: &self.ctx.run.run_id,
             stage: "ai_run",
             repo: self.ctx.event_repo.as_ref(),
         };
@@ -197,7 +197,7 @@ impl AiRunFlow {
                         now,
                         lease_expires_at: lease_expires_at(
                             now,
-                            Duration::seconds(self.ctx.app.lease.ai_duration_seconds as i64),
+                            Duration::seconds(self.ctx.lease.ai_duration_seconds as i64),
                         ),
                         batch_size: opts.process_batch_size.max(1),
                         max_attempts: opts.max_attempts,
@@ -237,7 +237,7 @@ impl AiRunFlow {
             let per_task_len_before = summary.per_task.len();
 
             let semaphore = Arc::new(Semaphore::new(
-                self.ctx.app.http.concurrent_fetches.max(1) as usize
+                self.ctx.http.concurrent_fetches.max(1) as usize
             ));
             let mut join_set = JoinSet::new();
 

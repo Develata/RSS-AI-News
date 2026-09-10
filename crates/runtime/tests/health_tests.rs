@@ -7,12 +7,12 @@ use rss_ai_news_config::{
     LoadedConfig, ObservabilityConfig, PublishConfig, RetentionPolicy, RetryConfig, RuntimeConfig,
 };
 use rss_ai_news_domain::Score0To100;
-use rss_ai_news_observability::health::{
-    CheckOutcome, HealthCheck, config_check::ConfigCheck, db_check::DatabaseConnectivityCheck,
-    disk_check::DiskSpaceCheck, github_check::GitHubPingCheck,
-    migration_check::MigrationVersionCheck, openai_check::OpenAiPingCheck,
-    pending_backlog_check::PendingBacklogCheck, silent_source_check::SilentSourceCheck,
-    stuck_reindex_check::StuckReindexCheck,
+use rss_ai_news_observability::health::{CheckOutcome, HealthCheck};
+use rss_ai_news_runtime::doctor::health::{
+    config_check::ConfigCheck, db_check::DatabaseConnectivityCheck, disk_check::DiskSpaceCheck,
+    github_check::GitHubPingCheck, migration_check::MigrationVersionCheck,
+    openai_check::OpenAiPingCheck, pending_backlog_check::PendingBacklogCheck,
+    silent_source_check::SilentSourceCheck, stuck_reindex_check::StuckReindexCheck,
 };
 use rss_ai_news_storage::StoragePool;
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};

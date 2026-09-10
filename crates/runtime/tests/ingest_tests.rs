@@ -18,7 +18,7 @@ use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
 use common::{
-    app_config, category_with_sources, full_context, insert_config_rule, insert_source,
+    app_config, category_with_sources, ingest_deps, insert_config_rule, insert_source,
     make_test_pool, make_test_pool_with_connections,
 };
 
@@ -519,7 +519,7 @@ fn flow_with_source_secrets(
     let fetcher = Arc::new(MockFeedFetcher {
         responses: Mutex::new(responses),
     });
-    let ctx = Arc::new(full_context("ingest", pool, app, fetcher));
+    let ctx = Arc::new(ingest_deps(pool, app, fetcher));
     IngestFlow::with_source_secrets(ctx, vec![category], source_secrets)
 }
 

@@ -1,13 +1,14 @@
 use rss_ai_news_domain::SecretString;
-use rss_ai_news_observability::health::{
-    CheckReport, HealthCheck, backlog_check::FailedBacklogCheck, config_check::ConfigCheck,
+use rss_ai_news_observability::health::{CheckReport, HealthCheck};
+use rss_ai_news_runtime::doctor::deep_scan;
+use rss_ai_news_runtime::doctor::health::{
+    backlog_check::FailedBacklogCheck, config_check::ConfigCheck,
     db_check::DatabaseConnectivityCheck, disk_check::DiskSpaceCheck, github_check::GitHubPingCheck,
     lease_check::ExpiredLeaseCheck, migration_check::MigrationVersionCheck,
     openai_check::OpenAiPingCheck, pending_backlog_check::PendingBacklogCheck,
     rsshub_check::RsshubPingCheck, silent_source_check::SilentSourceCheck,
     stuck_reindex_check::StuckReindexCheck, timezone_check::TimezoneCheck,
 };
-use rss_ai_news_runtime::doctor::deep_scan;
 
 use crate::{
     args::{Cli, DoctorArgs},

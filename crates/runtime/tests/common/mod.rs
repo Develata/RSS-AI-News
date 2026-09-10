@@ -21,13 +21,12 @@ use rss_ai_news_domain::dto::publish::RenderedReport;
 use rss_ai_news_domain::state::FeedKind;
 use rss_ai_news_extractor::{ExtractorError, HtmlFetcher, RawHtmlFetch};
 use rss_ai_news_feed::{FeedError, FeedFetcher, fetcher::RawFeedFetch};
-use rss_ai_news_publish::{LocalFsTarget, PublishError, PublishTarget, PublishedArtifact};
-use rss_ai_news_runtime::{RunContext, RunContextDeps};
-use rss_ai_news_storage::{
-    ArticleAiResultRepo, ArticleRepo, FeedEntryRepo, FeedSourceRepo, PublishItemRepo,
-    PublishRecordRepo, RawArtifactRepo, RunEventRepo, StoragePool, build_sqlite_pool,
-    run_migrations,
+use rss_ai_news_publish::{PublishError, PublishTarget, PublishedArtifact};
+use rss_ai_news_runtime::{
+    AiDeps, BackfillDeps, ExtractDeps, IngestDeps, PublishDeps, RebuildReportDeps, ReindexDeps,
+    RunMeta,
 };
+use rss_ai_news_storage::{StoragePool, build_sqlite_pool, run_migrations};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
@@ -191,66 +190,109 @@ pub fn app_config(retention_policy: RetentionPolicy, concurrent_feeds: u32) -> A
     }
 }
 
-pub fn full_context(
-    stage: &str,
+pub fn ingest_deps(
     pool: SqlitePool,
     app: Arc<AppConfig>,
     feed_fetcher: Arc<dyn FeedFetcher>,
-) -> RunContext {
-    let dir = std::env::temp_dir().join(format!(
-        "rss-ai-news-runtime-publish-output-{}",
-        unique_path_suffix()
-    ));
-    std::fs::create_dir_all(&dir).expect("publish output dir should be created");
-    full_context_with_publish_target(
-        stage,
-        pool,
-        app,
+) -> IngestDeps {
+    IngestDeps {
+        run: RunMeta::default(),
+        http: app.http.clone(),
+        artifact: app.artifact.clone(),
         feed_fetcher,
-        Arc::new(LocalFsTarget::new(dir)),
-    )
+        feed_source_repo: Arc::new(rss_ai_news_storage::FeedSourceRepo::new(pool.clone())),
+        feed_entry_repo: Arc::new(rss_ai_news_storage::FeedEntryRepo::new(pool.clone())),
+        artifact_repo: Arc::new(rss_ai_news_storage::RawArtifactRepo::new(pool.clone())),
+        event_repo: Arc::new(rss_ai_news_storage::RunEventRepo::new(pool.clone())),
+        rule_version_repo: Arc::new(rss_ai_news_storage::RuleVersionRepo::new(pool.clone())),
+    }
 }
 
-pub fn full_context_with_publish_target(
-    stage: &str,
+pub fn extract_deps(
     pool: SqlitePool,
     app: Arc<AppConfig>,
-    feed_fetcher: Arc<dyn FeedFetcher>,
-    publish_target_local: Arc<dyn PublishTarget>,
-) -> RunContext {
-    full_context_with_publish_targets(stage, pool, app, feed_fetcher, publish_target_local, None)
+    html_fetcher: Arc<dyn HtmlFetcher>,
+    strategies: Vec<Arc<dyn rss_ai_news_extractor::ContentStrategy>>,
+) -> ExtractDeps {
+    ExtractDeps {
+        run: RunMeta::default(),
+        http: app.http.clone(),
+        lease: app.lease.clone(),
+        retry: app.retry.clone(),
+        artifact: app.artifact.clone(),
+        min_body_chars: app.extractor.min_body_chars,
+        html_fetcher,
+        strategies,
+        feed_entry_repo: Arc::new(rss_ai_news_storage::FeedEntryRepo::new(pool.clone())),
+        article_repo: Arc::new(rss_ai_news_storage::ArticleRepo::new(pool.clone())),
+        artifact_repo: Arc::new(rss_ai_news_storage::RawArtifactRepo::new(pool.clone())),
+        event_repo: Arc::new(rss_ai_news_storage::RunEventRepo::new(pool.clone())),
+    }
 }
 
-pub fn full_context_with_publish_targets(
-    stage: &str,
+pub fn ai_deps(pool: SqlitePool, app: Arc<AppConfig>, ai_client: Arc<dyn AiClient>) -> AiDeps {
+    AiDeps {
+        run: RunMeta::default(),
+        http: app.http.clone(),
+        lease: app.lease.clone(),
+        artifact: app.artifact.clone(),
+        ai_client,
+        article_repo: Arc::new(rss_ai_news_storage::ArticleRepo::new(pool.clone())),
+        ai_result_repo: Arc::new(rss_ai_news_storage::ArticleAiResultRepo::new(pool.clone())),
+        artifact_repo: Arc::new(rss_ai_news_storage::RawArtifactRepo::new(pool.clone())),
+        event_repo: Arc::new(rss_ai_news_storage::RunEventRepo::new(pool.clone())),
+    }
+}
+
+pub fn publish_deps(
     pool: SqlitePool,
     app: Arc<AppConfig>,
-    feed_fetcher: Arc<dyn FeedFetcher>,
     publish_target_local: Arc<dyn PublishTarget>,
     publish_target_remote: Option<Arc<dyn PublishTarget>>,
-) -> RunContext {
-    RunContext::new_for_stage(
-        stage,
-        app,
-        RunContextDeps {
-            feed_fetcher,
-            html_fetcher: Arc::new(DummyHtmlFetcher),
-            strategies: Vec::new(),
-            ai_client: Arc::new(DummyAiClient),
-            publish_target_local,
-            publish_target_remote,
-            feed_source_repo: Arc::new(FeedSourceRepo::new(pool.clone())),
-            feed_entry_repo: Arc::new(FeedEntryRepo::new(pool.clone())),
-            article_repo: Arc::new(ArticleRepo::new(pool.clone())),
-            ai_result_repo: Arc::new(ArticleAiResultRepo::new(pool.clone())),
-            publish_record_repo: Arc::new(PublishRecordRepo::new(pool.clone())),
-            publish_item_repo: Arc::new(PublishItemRepo::new(pool.clone())),
-            artifact_repo: Arc::new(RawArtifactRepo::new(pool.clone())),
-            event_repo: Arc::new(RunEventRepo::new(pool.clone())),
-            rule_version_repo: Arc::new(rss_ai_news_storage::RuleVersionRepo::new(pool.clone())),
-            reindex_job_repo: Arc::new(rss_ai_news_storage::ReindexJobRepo::new(pool)),
-        },
-    )
+) -> PublishDeps {
+    PublishDeps {
+        run: RunMeta::default(),
+        lease: app.lease.clone(),
+        retry: app.retry.clone(),
+        template: app.publish.template.clone(),
+        publish_target_local,
+        publish_target_remote,
+        publish_record_repo: Arc::new(rss_ai_news_storage::PublishRecordRepo::new(pool.clone())),
+        publish_item_repo: Arc::new(rss_ai_news_storage::PublishItemRepo::new(pool.clone())),
+        event_repo: Arc::new(rss_ai_news_storage::RunEventRepo::new(pool.clone())),
+    }
+}
+
+pub fn rebuild_report_deps(pool: SqlitePool, app: Arc<AppConfig>) -> RebuildReportDeps {
+    RebuildReportDeps {
+        template: app.publish.template.clone(),
+        publish_record_repo: Arc::new(rss_ai_news_storage::PublishRecordRepo::new(pool.clone())),
+        publish_item_repo: Arc::new(rss_ai_news_storage::PublishItemRepo::new(pool.clone())),
+    }
+}
+
+pub fn backfill_deps(pool: SqlitePool) -> BackfillDeps {
+    BackfillDeps {
+        run: RunMeta::default(),
+        feed_entry_repo: Arc::new(rss_ai_news_storage::FeedEntryRepo::new(pool.clone())),
+        article_repo: Arc::new(rss_ai_news_storage::ArticleRepo::new(pool.clone())),
+        ai_result_repo: Arc::new(rss_ai_news_storage::ArticleAiResultRepo::new(pool.clone())),
+        rule_version_repo: Arc::new(rss_ai_news_storage::RuleVersionRepo::new(pool.clone())),
+        event_repo: Arc::new(rss_ai_news_storage::RunEventRepo::new(pool.clone())),
+    }
+}
+
+pub fn reindex_deps(pool: SqlitePool, app: Arc<AppConfig>) -> ReindexDeps {
+    ReindexDeps {
+        run: RunMeta::default(),
+        lease: app.lease.clone(),
+        feed_source_repo: Arc::new(rss_ai_news_storage::FeedSourceRepo::new(pool.clone())),
+        feed_entry_repo: Arc::new(rss_ai_news_storage::FeedEntryRepo::new(pool.clone())),
+        article_repo: Arc::new(rss_ai_news_storage::ArticleRepo::new(pool.clone())),
+        rule_version_repo: Arc::new(rss_ai_news_storage::RuleVersionRepo::new(pool.clone())),
+        reindex_job_repo: Arc::new(rss_ai_news_storage::ReindexJobRepo::new(pool.clone())),
+        event_repo: Arc::new(rss_ai_news_storage::RunEventRepo::new(pool.clone())),
+    }
 }
 
 pub async fn seed_snapshot_frozen_publish_record(

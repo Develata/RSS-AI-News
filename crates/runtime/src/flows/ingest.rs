@@ -16,7 +16,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::artifact::ArtifactWriter;
-use crate::context::RunContext;
+use crate::context::IngestDeps;
 use crate::events::RunEventEmitter;
 
 #[derive(Debug, Clone, Default)]
@@ -76,18 +76,18 @@ struct SourceTask {
 }
 
 pub struct IngestFlow {
-    ctx: Arc<RunContext>,
+    ctx: Arc<IngestDeps>,
     categories: Vec<CategoryConfig>,
     source_secrets: SourceSecrets,
 }
 
 impl IngestFlow {
-    pub fn new(ctx: Arc<RunContext>, categories: Vec<CategoryConfig>) -> Self {
+    pub fn new(ctx: Arc<IngestDeps>, categories: Vec<CategoryConfig>) -> Self {
         Self::with_source_secrets(ctx, categories, SourceSecrets::default())
     }
 
     pub fn with_source_secrets(
-        ctx: Arc<RunContext>,
+        ctx: Arc<IngestDeps>,
         categories: Vec<CategoryConfig>,
         source_secrets: SourceSecrets,
     ) -> Self {
@@ -100,8 +100,8 @@ impl IngestFlow {
 
     pub async fn run(&self, opts: IngestOptions) -> IngestSummary {
         let emitter = RunEventEmitter {
-            run_id: &self.ctx.run_id,
-            stage: &self.ctx.stage,
+            run_id: &self.ctx.run.run_id,
+            stage: "ingest",
             repo: self.ctx.event_repo.as_ref(),
         };
         emitter
@@ -144,7 +144,7 @@ impl IngestFlow {
         }
 
         summary.sources_attempted = (tasks.len() + summary.per_source.len()) as u32;
-        let concurrent_feeds = self.ctx.app.http.concurrent_feeds.max(1) as usize;
+        let concurrent_feeds = self.ctx.http.concurrent_feeds.max(1) as usize;
         let semaphore = Arc::new(Semaphore::new(concurrent_feeds));
         let mut join_set = JoinSet::new();
 
@@ -332,10 +332,10 @@ impl IngestFlow {
         })
     }
 
-    async fn process_source(ctx: Arc<RunContext>, task: SourceTask) -> IngestSourceOutcome {
+    async fn process_source(ctx: Arc<IngestDeps>, task: SourceTask) -> IngestSourceOutcome {
         let now = OffsetDateTime::now_utc();
         let emitter = RunEventEmitter {
-            run_id: &ctx.run_id,
+            run_id: &ctx.run.run_id,
             stage: "ingest",
             repo: ctx.event_repo.as_ref(),
         };
@@ -360,7 +360,7 @@ impl IngestFlow {
             rsshub_access_key: task.rsshub_access_key,
             etag: task.existing_etag,
             last_modified: task.existing_last_modified,
-            timeout: StdDuration::from_secs(ctx.app.http.timeout_seconds),
+            timeout: StdDuration::from_secs(ctx.http.timeout_seconds),
         };
 
         let raw = match ctx.feed_fetcher.fetch_raw(&fetch_request).await {
@@ -440,7 +440,7 @@ impl IngestFlow {
         };
 
         let artifact_writer = ArtifactWriter {
-            config: &ctx.app.artifact,
+            config: &ctx.artifact,
             repo: ctx.artifact_repo.as_ref(),
         };
         if artifact_writer.should_write(false) {
@@ -536,7 +536,7 @@ impl IngestFlow {
 }
 
 async fn process_entries(
-    ctx: &RunContext,
+    ctx: &IngestDeps,
     emitter: &RunEventEmitter<'_>,
     outcome: &mut IngestSourceOutcome,
     source_id: i64,

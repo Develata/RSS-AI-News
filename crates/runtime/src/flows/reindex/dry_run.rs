@@ -33,7 +33,7 @@ impl ReindexFlow {
     /// dry-run；CLI 借此识别并跳过 job_id 行的 pretty 输出。
     pub async fn dry_run(&self, opts: ReindexOptions) -> Result<ReindexSummary, RuntimeError> {
         let emitter = RunEventEmitter {
-            run_id: &self.ctx.run_id,
+            run_id: &self.ctx.run.run_id,
             stage: "reindex",
             repo: self.ctx.event_repo.as_ref(),
         };

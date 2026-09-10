@@ -9,7 +9,7 @@ use rss_ai_news_storage::{
 use serde_json::json;
 use time::OffsetDateTime;
 
-use crate::context::RunContext;
+use crate::context::AiDeps;
 use crate::events::RunEventEmitter;
 
 use super::process::SuccessfulAttempt;
@@ -19,7 +19,7 @@ use super::{AiRunOptions, AiTaskOutcome, AiTaskStatus};
 /// 降级时额外 emit `ai_model_fallback`，并发 `ai_completed`。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn finish_ai_success(
-    ctx: &RunContext,
+    ctx: &AiDeps,
     emitter: &RunEventEmitter<'_>,
     owner: &str,
     claimed: &ClaimedAiResult,
@@ -136,7 +136,7 @@ pub(super) async fn finish_ai_success(
 /// W15 §3：retryable 路径在 release SQL 内按 `max_attempts` 折叠——预算耗尽
 /// 直接转 `permanent_failed`，不再造出永久卡 pending 的行。
 pub(super) async fn finish_ai_failure(
-    ctx: &RunContext,
+    ctx: &AiDeps,
     emitter: &RunEventEmitter<'_>,
     owner: &str,
     claimed: &ClaimedAiResult,
@@ -173,7 +173,7 @@ pub(super) async fn finish_ai_failure(
 }
 
 async fn release_retryable_ai_failure(
-    ctx: &RunContext,
+    ctx: &AiDeps,
     emitter: &RunEventEmitter<'_>,
     owner: &str,
     claimed: &ClaimedAiResult,
@@ -238,7 +238,7 @@ async fn release_retryable_ai_failure(
 }
 
 pub(super) async fn release_permanent_ai_failure(
-    ctx: &RunContext,
+    ctx: &AiDeps,
     emitter: &RunEventEmitter<'_>,
     owner: &str,
     claimed: &ClaimedAiResult,

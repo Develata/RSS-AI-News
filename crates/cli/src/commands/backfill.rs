@@ -8,7 +8,7 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 use crate::{
     args::{BackfillArgs, BackfillTarget, Cli},
-    context_factory::build_run_context,
+    context_factory::{build_backfill_deps, open_write_storage},
     error::CliError,
     output::CommandSummary,
 };
@@ -77,7 +77,8 @@ pub async fn run(cli: &Cli, args: &BackfillArgs) -> Result<BackfillCommandSummar
     let date_to = parse_date_start(args.date_to.as_deref())?;
     // W14-B：backfill 只播种 pending AI 行（model 取全局 [ai].model 做行身份），
     // 不调用 AI client——凭证由后续 ai-run 按板块解析，此处无需传入。
-    let ctx = build_run_context("backfill", &loaded, None).await?;
+    let pool = open_write_storage(&loaded).await?;
+    let ctx = build_backfill_deps(&loaded, &pool)?;
     let flow = BackfillFlow::new(ctx.clone());
 
     match args.target {

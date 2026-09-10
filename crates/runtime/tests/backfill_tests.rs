@@ -9,7 +9,6 @@ mod common;
 
 use std::sync::Arc;
 
-use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_runtime::{BackfillAiOptions, BackfillExtractOptions, BackfillFlow};
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
@@ -185,12 +184,7 @@ async fn backfill_ai_requeues_ai_pending_article_whose_results_all_failed() {
 }
 
 fn backfill(pool: &SqlitePool) -> BackfillFlow {
-    BackfillFlow::new(Arc::new(common::full_context(
-        "backfill",
-        pool.clone(),
-        Arc::new(common::app_config(RetentionPolicy::Always, 1)),
-        Arc::new(common::DummyFeedFetcher),
-    )))
+    BackfillFlow::new(Arc::new(common::backfill_deps(pool.clone())))
 }
 
 async fn ai_opts(pool: &SqlitePool, tag: &str, batch_size: u32) -> BackfillAiOptions {

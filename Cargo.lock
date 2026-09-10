@@ -3027,7 +3027,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "sqlx",
  "thiserror 2.0.18",
  "time",
  "url",
@@ -3074,26 +3073,17 @@ name = "rss-ai-news-observability"
 version = "0.7.1"
 dependencies = [
  "async-trait",
- "fs2",
  "once_cell",
  "prometheus",
  "regex",
- "reqwest",
- "rss-ai-news-config",
- "rss-ai-news-domain",
- "rss-ai-news-storage",
  "serde",
  "serde_json",
- "sqlx",
  "tempfile",
- "thiserror 2.0.18",
- "time",
  "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
  "url",
- "wiremock",
 ]
 
 [[package]]
@@ -3136,7 +3126,9 @@ version = "0.7.1"
 dependencies = [
  "async-trait",
  "fastrand",
+ "fs2",
  "hex",
+ "reqwest",
  "rss-ai-news-ai",
  "rss-ai-news-config",
  "rss-ai-news-domain",
@@ -3155,6 +3147,7 @@ dependencies = [
  "tokio",
  "tracing",
  "ulid",
+ "wiremock",
 ]
 
 [[package]]

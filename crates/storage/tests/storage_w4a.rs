@@ -10,8 +10,8 @@ use rss_ai_news_domain::{
     state::{FeedKind, FeedSourceStatus},
 };
 use rss_ai_news_storage::{
-    FeedSourceRepo, FeedSourceRepository, StorageError, StoragePool, build_sqlite_pool,
-    classify_db_error, run_migrations,
+    FeedSourceRepo, FeedSourceRepository, PublishItemRepo, PublishItemRepository, StorageError,
+    StoragePool, build_sqlite_pool, classify_db_error, run_migrations,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -242,6 +242,76 @@ async fn publish_items_reject_frozen_score_out_of_range() {
     .expect_err("score > 100 should be rejected");
     // P3-B-fix1.M1：SQLite CHECK 违例（code 275）现在与 PG 23514 一致归 Integrity
     assert!(matches!(error, StorageError::Integrity { .. }));
+}
+
+#[tokio::test]
+async fn publish_items_loading_rejects_corrupt_score_with_original_value() {
+    let (_dir, pool) = make_test_pool().await;
+    let (rule_id, _entry_id, article_id) = seed_article(&pool).await;
+    let output_schema_id = insert_rule(&pool, "ai_output_schema", "v1", "schema-sha").await;
+    let ai_result_id = insert_ai_result(&pool, article_id, rule_id, output_schema_id).await;
+    let publish_record_id = insert_publish_record(&pool, rule_id).await;
+    insert_publish_item(
+        &pool,
+        publish_record_id,
+        article_id,
+        Some(ai_result_id),
+        Some(0),
+    )
+    .await
+    .expect("valid score should insert");
+    let repo = PublishItemRepo::new(pool.clone());
+    for raw in [0_i32, 100] {
+        sqlx::query("UPDATE publish_items SET frozen_score = ? WHERE publish_record_id = ?")
+            .bind(raw)
+            .bind(publish_record_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let items = repo
+            .list_by_publish_record(publish_record_id)
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].frozen_score.unwrap().get(), raw as u8);
+    }
+
+    // Simulate a damaged legacy database; ordinary writes retain CHECK protection.
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for raw in [-1_i64, 101, 256, i64::from(i32::MAX)] {
+        sqlx::query("UPDATE publish_items SET frozen_score = ? WHERE publish_record_id = ?")
+            .bind(raw)
+            .bind(publish_record_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = repo
+            .list_by_publish_record(publish_record_id)
+            .await
+            .unwrap_err();
+        match error {
+            StorageError::Corruption(message) => {
+                assert_eq!(message, format!("score must be in 0..=100, got {raw}"),)
+            }
+            other => panic!("expected corruption for {raw}, got {other:?}"),
+        }
+    }
+    // SQLite's integer decoder must also reject values wider than the raw i32 row.
+    sqlx::query("UPDATE publish_items SET frozen_score = ? WHERE publish_record_id = ?")
+        .bind((1_i64 << 32) + 42)
+        .bind(publish_record_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        repo.list_by_publish_record(publish_record_id)
+            .await
+            .is_err()
+    );
+    pool.close().await;
 }
 
 #[tokio::test]

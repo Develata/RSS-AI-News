@@ -2,15 +2,12 @@ mod common;
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use rss_ai_news_config::RetentionPolicy;
-use rss_ai_news_domain::dto::feed::FeedFetchRequest;
-use rss_ai_news_feed::{FeedError, FeedFetcher};
 use rss_ai_news_runtime::{PublishFlow, PublishRenderOptions, PublishRenderStatus};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
-use common::{app_config, full_context, make_test_pool, seed_snapshot_frozen_publish_record};
+use common::{app_config, make_test_pool, publish_deps, seed_snapshot_frozen_publish_record};
 
 #[tokio::test]
 async fn render_advances_snapshot_frozen_to_rendered_when_items_exist() {
@@ -82,11 +79,11 @@ async fn render_returns_failed_when_publish_record_has_no_items() {
 
 fn flow(pool: SqlitePool) -> PublishFlow {
     let app = Arc::new(app_config(RetentionPolicy::Always, 1));
-    let ctx = Arc::new(full_context(
-        "publish",
+    let ctx = Arc::new(publish_deps(
         pool,
         app,
-        Arc::new(DummyFeedFetcher),
+        Arc::new(rss_ai_news_publish::LocalFsTarget::new(std::env::temp_dir())),
+        None,
     ));
     PublishFlow::new(ctx)
 }
@@ -106,19 +103,5 @@ fn render_opts() -> PublishRenderOptions {
         report_title: "Daily AI".to_string(),
         generated_at: OffsetDateTime::from_unix_timestamp(0).unwrap(),
         path_template: None,
-    }
-}
-
-struct DummyFeedFetcher;
-
-#[async_trait]
-impl FeedFetcher for DummyFeedFetcher {
-    async fn fetch_raw(
-        &self,
-        _request: &FeedFetchRequest,
-    ) -> Result<rss_ai_news_feed::fetcher::RawFeedFetch, FeedError> {
-        Err(FeedError::ConnectionFailed {
-            source: "publish tests do not fetch feeds".to_string(),
-        })
     }
 }

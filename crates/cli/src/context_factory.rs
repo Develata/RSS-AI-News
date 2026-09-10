@@ -1,161 +1,192 @@
-use std::{sync::Arc, time::Duration};
-
-use async_trait::async_trait;
+use crate::{db_url::resolve_storage_url, error::CliError};
 use reqwest::Client;
-use rss_ai_news_ai::{AiClient, AiClientConfig, AiError, AiResponse, AiTask, OpenAiCompatClient};
+use rss_ai_news_ai::{AiClientConfig, OpenAiCompatClient};
 use rss_ai_news_config::{self as config, AiCredentials, LoadedConfig};
-use rss_ai_news_domain::SecretString;
 use rss_ai_news_extractor::{ContentStrategy, ReqwestHtmlFetcher};
 use rss_ai_news_feed::ReqwestFeedFetcher;
 use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, LocalFsTarget, PublishTarget};
-use rss_ai_news_runtime::{RecentEntriesFlow, RunContext, RunContextDeps};
+use rss_ai_news_runtime::{
+    AiDeps, BackfillDeps, ExtractDeps, IngestDeps, PublishDeps, RebuildReportDeps,
+    RecentEntriesFlow, ReindexDeps, RunMeta,
+};
 use rss_ai_news_storage::{
     ArticleAiResultRepo, ArticleRepo, ConfigRotation, FeedEntryRepo, FeedSourceRepo,
     PublishItemRepo, PublishRecordRepo, RawArtifactRepo, ReindexJobRepo, RuleVersionRepo,
     RunEventRepo, StoragePool, applied_migration_versions, ensure_migration_state_exact,
     pending_migration_versions, run_migrations,
 };
+use std::{sync::Arc, time::Duration};
 use time::OffsetDateTime;
 
-use crate::{db_url::resolve_storage_url, error::CliError};
-
-/// W11-P4-C：cli/runtime PG 端到端入口。
-///
-/// 按 [`docs-backup/design/storage-multi-dialect.md`] §5.4 通过 [`resolve_storage_url`]
-/// 解析 `driver` + `DATABASE_URL`，[`StoragePool::build`] 按 URL scheme 路由到
-/// `StoragePool::{Sqlite, Postgres}`。所有 10 个 repo 通过
-/// `new_with_storage(StoragePool)` 入口注入，业务方法内部按 backend `match`
-/// 分发（P3-C/E 已实装）。
-///
-/// 返回值不再含 pool（原 `_pool` 在 7 个调用点均未使用），让签名直接反映
-/// "这里只构造 ctx" 的语义。
-/// W14-B：`ai_credentials` = `Some(板块凭证)` 时用其装配 `OpenAiCompatClient`
-/// （ai-run 在 `select_category` 后经 `ai_credentials_for_category` 解析传入）；
-/// `None` = 沿用全局 env 凭证（其余调用点零语义变化）。一次 ai-run 严格单
-/// category，故单 client 静态装配、无运行时路由（docs/plan/14-ai-fallback.md §B.5）。
-pub async fn build_run_context(
-    stage: &str,
-    loaded: &LoadedConfig,
-    ai_credentials: Option<AiCredentials>,
-) -> Result<Arc<RunContext>, CliError> {
-    let app = Arc::new(loaded.app.clone());
+/// Only write commands migrate and rotate the active configuration.
+pub async fn open_write_storage(loaded: &LoadedConfig) -> Result<StoragePool, CliError> {
+    let app = &loaded.app;
     let url = resolve_storage_url(loaded)?;
-    let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
-    let pool = StoragePool::build(&url, app.database.max_connections, busy_timeout_ms)
-        .await
-        .map_err(CliError::Storage)?;
-    run_migrations(&pool).await.map_err(CliError::Storage)?;
-    ensure_active_config_version(&pool, &loaded.config_sha256)
-        .await
-        .map_err(CliError::Storage)?;
+    let pool = StoragePool::build(
+        &url,
+        app.database.max_connections,
+        u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX),
+    )
+    .await?;
+    run_migrations(&pool).await?;
+    ensure_active_config_version(&pool, &loaded.config_sha256).await?;
+    Ok(pool)
+}
 
-    // Feed 与 HTML 抓取的体上限解耦：feed 走可独立抬高的有效值（嵌全文的
-    // atom 源需要更高上限），HTML 仍用 max_body_bytes（约束单篇文章内存/带宽）。
-    let feed_fetcher = Arc::new(ReqwestFeedFetcher::new(
-        app.extractor.effective_feed_max_body_bytes(),
-    )?);
-    let html_fetcher = Arc::new(ReqwestHtmlFetcher::new(app.extractor.max_body_bytes)?);
+pub async fn open_read_storage(loaded: &LoadedConfig) -> Result<StoragePool, CliError> {
+    open_write_storage(loaded).await
+}
+
+pub fn build_ingest_deps(
+    loaded: &LoadedConfig,
+    pool: &StoragePool,
+) -> Result<Arc<IngestDeps>, CliError> {
+    let app = &loaded.app;
+    Ok(Arc::new(IngestDeps {
+        run: RunMeta::default(),
+        http: app.http.clone(),
+        artifact: app.artifact.clone(),
+        feed_fetcher: Arc::new(ReqwestFeedFetcher::new(
+            app.extractor.effective_feed_max_body_bytes(),
+        )?),
+        feed_source_repo: Arc::new(FeedSourceRepo::new_with_storage(pool.clone())),
+        feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool.clone())),
+        artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
+        event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+        rule_version_repo: Arc::new(RuleVersionRepo::new_with_storage(pool.clone())),
+    }))
+}
+
+pub fn build_extract_deps(
+    loaded: &LoadedConfig,
+    pool: &StoragePool,
+    run: RunMeta,
+) -> Result<Arc<ExtractDeps>, CliError> {
+    let app = &loaded.app;
     let strategies: Vec<Arc<dyn ContentStrategy>> = Vec::new();
+    Ok(Arc::new(ExtractDeps {
+        run,
+        http: app.http.clone(),
+        lease: app.lease.clone(),
+        retry: app.retry.clone(),
+        artifact: app.artifact.clone(),
+        min_body_chars: app.extractor.min_body_chars,
+        html_fetcher: Arc::new(ReqwestHtmlFetcher::new(app.extractor.max_body_bytes)?),
+        strategies,
+        feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool.clone())),
+        article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
+        artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
+        event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+    }))
+}
 
-    let ai_client: Arc<dyn AiClient> = match (app.ai.enabled, ai_credentials) {
-        // W14-B：板块凭证已由 ai_credentials_for_category 折叠并保证非空，
-        // 直接装配。request_timeout 仍取全局（超时不是凭证，见 §B.5）。
-        (true, Some(credentials)) => Arc::new(OpenAiCompatClient::new(AiClientConfig {
+pub fn build_ai_deps(
+    loaded: &LoadedConfig,
+    pool: &StoragePool,
+    credentials: AiCredentials,
+) -> Result<Arc<AiDeps>, CliError> {
+    let app = &loaded.app;
+    Ok(Arc::new(AiDeps {
+        run: RunMeta::default(),
+        http: app.http.clone(),
+        lease: app.lease.clone(),
+        artifact: app.artifact.clone(),
+        ai_client: Arc::new(OpenAiCompatClient::new(AiClientConfig {
             api_base: credentials.base_url,
             api_key: credentials.api_key,
             request_timeout: Duration::from_secs(app.ai.request_timeout_seconds),
         })?),
-        // W14-B codex P2：全局分支须同时具备 key + base 才构造 client。放宽
-        // gate 后"全部板块自带凭证 + 遗留全局 key + 全局 base 缺省"是合法配置，
-        // 旧守卫只查 key 会拿空串 api_base 构造 → InvalidConfig，让 ingest/
-        // publish 等不调 AI 的命令死在 ctx 构造期。base 缺省 ⇒ 无板块继承
-        // 全局（gate 已保证），回落 NullAiClient 即可。
-        (true, None)
-            if loaded
-                .env
-                .openai_api_key
-                .as_ref()
-                .map(SecretString::expose_secret)
-                .is_some_and(|value| !value.trim().is_empty())
-                && loaded
-                    .env
-                    .openai_base_url
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty()) =>
-        {
-            // Pass the SecretString through end-to-end (W2-A2). The branch
-            // condition above already verified `openai_api_key` is `Some(_)`
-            // and non-empty after trim, so cloning the original is sound.
-            let api_key = loaded
-                .env
-                .openai_api_key
-                .clone()
-                .unwrap_or_else(|| SecretString::from(""));
-            Arc::new(OpenAiCompatClient::new(AiClientConfig {
-                api_base: loaded.env.openai_base_url.clone().unwrap_or_default(),
-                api_key,
-                request_timeout: Duration::from_secs(app.ai.request_timeout_seconds),
-            })?)
-        }
-        _ => Arc::new(NullAiClient),
+        article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
+        ai_result_repo: Arc::new(ArticleAiResultRepo::new_with_storage(pool.clone())),
+        artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
+        event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+    }))
+}
+
+pub fn build_publish_deps(
+    loaded: &LoadedConfig,
+    pool: &StoragePool,
+    local_only: bool,
+) -> Result<Arc<PublishDeps>, CliError> {
+    let app = &loaded.app;
+    let publish_target_remote: Option<Arc<dyn PublishTarget>> = if !local_only
+        && !app.publish.github_owner.trim().is_empty()
+        && !app.publish.github_repo.trim().is_empty()
+    {
+        loaded
+            .env
+            .github_token
+            .as_ref()
+            .filter(|token| !token.expose_secret().trim().is_empty())
+            .map(|token| {
+                GitHubTarget::new(GitHubTargetConfig {
+                    token: token.clone(),
+                    owner: app.publish.github_owner.clone(),
+                    repo: app.publish.github_repo.clone(),
+                    branch: app.publish.github_branch.clone(),
+                    path_prefix: app.publish.github_path_prefix.clone(),
+                    commit_message_prefix: "rss-ai-news".into(),
+                })
+                .map(|target| Arc::new(target) as Arc<dyn PublishTarget>)
+            })
+            .transpose()?
+    } else {
+        None
     };
+    Ok(Arc::new(PublishDeps {
+        run: RunMeta::default(),
+        lease: app.lease.clone(),
+        retry: app.retry.clone(),
+        template: app.publish.template.clone(),
+        publish_target_local: Arc::new(LocalFsTarget::new(app.publish.local_output_dir.clone())),
+        publish_target_remote,
+        publish_record_repo: Arc::new(PublishRecordRepo::new_with_storage(pool.clone())),
+        publish_item_repo: Arc::new(PublishItemRepo::new_with_storage(pool.clone())),
+        event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+    }))
+}
 
-    let publish_target_local: Arc<dyn PublishTarget> =
-        Arc::new(LocalFsTarget::new(app.publish.local_output_dir.clone()));
-    let publish_target_remote: Option<Arc<dyn PublishTarget>> =
-        if !app.publish.github_owner.trim().is_empty()
-            && !app.publish.github_repo.trim().is_empty()
-            && loaded
-                .env
-                .github_token
-                .as_ref()
-                .map(SecretString::expose_secret)
-                .is_some_and(|value| !value.trim().is_empty())
-        {
-            // Same pattern as the AI api_key above: the surrounding `if`
-            // already ensured `github_token` is `Some(_)` and non-empty,
-            // so we forward the SecretString unchanged (W2-A2).
-            let token = loaded
-                .env
-                .github_token
-                .clone()
-                .unwrap_or_else(|| SecretString::from(""));
-            Some(Arc::new(GitHubTarget::new(GitHubTargetConfig {
-                token,
-                owner: app.publish.github_owner.clone(),
-                repo: app.publish.github_repo.clone(),
-                branch: app.publish.github_branch.clone(),
-                path_prefix: app.publish.github_path_prefix.clone(),
-                commit_message_prefix: "rss-ai-news".to_string(),
-            })?))
-        } else {
-            None
-        };
+pub fn build_rebuild_report_deps(
+    loaded: &LoadedConfig,
+    pool: &StoragePool,
+) -> Result<Arc<RebuildReportDeps>, CliError> {
+    let app = &loaded.app;
+    Ok(Arc::new(RebuildReportDeps {
+        template: app.publish.template.clone(),
+        publish_record_repo: Arc::new(PublishRecordRepo::new_with_storage(pool.clone())),
+        publish_item_repo: Arc::new(PublishItemRepo::new_with_storage(pool.clone())),
+    }))
+}
 
-    let ctx = RunContext::new_for_stage(
-        stage,
-        app,
-        RunContextDeps {
-            feed_fetcher,
-            html_fetcher,
-            strategies,
-            ai_client,
-            publish_target_local,
-            publish_target_remote,
-            feed_source_repo: Arc::new(FeedSourceRepo::new_with_storage(pool.clone())),
-            feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool.clone())),
-            article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
-            ai_result_repo: Arc::new(ArticleAiResultRepo::new_with_storage(pool.clone())),
-            publish_record_repo: Arc::new(PublishRecordRepo::new_with_storage(pool.clone())),
-            publish_item_repo: Arc::new(PublishItemRepo::new_with_storage(pool.clone())),
-            artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
-            event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
-            rule_version_repo: Arc::new(RuleVersionRepo::new_with_storage(pool.clone())),
-            reindex_job_repo: Arc::new(ReindexJobRepo::new_with_storage(pool)),
-        },
-    );
+pub fn build_backfill_deps(
+    _loaded: &LoadedConfig,
+    pool: &StoragePool,
+) -> Result<Arc<BackfillDeps>, CliError> {
+    Ok(Arc::new(BackfillDeps {
+        run: RunMeta::default(),
+        feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool.clone())),
+        article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
+        ai_result_repo: Arc::new(ArticleAiResultRepo::new_with_storage(pool.clone())),
+        rule_version_repo: Arc::new(RuleVersionRepo::new_with_storage(pool.clone())),
+        event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+    }))
+}
 
-    Ok(Arc::new(ctx))
+pub fn build_reindex_deps(
+    loaded: &LoadedConfig,
+    pool: &StoragePool,
+) -> Result<Arc<ReindexDeps>, CliError> {
+    let app = &loaded.app;
+    Ok(Arc::new(ReindexDeps {
+        run: RunMeta::default(),
+        lease: app.lease.clone(),
+        feed_source_repo: Arc::new(FeedSourceRepo::new_with_storage(pool.clone())),
+        feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool.clone())),
+        article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
+        rule_version_repo: Arc::new(RuleVersionRepo::new_with_storage(pool.clone())),
+        reindex_job_repo: Arc::new(ReindexJobRepo::new_with_storage(pool.clone())),
+        event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+    }))
 }
 
 /// 构造严格只读 recent-entries flow：不自动 migrate、不轮换 config version、
@@ -259,7 +290,7 @@ pub async fn build_doctor_deps(cli: &crate::args::Cli) -> Result<DoctorDeps, Cli
 /// active"时 seed（tag 固定 `cli-default`），config 改动后新 sha 永不落库、
 /// bootstrap placeholder 滞留 active（D1/D2）。现改为 sha-keyed 轮换：
 /// sha 一致 → 单 SELECT 零写入；漂移 → 单事务 demote + 复用/插入 + promote。
-/// 轮换只走 tracing 留痕——seed 在 RunContext 之前执行无 run_id，
+/// 轮换只走 tracing 留痕——seed 在 flow 装配之前执行无 run_id，
 /// rule_versions 行自身即审计记录。
 async fn ensure_active_config_version(
     pool: &StoragePool,
@@ -282,15 +313,4 @@ async fn ensure_active_config_version(
         );
     }
     Ok(())
-}
-
-struct NullAiClient;
-
-#[async_trait]
-impl AiClient for NullAiClient {
-    async fn invoke(&self, _task: &AiTask) -> Result<AiResponse, AiError> {
-        Err(AiError::ConnectionFailed(
-            "ai client not configured".to_string(),
-        ))
-    }
 }

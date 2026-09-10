@@ -623,6 +623,5 @@ impl TryFrom<PublishItemRow> for PublishItem {
 }
 
 fn score_from_i32(value: i32) -> Result<Score0To100, String> {
-    let value = u8::try_from(value).map_err(|error| error.to_string())?;
-    Score0To100::try_new(value).map_err(|error| error.to_string())
+    Score0To100::try_from(i64::from(value)).map_err(|error| error.to_string())
 }

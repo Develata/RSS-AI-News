@@ -4,7 +4,7 @@ use rss_ai_news_storage::{NewAiResult, ResetFailedFilter};
 use serde_json::json;
 use time::OffsetDateTime;
 
-use crate::context::RunContext;
+use crate::context::BackfillDeps;
 use crate::error::RuntimeError;
 use crate::events::RunEventEmitter;
 
@@ -41,11 +41,11 @@ pub struct BackfillAiSummary {
 }
 
 pub struct BackfillFlow {
-    ctx: Arc<RunContext>,
+    ctx: Arc<BackfillDeps>,
 }
 
 impl BackfillFlow {
-    pub fn new(ctx: Arc<RunContext>) -> Self {
+    pub fn new(ctx: Arc<BackfillDeps>) -> Self {
         Self { ctx }
     }
 
@@ -54,7 +54,7 @@ impl BackfillFlow {
         opts: BackfillExtractOptions,
     ) -> Result<BackfillExtractSummary, RuntimeError> {
         let emitter = RunEventEmitter {
-            run_id: &self.ctx.run_id,
+            run_id: &self.ctx.run.run_id,
             stage: "backfill",
             repo: self.ctx.event_repo.as_ref(),
         };
@@ -96,7 +96,7 @@ impl BackfillFlow {
 
     pub async fn ai(&self, opts: BackfillAiOptions) -> Result<BackfillAiSummary, RuntimeError> {
         let emitter = RunEventEmitter {
-            run_id: &self.ctx.run_id,
+            run_id: &self.ctx.run.run_id,
             stage: "backfill",
             repo: self.ctx.event_repo.as_ref(),
         };

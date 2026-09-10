@@ -10,20 +10,20 @@ use serde_json::json;
 use time::OffsetDateTime;
 
 use crate::artifact::ArtifactWriter;
-use crate::context::RunContext;
+use crate::context::AiDeps;
 use crate::events::RunEventEmitter;
 
 use super::release::{finish_ai_failure, finish_ai_success, release_permanent_ai_failure};
 use super::{AiRunOptions, AiTaskOutcome};
 
 pub(super) async fn process_one(
-    ctx: Arc<RunContext>,
+    ctx: Arc<AiDeps>,
     owner: String,
     claimed: ClaimedAiResult,
     opts: AiRunOptions,
 ) -> AiTaskOutcome {
     let emitter = RunEventEmitter {
-        run_id: &ctx.run_id,
+        run_id: &ctx.run.run_id,
         stage: "ai_run",
         repo: ctx.event_repo.as_ref(),
     };
@@ -138,7 +138,7 @@ pub(super) struct SuccessfulAttempt {
 /// 单个模型的一次完整尝试：invoke + 写 raw artifact + parse + 构造 outcome。
 /// 任一步失败返回 `AiError`，由 [`process_one`] 按 `should_fallback` 决定换模型 / 终止。
 async fn run_model_attempt(
-    ctx: &RunContext,
+    ctx: &AiDeps,
     task: &AiTask,
     attempt_index: usize,
 ) -> Result<SuccessfulAttempt, AiError> {
@@ -157,7 +157,7 @@ async fn run_model_attempt(
 }
 
 async fn write_ai_raw_response_artifact(
-    ctx: &RunContext,
+    ctx: &AiDeps,
     ai_result_id: i64,
     attempt_index: usize,
     response: &AiResponse,
@@ -171,7 +171,7 @@ async fn write_ai_raw_response_artifact(
         format!("{ai_result_id}#a{attempt_index}")
     };
     let artifact_writer = ArtifactWriter {
-        config: &ctx.app.artifact,
+        config: &ctx.artifact,
         repo: ctx.artifact_repo.as_ref(),
     };
     match artifact_writer

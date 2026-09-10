@@ -15,7 +15,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::artifact::ArtifactWriter;
-use crate::context::RunContext;
+use crate::context::ExtractDeps;
 use crate::events::RunEventEmitter;
 use crate::flows::maintenance::emit_maintenance_outcome;
 
@@ -77,17 +77,17 @@ pub enum ExtractEntryStatus {
 }
 
 pub struct ExtractFlow {
-    ctx: Arc<RunContext>,
+    ctx: Arc<ExtractDeps>,
 }
 
 impl ExtractFlow {
-    pub fn new(ctx: Arc<RunContext>) -> Self {
+    pub fn new(ctx: Arc<ExtractDeps>) -> Self {
         Self { ctx }
     }
 
     pub async fn run(&self, opts: ExtractOptions) -> ExtractSummary {
         let emitter = RunEventEmitter {
-            run_id: &self.ctx.run_id,
+            run_id: &self.ctx.run.run_id,
             stage: "extract",
             repo: self.ctx.event_repo.as_ref(),
         };
@@ -107,7 +107,7 @@ impl ExtractFlow {
         // W15 §3.3：claim 过滤与 release 折叠必须用同一预算值，hoist 一处计算。
         let max_attempts = opts
             .max_attempts
-            .max(self.ctx.app.retry.feed_entry_max_attempts);
+            .max(self.ctx.retry.feed_entry_max_attempts);
 
         // W15 §5：首次 claim 前执行一次 ① reclaim + ② sweep（顺序固定，best-effort）。
         let maintenance_now = OffsetDateTime::now_utc();
@@ -150,7 +150,7 @@ impl ExtractFlow {
                 now,
                 lease_expires_at: lease_expires_at(
                     now,
-                    Duration::seconds(self.ctx.app.lease.fetch_duration_seconds as i64),
+                    Duration::seconds(self.ctx.lease.fetch_duration_seconds as i64),
                 ),
                 batch_size: opts.batch_size.max(1),
                 max_attempts,
@@ -187,7 +187,7 @@ impl ExtractFlow {
             let per_entry_len_before = summary.per_entry.len();
 
             let semaphore = Arc::new(Semaphore::new(
-                self.ctx.app.http.concurrent_fetches.max(1) as usize
+                self.ctx.http.concurrent_fetches.max(1) as usize
             ));
             let mut join_set = JoinSet::new();
 
@@ -262,14 +262,14 @@ impl ExtractFlow {
     }
 
     async fn process_entry(
-        ctx: Arc<RunContext>,
+        ctx: Arc<ExtractDeps>,
         owner: String,
         claimed: ClaimedFeedEntry,
         max_attempts: u32,
     ) -> ExtractEntryOutcome {
         let now = OffsetDateTime::now_utc();
         let emitter = RunEventEmitter {
-            run_id: &ctx.run_id,
+            run_id: &ctx.run.run_id,
             stage: "extract",
             repo: ctx.event_repo.as_ref(),
         };
@@ -289,7 +289,7 @@ impl ExtractFlow {
             normalized_link: claimed.normalized_link,
             title_raw: claimed.title_raw,
             summary_raw,
-            timeout: StdDuration::from_secs(ctx.app.http.timeout_seconds),
+            timeout: StdDuration::from_secs(ctx.http.timeout_seconds),
         };
 
         let raw = match ctx.html_fetcher.fetch_html(&fetch_task).await {
@@ -383,7 +383,7 @@ enum ChainResult {
 }
 
 fn run_strategy_chain(
-    ctx: &RunContext,
+    ctx: &ExtractDeps,
     task: &ArticleFetchTask,
     raw: &RawHtmlFetch,
 ) -> ChainResult {
@@ -399,12 +399,12 @@ fn run_strategy_chain(
 }
 
 async fn write_html_artifact(
-    ctx: &RunContext,
+    ctx: &ExtractDeps,
     feed_entry_id: i64,
     raw: &RawHtmlFetch,
 ) -> Option<i64> {
     let artifact_writer = ArtifactWriter {
-        config: &ctx.app.artifact,
+        config: &ctx.artifact,
         repo: ctx.artifact_repo.as_ref(),
     };
     if !artifact_writer.should_write(false) {
@@ -426,7 +426,7 @@ async fn write_html_artifact(
 }
 
 async fn persist_extracted(
-    ctx: &RunContext,
+    ctx: &ExtractDeps,
     emitter: &RunEventEmitter<'_>,
     owner: &str,
     feed_entry_id: i64,
@@ -450,7 +450,7 @@ async fn persist_extracted(
 }
 
 async fn persist_fallback(
-    ctx: &RunContext,
+    ctx: &ExtractDeps,
     emitter: &RunEventEmitter<'_>,
     owner: &str,
     feed_entry_id: i64,
@@ -474,7 +474,7 @@ async fn persist_fallback(
 }
 
 async fn persist_article(
-    ctx: &RunContext,
+    ctx: &ExtractDeps,
     emitter: &RunEventEmitter<'_>,
     owner: &str,
     feed_entry_id: i64,
@@ -570,7 +570,7 @@ async fn persist_article(
 }
 
 async fn release_dedup_skipped(
-    ctx: &RunContext,
+    ctx: &ExtractDeps,
     emitter: &RunEventEmitter<'_>,
     owner: &str,
     feed_entry_id: i64,
@@ -626,7 +626,7 @@ async fn release_dedup_skipped(
 }
 
 async fn release_extract_error(
-    ctx: &RunContext,
+    ctx: &ExtractDeps,
     emitter: &RunEventEmitter<'_>,
     feed_entry_id: i64,
     owner: &str,
@@ -700,7 +700,7 @@ async fn release_extract_error(
 }
 
 async fn release_permanent_failure(
-    ctx: &RunContext,
+    ctx: &ExtractDeps,
     emitter: &RunEventEmitter<'_>,
     feed_entry_id: i64,
     owner: &str,

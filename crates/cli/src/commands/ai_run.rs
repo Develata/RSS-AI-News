@@ -1,3 +1,4 @@
+use rss_ai_news_storage::RuleVersionRepository;
 use std::{
     io::{self, Write},
     time::Instant,
@@ -9,7 +10,7 @@ use serde::Serialize;
 
 use crate::{
     args::{AiRunArgs, Cli},
-    context_factory::build_run_context,
+    context_factory::{build_ai_deps, open_write_storage},
     error::CliError,
     output::CommandSummary,
 };
@@ -82,17 +83,17 @@ pub async fn run(cli: &Cli, args: &AiRunArgs) -> Result<AiRunCommandSummary, Cli
     // fail-fast（错误只含 env 变量名），单 client 静态装配。
     let ai_credentials = loaded.ai_credentials_for_category(&category.category.key)?;
     let started = Instant::now();
-    let ctx = build_run_context("ai-run", &loaded, Some(ai_credentials)).await?;
+    let pool = open_write_storage(&loaded).await?;
+    let ctx = build_ai_deps(&loaded, &pool, ai_credentials)?;
+    let rule_version_repo = rss_ai_news_storage::RuleVersionRepo::new_with_storage(pool.clone());
 
     // F15-3: 生产读路径走 active_rule_or_register（先读 active，无则 seed
     // 首版）。直接 get_or_create 会被 partial unique index 误判（同 kind
     // 仅一行 active），导致 reindex 切换后无法继续 ingest。
-    let prompt_version = ctx
-        .rule_version_repo
+    let prompt_version = rule_version_repo
         .active_rule_or_register("prompt", "default", "default prompt version", "0")
         .await?;
-    let output_schema_version = ctx
-        .rule_version_repo
+    let output_schema_version = rule_version_repo
         .active_rule_or_register("ai_output_schema", "v1", "AI v1 schema", "v1")
         .await?;
     let prompt_template = category
