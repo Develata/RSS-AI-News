@@ -1,6 +1,6 @@
 # RSS-AI-News
 
-当前版本：`v0.7.1`。
+当前版本：`v0.8.0`。
 
 RSS-AI-News 是一个一次性运行的 RSS 新闻处理 CLI。它按外部调度触发，完成：
 
@@ -336,14 +336,14 @@ rss-ai-news \
 cargo acceptance list
 
 # credential-free pre-tag matrix：static / workspace / SQLite+CLI / release identity
-cargo acceptance run --profile local --expected-version 0.7.1
+cargo acceptance run --profile local --expected-version 0.8.0
 
 # 包含 PostgreSQL 与 Docker；缺 prerequisite 直接失败
 DATABASE_URL='postgres://...' \
-  cargo acceptance run --profile full --expected-version 0.7.1
+  cargo acceptance run --profile full --expected-version 0.8.0
 
 # 机器可读 evidence；不执行命令、不创建 smoke resources
-cargo acceptance --format json run --profile full --expected-version 0.7.1 --dry-run
+cargo acceptance --format json run --profile full --expected-version 0.8.0 --dry-run
 ```
 
 完整 lane contract、cleanup 与 exit semantics 见 [`docs/operations/acceptance-matrix.md`](docs/operations/acceptance-matrix.md)。
@@ -856,7 +856,7 @@ rss-ai-news --config-dir configs publish --date 2026-05-18 --force
 rss-ai-news --config-dir configs validate-config
 ```
 
-## 当前版本状态（v0.7.1）
+## 当前版本状态（v0.8.0）
 
 - production graph：11 个 library crates + 1 个 single-shot binary；SQLite / PostgreSQL 双方言。
 - CLI：13 个顶层子命令；`recent-entries` 提供 read-only discovery surface，`--published-after` 默认关闭。
@@ -864,7 +864,7 @@ rss-ai-news --config-dir configs validate-config
 - CI：lint / workspace test / SQLite migration smoke / PostgreSQL / Docker 5 个并行 jobs。
 - release：runtime + scheduler GHCR images；版本、README、lockfile 与 binary identity 在 pre-tag matrix 中联动检查。
 
-完整发布快照见 [`docs/reports/releases/v0.7.1.md`](docs/reports/releases/v0.7.1.md)。
+完整发布快照见 [`docs/reports/releases/v0.8.0.md`](docs/reports/releases/v0.8.0.md)。
 
 ## 更多文档
 

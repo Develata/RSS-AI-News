@@ -38,37 +38,35 @@ push tag `v*` 时同时构建发布两套镜像：
 
 ## 3. Dockerfile multi-stage
 
-入口：[`docker/Dockerfile`](../../docker/Dockerfile)。三层结构：
+入口：[`docker/Dockerfile`](../../docker/Dockerfile)。构建与运行 stage：
 
 ```text
-deps    →  builder  →  runtime
-              │
-              └──→  scheduler
+builder  →  runtime  →  debug
+                └──→  scheduler
 ```
 
-### 3.1 `deps` stage
+### 3.1 `builder` stage
 
-- 仅 COPY 各 crate 的 `Cargo.toml` + `Cargo.lock` + 占位 `src/lib.rs`
-- 运行 `cargo build --release --workspace --bin rss-ai-news`（允许失败）
-- 目的：让 cargo 注册表 / git / target 缓存固化在这一层，源码改动不触发依赖重编译
+- 从 Rust 1.97.0 bookworm 镜像直接 COPY 真实源码，不再构造占位源码或忽略构建失败。
+- BuildKit cache mounts 复用 Cargo registry、git 与 target；执行 `cargo build --release --locked --bin rss-ai-news`。
+- 将二进制复制到 cache mount 外的 `/app/rss-ai-news` 并 strip，供后续 stage 复制。
 
-### 3.2 `builder` stage
+### 3.2 `debug` stage
 
-- 在 `deps` 基础上 COPY 真实源码
-- 删除占位 lib.rs 的 fingerprint + 触碰所有 .rs 的 mtime，强制 cargo 重编译工作区 crate
-- 不带 builtin 依赖编译 → 编出最终 release 二进制
+- 基于 runtime 增加 bash、curl、sqlite3、jq 等诊断工具与 tini。
+- 最终仍以非 root 的 `appuser` 运行，不单独发布 GHCR debug tag。
 
 ### 3.3 `runtime` stage
 
 - `debian:bookworm-slim` 基础
 - 安装最小运行时依赖（`ca-certificates` 等）
-- `COPY --from=builder /app/target/release/rss-ai-news /usr/local/bin/`
-- `ENTRYPOINT ["rss-ai-news"]`
+- 从 builder 的 `/app/rss-ai-news` 复制最终二进制到 `/usr/local/bin/`。
+- `ENTRYPOINT ["/usr/local/bin/rss-ai-news"]`，以 UID/GID 10001 的 `appuser` 运行。
 
 ### 3.4 `scheduler` stage
 
 - `FROM runtime`
-- 额外安装 supercronic（aptible/supercronic）静态二进制
+- 额外安装 supercronic 0.2.49（aptible/supercronic），按 amd64/arm64 校验固定 SHA-256。
 - `COPY docker/scheduler-entrypoint.sh /usr/local/bin/`
 - `ENTRYPOINT ["scheduler-entrypoint.sh"]`
 
