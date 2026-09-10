@@ -263,3 +263,4 @@ remote 使用 claim 返回的记录元信息，只加载一次 frozen items，�
 Octocrab connect/read/write timeout 为5/30/30秒，所有 GitHub 响应最多16 MiB（含 base64 Contents 响应）。
 成功响应超限不可重试；429/5xx 错误页超限仍保留对应 retry 分类。
 GitHub错误消息先解析JSON，再遮蔽当前token，避免JSON转义绕过凭据脱敏；诊断正文最多 8 KiB，包含截断标记；422 的 fast-forward 冲突分类信号在截断后保留。
+合法 JSON 缺少字符串 `message` 时仅输出状态说明，不回显未知结构中的键或嵌套值。

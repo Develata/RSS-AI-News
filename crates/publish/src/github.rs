@@ -547,10 +547,15 @@ fn validate_path_part(path: &str) -> Result<(), PublishError> {
 }
 
 fn response_message(status: u16, body: &[u8], token: &str) -> String {
-    let message = if let Ok(value) = serde_json::from_slice::<Value>(body)
-        && let Some(message) = value.get("message").and_then(|message| message.as_str())
-    {
-        message.to_string()
+    let message = if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        value
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                // Unknown JSON keys/values may contain escaped credentials.
+                format!("github api returned status {status} with an unrecognized JSON error")
+            })
     } else {
         let body = String::from_utf8_lossy(body);
         if body.trim().is_empty() {

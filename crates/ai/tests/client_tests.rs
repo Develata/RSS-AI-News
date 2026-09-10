@@ -227,6 +227,55 @@ fn client_config_debug_hides_url_credentials_and_query() {
     }
 }
 
+#[tokio::test]
+async fn unusual_error_json_does_not_retain_escaped_credentials() {
+    for body in [
+        r#"{"error":{"message":"Unavailable: \u0073k-test","code":503}}"#,
+        r#"{"error":{"message":"Unavailable: \u0073k-test","type":false}}"#,
+        r#"{"error":{"message":{"detail":"\u0073k-test"}}}"#,
+        r#"{"\u0073k-test":"unexpected error shape"}"#,
+        r#"["\u0073k-test"]"#,
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+        let error = test_client(server.uri())
+            .invoke(&test_task())
+            .await
+            .expect_err("503 fails");
+        assert!(matches!(error, AiError::HttpStatus { code: 503, .. }));
+        assert!(error.is_retryable());
+        for diagnostic in [
+            format!("{error:?}"),
+            error.to_string(),
+            error.display_user(),
+        ] {
+            assert!(!diagnostic.contains("k-test"), "credential retained");
+        }
+    }
+}
+
+#[tokio::test]
+async fn plaintext_error_retains_http_retry_classification() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .set_body_string("quota service temporarily unavailable: sk-test"),
+        )
+        .mount(&server)
+        .await;
+    let error = test_client(server.uri())
+        .invoke(&test_task())
+        .await
+        .expect_err("503 fails");
+    assert!(matches!(error, AiError::HttpStatus { code: 503, .. }));
+    assert!(error.is_retryable());
+    assert!(!error.display_user().contains("sk-test"));
+}
+
 // A raw local HTTP fixture is intentional: wiremock supplies Content-Length,
 // so it cannot prove that the reader enforces its cap while streaming.
 fn chunked_server(body: Vec<u8>, delay: Duration) -> (String, std::thread::JoinHandle<()>) {

@@ -231,55 +231,44 @@ struct CompletionUsage {
     completion_tokens: u32,
 }
 
-#[derive(Deserialize)]
-struct ErrorEnvelope {
-    error: Option<ApiErrorBody>,
-}
-
-#[derive(Deserialize)]
-struct ApiErrorBody {
-    message: String,
-    #[serde(default)]
-    r#type: Option<String>,
-    #[serde(default)]
-    code: Option<String>,
-}
-
 fn classify_error_response(
     code: u16,
     body: String,
     retry_after_seconds: Option<u64>,
     api_key: &str,
 ) -> AiError {
-    let parsed = serde_json::from_str::<ErrorEnvelope>(&body).ok();
-    let Some(mut api_error) = parsed.and_then(|envelope| envelope.error) else {
+    let parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
+    let Some(parsed) = parsed else {
         return classify_http_status(code, body.replace(api_key, "***"), retry_after_seconds);
     };
+    let api_error = parsed.get("error");
+    let field = |name| {
+        api_error
+            .and_then(|error| error.get(name))
+            .and_then(serde_json::Value::as_str)
+    };
+    let message = field("message").map(str::to_owned).unwrap_or_else(|| {
+        // Never echo unrecognized JSON: keys and nested values can contain
+        // escaped credentials that a wire-text replacement cannot remove.
+        format!("provider returned status {code} with an unrecognized JSON error")
+    });
     // Decode JSON escapes before matching the credential. Scrubbing the wire
     // text alone allows e.g. "\u0073k-..." to reappear in persisted diagnostics.
-    api_error.message = api_error.message.replace(api_key, "***");
+    let message = message.replace(api_key, "***");
 
-    if is_quota_error(
-        api_error.r#type.as_deref(),
-        api_error.code.as_deref(),
-        &api_error.message,
-    ) {
+    if is_quota_error(field("type"), field("code"), &message) {
         return AiError::QuotaExceeded {
-            message: rss_ai_news_domain::error::truncate_diagnostic(api_error.message, 8 * 1024),
+            message: rss_ai_news_domain::error::truncate_diagnostic(message, 8 * 1024),
         };
     }
 
-    if is_model_unavailable_error(
-        api_error.r#type.as_deref(),
-        api_error.code.as_deref(),
-        &api_error.message,
-    ) {
+    if is_model_unavailable_error(field("type"), field("code"), &message) {
         return AiError::ModelUnavailable {
-            message: rss_ai_news_domain::error::truncate_diagnostic(api_error.message, 8 * 1024),
+            message: rss_ai_news_domain::error::truncate_diagnostic(message, 8 * 1024),
         };
     }
 
-    classify_http_status(code, api_error.message, retry_after_seconds)
+    classify_http_status(code, message, retry_after_seconds)
 }
 
 async fn read_limited_body(

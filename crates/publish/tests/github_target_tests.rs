@@ -458,3 +458,31 @@ async fn github_error_diagnostics_are_bounded() {
         assert!(error.display_user().contains("[truncated, original_bytes="));
     }
 }
+
+#[tokio::test]
+async fn unusual_error_json_does_not_retain_escaped_credentials() {
+    for body in [
+        r#"{"message":{"detail":"\u0074oken"}}"#,
+        r#"{"\u0074oken":"unexpected error shape"}"#,
+        r#"["\u0074oken"]"#,
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+        let error = target(&server).publish(&sample_report()).await.unwrap_err();
+        assert!(matches!(
+            error,
+            PublishError::GitHubApiError { status: 500, .. }
+        ));
+        assert!(error.is_retryable());
+        for diagnostic in [
+            format!("{error:?}"),
+            error.to_string(),
+            error.display_user(),
+        ] {
+            assert!(!diagnostic.contains("oken"), "credential retained");
+        }
+    }
+}
