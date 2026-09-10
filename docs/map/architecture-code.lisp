@@ -1,6 +1,6 @@
 ;;; architecture-code.lisp — code 视图（"实际如此"）
 ;;;
-;;; 节点 / 路径 / 行号取自 codegraph 索引（结构化 tree-sitter AST 解析）。
+;;; 初版节点 / 路径由 codegraph 辅助导出；本轮变更按当前 Rust 源文件与 Cargo.toml 核对。
 ;;; 与 architecture-plan.lisp 节点 :id 对称：plan-side 是语义抽象，code-side
 ;;; 是当前实现位置。两边出现 :id 不一致即漂移，登记在 architecture-diff.md。
 ;;;
@@ -31,7 +31,7 @@
       :crate cli
       :path "crates/cli/src/lib.rs"
       :kind function
-      :downstream (config-loader runtime-context cli-commands)
+      :downstream (config-loader cli-commands)
       :state active
       :notes "解析 clap Cli + 全局 flag + 子命令分派；持有 WorkerGuard 到进程结束。")
 
@@ -51,89 +51,153 @@
 ;; 运行时
 ;; ====================================================================
 
-(node :id runtime-context
-      :label "RunContext 结构体"
+(node :id run-meta
+      :label "RunMeta"
       :layer flow-coord
       :crate runtime
-      :path "crates/runtime/src/context.rs:16"
+      :path "crates/runtime/src/context.rs"
       :kind struct
-      :downstream (storage-pool config-loader observability-stack
-                   flow-ingest flow-extract flow-ai-run flow-publish
-                   flow-reindex flow-backfill flow-rebuild-report)
+      :downstream ()
       :state active
-      :notes "16 字段：run_id / started_at / stage / app + 6 capability clients
-              + 10 Repository traits + RunContextDeps（其构造在 cli/context_factory.rs::build_run_context）。")
+      :notes "仅 run_id 与 started_at；不持有配置、clients 或 repositories。")
 
-(node :id runtime-context-deps
-      :label "RunContextDeps"
+(node :id ingest-deps
+      :label "IngestDeps"
       :layer flow-coord
       :crate runtime
-      :path "crates/runtime/src/context.rs:42"
+      :path "crates/runtime/src/context.rs"
       :kind struct
-      :upstream (runtime-context)
+      :upstream (flow-ingest)
+      :downstream (run-meta feed-crate repo-feed-source repo-feed-entry repo-raw-artifact repo-run-event repo-rule-version)
       :state active
-      :notes "RunContext::new_for_stage 的入参聚合体。")
+      :notes "Feed 抓取所需配置、fetcher 与 repositories；无 HTML、AI 或 publisher。")
+
+(node :id extract-deps
+      :label "ExtractDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "crates/runtime/src/context.rs"
+      :kind struct
+      :upstream (flow-extract)
+      :downstream (run-meta extractor-fetcher extractor-strategy repo-feed-entry repo-article repo-raw-artifact repo-run-event)
+      :state active
+      :notes "HTML 抓取、提取策略与 persistence；无 AI 或 publisher。")
+
+(node :id ai-deps
+      :label "AiDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "crates/runtime/src/context.rs"
+      :kind struct
+      :upstream (flow-ai-run)
+      :downstream (run-meta ai-crate repo-article repo-article-ai-result repo-raw-artifact repo-run-event)
+      :state active
+      :notes "单次运行的 AI client 与 article/result/artifact/event repositories。")
+
+(node :id publish-deps
+      :label "PublishDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "crates/runtime/src/context.rs"
+      :kind struct
+      :upstream (flow-publish)
+      :downstream (run-meta publish-crate repo-publish-record repo-publish-item repo-run-event)
+      :state active
+      :notes "冻结快照发布依赖；remote target 为 Option，local-only 不构造 GitHub client。")
+
+(node :id backfill-deps
+      :label "BackfillDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "crates/runtime/src/context.rs"
+      :kind struct
+      :upstream (flow-backfill)
+      :downstream (run-meta repo-feed-entry repo-article repo-article-ai-result repo-rule-version repo-run-event)
+      :state active
+      :notes "只依赖重置/派生任务所需 repositories，不构造 AI 或网络 client。")
+
+(node :id reindex-deps
+      :label "ReindexDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "crates/runtime/src/context.rs"
+      :kind struct
+      :upstream (flow-reindex)
+      :downstream (run-meta repo-feed-source repo-feed-entry repo-article repo-rule-version repo-reindex-job repo-run-event)
+      :state active
+      :notes "租约配置与规则/对象 repositories，不持有网络 client。")
+
+(node :id rebuild-report-deps
+      :label "RebuildReportDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "crates/runtime/src/context.rs"
+      :kind struct
+      :upstream (flow-rebuild-report)
+      :downstream (repo-publish-record repo-publish-item)
+      :state active
+      :notes "模板与冻结快照读取依赖，不持有 publisher。")
 
 (node :id flow-ingest
       :label "IngestFlow"
       :layer flow-coord
       :crate runtime
-      :path "crates/runtime/src/flows/ingest.rs:73"
+      :path "crates/runtime/src/flows/ingest.rs"
       :kind struct
-      :upstream (runtime-context)
-      :downstream (feed-crate repo-feed-source repo-feed-entry artifact-writer
+      :upstream (cli-commands)
+      :downstream (ingest-deps feed-crate repo-feed-source repo-feed-entry artifact-writer
                    run-event-emitter)
       :state active
-      :notes "run() at line 96。process_source 静态函数处理单 source。")
+      :notes "run() 按 source 执行；仅持有 IngestDeps。")
 
 (node :id flow-extract
       :label "ExtractFlow"
       :layer flow-coord
       :crate runtime
-      :path "crates/runtime/src/flows/extract.rs:74"
+      :path "crates/runtime/src/flows/extract.rs"
       :kind struct
-      :upstream (runtime-context)
-      :downstream (extractor-crate repo-feed-entry repo-article artifact-writer
+      :upstream (cli-commands)
+      :downstream (extract-deps extractor-crate repo-feed-entry repo-article artifact-writer
                    run-event-emitter)
       :state active
-      :notes "run() at line 83。")
+      :notes "run() 批次领取，失败时懒读取摘要；仅保存计数与最多 32 个失败样例。")
 
 (node :id flow-ai-run
       :label "AiRunFlow"
       :layer flow-coord
       :crate runtime
-      :path "crates/runtime/src/flows/ai_run/mod.rs:24"
+      :path "crates/runtime/src/flows/ai_run/mod.rs"
       :kind struct
-      :upstream (runtime-context)
-      :downstream (ai-crate repo-article repo-article-ai-result artifact-writer
+      :upstream (cli-commands)
+      :downstream (ai-deps ai-crate repo-article repo-article-ai-result artifact-writer
                    run-event-emitter)
       :state active
-      :notes "run() at mod.rs:314。mod 编排 + 拆出 dto / process(任务生成+处理) / release。")
+      :notes "mod 编排 + dto / process / release；Arc<AiRunOptions> 与 Arc<str> 共享不可变配置，最多 32 个失败样例。")
 
 (node :id flow-publish
       :label "PublishFlow"
       :layer flow-coord
       :crate runtime
-      :path "crates/runtime/src/flows/publish/mod.rs:31"
+      :path "crates/runtime/src/flows/publish/mod.rs"
       :kind struct
-      :upstream (runtime-context)
-      :downstream (report-crate publish-crate repo-publish-record repo-publish-item
+      :upstream (cli-commands)
+      :downstream (publish-deps report-crate publish-crate repo-publish-record repo-publish-item
                    run-event-emitter)
       :state active
       :notes "5 阶段：init(mod) / freeze / render / store_local / publish_remote(remote)，
               按阶段拆 freeze.rs / render.rs / store_local.rs / remote.rs + dto.rs。
-              freeze() at freeze.rs:23。")
+              远端报告仅加载一次冻结 items，同时派生 article IDs，不重复读取完整快照。")
 
 (node :id flow-reindex
       :label "ReindexFlow"
       :layer flow-coord
       :crate runtime
-      :path "crates/runtime/src/flows/reindex/mod.rs:27"
+      :path "crates/runtime/src/flows/reindex/mod.rs"
       :kind struct
-      :upstream (runtime-context)
-      :downstream (repo-reindex-job repo-rule-version repo-feed-entry repo-article repo-feed-source)
+      :upstream (cli-commands)
+      :downstream (reindex-deps repo-reindex-job repo-rule-version repo-feed-entry repo-article repo-feed-source)
       :state active
-      :notes "run() at mod.rs:36。mod 编排 + 拆出 dto / dry_run / execute / abort。
+      :notes "mod 编排 + 拆出 dto / dry_run / execute / abort。
               三 target × dry-run/real-run × abort 分支。")
 
 (node :id flow-backfill
@@ -142,8 +206,8 @@
       :crate runtime
       :path "crates/runtime/src/flows/backfill.rs"
       :kind struct
-      :upstream (runtime-context)
-      :downstream (repo-feed-entry repo-article-ai-result repo-rule-version)
+      :upstream (cli-commands)
+      :downstream (backfill-deps repo-feed-entry repo-article-ai-result repo-rule-version)
       :state active
       :notes "extract / ai 两个方法。详见 plan/10-replay-and-backfill.md。")
 
@@ -153,8 +217,8 @@
       :crate runtime
       :path "crates/runtime/src/flows/rebuild_report.rs"
       :kind struct
-      :upstream (runtime-context)
-      :downstream (report-crate publish-crate repo-publish-record)
+      :upstream (cli-commands)
+      :downstream (rebuild-report-deps report-crate repo-publish-record repo-publish-item)
       :state active
       :notes "字节相等重建保证由 report::rebuild 实现。")
 
@@ -167,7 +231,7 @@
       :upstream (cli-commands)
       :downstream (repo-feed-source repo-feed-entry)
       :state active
-      :notes "只读 projection；独立持有最小 read-only repository traits，不构造完整 RunContext。")
+      :notes "只读 projection；独立持有最小 read-only repository traits，不构造网络 clients、publisher 或 writer repositories。")
 
 (node :id runtime-error
       :label "RuntimeError enum"
@@ -189,18 +253,18 @@
       :downstream (repo-raw-artifact)
       :state active
       :notes "should_write() 按 retention_policy + on_failure 决策；
-              write_inline() 按 inline_threshold_bytes 决定 inline vs file 后端。")
+              write_inline() 当前只写数据库；inline_threshold_bytes/file_storage_dir 为保留配置。")
 
 (node :id run-event-emitter
       :label "RunEventEmitter"
       :layer cross-cutting
       :crate runtime
-      :path "crates/runtime/src/events.rs:19"
+      :path "crates/runtime/src/events.rs:20"
       :kind struct
       :upstream (flow-ingest flow-extract flow-ai-run flow-publish flow-backfill flow-reindex)
       :downstream (repo-run-event redact-event-context)
       :state active
-      :notes "emit() 强制 redact_event_context + 4KB 截断；
+      :notes "emit() 脱敏 message 与 context，context 最终序列化 JSON ≤4096 bytes；
               insert 失败仅 tracing::error!，不向上抛错（'禁止静默吞错' 的唯一豁免点）。")
 
 ;; ====================================================================
@@ -256,15 +320,15 @@
       :label "StoragePool enum"
       :layer capability
       :crate storage
-      :path "crates/storage/src/pool.rs:21"
+      :path "crates/storage/src/pool.rs"
       :kind enum
-      :upstream (runtime-context)
+      :upstream (cli-commands)
       :downstream (repo-feed-source repo-feed-entry repo-article repo-article-ai-result
                    repo-publish-record repo-publish-item repo-raw-artifact
                    repo-run-event repo-rule-version repo-reindex-job)
       :state active
-      :notes "build(url, max_connections, busy_timeout_ms) at line 33；
-              is_postgres_url() at line 50；impl fmt::Debug at line 77（仅 Debug，无 Display）。")
+      :notes "build / build_read_only 按数据库 scheme 分派；未知 URL scheme 明确拒绝。
+              Debug 不暴露连接 URL 或 credentials。")
 
 (node :id repo-feed-source
       :label "FeedSourceRepository"
@@ -305,7 +369,7 @@
       :path "crates/storage/src/repo/publish_record.rs"
       :kind trait
       :state active
-      :notes "storage_pool() at line 203（双方言派发）。")
+      :notes "内部按双方言派发，阶段 claim/release 与终态推进保持原子性。")
 
 (node :id repo-publish-item
       :label "PublishItemRepository"
@@ -404,7 +468,8 @@
       :path "crates/observability/src/lib.rs"
       :kind module
       :downstream (tracing-init metrics-recorder health-check redact-event-context)
-      :state active)
+      :state active
+      :notes "不依赖 config/storage/domain 或 SQL/HTTP client；run_events 持久化由 runtime::RunEventEmitter 承担。")
 
 (node :id tracing-init
       :label "tracing_init::init"
@@ -422,7 +487,7 @@
       :path "crates/observability/src/metrics.rs"
       :kind trait
       :state active
-      :notes "NullMetrics / InMemoryMetrics / PrometheusMetrics 三实现。")
+      :notes "NullMetrics / InMemoryMetrics / PrometheusMetrics 三实现；HTTP exporter 最多 32 个 handlers、5 秒截止时间、4 KiB 请求头。")
 
 (node :id health-check
       :label "HealthCheck trait + CheckReport"
@@ -431,7 +496,19 @@
       :path "crates/observability/src/health.rs"
       :kind trait
       :state active
-      :notes "config / database / migrations / openai / github / rsshub / disk 七个具体 check。")
+      :notes "仅 CheckOutcome / CheckReport / HealthCheck；具体 checks 位于 runtime::doctor::health。")
+
+(node :id doctor-health
+      :label "runtime::doctor::health 具体诊断"
+      :layer flow-coord
+      :crate runtime
+      :path "crates/runtime/src/doctor/health.rs"
+      :kind module
+      :upstream (cli-commands)
+      :downstream (health-check config-validate storage-pool)
+      :state active
+      :notes "13 项具体 config/DB/migration/HTTP/disk/liveness checks。doctor 不自动 migrate 或 seed；
+              migration 校验版本、checksum 和 success；HTTP ping 有时间与 body 上限。")
 
 (node :id redact-event-context
       :label "redact::redact_event_context"
@@ -440,8 +517,8 @@
       :path "crates/observability/src/redact.rs"
       :kind function
       :state active
-      :notes "三类红action：URL userinfo / Authorization Bearer / JSON 键名匹配
-              (api_key|token|secret|password|access_key)。")
+      :notes "URL userinfo 与敏感 query（包括错误文本内 URL）、Authorization header、JSON credential 键。
+              无变化字符串保留借用；doctor 输出和 run_events 写入复用同一策略。")
 
 ;; ====================================================================
 ;; 状态机（4 个 enum）
@@ -496,7 +573,7 @@
       :kind module
       :downstream (cli-main)
       :state active
-      :notes "deps → builder → runtime 三 stage；ENTRYPOINT 直接是 rss-ai-news。")
+      :notes "builder → runtime；普通 locked Cargo build + BuildKit cache mounts，无 workspace stubs；ENTRYPOINT 为 rss-ai-news。")
 
 (node :id docker-scheduler-image
       :label "Dockerfile scheduler stage + entrypoint"

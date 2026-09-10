@@ -2,7 +2,7 @@
 
 本章说明：
 1. CLI 子命令的整体形态与全局 flag 约定
-2. Runtime 层的 `RunContext` —— 流程协调层的接缝点
+2. Runtime 按 flow 定义的窄依赖集合
 3. CLI 壳到 Runtime Flow 的调度路径
 
 实际可执行的 CLI 用法 / 排障细节在 [../operations/cli-reference.md](../operations/cli-reference.md)
@@ -59,8 +59,8 @@ CLI 框架：`clap` derive。每个子命令是独立 enum 变体。
 
 每个子命令的责任：
 1. 解析参数（clap derive）
-2. 加载配置（`config::load_all` 或 `config::load_skip_env_checks`）
-3. 构造 `RunContext`
+2. 加载配置（`config::load` 或 `config::load_skip_env_checks`）
+3. 在 CLI composition root 打开相应读/写连接，构造该 flow 的依赖
 4. 调用 `crates/runtime/src/flows/<flow>`（单文件 `<flow>.rs` 或 `<flow>/` 目录）的对应 Flow
 5. 把 Flow 结果转 exit code / 输出格式
 
@@ -99,56 +99,41 @@ CLI 框架：`clap` derive。每个子命令是独立 enum 变体。
 
 `migrate` 与 `validate-config` 是**纯 config / storage 层**的命令，不进入流程协调层。
 `recent-entries` 进入一个只读 Runtime Flow，但只注入 `FeedSourceRepository` 与
-`FeedEntryRepository` 的轻量 deps：它不得复用会自动 migration/config rotation 的完整
-`RunContext`。三者都不构造 `RunContext`；区别是 `recent-entries` 仍保留 CLI → Flow → Repo
+`FeedEntryRepository` 的轻量 deps：它不得复用会自动 migration/config rotation 的全量客户端装配。三者都不装配网络能力；区别是 `recent-entries` 仍保留 CLI → Flow → Repo
 的分层，不让 CLI 直接发 SQL。
 
-## 4. RunContext —— 流程协调层接缝点
+## 4. Flow 依赖与启用边界
 
-`RunContext` 是主链路与会推进状态的 Runtime Flow 的完整依赖接缝。它持有：
+[ADR 0009](../adr/0009-boundary-resource-hardening.md) 替代原全量 `RunContext`。
+`context.rs` 只包含普通 Rust struct，无 service locator、动态注册表或 DI 框架。
 
-```rust
-pub struct RunContext {
-    pub run_id: String,              // ULID, 用于跨进程追踪
-    pub started_at: OffsetDateTime,
-    pub stage: String,                // "ingest" / "ai_run" / "publish" / ...
-    pub app: Arc<AppConfig>,
+| Flow | 依赖集合 | 外部能力 |
+|---|---|---|
+| IngestFlow | IngestDeps | FeedFetcher；source/entry/artifact/event/rule repositories |
+| ExtractFlow | ExtractDeps | HtmlFetcher、ContentStrategy；entry/article/artifact/event repositories |
+| AiRunFlow | AiDeps | AiClient；article/AI result/artifact/event repositories |
+| PublishFlow | PublishDeps | 本地及可选远端 PublishTarget；record/item/event repositories |
+| RebuildReportFlow | RebuildReportDeps | 模板、record/item repositories，无 publisher |
+| BackfillFlow | BackfillDeps | entry/article/AI result/rule/event repositories |
+| ReindexFlow | ReindexDeps | source/entry/article/rule/job/event repositories |
 
-    // 4 个能力执行层 client
-    pub feed_fetcher: Arc<dyn FeedFetcher>,
-    pub html_fetcher: Arc<dyn HtmlFetcher>,
-    pub strategies: Vec<Arc<dyn ContentStrategy>>,
-    pub ai_client: Arc<dyn AiClient>,
-    pub publish_target_local: Arc<dyn PublishTarget>,
-    pub publish_target_remote: Option<Arc<dyn PublishTarget>>,
+配置只按实际需要传 `HttpConfig`、`LeaseConfig`、`RetryConfig`、`ArtifactConfig` 或模板；
+flow 不持有 `AppConfig`。小型 `RunMeta { run_id, started_at }` 提供追踪身份；同一 ingest
+命令的 feed/extract 两阶段共享身份，stage 由各 flow 显式指定。
 
-    // 10 个 Repository trait（覆盖所有持久化对象）
-    pub feed_source_repo: Arc<dyn FeedSourceRepository>,
-    pub feed_entry_repo: Arc<dyn FeedEntryRepository>,
-    pub article_repo: Arc<dyn ArticleRepository>,
-    pub ai_result_repo: Arc<dyn ArticleAiResultRepository>,
-    pub publish_record_repo: Arc<dyn PublishRecordRepository>,
-    pub publish_item_repo: Arc<dyn PublishItemRepository>,
-    pub artifact_repo: Arc<dyn RawArtifactRepository>,
-    pub event_repo: Arc<dyn RunEventRepository>,
-    pub rule_version_repo: Arc<dyn RuleVersionRepository>,
-    pub reindex_job_repo: Arc<dyn ReindexJobRepository>,
-}
-```
+`cli::context_factory` 是装配入口：
 
-构造模式：CLI 子命令构造 `RunContextDeps`（同形态的所有字段），传 `RunContext::new_for_stage(stage, app, deps)`。
-ULID 自动生成。
+- 写命令用 `open_write_storage` 执行迁移及 config version 轮换，再建立该 flow 所需客户端。
+- `recent-entries`、`replay`、`rebuild-report`、`reindex --dry-run` 使用只读连接与精确迁移校验；
+  不创建数据库、不自动修复迁移、不轮换配置、不构造网络客户端。dry-run 只输出 tracing，不写 run_events。
+- `doctor` 不自动迁移或轮换版本，检查真实数据库状态；数据库/迁移未就绪时跳过 deep scan。
+- 单阶段命令先做结构校验，再检查实际启用能力所需凭据。ingest 不要求 AI/GitHub 凭据；
+  `ai-run` 在 ai.enabled=false 时明确失败；publish --local-only 不构造 GitHub client。
+- 原来的 `NullAiClient` 已删除，未启用的能力不装配占位对象。
 
-### 4.1 为什么所有 client / repo 都在 Context 里
-
-避免 Flow 入口需要 13 个参数的"参数车祸"。所有依赖通过 `Arc<dyn Trait>` 装箱，Flow
-按需借用。代价：测试时需要为不用的字段注入 dummy 值（见 `context.rs` 中 `html_fetcher`
-字段紧邻的 doc 注释，约定 ingest-only flow 也必须填占位值）。
-
-### 4.2 stage 字段的作用
-
-`stage` 是 tracing span 的 root field。所有日志、metric、run_event 自动带上 `stage` 标签。
-方便从 run_events 表反查"某 stage 的全部事件"。
+结果内存：extract/AI 每批持有 claim 数据，完成后只累计 counters，并保留最多 32 条失败样例；
+成功结果不累计。无限批次不再导致 summary 随历史处理量增长。ingest 同时存活任务数不超过
+concurrent_feeds，源配置通过引用迭代。运行总内存仍受当前 body、批大小、并发和配置规模影响。
 
 ## 5. exit code 速查
 
@@ -170,13 +155,12 @@ ULID 自动生成。
 宪法 §3.3 壳核分离的硬约束：
 
 - CLI 不能直接写库（必须经 Flow → Repo）
-- CLI 不能直接调外部 HTTP（必须经 RunContext 中的 client trait）
-- CLI 不能持有业务状态（每次调用都新构造 RunContext）
+- CLI 不能直接调外部 HTTP（必须经相应 flow 的 capability trait；doctor 的探测在专用检查模块）
+- CLI 不能持有业务状态（业务状态由数据库持有，运行身份为 RunMeta）
 
 `migrate` / `validate-config` 是纯配置 / 存储工具命令，绕过 Flow 层。
 `recent-entries` 是受限例外：CLI 只构造 read-only deps，查询仍必须经过
-`RecentEntriesFlow` → Repository；不得直接发 SQL，也不得走会产生 startup writes 的完整
-`RunContext`。
+`RecentEntriesFlow` → Repository；不得直接发 SQL，也不得走会产生 startup writes 的全量客户端装配。
 
 ## 7. 当前实现入口
 
@@ -185,7 +169,7 @@ ULID 自动生成。
 | 二进制入口 | [`src/main.rs`](../../src/main.rs) |
 | CLI 路由 | [`crates/cli/src/lib.rs`](../../crates/cli/src/lib.rs) |
 | 子命令实现 | [`crates/cli/src/commands/`](../../crates/cli/src/commands/) |
-| RunContext | [`crates/runtime/src/context.rs`](../../crates/runtime/src/context.rs) |
+| Flow deps / RunMeta | [`crates/runtime/src/context.rs`](../../crates/runtime/src/context.rs) |
 | Flow 模块集合 | [`crates/runtime/src/flows/`](../../crates/runtime/src/flows/) |
 
 代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。

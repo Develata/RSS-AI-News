@@ -128,3 +128,17 @@ docker logs -f rss-ai-news-scheduler
 - 边界约束（不内置 cron）：[../adr/0001-single-shot-cli-no-builtin-cron.md](../adr/0001-single-shot-cli-no-builtin-cron.md)
 - scheduler 镜像验收：[../acceptance-cases/commands/scheduler.md](../acceptance-cases/commands/scheduler.md)
 - PG 切换：[./postgres-deployment.md](./postgres-deployment.md)
+
+## 构建与供应链（2026-09-10）
+
+Dockerfile 使用真实源码、cargo build --release --locked 与 registry/git/target BuildKit cache mounts；
+不再制造 stub、忽略 build 失败或删除 fingerprints。可执行文件复制到 mount 外再进入 runtime stage。
+新增 crate 无需维护额外 COPY/stub 名单。docs-backup 不进入构建上下文。
+
+同一 builder 的 cache mounts 可复用；GitHub Actions cache exporter 默认不保存 cache mount 内容，
+新 runner 的冷构建仍可能重新编译依赖，不能声称与旧 dependency layer 命中性能相等。
+参见 [Docker 官方说明](https://docs.docker.com/build/ci/github-actions/cache/)。不引入 cargo-chef 或 cache-dance。
+
+Supercronic 固定 v0.2.49，amd64/arm64 SHA-256 来自官方 GitHub release asset.digest，并逐个下载核验。
+entrypoint 不打印可能带密钥的完整 crontab/命令。本机 amd64 已测版本、合法/非法 cron 和 SIGTERM；
+镜像 runtime/debug/scheduler 的既有 CI smoke 仍是容器验收入口，本地无 Docker 的结果不能替代它。

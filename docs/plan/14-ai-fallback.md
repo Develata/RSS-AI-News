@@ -48,10 +48,13 @@ load 后丢弃、不注入 `std::env`），需把动态 env 解析做成 config 
 > 注：`QuotaExceeded` 在同一 key 下多为账户级、换模型未必有救，但用户选择"只要失败就试"，
 > 故纳入。A 期全局单凭证，这两个 false 排除是纯逻辑的（非策略偏好）。
 
-新增 `AiError::ModelUnavailable { message }`：在 `classify_error_response`（reqwest 路径）与
-`From<OpenAIError::ApiError>`（async-openai 路径）**双路径**识别 `model_not_found` /
-`model_not_available` / `does not exist`（400/404、JSON 与纯文本）。同时修正 `From<OpenAIError::ApiError>`
-把非 quota/rate 的 API error 粗归 `ConnectionFailed` 的问题（影响 fallback 判定）。
+`AiError::ModelUnavailable { message }` 由唯一的 reqwest OpenAI-compatible JSON 请求路径
+识别 `model_not_found` / `model_not_available` / `does not exist`（400/404、JSON 与纯文本）。
+2026-09-10 删除未执行请求的 async-openai 包装、getter、错误转换和 InvokeOptions。
+成功响应最多 4 MiB；超限为不可重试但可尝试 fallback 的 ResponseTooLarge。
+非成功状态即使 body 超限也保留 429/5xx 分类；错误回显过滤 API key。
+AiRunOptions 在一次 process 中共享 Arc，prompt_template 使用 Arc<str>；同一任务模型回退
+复用已经准备的标题、正文和模板，不重复截断正文。
 
 ## 4. `effective_model_id`（storage）
 

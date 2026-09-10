@@ -276,3 +276,15 @@ diagnostic 列表渲染到 stderr。
 | validate-config CLI | [`crates/cli/src/commands/validate_config.rs`](../../crates/cli/src/commands/validate_config.rs) |
 
 代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。
+
+## 独立能力与保留字段（2026-09-10）
+
+单阶段命令的凭据 gate 只针对该命令实际调用的能力；结构/schema 错误仍统一 fail-fast。
+完整 run/validate-config 检查整套配置。EnvConfig Debug 不打印可能带凭据的 URL/proxy，
+dotenv 语法错误不回显原始行。
+
+当前未驱动实现的兼容字段仍可解析，但不能作为运行保证：ai.rate_limit、http.max_retries /
+retry_backoff_base_ms、dedup.enable_link_dedup / enable_content_dedup、artifact.inline_threshold_bytes /
+file_storage_dir（artifact 持久化当前走数据库 inline；目录仍供 doctor 检查）。
+数据库 dedup 始终启用；网络限流靠并发上限，失败重试由状态机与后续 run 完成。
+本轮不悄悄改变公开配置格式，后续删除这些字段需单独迁移说明。

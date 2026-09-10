@@ -36,20 +36,10 @@ pending_fetch (claim+lease)
 
 ### 2.1 抓取约束
 
-每次抓取强制：
-- HEAD-then-GET：先 HEAD 检查 `Content-Type` 与 `Content-Length`，过滤非 HTML / 超大
-- 单请求超时：`runtime.html_timeout_seconds`（默认 30s）
-- 最大 payload：`extractor.max_content_size_bytes`（默认 5 MB）
-- User-Agent：固定字符串（绕过部分反爬）
-- 自动跟随 redirect（最多 5 次）
-
-### 2.2 媒体类型过滤
-
-允许的 `Content-Type` 白名单：
-- `text/html`（含 charset 变体）
-- `application/xhtml+xml`
-
-其它（如 `application/pdf` / `video/*` / `image/*`）直接 `ExtractorError::UnsupportedMediaType` → `failed`。
+每次抓取直接 GET，自动跟随最多5次 redirect。超时来自 `http.timeout_seconds`，
+payload 上限来自 `extractor.max_body_bytes`；先检查 Content-Length，再逐 chunk 检查实际长度。
+不单独发 HEAD，也不强制 Content-Type 白名单；非 HTML 内容由策略解析失败路径处理。
+User-Agent 由 fetcher 构造器设置。
 
 ## 3. 策略链
 
@@ -58,16 +48,16 @@ pending_fetch (claim+lease)
 
 | 顺序 | 策略 | 实现 |
 |---|---|---|
-| 1 | Readability | `readability` crate 适配，基于 Mozilla Readability 算法 |
+| 1 | Readability | `readability-rust` crate 适配，基于 Mozilla Readability 算法 |
 | 2 | SummaryFallback | 使用 `feed_entries.summary_raw` 作为正文，标记 `content_quality='fallback'` |
 
 每个策略的契约：
-- 输入：原始 HTML payload + `FeedEntryMeta`
+- 输入：原始 HTML payload + `ArticleFetchTask`
 - 输出：`Result<ExtractedArticle, ExtractorError>`
 - `ExtractedArticle` 包含：正文 text、HTML、quality 标记
 
-成功条件：策略返回 `Ok` 且内容长度 ≥ `extractor.min_content_length`（默认 200 字符）。
-内容太短 → `ExtractorError::ContentTooShort` → 尝试下一个策略。
+成功条件：策略返回 `Ok` 且内容长度 ≥ `extractor.min_body_chars`。
+Readability 本身也会拒绝空正文；不满足配置最小字数时继续降级。
 
 ### 3.1 content_quality 分级
 
@@ -81,14 +71,9 @@ quality 由 strategy 自己决定。AI 阶段会跳过 `Fallback` 行（避免�
 
 ## 4. 第三层去重：content_hash
 
-正文提取成功后，在 `articles` INSERT 之前：
-
-```sql
-SELECT id FROM articles WHERE content_hash = ?
-```
-
-`content_hash` 由 `crates/domain/src/link_normalizer.rs` 计算（基于规范化正文 BLAKE3）。
-命中 → **不**插入 articles，`feed_entries` 转 `DedupSkipped`（`dedup_decision='hash_dup'`）+ 关联到已有 article。
+正文提取使用 SHA-256 计算 content_hash，storage::insert_or_get_by_content_hash
+依靠数据库唯一约束原子插入或返回已有 article，禁止 SELECT-exists 再 INSERT。
+命中后 feed_entry 进入 dedup_skipped 并关联已有 article；schema/claim 状态由 storage 负责。
 
 ### 4.1 与一/二层的区别
 
@@ -106,12 +91,12 @@ loop:
      WHERE state='pending_fetch' AND (lease_expires_at IS NULL OR lease_expires_at < now)
      LIMIT N RETURNING *
   2. 对每行：
-     a. HTTP HEAD → 校验
-     b. HTTP GET → raw HTML
+     a. HTTP GET → raw HTML（超时/大小边界）
+     b. 永久抓取失败才懒读摘要并尝试 fallback
      c. 写入 raw_artifact（按 retention_policy）
-     d. state='extracting'
+     d. 执行配置的提取策略
      e. 策略链尝试 → ExtractedArticle 或 fallback
-     f. 计算 content_hash，三层 dedup check
+     f. 计算 content_hash，原子 insert-or-get
      g. 命中 → feed_entries='dedup_skipped'，关联 article_id
      h. 未命中 → INSERT articles，feed_entries='persisted'
      i. fallback 命中 → INSERT articles (quality='fallback')，feed_entries='fallback_persisted'
@@ -120,13 +105,13 @@ loop:
 
 ### 5.1 batch_size 与 max_batches
 
-- `app.runtime.batch_size`（默认 50）：单批 claim 行数
+- CLI `--batch-size`（ingest 默认50）：单批 claim 行数
 - `app.runtime.max_batches_per_run`（默认 10）：单次 run 最多跑几批；`0` 表示不限
 - 触达 max_batches → INFO 日志 + exit 0（**不**视为失败）
 
 ### 5.2 并发与 lease
 
-claim SQL 用 `FOR UPDATE SKIP LOCKED`（PG）或 `BEGIN IMMEDIATE`（SQLite）保证并发安全。
+claim SQL 用 `FOR UPDATE SKIP LOCKED`（PG）或单条 UPDATE...RETURNING 的数据库写锁（SQLite）保证并发安全。
 lease 字段约束见 [./08-state-machines.md](./08-state-machines.md) §2.3 + [./05-storage.md](./05-storage.md)。
 
 ## 6. RawArtifact 留档（HTML）
@@ -163,7 +148,6 @@ rss-ai-news replay --kind html --target-id <feed_entry_id> --diff
 | HTML fetch 超时 | `ExtractorError::HttpTimeout` | true | 回 `pending_fetch` |
 | HTML 4xx | `ExtractorError::HttpStatus { 4xx }` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | HTML 5xx | `ExtractorError::HttpStatus { 5xx }` | true | 回 `pending_fetch` |
-| 不支持的媒体类型 | `ExtractorError::UnsupportedMediaType` | false | 转 `failed` |
 | payload 过大 | `ExtractorError::TooLarge` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | 提取失败 | `ExtractorError::ParseFailed` | false | 尝试 fallback；失败则 `failed` |
 | 内容太短 | `ExtractorError::ContentTooShort` | false | 尝试 fallback；失败则 `failed` |
@@ -175,11 +159,14 @@ rss-ai-news replay --kind html --target-id <feed_entry_id> --diff
 参考 [./06-config.md](./06-config.md)：
 
 ```toml
+[http]
+timeout_seconds = 30
+concurrent_fetches = 5
+
 [extractor]
-max_content_size_bytes = 5_242_880    # 5 MB
-min_content_length = 200
-http_timeout_seconds = 30
-allowed_content_types = ["text/html", "application/xhtml+xml"]
+strategy_order = ["readability", "summary_fallback"]
+max_body_bytes = 5242880
+min_body_chars = 200
 ```
 
 ## 10. 当前实现入口
@@ -195,3 +182,12 @@ allowed_content_types = ["text/html", "application/xhtml+xml"]
 | 集成测试 | [`crates/runtime/tests/extract_tests.rs`](../../crates/runtime/tests/extract_tests.rs) |
 
 代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。
+
+## 运行装配与资源约束（2026-09-10）
+
+CLI 按 strategy_order 装配 Readability；unknown/重复/空列表在结构校验时拒绝。
+summary_fallback 仍是最终降级步骤（兼容已有行为），不是网络成功前执行的策略。
+Readability 成文须满足 min_body_chars；短摘要 fallback 保留既有允许策略。
+claim 后正常成功路径不读 summary_raw；只有永久抓取失败或解析链耗尽才按 id 懒读取。
+超时/5xx 保持跨 run 重试。HTTP 期间不持有数据库事务。
+Feed/HTML 用有上限的分块 Vec 累计后直接移交，保留 Content-Length 与实际读取双重检查。

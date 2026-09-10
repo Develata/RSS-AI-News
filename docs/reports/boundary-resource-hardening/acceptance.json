@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "profile": null,
+  "dry_run": false,
+  "status": "passed",
+  "repo_root": "/home/deve/gitclone/RSS-AI-News",
+  "target_dir": "/home/deve/gitclone/RSS-AI-News/target",
+  "expected_version": "0.7.1",
+  "duration_ms": 651,
+  "lanes": [
+    {
+      "lane": "sqlite",
+      "status": "passed",
+      "duration_ms": 304,
+      "steps": [
+        {
+          "id": "release-build",
+          "command": "cargo build --release --locked --bin rss-ai-news",
+          "status": "passed",
+          "exit_code": 0,
+          "duration_ms": 266
+        },
+        {
+          "id": "sqlite-workspace",
+          "command": "create isolated SQLite smoke workspace",
+          "status": "passed",
+          "exit_code": null,
+          "duration_ms": 0
+        },
+        {
+          "id": "sqlite-migrate-run",
+          "command": "/home/deve/gitclone/RSS-AI-News/target/release/rss-ai-news --config-dir /tmp/rss-ai-news-acceptance-sqlite-160036-1789050481678657127/configs --db-path /tmp/rss-ai-news-acceptance-sqlite-160036-1789050481678657127/data/smoke.db migrate run",
+          "status": "passed",
+          "exit_code": 0,
+          "duration_ms": 11
+        },
+        {
+          "id": "sqlite-migrate-check",
+          "command": "/home/deve/gitclone/RSS-AI-News/target/release/rss-ai-news --config-dir /tmp/rss-ai-news-acceptance-sqlite-160036-1789050481678657127/configs --db-path /tmp/rss-ai-news-acceptance-sqlite-160036-1789050481678657127/data/smoke.db migrate check",
+          "status": "passed",
+          "exit_code": 0,
+          "duration_ms": 5
+        },
+        {
+          "id": "binary-version",
+          "command": "/home/deve/gitclone/RSS-AI-News/target/release/rss-ai-news --version",
+          "status": "passed",
+          "exit_code": 0,
+          "duration_ms": 3
+        },
+        {
+          "id": "binary-version-contract",
+          "command": "release binary --version matches candidate version",
+          "status": "passed",
+          "exit_code": null,
+          "duration_ms": 0
+        },
+        {
+          "id": "binary-help",
+          "command": "/home/deve/gitclone/RSS-AI-News/target/release/rss-ai-news --help",
+          "status": "passed",
+          "exit_code": 0,
+          "duration_ms": 3
+        },
+        {
+          "id": "recent-entries-default",
+          "command": "/home/deve/gitclone/RSS-AI-News/target/release/rss-ai-news --config-dir /tmp/rss-ai-news-acceptance-sqlite-160036-1789050481678657127/configs --db-path /tmp/rss-ai-news-acceptance-sqlite-160036-1789050481678657127/data/smoke.db --category ai --output-format json recent-entries --discovered-after 1970-01-01T00:00:00Z --limit 5",
+          "status": "passed",
+          "exit_code": 0,
+          "duration_ms": 6
+        },
+        {
+          "id": "recent-entries-default-contract",
+          "command": "omitted --published-after yields summary.published_after = null",
+          "status": "passed",
+          "exit_code": null,
+          "duration_ms": 0
+        },
+        {
+          "id": "recent-entries-explicit-cutoff",
+          "command": "/home/deve/gitclone/RSS-AI-News/target/release/rss-ai-news --config-dir /tmp/rss-ai-news-acceptance-sqlite-160036-1789050481678657127/configs --db-path /tmp/rss-ai-news-acceptance-sqlite-160036-1789050481678657127/data/smoke.db --category ai --output-format json recent-entries --discovered-after 1970-01-01T00:00:00Z --published-after 2000-01-01T00:00:00Z --limit 5",
+          "status": "passed",
+          "exit_code": 0,
+          "duration_ms": 7
+        },
+        {
+          "id": "recent-entries-explicit-contract",
+          "command": "explicit --published-after is reflected in the JSON contract",
+          "status": "passed",
+          "exit_code": null,
+          "duration_ms": 0
+        }
+      ]
+    },
+    {
+      "lane": "release",
+      "status": "passed",
+      "duration_ms": 346,
+      "steps": [
+        {
+          "id": "release-build",
+          "command": "cargo build --release --locked --bin rss-ai-news",
+          "status": "passed",
+          "exit_code": 0,
+          "duration_ms": 308
+        },
+        {
+          "id": "workspace-version",
+          "command": "workspace.package.version matches --expected-version",
+          "status": "passed",
+          "exit_code": null,
+          "duration_ms": 0
+        },
+        {
+          "id": "lockfile-versions",
+          "command": "all rss-ai-news workspace packages in Cargo.lock match --expected-version",
+          "status": "passed",
+          "exit_code": null,
+          "duration_ms": 0
+        },
+        {
+          "id": "readme-version",
+          "command": "README declares the candidate version and acceptance command",
+          "status": "passed",
+          "exit_code": null,
+          "duration_ms": 0
+        },
+        {
+          "id": "git-diff-check",
+          "command": "git diff --check",
+          "status": "passed",
+          "exit_code": 0,
+          "duration_ms": 27
+        },
+        {
+          "id": "binary-version",
+          "command": "/home/deve/gitclone/RSS-AI-News/target/release/rss-ai-news --version",
+          "status": "passed",
+          "exit_code": 0,
+          "duration_ms": 4
+        },
+        {
+          "id": "binary-version-contract",
+          "command": "release binary --version matches candidate version",
+          "status": "passed",
+          "exit_code": null,
+          "duration_ms": 0
+        },
+        {
+          "id": "binary-help",
+          "command": "/home/deve/gitclone/RSS-AI-News/target/release/rss-ai-news --help",
+          "status": "passed",
+          "exit_code": 0,
+          "duration_ms": 4
+        }
+      ]
+    }
+  ]
+}

@@ -28,8 +28,7 @@
 | **metrics** | 数值时序 | 进程内 `MetricsRecorder` → 可选 Prometheus 端点 | Prometheus / Grafana |
 | **run_events 表** | 业务里程碑（持久化） | `run_events` 表（append-only） | 自家 CLI 查询 / 复盘 |
 
-三条出口共享同一套**密钥redaction 过滤器**（`crates/observability/src/redact.rs`），保证
-密钥不会在任一通道泄漏。
+事件与显式错误出口复用**密钥redaction 过滤器**（`crates/observability/src/redact.rs`），。tracing 不自动拦截所有任意字符串，调用点仍须避免传入原始凭据。
 
 ## 3. tracing 日志
 
@@ -116,19 +115,23 @@ emitter.emit(
 `context` 写入 `run_events.context_json` 前**必须**经
 `rss_ai_news_observability::redact::redact_event_context` 过滤：
 
-- URL userinfo（`https://user:pass@host`）→ `user:***@host`
+- URL userinfo（`https://user:pass@host`）→ `https://***@host`，敏感query值一并遮蔽
 - `Authorization: Bearer ...` header → `Bearer ***`
 - JSON 内键名匹配 `api_key|token|secret|password|access_key`（不区分大小写）→ 值替换为 `***`
 
 redaction 在**截断之前**执行，保证即使内容超长，密钥也已被遮蔽。
+独立的 `run_events.message` 列也在发射器内执行Authorization与URL脱敏，不能只过滤context。
 
 ### 5.2 截断
 
 `CONTEXT_JSON_MAX_BYTES = 4096`。超长 context 被替换为：
 
 ```json
-{"truncated": true, "preview": "<前 3500 字节>"}
+{"truncated": true, "original_len": 10000, "preview": "<按UTF-8边界截取的前缀>"}
 ```
+
+上限约束最终序列化JSON。预算扣除envelope字段，并为preview再次JSON转义预留最多两倍字节；
+不能只截取原字符串3500字节，否则引号/反斜杠会使最终结果超过4096字节。
 
 ### 5.3 持久化失败的语义
 
@@ -162,6 +165,17 @@ ORDER BY id;
 ```
 
 ## 6. HealthCheck 与 doctor 子命令
+
+具体数据库、迁移、HTTP、配置、磁盘检查位于
+[`runtime::doctor::health`](../../crates/runtime/src/doctor/health.rs)。observability 只保留通用
+HealthCheck/CheckOutcome/CheckReport、日志、metrics 与脱敏，不依赖 config/storage/sqlx/reqwest。
+迁移检查验证版本集合和 checksum，不再只查最大版本号。OpenAI ping body 上限 64 KiB，
+健康探测整体超时 10 秒；doctor 不自动修复被检查对象。
+
+metrics HTTP server 最多 32 个活跃连接、请求头最多 4 KiB、每连接生命周期最多 5 秒。
+分片请求头可正常拼接；停止 server 会取消全部连接 handler。响应直接写 headers/body，
+不为完整响应再复制 metrics body。Doctor 最终 pretty/JSON 出口再次脱敏。
+
 
 抽象：[`crates/observability/src/health.rs::HealthCheck`](../../crates/observability/src/health.rs)：
 

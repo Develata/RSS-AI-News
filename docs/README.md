@@ -71,6 +71,6 @@ docs/
 
 ## 与旧文档的关系
 
-旧 `docs/` 已归档至 `docs-backup/`（git mv 保留历史），目前处于**观察期**：新 docs/ 自包含、
-不依赖 docs-backup/；v0.4+ release 评审确认无遗漏后再单独 commit 删除。
-观察期内 docs-backup/ 只读、不再追加内容。
+`docs-backup/` 保存早期细粒度契约，仍有历史链接引用，因此本轮保留，不作大批删除。
+当前行为以 `plan/`、`acceptance-cases/`、`operations/` 与后续 ADR 为准；backup 只读、
+不再更新，遇到不一致不得据此回退当前实现。这里不再宣称 docs 已完全不依赖历史引用。

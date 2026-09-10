@@ -19,7 +19,7 @@
       :path "plan/01-feed.md"
       :kind flow
       :upstream (cli-ingest)
-      :downstream (feed-fetch feed-parse dedup-link dedup-uid feed-entry-state)
+      :downstream (ingest-deps feed-fetch feed-parse dedup-link dedup-uid feed-entry-state)
       :state active
       :notes "按 categories/*.toml 中 [[sources]] 逐 source 抓取；
               一层 link_hash + 二层 uid 去重；bootstrap 写 config rule_version_id。
@@ -31,8 +31,8 @@
       :crate runtime
       :path "plan/02-extract.md"
       :kind flow
-      :upstream (cli-extract ingest-flow)
-      :downstream (html-fetcher content-strategy dedup-content article-state artifact-html)
+      :upstream (cli-ingest ingest-flow)
+      :downstream (extract-deps html-fetcher content-strategy dedup-content article-state artifact-html)
       :state active
       :notes "策略链 Readability → SummaryFallback。
               第三层 content_hash 去重，命中则 DedupSkipped。
@@ -45,7 +45,7 @@
       :path "plan/03-ai.md"
       :kind flow
       :upstream (cli-ai-run extract-flow)
-      :downstream (ai-task-gen ai-client ai-parser article-state ai-result-state artifact-ai)
+      :downstream (ai-deps ai-task-gen ai-client ai-parser article-state ai-result-state artifact-ai)
       :state active
       :notes "task_gen 从 Persisted articles 派生 Pending ai_result；
               process 按 lease 并发；keep × score 决定 article 走 ReadyForPublish / AiDone / PublishSkipped。
@@ -58,7 +58,7 @@
       :path "plan/04-publish.md"
       :kind flow
       :upstream (cli-publish ai-run-flow)
-      :downstream (publish-init publish-freeze publish-render publish-store-local publish-remote publish-state)
+      :downstream (publish-deps publish-init publish-freeze publish-render publish-store-local publish-remote publish-state)
       :state active
       :notes "init → freeze → render → store-local → publish-remote。
               snapshot 冻结后保证 rebuild-report 字节相等。
@@ -74,7 +74,7 @@
       :crate storage
       :path "plan/05-storage.md"
       :kind enum
-      :upstream (runtime-context)
+      :upstream (cli-main)
       :downstream (repo-feed-source repo-feed-entry repo-article repo-ai-result
                    repo-publish-record repo-publish-item repo-raw-artifact
                    repo-run-event repo-rule-version repo-reindex-job)
@@ -100,11 +100,23 @@
       :crate observability
       :path "plan/07-observability.md"
       :kind module
-      :upstream (runtime-context cli-main)
-      :downstream (tracing-init metrics-recorder health-check redact-event-context
-                   run-event-emitter)
+      :upstream (ingest-flow extract-flow ai-run-flow publish-flow cli-main)
+      :downstream (tracing-init metrics-recorder health-check redact-event-context)
       :state active
-      :notes "tracing 日志 + Prometheus metrics + run_events 表三出口共享同一 redaction 过滤器。")
+      :notes "tracing 日志 + Prometheus metrics + run_events 表三出口共享 redaction；
+              run_events 持久化与具体 doctor checks 属于 runtime，横向 crate 不依赖 storage/config。")
+
+(node :id doctor-health
+      :label "doctor 具体诊断"
+      :layer flow-coord
+      :crate runtime
+      :path "plan/07-observability.md"
+      :kind module
+      :upstream (cli-doctor)
+      :downstream (health-check config-validate storage-pool)
+      :state active
+      :notes "具体 config/DB/migration/HTTP/disk/liveness checks；不自动迁移或轮换配置，
+              不具备完整 AI/publish flow 的依赖。")
 
 (node :id error-model
       :label "三层错误模型"
@@ -193,7 +205,7 @@
       :path "plan/10-replay-and-backfill.md"
       :kind function
       :upstream (cli-main)
-      :downstream (repo-feed-entry repo-article-ai-result repo-rule-version)
+      :downstream (backfill-deps repo-feed-entry repo-article-ai-result repo-rule-version)
       :state active
       :notes "extract：重置窗内 Failed → PendingFetch。
               ai：新建 prompt_version 行，对窗内 article 插入新版本的 Pending ai_result。")
@@ -205,9 +217,9 @@
       :path "plan/05-storage.md"
       :kind function
       :upstream (cli-main)
-      :downstream (repo-reindex-job repo-rule-version repo-feed-entry repo-article repo-feed-source)
+      :downstream (reindex-deps repo-reindex-job repo-rule-version repo-feed-entry repo-article repo-feed-source)
       :state active
-      :notes "版本化规则升级：原子写 rule_versions(pending) + reindex_jobs(pending)；
+      :notes "全局规则升级，拒绝 --category；原子写 rule_versions(pending) + reindex_jobs(pending)；
               claim → running → checkpoint → 完成时事务内 active 切换。
               partial unique index 保证同 target 只能一个 active job。")
 
@@ -218,7 +230,7 @@
       :path "plan/10-replay-and-backfill.md"
       :kind function
       :upstream (cli-main)
-      :downstream (repo-publish-record report-render publish-target)
+      :downstream (rebuild-report-deps repo-publish-record repo-publish-item report-render)
       :state active
       :notes "用当前模板 + 冻结 snapshot 重新渲染。
               snapshot 不变 → 字节相等；模板变 → 字节差异即影响范围。")
@@ -245,27 +257,100 @@
       :path "plan/09-cli-and-runtime.md"
       :kind function
       :upstream ()
-      :downstream (cli-ingest cli-extract cli-ai-run cli-publish cli-publish-all
+      :downstream (cli-ingest cli-ai-run cli-publish cli-publish-all
                    cli-run cli-migrate cli-validate-config cli-doctor
                    replay-command backfill-command reindex-command rebuild-report-command
                    recent-entries-command
-                   config-loader observability-stack runtime-context)
+                   config-loader observability-stack)
       :state active
       :notes "main.rs 仅一行：rss_ai_news_cli::run().await.into_process_exit()。")
 
-(node :id runtime-context
-      :label "RunContext（接缝点）"
+(node :id run-meta
+      :label "RunMeta"
       :layer flow-coord
       :crate runtime
       :path "plan/09-cli-and-runtime.md"
       :kind struct
-      :upstream (cli-main)
-      :downstream (storage-pool feed-client html-fetcher content-strategy
-                   ai-client publish-target-local publish-target-remote
-                   run-event-emitter)
+      :downstream ()
       :state active
-      :notes "承载 6 capability clients + 10 Repository traits + run 元数据。
-              是 CLI 壳与 Flow 编排的唯一接缝。")
+      :notes "仅 run_id 与 started_at；不持有配置、clients 或 repositories。")
+
+(node :id ingest-deps
+      :label "IngestDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "plan/09-cli-and-runtime.md"
+      :kind struct
+      :upstream (ingest-flow)
+      :downstream (run-meta feed-fetch repo-feed-source repo-feed-entry repo-raw-artifact repo-run-event repo-rule-version)
+      :state active
+      :notes "Feed 抓取所需配置、fetcher 与 repositories；无 HTML、AI 或 publisher。")
+
+(node :id extract-deps
+      :label "ExtractDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "plan/09-cli-and-runtime.md"
+      :kind struct
+      :upstream (extract-flow)
+      :downstream (run-meta html-fetcher content-strategy repo-feed-entry repo-article repo-raw-artifact repo-run-event)
+      :state active
+      :notes "HTML 抓取、提取策略与 persistence；无 AI 或 publisher。")
+
+(node :id ai-deps
+      :label "AiDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "plan/09-cli-and-runtime.md"
+      :kind struct
+      :upstream (ai-run-flow)
+      :downstream (run-meta ai-client repo-article repo-article-ai-result repo-raw-artifact repo-run-event)
+      :state active
+      :notes "单次运行的 AI client 与 article/result/artifact/event repositories。")
+
+(node :id publish-deps
+      :label "PublishDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "plan/09-cli-and-runtime.md"
+      :kind struct
+      :upstream (publish-flow)
+      :downstream (run-meta publish-target-local publish-target-remote repo-publish-record repo-publish-item repo-run-event)
+      :state active
+      :notes "冻结快照发布依赖；remote target 为 Option，local-only 不构造 GitHub client。")
+
+(node :id backfill-deps
+      :label "BackfillDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "plan/09-cli-and-runtime.md"
+      :kind struct
+      :upstream (backfill-command)
+      :downstream (run-meta repo-feed-entry repo-article repo-article-ai-result repo-rule-version repo-run-event)
+      :state active
+      :notes "只依赖重置/派生任务所需 repositories，不构造 AI 或网络 client。")
+
+(node :id reindex-deps
+      :label "ReindexDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "plan/09-cli-and-runtime.md"
+      :kind struct
+      :upstream (reindex-command)
+      :downstream (run-meta repo-feed-source repo-feed-entry repo-article repo-rule-version repo-reindex-job repo-run-event)
+      :state active
+      :notes "租约配置与规则/对象 repositories，不持有网络 client。")
+
+(node :id rebuild-report-deps
+      :label "RebuildReportDeps"
+      :layer flow-coord
+      :crate runtime
+      :path "plan/09-cli-and-runtime.md"
+      :kind struct
+      :upstream (rebuild-report-command)
+      :downstream (repo-publish-record repo-publish-item)
+      :state active
+      :notes "模板与冻结快照读取依赖，不持有 publisher。")
 
 ;; ====================================================================
 ;; 部署形态（plan/12）
@@ -280,7 +365,7 @@
       :upstream ()
       :downstream (cli-main)
       :state active
-      :notes "Docker multi-stage：deps → builder → runtime。
+      :notes "Docker multi-stage：builder → runtime，使用普通 Cargo build 与 BuildKit cache。
               ENTRYPOINT 直接是 rss-ai-news 二进制。")
 
 (node :id docker-scheduler-image

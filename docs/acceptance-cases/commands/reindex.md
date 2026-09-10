@@ -24,10 +24,11 @@
 - `content_hash`：扫描所有 article 重算；命中 unique conflict 时计入 conflict 计数（不写入）
 - `categories`：扫描 sources 增量插入新行、归档已不在 config 的旧行；幂等（第二次执行归档=0）
 - categories reindex 把 active `config` kind rule_version_id 写入新插入 feed_sources 的 `config_rule_version_id`
-- `--dry-run` 与 real run 计数完全一致；dry-run 的 **reindex 流程自身**不写任何业务表。
-  契约范围注（W16）：CLI 启动期所有命令共享的基础设施写入——migrations 与
-  config 版本轮换（[../../plan/16-config-versioning.md](../../plan/16-config-versioning.md) §5）——
-  不在本契约内；W16 之前 `ensure_default_rule_version` 在同一启动位置已有同性质写入（空库 seed）
+- 无并发写入的静态数据库中，`--dry-run` 与 real run 计数一致；dry-run 的 **reindex 流程自身**不写任何业务表。
+  2026-09-10 起 CLI 启动也严格只读：不创建数据库、不迁移、不轮换 config、不写 run_events。
+  全局或子命令 --dry-run 均生效，abort 与 dry-run 的组合在访问配置/数据库前拒绝。
+  碰撞模拟最多处理100000行，超过明确失败，不返回部分计数。
+
 - `--abort <job_id>` 中止 running 任务，**保留** 已 checkpoint 的数据；幂等
 - `all`：解析为 link_hash → content_hash → categories 顺序执行
 
@@ -39,6 +40,8 @@
 - mark_failed 时保留 pending 新 rule_version + 不降级旧 active（避免读路径丢 active）
 - abort 终态任务 → idempotent noop
 - abort 缺失任务 → `NotFound` outcome（exit 1）
+- `--category` 与任何reindex target/abort组合 → 在读取配置或打开数据库前报参数错误（exit 2）。
+  reindex升级全局规则；过滤后的配置不能作为全库source归档的依据，hash重算也不支持分类范围。
 
 ## 测试覆盖
 
@@ -84,6 +87,8 @@
 | `reindex_mark_failed_keeps_old_active_and_pending_new_rule_version` | 同上 | 失败保旧 active |
 | `reindex_link_hash_partial_failure_continues_processing_remaining_rows` | 同上 | 部分失败续跑 |
 | `reindex_dry_run_then_real_run_promotes_without_polluting_rule_versions_chain` | 同上 | dry-run 不污染 |
+| `reindex_category_filter_cannot_archive_unselected_categories` | `crates/cli/tests/reindex_cmd_tests.rs` | 过滤配置不能归档其他分类 |
+| `reindex_rejects_filtered_global_targets_before_opening_storage` | 同上 | 全局target拒绝误导性的分类范围 |
 
 ## 当前状态
 

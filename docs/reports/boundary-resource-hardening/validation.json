@@ -1,0 +1,122 @@
+{
+  "date": "2026-09-10",
+  "baseline_head": "95ae450fda35416a59325c05decbf3b577873e52",
+  "state": "uncommitted workspace; not published",
+  "checks": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets --all-features --jobs 1 -- -D warnings",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test --workspace --all-features --no-fail-fast -j3",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo build --workspace --all-features --locked -j3",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo build --release --locked -j3",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "target/debug/rss-ai-news-acceptance --format json run --lane sqlite --lane release --expected-version 0.7.1",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "bash .ci/check_swallowed_errors.sh",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "bash .ci/check_dependency_security_policy.sh",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo audit --ignore RUSTSEC-2023-0071",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "python3 tools/perf/query_plans.py",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "sh -n docker/scheduler-entrypoint.sh",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "git diff --check",
+      "status": "PASS",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo audit --json",
+      "status": "FAIL",
+      "exit_code": 1,
+      "reason": "RUSTSEC-2023-0071 in inactive rsa lockfile package; existing active-graph gate PASS"
+    },
+    {
+      "command": "baseline cargo test --workspace --all-features",
+      "status": "FAIL",
+      "reason": "HTTP_PROXY inherited from host invalidated test assumption; isolated rerun passed; test fixed with isolated child process"
+    },
+    {
+      "command": "PostgreSQL integration/migration/query plan",
+      "status": "NOT RUN",
+      "reason": "No local PostgreSQL server or psql; Docker unavailable"
+    },
+    {
+      "command": "Docker runtime/debug/scheduler build and container smoke",
+      "status": "NOT RUN",
+      "reason": "Linux Docker points to missing Docker Desktop executable; no Windows fallback"
+    },
+    {
+      "command": "arm64 scheduler execution",
+      "status": "NOT RUN",
+      "reason": "Only native amd64 execution available; both architecture asset digests and ELF checked"
+    }
+  ],
+  "workspace_tests": {
+    "passed": 816,
+    "failed": 0,
+    "ignored": 62,
+    "log_pass_sum": 817,
+    "log_pass_sum_note": "Includes one isolated child repeating the dotenv environment fixture test",
+    "ignored_breakdown": {
+      "perf_fixtures_run_separately": 6,
+      "preexisting_ignored_integration_tests": 56
+    }
+  },
+  "baseline_tests": {
+    "passed": 763,
+    "ignored": 56,
+    "environment": "isolated proxy/provider variables"
+  },
+  "native_scheduler": {
+    "status": "PASS",
+    "artifact": "scheduler-native.json",
+    "container_test": false
+  },
+  "performance": {
+    "status": "PASS",
+    "samples_per_fixture": 3,
+    "fixtures": 6,
+    "measurement": "GNU time per-process peak RSS; Rust elapsed timer excludes fixture setup",
+    "before": "perf-before.json",
+    "after": "perf-after.json"
+  }
+}

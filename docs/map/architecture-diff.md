@@ -32,6 +32,8 @@
 | D-003 | 2026-06-11 | storage-multi-dialect-doc | `cli/src/context_factory.rs` 等多处注释引用 `docs/design/storage-multi-dialect.md`（§2.5/§5.4），该文件在仓库中不存在（docs/design/ 目录不存在） | resolved | 改注释/链接（W17）：设计契约实际存于 `docs-backup/design/storage-multi-dialect.md`（2026-05-16 落地，docs 重组迁入 backup 后引用未跟上）。代码注释/ci.yml 7 处改指 backup 真实路径；README 10 处死链改指 plan/ 活章节 + backup 存档。现行权威 = plan/05-storage.md。**例外**：migrations/postgres/0001 的注释已回滚不改——sqlx 对已应用迁移做校验和比对，文件字节不可变（见 migration_immutability_tests.rs 锁定） |
 | D-004 | 2026-07-18 | cli-commands / ci-workflow | code/map 仍写 12 commands / 4 CI jobs，实际已为 13 commands（含 `recent-entries`）/ 5 jobs；`RecentEntriesFlow` 也未进入 code map | resolved | v0.7.1 candidate 同步 `plan/09`、`architecture*.md`、`modules.lisp` 与 `architecture-code.lisp`，并登记独立 acceptance tooling boundary |
 
+| D-005 | 2026-09-10 | run-meta / ingest-deps / extract-deps / ai-deps / publish-deps / backfill-deps / reindex-deps / rebuild-report-deps / health-check / doctor-health | 用户授权 Boundary & Resource Hardening 后，旧地图仍将 RunContext/RunContextDeps 标为全局接缝，并把具体 health checks 与 config/storage 依赖放在 observability；与本轮代码及 plan/05、07、09 的边界不一致 | resolved | 当前工作树同步 plan/code/crate maps：按 flow 列出具体依赖 struct，RunMeta 仅保留运行标识；health 实现归 runtime，observability/domain 无 infra 反向依赖。见 [ADR-0009](../adr/0009-boundary-resource-hardening.md)；提交 SHA 待本轮提交后记录 |
+
 ## 已知**可能**的近期漂移点（监视）
 
 以下不是确认漂移，只是设计/实现演进路径上较可能产生差异的位置，列出便于日后核对：

@@ -1,0 +1,34 @@
+{
+  "scope": "native Linux amd64; temporary entrypoint copy substitutes absolute binary paths; not a container test",
+  "version": "v0.2.49",
+  "checks": [
+    {
+      "check": "amd64 digest",
+      "status": "PASS",
+      "sha256": "a53ae236602c7338aba3fbaff40bda6300eae3b9fedb8261eb06cfe3724430c1",
+      "file": "ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, Go BuildID=YN1ANdo3NgDSTDgFKG5N/RjIde3tT90qImd7giakp/3QCAbptl6F5tF9WJPeR2/scI3gEhBvqPlnjP1XTqI, BuildID[sha1]=93c34e84d88fc99e6c21ecc93f60f48cb1c37a7e, with debug_info, not stripped"
+    },
+    {
+      "check": "arm64 digest",
+      "status": "PASS",
+      "sha256": "02aa0cb229ba09050cba6638059dadb9eedc2276632ea43d6a57a2f8c1629dd5",
+      "file": "ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, Go BuildID=6xQdaMq8F1sAzCFF1McY/k3O16wrB7RO_DsKzbZ1A/APk7kqHcdbW2GNHmk8mb/FP-fb5euSwlTxPgIdIPm, BuildID[sha1]=6a03034d6295cce8ef9bfb38d832c02035365da3, with debug_info, not stripped"
+    },
+    {
+      "check": "valid cron",
+      "status": "PASS"
+    },
+    {
+      "check": "invalid cron rejected",
+      "status": "PASS"
+    },
+    {
+      "check": "mounted entrypoint start / SIGTERM",
+      "status": "PASS"
+    },
+    {
+      "check": "generated entrypoint start / SIGTERM",
+      "status": "PASS"
+    }
+  ]
+}

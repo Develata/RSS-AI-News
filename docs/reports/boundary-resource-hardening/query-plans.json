@@ -1,0 +1,78 @@
+{
+  "sqlite_version": "3.46.1",
+  "fixture_rows": 10000,
+  "pending_rows": 100,
+  "queries": [
+    {
+      "query": "CLAIM_PENDING_FETCH_SQLITE_SQL",
+      "plan": [
+        "SEARCH feed_entries USING INTEGER PRIMARY KEY (rowid=?)",
+        "LIST SUBQUERY 1",
+        "SEARCH feed_entries USING INDEX idx_feed_entries_state_lease_expires_at (state=?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ]
+    },
+    {
+      "query": "CLAIM_AI_PENDING_SQLITE_SQL",
+      "plan": [
+        "SEARCH article_ai_results USING INTEGER PRIMARY KEY (rowid=?)",
+        "LIST SUBQUERY 1",
+        "SEARCH aar USING INDEX idx_article_ai_results_state_lease_expires_at (state=?)",
+        "SEARCH a USING INTEGER PRIMARY KEY (rowid=?)",
+        "SEARCH fe USING INTEGER PRIMARY KEY (rowid=?)",
+        "BLOOM FILTER ON fs (id=?)",
+        "SEARCH fs USING INTEGER PRIMARY KEY (rowid=?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ]
+    },
+    {
+      "query": "LIST_RECENT_FEED_ENTRIES_SQLITE_SQL",
+      "plan": [
+        "SEARCH fs USING INDEX idx_feed_sources_category_priority (category_key=?)",
+        "SEARCH fe USING INDEX idx_feed_entries_source_discovered_at (source_id=? AND discovered_at>?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ]
+    },
+    {
+      "query": "LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL",
+      "plan": [
+        "SEARCH a USING INTEGER PRIMARY KEY (rowid>?)",
+        "SEARCH fe USING INTEGER PRIMARY KEY (rowid=?)",
+        "BLOOM FILTER ON fs (id=?)",
+        "SEARCH fs USING INTEGER PRIMARY KEY (rowid=?)"
+      ]
+    },
+    {
+      "query": "SELECT_AI_PATH_CANDIDATES_SQL",
+      "plan": [
+        "CO-ROUTINE ranked",
+        "CO-ROUTINE (subquery-3)",
+        "SEARCH article_ai_results USING INDEX idx_article_ai_results_state_lease_expires_at (state=?)",
+        "USE TEMP B-TREE FOR ORDER BY",
+        "SCAN (subquery-3)",
+        "SCAN fs",
+        "BLOOM FILTER ON top (rn=?)",
+        "SEARCH top USING AUTOMATIC PARTIAL COVERING INDEX (rn=?)",
+        "SEARCH a USING INTEGER PRIMARY KEY (rowid=?)",
+        "SEARCH fe USING INTEGER PRIMARY KEY (rowid=?)",
+        "SEARCH aar USING INTEGER PRIMARY KEY (rowid=?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ]
+    },
+    {
+      "query": "SELECT_RAW_ARTIFACT_BY_KEY_SQL",
+      "plan": [
+        "SEARCH raw_artifacts USING INDEX sqlite_autoindex_raw_artifacts_1 (kind=? AND artifact_key=?)"
+      ]
+    },
+    {
+      "query": "CLAIM_PUBLISH_SQLITE_SQL",
+      "plan": [
+        "SEARCH publish_records USING INTEGER PRIMARY KEY (rowid=?)",
+        "LIST SUBQUERY 1",
+        "SEARCH publish_records USING INDEX idx_publish_records_state_lease_expires_at (state=?)",
+        "USE TEMP B-TREE FOR ORDER BY"
+      ]
+    }
+  ]
+}

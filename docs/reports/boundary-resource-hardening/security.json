@@ -1,0 +1,30 @@
+{
+  "raw_audit_exit_code": 1,
+  "policy_audit_exit_code": 0,
+  "inactive_dependency_policy": "PASS: rsa has no active path",
+  "vulnerabilities": [
+    {
+      "id": "RUSTSEC-2023-0071",
+      "package": "rsa",
+      "version": "0.9.10"
+    }
+  ],
+  "warnings": {
+    "unmaintained": [
+      {
+        "package": "fxhash",
+        "version": "0.2.1"
+      }
+    ],
+    "yanked": [
+      {
+        "package": "chacha20",
+        "version": "0.10.0"
+      },
+      {
+        "package": "spin",
+        "version": "0.9.8"
+      }
+    ]
+  }
+}

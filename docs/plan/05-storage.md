@@ -224,9 +224,11 @@ pub async fn check(pool: &StoragePool) -> Result<MigrationStatus, StorageError>;
 - `migrate run` — 执行 pending migration（必须由 driver=URL 与配置 driver 一致）
 - `migrate check` — 检查版本状态，不执行
 
-`migrate` **不**经过 RunContext / Flow 编排，直接调 storage 层。`validate-config` 同样。
+`migrate` **不**经过 Flow 编排，直接调 storage 层。`validate-config` 同样。
 
 ## 8. reindex
+
+reindex作用于全局规则与数据，CLI拒绝 `--category`（exit 2）；特别是categories归档判断必须使用完整配置。
 
 版本化规则升级（prompt / link_hash 算法 / categories）通过 reindex 流程：
 
@@ -309,3 +311,14 @@ CREATE TABLE run_events (
 | db url resolver | [`crates/cli/src/db_url.rs`](../../crates/cli/src/db_url.rs) |
 
 代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。
+
+## 边界加固（2026-09-10）
+
+Domain 不依赖 SQLx：状态枚举与 Score0To100 只表达纯业务语义。
+Storage 将原始整数显式转换为 Score0To100，坏数据拒绝并保留越界值，不作截断。
+SQLite/PG 的 atomic claim、unique dedup、lease、retry 与事务实现保持双方言显式分支。
+
+数据库 URL 的 `://` scheme 只允许 sqlite/postgres/postgresql；未知 scheme 明确拒绝，
+不会当作本地文件创建。保留 sqlite:、sqlite://、裸路径，scheme 比较不区分大小写。
+错误不回显可能包含密码的 URL。AI taskgen 扫描仅返回 article_id，不读取正文或标题。
+本轮不新增 migration/index/batch insert；SQLite 查询计划与 perf 证据见本轮工程报告。

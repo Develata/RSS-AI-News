@@ -10,6 +10,12 @@ RSS-AI-News 是一个一次性运行的 RSS 新闻处理 CLI。它按外部调�
 
 它不内置 cron，也不长期驻留。你可以用 Docker、cron、systemd timer、GitHub Actions 或 Kubernetes CronJob 定时调用它。
 
+各阶段可独立调用：`ingest --skip-fetch` 只拉 feed，`ingest` 增加正文提取，`ai-run` 使用 AI，
+`publish --local-only` 只输出本地。ingest 与本地发布无需 AI 凭据；只读维护命令不初始化网络客户端或自动迁移。
+架构入口见 [flow 依赖与启用边界](docs/plan/09-cli-and-runtime.md#4-flow-依赖与启用边界)，
+本地性能测量见 [perf harness](tools/perf/README.md)，本轮修改与实测结果见
+[Boundary & Resource Hardening 工程报告](docs/reports/boundary-resource-hardening/README.md)。
+
 ## 适合什么场景
 
 - 定期收集一组 RSS 源中的新闻或论文动态。

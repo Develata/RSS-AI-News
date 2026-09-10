@@ -1,0 +1,170 @@
+{
+  "root_tree_packages_before": 338,
+  "root_tree_packages_after": 319,
+  "removed": [
+    [
+      "async-openai",
+      "0.27.2"
+    ],
+    [
+      "backoff",
+      "0.4.0"
+    ],
+    [
+      "concurrent-queue",
+      "2.5.0"
+    ],
+    [
+      "darling",
+      "0.20.11"
+    ],
+    [
+      "darling_core",
+      "0.20.11"
+    ],
+    [
+      "darling_macro",
+      "0.20.11"
+    ],
+    [
+      "derive_builder",
+      "0.20.2"
+    ],
+    [
+      "derive_builder_core",
+      "0.20.2"
+    ],
+    [
+      "derive_builder_macro",
+      "0.20.2"
+    ],
+    [
+      "event-listener",
+      "5.4.1"
+    ],
+    [
+      "eventsource-stream",
+      "0.2.3"
+    ],
+    [
+      "futures-timer",
+      "3.0.3"
+    ],
+    [
+      "ident_case",
+      "1.0.1"
+    ],
+    [
+      "instant",
+      "0.1.13"
+    ],
+    [
+      "mime",
+      "0.3.17"
+    ],
+    [
+      "mime_guess",
+      "2.0.5"
+    ],
+    [
+      "minimal-lexical",
+      "0.2.1"
+    ],
+    [
+      "nom",
+      "7.1.3"
+    ],
+    [
+      "reqwest-eventsource",
+      "0.6.0"
+    ],
+    [
+      "unicase",
+      "2.9.0"
+    ]
+  ],
+  "added_or_updated": [
+    [
+      "event-listener",
+      "5.4.2"
+    ]
+  ],
+  "lock_packages_before": 506,
+  "lock_packages_after": 488,
+  "normal_direct": {
+    "domain": {
+      "before": 7,
+      "after": 5,
+      "removed": [
+        "serde_json",
+        "sqlx"
+      ],
+      "added": []
+    },
+    "observability": {
+      "before": 18,
+      "after": 11,
+      "removed": [
+        "fs2",
+        "reqwest",
+        "rss-ai-news-config",
+        "rss-ai-news-storage",
+        "sqlx",
+        "thiserror",
+        "time"
+      ],
+      "added": []
+    },
+    "ai": {
+      "before": 10,
+      "after": 7,
+      "removed": [
+        "async-openai",
+        "tokio",
+        "tracing"
+      ],
+      "added": []
+    },
+    "feed": {
+      "before": 10,
+      "after": 6,
+      "removed": [
+        "bytes",
+        "thiserror",
+        "tokio",
+        "url"
+      ],
+      "added": []
+    },
+    "extractor": {
+      "before": 12,
+      "after": 8,
+      "removed": [
+        "bytes",
+        "tokio",
+        "tracing",
+        "url"
+      ],
+      "added": []
+    },
+    "cli": {
+      "before": 22,
+      "after": 20,
+      "removed": [
+        "async-trait",
+        "tracing-subscriber"
+      ],
+      "added": []
+    },
+    "publish": {
+      "before": 10,
+      "after": 13,
+      "removed": [],
+      "added": [
+        "bytes",
+        "http",
+        "http-body-util"
+      ]
+    }
+  }
+}

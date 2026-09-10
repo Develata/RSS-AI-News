@@ -1,0 +1,118 @@
+{
+  "date": "2026-09-10",
+  "baseline_head": "95ae450fda35416a59325c05decbf3b577873e52",
+  "state": "uncommitted workspace; review fixes applied; not deployed",
+  "workspace_tests": {
+    "passed": 823,
+    "failed": 0,
+    "ignored": 62,
+    "raw_log_pass_total": 824,
+    "note": "One dotenv test repeats in an isolated child. Six ignored performance fixtures and 56 preexisting ignored tests were not run in this review."
+  },
+  "checks": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "status": "PASS",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets --all-features --jobs 1 -- -D warnings",
+      "status": "PASS",
+      "log_sha256": "177f249501bd21b7946830e3116b57ed566d0fdeb16053087ccf0ab43de3c0c6"
+    },
+    {
+      "command": "cargo test --workspace --all-features --no-fail-fast -j3",
+      "status": "PASS",
+      "log_sha256": "f14b3e2caa20e9673ba761e86fa73601cbf4e09ac7f5641122248afb48463efe"
+    },
+    {
+      "command": "cargo build --workspace --all-features --locked -j3",
+      "status": "PASS",
+      "log_sha256": "d525d188cbaeacc8731b4db6132c77c7aaac9e1f2a435e7ae3bbdd821d1f7ec1"
+    },
+    {
+      "command": "cargo build --release --locked -j3",
+      "status": "PASS",
+      "log_sha256": "a07e560fd9fde5c15491de9c082ac8e6bcae0e84f79b7ea35a2ffcfd0090c133"
+    },
+    {
+      "command": "SQLite/release acceptance --expected-version 0.7.1",
+      "status": "PASS"
+    },
+    {
+      "command": "bash .ci/check_swallowed_errors.sh",
+      "status": "PASS"
+    },
+    {
+      "command": "bash .ci/check_dependency_security_policy.sh",
+      "status": "PASS"
+    },
+    {
+      "command": "git diff --check",
+      "status": "PASS"
+    },
+    {
+      "command": "PostgreSQL integration/migration",
+      "status": "NOT RUN",
+      "reason": "No local PostgreSQL service; Docker unavailable"
+    },
+    {
+      "command": "Docker image/container smoke",
+      "status": "NOT RUN",
+      "reason": "Linux Docker executable unavailable"
+    },
+    {
+      "command": "Performance remeasurement",
+      "status": "NOT RUN",
+      "reason": "No new performance claim; previous report is explicitly a pre-review snapshot"
+    }
+  ],
+  "regressions": [
+    {
+      "case": "ai",
+      "before": "FAIL",
+      "after": "PASS",
+      "red_log_sha256": "a3117fac60a4813a499672244414da4a00fe753d5f80fec88d3a1b1121e2d075"
+    },
+    {
+      "case": "github",
+      "before": "FAIL",
+      "after": "PASS",
+      "red_log_sha256": "bbe0601b3b53fdeee65c88dd96b51bebff115846a265ec8812ff96dec8e92ba8"
+    },
+    {
+      "case": "reindex",
+      "before": "FAIL",
+      "after": "PASS",
+      "red_log_sha256": "0eb855c0bd7b4ff9bbd002d5b88c033b15c894d7dee22da6b241dcd575d778e8"
+    },
+    {
+      "case": "events",
+      "before": "FAIL",
+      "after": "PASS",
+      "red_log_sha256": "dfde615d5cc1f51629ba21499e478756dfe347ed7619f788be39a4177119a8b6"
+    },
+    {
+      "case": "prepare",
+      "before": "FAIL",
+      "after": "PASS",
+      "red_log_sha256": "abeb66546ef12aee2e07409d132537678b87bc086e7c88faceaea93903d5b327"
+    },
+    {
+      "case": "context-cap",
+      "before": "FAIL",
+      "after": "PASS",
+      "red_log_sha256": "2310e01286e643f1772479a4e7a59aadcd463d7e184fd474614258c154bee20a"
+    }
+  ],
+  "source_sha256": {
+    "crates/ai/src/client.rs": "157c289dc32924a700155da722ba0316581e5c44969b4198d9406436400ed10e",
+    "crates/publish/src/github.rs": "af756593c4f1e344b1d1c1c8b60e66b81ea7bcc4ac9e7fc3c52c9236e5296f11",
+    "crates/runtime/src/events.rs": "57ba58594dbc62a02fa1ca00a22374edc04b4831cc16eff48fd0e5c2f2283491",
+    "crates/runtime/src/flows/publish/remote.rs": "137ef287026877cbc71a21f18b3735f6d9fa096d09690392fd90b08ddde175f4",
+    "crates/cli/src/commands/reindex.rs": "10485c5e4b39ad78af98049c809149d0a8baf1d71ad66dd230b4950ae61b0acf",
+    "crates/cli/src/error.rs": "79ef0013b8fb8a59cdda7bf89e465163c3cd57e48baa9d4f53db188a598add67"
+  },
+  "release_binary_sha256": "3ae0a28221dab09bd85c4d9b05bfa30e71284e15c406f427e3407183e92c8015",
+  "release_binary_bytes": 32336384
+}

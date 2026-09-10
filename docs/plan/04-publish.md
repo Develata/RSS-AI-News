@@ -249,3 +249,15 @@ rss-ai-news rebuild-report --publish-record-id <id>
 | 集成测试 | [`crates/runtime/tests/publish_freeze_tests.rs`](../../crates/runtime/tests/publish_freeze_tests.rs) + [`crates/runtime/tests/rebuild_report_tests.rs`](../../crates/runtime/tests/rebuild_report_tests.rs) |
 
 代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。
+
+## 远端发布资源边界（2026-09-10）
+
+remote 使用 claim 返回的记录元信息，只加载一次 frozen items，同时用于渲染与 article id 推进，
+不回读当前文章/AI正文，不破坏冻结快照不可变性。批量报告和推进元信息分开持有，不再复制整批 Markdown。
+从 claim 前起计算共享 deadline = publish lease 的80%；准备阶段（started事件与快照读取）和远端调用均受此限制，
+超时按 retryable 释放，预留20%用于数据库收尾。claim与收尾写入沿用数据库自身的失败/恢复机制，
+不因deadline主动取消；数据库不可用时仍须依赖lease回收，不能保证整个函数必在lease内返回。
+网络取消不能撤销服务端已经完成的提交，仍依靠既有幂等发布与重试恢复。
+Octocrab connect/read/write timeout 为5/30/30秒，所有 GitHub 响应最多16 MiB（含 base64 Contents 响应）。
+成功响应超限不可重试；429/5xx 错误页超限仍保留对应 retry 分类。
+GitHub错误消息先解析JSON，再遮蔽当前token，避免JSON转义绕过凭据脱敏。

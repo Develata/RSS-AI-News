@@ -36,7 +36,7 @@
        :notes "8 本体对象 + 4 状态机集中定义。
                4 状态机：FeedEntryState / ArticleState / AiResultState / PublishState。
                见 plan/00-overview.md §2 与 plan/08-state-machines.md。
-               domain 是叶子 crate，下游为空，被几乎所有上层 crate 依赖。")
+               domain 是叶子 crate，下游为空；不依赖 sqlx、tokio 或 HTTP 类型，DB 编解码由 storage 承担。")
 
 (crate :id config
        :label "配置加载 + 校验"
@@ -51,13 +51,16 @@
                详见 plan/06-config.md。")
 
 (crate :id runtime
-       :label "流程协调层：Flow 编排 + RunContext"
+       :label "流程协调层：Flow 编排 + 按用途装配依赖"
        :layer flow-coord
        :path "crates/runtime/"
        :downstream (domain config storage feed extractor ai report publish observability)
        :state active
-       :notes "9 个 Flow 模块对应主链路 + reindex + backfill + rebuild_report + recent_entries。
-               RunContext 是接缝点：承载 6 capability clients + 10 Repository traits。
+       :notes "8 个公开 Flow 模块对应主链路 + reindex + backfill + rebuild_report + recent_entries；另有内部 maintenance 模块。
+               context.rs 定义 IngestDeps / ExtractDeps / AiDeps / PublishDeps /
+               BackfillDeps / ReindexDeps / RebuildReportDeps；RunMeta 仅含 run_id / started_at。
+               CLI context_factory 按命令分别构造，各 flow 无跨功能 dependency bag。
+               doctor/health.rs 拥有具体 config/DB/migration/HTTP/liveness checks。
                events.rs::RunEventEmitter 强制 redaction。
                artifact.rs::ArtifactWriter 控制 raw_artifacts 留档。
                详见 plan/09-cli-and-runtime.md。")
@@ -66,10 +69,10 @@
        :label "持久层：sqlx 双方言 + Repository"
        :layer capability
        :path "crates/storage/"
-       :downstream (config domain)
+       :downstream (domain)
        :state active
        :notes "StoragePool enum 统一封装 SqlitePool + PgPool。
-               13 个 Repository trait + 实现，claim+lease 模式。
+               Repository traits + 双方言实现，claim+lease 模式；不依赖 config crate。
                migrations/sqlite/ + migrations/postgres/ 编号一一对应。
                详见 plan/05-storage.md。")
 
@@ -122,15 +125,17 @@
                详见 plan/04-publish.md。")
 
 (crate :id observability
-       :label "横向：tracing / metrics / health / events redaction"
+       :label "横向：tracing / metrics / health 类型 / redaction"
        :layer cross-cutting
        :path "crates/observability/"
-       :downstream (config storage domain)
+       :downstream ()
        :state active
        :notes "tracing_init：subscriber 单例 + WorkerGuard 生命周期。
                metrics：MetricsRecorder trait + NullMetrics / InMemoryMetrics / PrometheusMetrics。
-               redact：URL userinfo / Bearer / JSON 键名匹配（api_key / token / secret / password / access_key）。
-               health：HealthCheck trait + doctor 子命令。
+               redact：嵌入 URL userinfo/敏感 query、Authorization header 与 JSON credential 键。
+               health：仅 HealthCheck / CheckOutcome / CheckReport；具体 doctor checks 属于 runtime。
+               不依赖其他 workspace product crate，也不依赖 sqlx / reqwest。
+               metrics HTTP exporter 固定 32 个并发 handlers、5 秒截止时间、4 KiB 请求头。
                详见 plan/07-observability.md。")
 
 (crate :id acceptance-tooling
