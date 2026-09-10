@@ -1,7 +1,6 @@
 //! HTTP-only HTML fetcher.
 
 use async_trait::async_trait;
-use bytes::BytesMut;
 use reqwest::header::{ACCEPT, USER_AGENT};
 use reqwest::{Client, Url};
 use rss_ai_news_domain::dto::extract::ArticleFetchTask;
@@ -84,7 +83,7 @@ impl HtmlFetcher for ReqwestHtmlFetcher {
             feed_entry_id: task.feed_entry_id,
             final_url,
             http_status: status.as_u16(),
-            body_bytes: body.to_vec(),
+            body_bytes: body,
         })
     }
 }
@@ -92,8 +91,8 @@ impl HtmlFetcher for ReqwestHtmlFetcher {
 async fn read_limited_body(
     mut response: reqwest::Response,
     max_body_bytes: u64,
-) -> Result<BytesMut, ExtractorError> {
-    let mut body = BytesMut::new();
+) -> Result<Vec<u8>, ExtractorError> {
+    let mut body = Vec::new();
     let mut total = 0_u64;
 
     while let Some(chunk) = response.chunk().await.map_err(ExtractorError::from)? {

@@ -185,3 +185,21 @@ async fn rejects_too_large_response() {
 
     assert!(matches!(err, FeedError::TooLarge { bytes } if bytes > 1024));
 }
+
+#[tokio::test]
+async fn raw_payload_at_limit_is_preserved_exactly() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(RSS_BODY))
+        .mount(&server)
+        .await;
+    let fetcher = ReqwestFeedFetcher::new(RSS_BODY.len() as u64).expect("fetcher");
+    let response = fetcher
+        .fetch_raw(&request(&server, "/feed"))
+        .await
+        .expect("exact limit succeeds");
+    assert_eq!(
+        response.raw_payload_bytes.as_deref(),
+        Some(RSS_BODY.as_bytes())
+    );
+}

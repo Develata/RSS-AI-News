@@ -156,7 +156,7 @@ pub async fn run(cli: &Cli, args: &AiRunArgs) -> Result<AiRunCommandSummary, Cli
             task_gen_batch_size: args.batch_size,
             process_batch_size: args.batch_size,
             max_attempts: loaded.app.retry.ai_max_attempts,
-            prompt_template,
+            prompt_template: prompt_template.into(),
             model_id,
             fallback_models,
             max_input_chars,

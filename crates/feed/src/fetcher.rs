@@ -1,7 +1,6 @@
 //! HTTP feed fetcher with conditional request support.
 
 use async_trait::async_trait;
-use bytes::BytesMut;
 use reqwest::header::{
     ACCEPT, ETAG, HeaderMap, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, USER_AGENT,
 };
@@ -110,9 +109,8 @@ impl FeedFetcher for ReqwestFeedFetcher {
 
         let response = builder.send().await.map_err(FeedError::from)?;
         let status = response.status();
-        let headers = response.headers().clone();
-        let etag = header_to_string(&headers, ETAG);
-        let last_modified = header_to_string(&headers, LAST_MODIFIED);
+        let etag = header_to_string(response.headers(), ETAG);
+        let last_modified = header_to_string(response.headers(), LAST_MODIFIED);
 
         if status == StatusCode::NOT_MODIFIED {
             return Ok(RawFeedFetch {
@@ -139,7 +137,7 @@ impl FeedFetcher for ReqwestFeedFetcher {
             etag,
             last_modified,
             not_modified: false,
-            raw_payload_bytes: Some(body.to_vec()),
+            raw_payload_bytes: Some(body),
         })
     }
 }
@@ -154,8 +152,8 @@ fn append_query_param_if_missing(url: &mut Url, key: &str, value: &str) {
 async fn read_limited_body(
     mut response: reqwest::Response,
     max_body_bytes: u64,
-) -> Result<BytesMut, FeedError> {
-    let mut body = BytesMut::new();
+) -> Result<Vec<u8>, FeedError> {
+    let mut body = Vec::new();
     let mut total = 0_u64;
 
     while let Some(chunk) = response.chunk().await.map_err(FeedError::from)? {

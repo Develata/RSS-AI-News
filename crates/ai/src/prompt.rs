@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 pub struct PromptInput<'a> {
     pub title: &'a str,
     pub body_text: &'a str,
@@ -33,13 +35,14 @@ pub fn render_prompt(template: &str, input: &PromptInput<'_>, cfg: &PromptRender
     output
 }
 
-fn truncate_chars(input: &str, max_chars: usize) -> String {
-    let mut chars = input.chars();
-    let mut output = chars.by_ref().take(max_chars).collect::<String>();
-
-    if chars.next().is_some() {
-        output.push('…');
+fn truncate_chars(input: &str, max_chars: usize) -> Cow<'_, str> {
+    match input.char_indices().nth(max_chars) {
+        Some((end, _)) => {
+            let mut output = String::with_capacity(end + '…'.len_utf8());
+            output.push_str(&input[..end]);
+            output.push('…');
+            Cow::Owned(output)
+        }
+        None => Cow::Borrowed(input),
     }
-
-    output
 }

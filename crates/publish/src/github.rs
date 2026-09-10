@@ -344,10 +344,8 @@ impl GitHubTarget {
         tree_entries: Vec<Value>,
     ) -> Result<String, PublishError> {
         let route = format!("/repos/{}/{}/git/trees", self.cfg.owner, self.cfg.repo);
-        let body = json!({
-            "base_tree": base_tree_sha,
-            "tree": tree_entries,
-        });
+        let mut body = json!({ "base_tree": base_tree_sha });
+        body["tree"] = Value::Array(tree_entries);
         let value = self.post_json(&route, &body).await?;
         value
             .get("sha")
@@ -443,9 +441,9 @@ impl GitHubTarget {
     ) -> Result<String, PublishError> {
         let mut body = json!({
             "message": format!("{} {}", self.cfg.commit_message_prefix, report.relative_path),
-            "content": STANDARD.encode(report.markdown_content.as_bytes()),
             "branch": self.cfg.branch,
         });
+        body["content"] = Value::String(STANDARD.encode(report.markdown_content.as_bytes()));
         if let Some(sha) = existing_sha {
             body["sha"] = Value::String(sha.to_owned());
         }

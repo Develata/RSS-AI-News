@@ -38,8 +38,6 @@ async fn list_persisted_filters_state_persisted_orders_by_id() {
         .map(|candidate| candidate.article_id)
         .collect::<Vec<_>>();
     assert_eq!(ids, vec![first, third]);
-    assert_eq!(candidates[0].title, "title");
-    assert_eq!(candidates[0].body_text, "body");
 }
 
 #[tokio::test]

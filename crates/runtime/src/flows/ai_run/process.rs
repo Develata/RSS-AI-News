@@ -20,7 +20,7 @@ pub(super) async fn process_one(
     ctx: Arc<AiDeps>,
     owner: String,
     claimed: ClaimedAiResult,
-    opts: AiRunOptions,
+    opts: Arc<AiRunOptions>,
 ) -> AiTaskOutcome {
     let emitter = RunEventEmitter {
         run_id: &ctx.run.run_id,
@@ -66,19 +66,22 @@ pub(super) async fn process_one(
     let mut attempts: Vec<serde_json::Value> = Vec::with_capacity(chain.len());
     let mut last_error: Option<AiError> = None;
 
-    for (attempt_index, model) in chain.iter().enumerate() {
-        let task = AiTask {
-            article_ai_result_id: claimed.id,
-            article_id: claimed.article_id,
-            title: article.title.clone(),
-            body_text: truncate_chars(&article.body_text, opts.max_input_chars as usize),
-            category_key: opts.category_key.clone(),
-            prompt_template: opts.prompt_template.clone(),
-            model_id: model.clone(),
-            max_tokens: opts.max_tokens,
-            temperature: opts.temperature,
-        };
+    let mut body_text = article.body_text;
+    truncate_chars(&mut body_text, opts.max_input_chars as usize);
+    let mut task = AiTask {
+        article_ai_result_id: claimed.id,
+        article_id: claimed.article_id,
+        title: article.title,
+        body_text,
+        category_key: opts.category_key.clone(),
+        prompt_template: opts.prompt_template.clone(),
+        model_id: String::new(),
+        max_tokens: opts.max_tokens,
+        temperature: opts.temperature,
+    };
 
+    for (attempt_index, model) in chain.iter().enumerate() {
+        task.model_id.clone_from(model);
         match run_model_attempt(&ctx, &task, attempt_index).await {
             Ok(attempt) => {
                 return finish_ai_success(
@@ -228,8 +231,10 @@ fn success_outcome_from_response(
     })
 }
 
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
+fn truncate_chars(value: &mut String, max_chars: usize) {
+    if let Some((end, _)) = value.char_indices().nth(max_chars) {
+        value.truncate(end);
+    }
 }
 
 fn clamp_u64_to_i64(value: u64) -> i64 {
@@ -239,6 +244,21 @@ fn clamp_u64_to_i64(value: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_body_truncation_preserves_utf8_and_bounds() {
+        for (max, expected) in [
+            (0, ""),
+            (1, "中"),
+            (2, "中文"),
+            (3, "中文A"),
+            (100, "中文A"),
+        ] {
+            let mut body = "中文A".to_string();
+            truncate_chars(&mut body, max);
+            assert_eq!(body, expected);
+        }
+    }
 
     #[test]
     fn model_chain_puts_primary_first_and_dedups() {

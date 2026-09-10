@@ -443,7 +443,9 @@ fn opts_for_category(category_key: &str) -> AiRunOptions {
         task_gen_batch_size: 10,
         process_batch_size: 10,
         max_attempts: 3,
-        prompt_template: "Title: {title}\nCategory: {category_key}\nBody: {body_text}".to_string(),
+        prompt_template: "Title: {title}\nCategory: {category_key}\nBody: {body_text}"
+            .to_string()
+            .into(),
         model_id: "test-model".to_string(),
         fallback_models: Vec::new(),
         max_input_chars: 1024,

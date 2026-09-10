@@ -10,7 +10,7 @@ pub struct AiTask {
     pub title: String,
     pub body_text: String,
     pub category_key: String,
-    pub prompt_template: String,
+    pub prompt_template: std::sync::Arc<str>,
     pub model_id: String,
     pub max_tokens: u32,
     pub temperature: f32,

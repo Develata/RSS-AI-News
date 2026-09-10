@@ -119,3 +119,18 @@ async fn returns_timeout_on_slow_server() {
 
     assert_eq!(err, ExtractorError::HttpTimeout);
 }
+
+#[tokio::test]
+async fn body_at_limit_is_preserved_exactly() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(HTML_BODY))
+        .mount(&server)
+        .await;
+    let fetcher = ReqwestHtmlFetcher::new(HTML_BODY.len() as u64).expect("fetcher");
+    let response = fetcher
+        .fetch_html(&task(&server, "/article"))
+        .await
+        .expect("exact limit succeeds");
+    assert_eq!(response.body_bytes, HTML_BODY.as_bytes());
+}

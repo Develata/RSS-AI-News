@@ -28,7 +28,7 @@ pub fn test_task() -> AiTask {
         title: "测试标题".to_string(),
         body_text: "测试正文".to_string(),
         category_key: "ai".to_string(),
-        prompt_template: "标题：{title}\n分类：{category_key}\n正文：{body_text}".to_string(),
+        prompt_template: "标题：{title}\n分类：{category_key}\n正文：{body_text}".into(),
         model_id: "gpt-test".to_string(),
         max_tokens: 256,
         temperature: 0.2,

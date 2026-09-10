@@ -138,11 +138,16 @@ impl AiClient for OpenAiCompatClient {
             "temperature": task.temperature,
         });
 
-        let response = self
+        let request = self
             .http_client
             .post(self.chat_completions_url.clone())
             .bearer_auth(self.api_key.expose_secret())
-            .json(&request_body)
+            .json(&request_body);
+        // RequestBuilder owns the serialized bytes; release intermediate copies
+        // before waiting for the network response.
+        drop(request_body);
+        drop(prompt);
+        let response = request
             .send()
             .await
             .map_err(|err| map_reqwest_error(err, self.request_timeout))?;

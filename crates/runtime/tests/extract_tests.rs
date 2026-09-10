@@ -8,7 +8,7 @@ use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_domain::dto::extract::{ArticleFetchTask, ExtractedArticle};
 use rss_ai_news_domain::state::{ContentQuality, ExtractorStrategy};
 use rss_ai_news_extractor::{ContentStrategy, ExtractorError, HtmlFetcher, RawHtmlFetch};
-use rss_ai_news_runtime::{ExtractEntryStatus, ExtractFlow, ExtractOptions};
+use rss_ai_news_runtime::{ExtractFlow, ExtractOptions};
 use rss_ai_news_storage::{ArticleRepo, ArticleRepository, NewArticle};
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
@@ -25,6 +25,10 @@ struct MockHtmlFetcher {
 #[async_trait]
 impl HtmlFetcher for MockHtmlFetcher {
     async fn fetch_html(&self, task: &ArticleFetchTask) -> Result<RawHtmlFetch, ExtractorError> {
+        assert!(
+            task.summary_raw.is_none(),
+            "fetch path must not eagerly load fallback summary"
+        );
         let response = {
             let mut guard = self.responses.lock().await;
             guard.remove(&task.feed_entry_id)
@@ -93,7 +97,7 @@ async fn extract_persists_new_article_on_success() {
             .expect("artifact count should be readable");
 
     assert_eq!(summary.persisted, 1);
-    assert_eq!(summary.per_entry[0].status, ExtractEntryStatus::Persisted);
+    assert!(summary.failure_samples.is_empty());
     assert_eq!(row.0, "persisted");
     assert!(row.1.is_some());
     assert_eq!(article_count, 1);

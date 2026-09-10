@@ -26,12 +26,10 @@ pub struct ArticleInsertOutcome {
     pub newly_created: bool,
 }
 
-#[derive(Debug, Clone)]
+/// Identifier-only projection: AI content is loaded after the task is claimed.
+#[derive(Debug, Clone, FromRow)]
 pub struct ArticleAiTaskCandidate {
     pub article_id: i64,
-    pub title: String,
-    pub body_text: String,
-    pub origin_feed_entry_id: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -148,7 +146,7 @@ WHERE id = $1
 "#;
 
 const LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL: &str = r#"
-SELECT a.id AS article_id, a.title, a.body_text, a.origin_feed_entry_id
+SELECT a.id AS article_id
 FROM articles a
 JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
 JOIN feed_sources fs ON fs.id = fe.source_id
@@ -343,13 +341,12 @@ async fn sqlite_list_persisted_for_ai_task_gen(
     batch_size: u32,
     after_id: i64,
 ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
-    sqlx::query_as::<_, ArticleAiTaskCandidateRow>(LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL)
+    sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL)
         .bind(after_id)
         .bind(category_key)
         .bind(i64::from(batch_size))
         .fetch_all(pool)
         .await
-        .map(|rows| rows.into_iter().map(ArticleAiTaskCandidate::from).collect())
         .map_err(StorageError::from)
 }
 
@@ -492,13 +489,12 @@ async fn pg_list_persisted_for_ai_task_gen(
     batch_size: u32,
     after_id: i64,
 ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
-    sqlx::query_as::<_, ArticleAiTaskCandidateRow>(LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL)
+    sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL)
         .bind(after_id)
         .bind(category_key)
         .bind(i64::from(batch_size))
         .fetch_all(pool)
         .await
-        .map(|rows| rows.into_iter().map(ArticleAiTaskCandidate::from).collect())
         .map_err(StorageError::from)
 }
 
@@ -607,28 +603,9 @@ struct ArticleRow {
 }
 
 #[derive(Debug, FromRow)]
-struct ArticleAiTaskCandidateRow {
-    article_id: i64,
-    title: String,
-    body_text: String,
-    origin_feed_entry_id: i64,
-}
-
-#[derive(Debug, FromRow)]
 struct BackfillArticleCandidateRow {
     article_id: i64,
     state: String,
-}
-
-impl From<ArticleAiTaskCandidateRow> for ArticleAiTaskCandidate {
-    fn from(row: ArticleAiTaskCandidateRow) -> Self {
-        Self {
-            article_id: row.article_id,
-            title: row.title,
-            body_text: row.body_text,
-            origin_feed_entry_id: row.origin_feed_entry_id,
-        }
-    }
 }
 
 impl From<BackfillArticleCandidateRow> for BackfillArticleCandidate {

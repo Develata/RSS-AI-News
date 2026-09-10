@@ -134,6 +134,7 @@ impl AiRunFlow {
 
     /// Phase 2：claim pending AI 任务，并发调用 AI、写 artifact、解析并 release。
     pub async fn process_ai_tasks(&self, opts: &AiRunOptions) -> AiProcessSummary {
+        let opts = Arc::new(opts.clone());
         let emitter = RunEventEmitter {
             run_id: &self.ctx.run.run_id,
             stage: "ai_run",
@@ -234,7 +235,7 @@ impl AiRunFlow {
 
             summary.claimed += claimed.len() as u32;
             summary.batches_executed += 1;
-            let per_task_len_before = summary.per_task.len();
+            let retryable_before = summary.retryable_failed;
 
             let semaphore = Arc::new(Semaphore::new(
                 self.ctx.http.concurrent_fetches.max(1) as usize
@@ -244,7 +245,7 @@ impl AiRunFlow {
             for task in claimed {
                 let ctx = Arc::clone(&self.ctx);
                 let owner = owner.clone();
-                let opts = opts.clone();
+                let opts = Arc::clone(&opts);
                 let semaphore = Arc::clone(&semaphore);
                 join_set.spawn(async move {
                     let _permit = semaphore
@@ -257,7 +258,7 @@ impl AiRunFlow {
 
             while let Some(result) = join_set.join_next().await {
                 match result {
-                    Ok(outcome) => summary.per_task.push(outcome),
+                    Ok(outcome) => summary.record(outcome),
                     Err(error) => {
                         tracing::error!("AI task panicked or was cancelled: {error}");
                         summary.tasks_panicked += 1;
@@ -268,10 +269,7 @@ impl AiRunFlow {
             // F6-3: 同 ExtractFlow 路径，本批次产生 retryable 失败 ⇒ 这些
             // 任务已回到 pending 且 lease 释放，下次 claim 会立即捞回形成
             // retry-loop。主动终止，留待下一次 run 重试。
-            let batch_retryable = summary.per_task[per_task_len_before..]
-                .iter()
-                .filter(|o| matches!(o.status, AiTaskStatus::RetryableFailed))
-                .count();
+            let batch_retryable = summary.retryable_failed - retryable_before;
             if batch_retryable > 0 {
                 summary.retryable_deferred = true;
                 tracing::info!(
@@ -285,7 +283,6 @@ impl AiRunFlow {
             }
         }
 
-        recalculate_process_summary(&mut summary);
         emitter
             .emit(
                 "run_completed",
@@ -319,18 +316,21 @@ impl AiRunFlow {
     }
 }
 
-fn recalculate_process_summary(summary: &mut AiProcessSummary) {
-    summary.succeeded = 0;
-    summary.filtered = 0;
-    summary.retryable_failed = 0;
-    summary.permanent_failed = 0;
-
-    for outcome in &summary.per_task {
+impl AiProcessSummary {
+    /// Count every outcome; retain only the first 32 failures for diagnostics.
+    fn record(&mut self, outcome: AiTaskOutcome) {
         match outcome.status {
-            AiTaskStatus::Succeeded => summary.succeeded += 1,
-            AiTaskStatus::Filtered => summary.filtered += 1,
-            AiTaskStatus::RetryableFailed => summary.retryable_failed += 1,
-            AiTaskStatus::PermanentFailed => summary.permanent_failed += 1,
+            AiTaskStatus::Succeeded => self.succeeded += 1,
+            AiTaskStatus::Filtered => self.filtered += 1,
+            AiTaskStatus::RetryableFailed => self.retryable_failed += 1,
+            AiTaskStatus::PermanentFailed => self.permanent_failed += 1,
+        }
+        if matches!(
+            outcome.status,
+            AiTaskStatus::RetryableFailed | AiTaskStatus::PermanentFailed
+        ) && self.failure_samples.len() < 32
+        {
+            self.failure_samples.push(outcome);
         }
     }
 }
@@ -367,7 +367,7 @@ mod tests {
             task_gen_batch_size: 1,
             process_batch_size: 1,
             max_attempts: 1,
-            prompt_template: String::new(),
+            prompt_template: String::new().into(),
             model_id: String::new(),
             fallback_models: Vec::new(),
             max_input_chars: 0,
@@ -397,38 +397,38 @@ mod tests {
     }
 
     #[test]
-    fn recalculate_process_summary_preserves_tasks_panicked() {
-        // codex P2-1 回归：panic/cancel 的任务在 join-error 分支累计到
-        // tasks_panicked，它不进 per_task；recalc 只从 per_task 重算业务计数，
-        // 必须**不**清零 tasks_panicked。旧实现把 permanent_failed += 1 后又被
-        // recalc 清零，导致 panic 在 summary / JSON 中报 0 failure。
+    fn summary_bounds_samples_without_losing_counts() {
         let mut summary = AiProcessSummary {
-            permanent_failed: 99, // 脏值：recalc 应按 per_task 重算覆盖
-            tasks_panicked: 2,    // join-error 累计；recalc 不得清零
-            per_task: vec![
-                AiTaskOutcome {
-                    article_ai_result_id: 1,
-                    article_id: 1,
-                    status: AiTaskStatus::Succeeded,
-                    article_advance: None,
-                    error_kind: None,
-                },
-                AiTaskOutcome {
-                    article_ai_result_id: 2,
-                    article_id: 2,
-                    status: AiTaskStatus::PermanentFailed,
-                    article_advance: None,
-                    error_kind: Some("boom".to_string()),
-                },
-            ],
+            tasks_panicked: 4,
             ..Default::default()
         };
-        recalculate_process_summary(&mut summary);
-        assert_eq!(summary.succeeded, 1);
-        assert_eq!(summary.permanent_failed, 1, "per_task 重算应覆盖脏值");
-        assert_eq!(
-            summary.tasks_panicked, 2,
-            "recalc 必须保留 join-failure 计数"
-        );
+        for _ in 0..10_000 {
+            summary.record(AiTaskOutcome {
+                article_ai_result_id: 1,
+                article_id: 1,
+                article_advance: None,
+                status: AiTaskStatus::Succeeded,
+                error_kind: None,
+            });
+            summary.record(AiTaskOutcome {
+                article_ai_result_id: 1,
+                article_id: 1,
+                article_advance: None,
+                status: AiTaskStatus::PermanentFailed,
+                error_kind: Some("failure".into()),
+            });
+        }
+        summary.record(AiTaskOutcome {
+            article_ai_result_id: 1,
+            article_id: 1,
+            article_advance: None,
+            status: AiTaskStatus::RetryableFailed,
+            error_kind: None,
+        });
+        assert_eq!(summary.succeeded, 10_000);
+        assert_eq!(summary.permanent_failed, 10_000);
+        assert_eq!(summary.retryable_failed, 1);
+        assert_eq!(summary.failure_samples.len(), 32);
+        assert_eq!(summary.tasks_panicked, 4);
     }
 }

@@ -12,7 +12,6 @@ use rss_ai_news_feed::parse_feed;
 use rss_ai_news_storage::{FeedEntryInsertOutcome, NewFeedEntry, StorageError};
 use serde_json::json;
 use time::OffsetDateTime;
-use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::artifact::ArtifactWriter;
@@ -117,11 +116,27 @@ impl IngestFlow {
 
         let mut summary = IngestSummary::default();
         let source_configs = self.collect_enabled_sources(&opts);
-        let mut tasks = Vec::with_capacity(source_configs.len());
+        let concurrent_feeds = self.ctx.http.concurrent_feeds.max(1) as usize;
+        let mut join_set = JoinSet::new();
 
         for (category, source) in source_configs {
-            match self.resolve_source(&category, &source).await {
-                Ok(task) => tasks.push(task),
+            summary.sources_attempted += 1;
+            if join_set.len() >= concurrent_feeds
+                && let Some(result) = join_set.join_next().await
+            {
+                match result {
+                    Ok(outcome) => summary.per_source.push(outcome),
+                    Err(error) => {
+                        tracing::error!("ingest source task panicked or was cancelled: {error}");
+                        summary.tasks_panicked += 1;
+                    }
+                }
+            }
+            match self.resolve_source(category, source).await {
+                Ok(task) => {
+                    let ctx = Arc::clone(&self.ctx);
+                    join_set.spawn(Self::process_source(ctx, task));
+                }
                 Err(error) => {
                     tracing::warn!(
                         category_key = %category.category.key,
@@ -141,23 +156,6 @@ impl IngestFlow {
                     });
                 }
             }
-        }
-
-        summary.sources_attempted = (tasks.len() + summary.per_source.len()) as u32;
-        let concurrent_feeds = self.ctx.http.concurrent_feeds.max(1) as usize;
-        let semaphore = Arc::new(Semaphore::new(concurrent_feeds));
-        let mut join_set = JoinSet::new();
-
-        for task in tasks {
-            let ctx = Arc::clone(&self.ctx);
-            let semaphore = Arc::clone(&semaphore);
-            join_set.spawn(async move {
-                let _permit = semaphore
-                    .acquire_owned()
-                    .await
-                    .expect("semaphore should not be closed");
-                Self::process_source(ctx, task).await
-            });
         }
 
         while let Some(result) = join_set.join_next().await {
@@ -195,27 +193,27 @@ impl IngestFlow {
         summary
     }
 
-    fn collect_enabled_sources(&self, opts: &IngestOptions) -> Vec<(CategoryConfig, SourceConfig)> {
-        let mut sources = Vec::new();
-        for category in &self.categories {
-            if !opts.category_keys.is_empty()
-                && !opts
-                    .category_keys
+    fn collect_enabled_sources<'a>(
+        &'a self,
+        opts: &'a IngestOptions,
+    ) -> impl Iterator<Item = (&'a CategoryConfig, &'a SourceConfig)> {
+        self.categories
+            .iter()
+            .filter(|category| {
+                opts.category_keys.is_empty()
+                    || opts
+                        .category_keys
+                        .iter()
+                        .any(|key| key == &category.category.key)
+            })
+            .flat_map(|category| {
+                category
+                    .sources
                     .iter()
-                    .any(|key| key == &category.category.key)
-            {
-                continue;
-            }
-            for source in &category.sources {
-                if source.enabled {
-                    sources.push((category.clone(), source.clone()));
-                }
-            }
-        }
-        if let Some(limit) = opts.max_sources {
-            sources.truncate(limit);
-        }
-        sources
+                    .filter(|source| source.enabled)
+                    .map(move |source| (category, source))
+            })
+            .take(opts.max_sources.unwrap_or(usize::MAX))
     }
 
     /// W16（docs/plan/16-config-versioning.md §6）：拿"当前生效 config 版本"

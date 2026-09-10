@@ -46,11 +46,10 @@ pub fn render_markdown(
         &excerpt,
         &parts,
     );
-    let items_markdown = items
-        .iter()
-        .map(|item| render_item(&config.templates.item_template, item))
-        .collect::<Result<Vec<_>, _>>()?
-        .join("");
+    let mut items_markdown = String::new();
+    for item in items {
+        items_markdown.push_str(&render_item(&config.templates.item_template, item)?);
+    }
     let excerpt_block = if excerpt.is_empty() {
         String::new()
     } else {

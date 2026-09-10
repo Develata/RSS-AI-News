@@ -10,7 +10,7 @@ pub struct AiRunOptions {
     /// process 阶段一次 claim 多少条 pending AI 任务。
     pub process_batch_size: u32,
     pub max_attempts: u32,
-    pub prompt_template: String,
+    pub prompt_template: std::sync::Arc<str>,
     pub model_id: String,
     /// W14-A 失败回退链（已由 config effective 层 trim / 去重 / 去主模型）。process
     /// 阶段主模型锚定 `claimed.model_id`（行身份），链 = `[主模型, ...fallback_models]`。
@@ -64,9 +64,7 @@ pub struct AiProcessSummary {
     pub filtered: u32,
     pub retryable_failed: u32,
     pub permanent_failed: u32,
-    /// 因 task panic / cancel 而失败的 AI 任务数（codex P2-1）。这类失败不进入
-    /// `per_task`，故 `recalculate_process_summary` 不重算它——与 `permanent_failed`
-    /// （进入 per_task 的业务永久失败）分开计，避免被 recalc 清零而隐身。
+    /// Tasks that panicked or were cancelled; leases recover on expiry.
     pub tasks_panicked: u32,
     /// 实际执行的批次数（F6-3）。命中 `max_batches` 时等于上限；否则小于上限。
     pub batches_executed: u32,
@@ -79,7 +77,7 @@ pub struct AiProcessSummary {
     /// retryable_deferred)` = `(T, F)` / `(F, T)` / `(F, F)` 区分 cap-hit /
     /// retryable-deferred / queue-exhausted 三种退出路径。
     pub retryable_deferred: bool,
-    pub per_task: Vec<AiTaskOutcome>,
+    pub failure_samples: Vec<AiTaskOutcome>,
 }
 
 #[derive(Debug, Clone)]

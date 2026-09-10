@@ -37,9 +37,7 @@ pub struct ExtractSummary {
     pub dedup_skipped: u32,
     pub retryable_failed: u32,
     pub permanent_failed: u32,
-    /// 因 task panic / cancel 而失败的 entry 数（codex P2-1）。这类失败不进入
-    /// `per_entry`，故 `recalculate_summary` 不重算它——与 `permanent_failed`
-    /// （进入 per_entry 的业务永久失败）分开计，避免被 recalc 清零而隐身。
+    /// Tasks that panicked or were cancelled; leases recover on expiry.
     pub tasks_panicked: u32,
     /// 实际执行的批次数（F6-3）。命中 `max_batches` 上限时等于上限值；
     /// 队列耗尽时小于上限。供 observability / 测试可见。
@@ -56,7 +54,7 @@ pub struct ExtractSummary {
     /// `(cap_hit, retryable, queue_exhausted)` → `(T, F)`, `(F, T)`, `(F, F)`。
     /// 让 observability 消费者无须靠 `batches_executed < cap` 隐式推断。
     pub retryable_deferred: bool,
-    pub per_entry: Vec<ExtractEntryOutcome>,
+    pub failure_samples: Vec<ExtractEntryOutcome>,
 }
 
 #[derive(Debug, Clone)]
@@ -184,7 +182,7 @@ impl ExtractFlow {
 
             summary.claimed += claimed.len() as u32;
             summary.batches_executed += 1;
-            let per_entry_len_before = summary.per_entry.len();
+            let retryable_before = summary.retryable_failed;
 
             let semaphore = Arc::new(Semaphore::new(
                 self.ctx.http.concurrent_fetches.max(1) as usize
@@ -206,7 +204,7 @@ impl ExtractFlow {
 
             while let Some(result) = join_set.join_next().await {
                 match result {
-                    Ok(outcome) => summary.per_entry.push(outcome),
+                    Ok(outcome) => summary.record(outcome),
                     Err(error) => {
                         tracing::error!("extract entry task panicked or was cancelled: {error}");
                         summary.tasks_panicked += 1;
@@ -219,10 +217,7 @@ impl ExtractFlow {
             // 此处主动终止，留待下一次 run 重试（符合
             // `extract_releases_retryable_on_5xx` 测试以及"重试跨 run 而非
             // 同 run"的语义）。
-            let batch_retryable = summary.per_entry[per_entry_len_before..]
-                .iter()
-                .filter(|o| matches!(o.status, ExtractEntryStatus::RetryableFailed))
-                .count();
+            let batch_retryable = summary.retryable_failed - retryable_before;
             if batch_retryable > 0 {
                 summary.retryable_deferred = true;
                 tracing::info!(
@@ -235,7 +230,6 @@ impl ExtractFlow {
             }
         }
 
-        recalculate_summary(&mut summary);
         emitter
             .emit(
                 "run_completed",
@@ -267,40 +261,29 @@ impl ExtractFlow {
         claimed: ClaimedFeedEntry,
         max_attempts: u32,
     ) -> ExtractEntryOutcome {
-        let now = OffsetDateTime::now_utc();
         let emitter = RunEventEmitter {
             run_id: &ctx.run.run_id,
             stage: "extract",
             repo: ctx.event_repo.as_ref(),
         };
-        let summary_raw = match ctx.feed_entry_repo.find_by_id(claimed.id).await {
-            Ok(Some(entry)) => entry.summary_raw,
-            Ok(None) => None,
-            Err(error) => {
-                tracing::warn!(
-                    feed_entry_id = claimed.id,
-                    "failed to load feed entry summary for fallback: {error}"
-                );
-                None
-            }
-        };
         let fetch_task = ArticleFetchTask {
             feed_entry_id: claimed.id,
             normalized_link: claimed.normalized_link,
             title_raw: claimed.title_raw,
-            summary_raw,
+            summary_raw: None,
             timeout: StdDuration::from_secs(ctx.http.timeout_seconds),
         };
 
         let raw = match ctx.html_fetcher.fetch_html(&fetch_task).await {
             Ok(raw) => raw,
             Err(error) => {
+                let now = OffsetDateTime::now_utc();
                 // W18（plan/17）：永久性抓取失败（403 付费墙 / 404 / too_large）
                 // 且 feed 摘要可用时降级成文，与下方解析链失败分支对称。
                 // 可重试错误（超时/5xx）不消费摘要——重试仍有机会拿到全文，
                 // W15 预算路径维持不变。
                 if !error.is_retryable()
-                    && let Some(fallback) = summary_fallback(&fetch_task)
+                    && let Some(fallback) = load_summary_fallback(&ctx, &fetch_task).await
                 {
                     tracing::info!(
                         feed_entry_id = claimed.id,
@@ -325,6 +308,7 @@ impl ExtractFlow {
             }
         };
 
+        let now = OffsetDateTime::now_utc();
         let html_artifact_id = write_html_artifact(&ctx, claimed.id, &raw).await;
         match run_strategy_chain(&ctx, &fetch_task, &raw) {
             ChainResult::Extracted(article) => {
@@ -344,7 +328,7 @@ impl ExtractFlow {
                     .await
             }
             ChainResult::Failed(errors) => {
-                if let Some(fallback) = summary_fallback(&fetch_task) {
+                if let Some(fallback) = load_summary_fallback(&ctx, &fetch_task).await {
                     persist_fallback(
                         &ctx,
                         &emitter,
@@ -372,6 +356,27 @@ impl ExtractFlow {
                     .await
                 }
             }
+        }
+    }
+}
+
+async fn load_summary_fallback(
+    ctx: &ExtractDeps,
+    task: &ArticleFetchTask,
+) -> Option<FallbackArticle> {
+    match ctx.feed_entry_repo.find_by_id(task.feed_entry_id).await {
+        Ok(Some(entry)) => {
+            let mut fallback_task = task.clone();
+            fallback_task.summary_raw = entry.summary_raw;
+            summary_fallback(&fallback_task)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                feed_entry_id = task.feed_entry_id,
+                "failed to load fallback summary: {error}"
+            );
+            None
         }
     }
 }
@@ -757,20 +762,22 @@ fn quality_to_str(quality: ContentQuality) -> &'static str {
     }
 }
 
-fn recalculate_summary(summary: &mut ExtractSummary) {
-    summary.persisted = 0;
-    summary.fallback_persisted = 0;
-    summary.dedup_skipped = 0;
-    summary.retryable_failed = 0;
-    summary.permanent_failed = 0;
-
-    for outcome in &summary.per_entry {
+impl ExtractSummary {
+    /// Count every outcome; retain only the first 32 failures for diagnostics.
+    fn record(&mut self, outcome: ExtractEntryOutcome) {
         match outcome.status {
-            ExtractEntryStatus::Persisted => summary.persisted += 1,
-            ExtractEntryStatus::FallbackPersisted => summary.fallback_persisted += 1,
-            ExtractEntryStatus::DedupSkipped => summary.dedup_skipped += 1,
-            ExtractEntryStatus::RetryableFailed => summary.retryable_failed += 1,
-            ExtractEntryStatus::PermanentFailed => summary.permanent_failed += 1,
+            ExtractEntryStatus::Persisted => self.persisted += 1,
+            ExtractEntryStatus::FallbackPersisted => self.fallback_persisted += 1,
+            ExtractEntryStatus::DedupSkipped => self.dedup_skipped += 1,
+            ExtractEntryStatus::RetryableFailed => self.retryable_failed += 1,
+            ExtractEntryStatus::PermanentFailed => self.permanent_failed += 1,
+        }
+        if matches!(
+            outcome.status,
+            ExtractEntryStatus::RetryableFailed | ExtractEntryStatus::PermanentFailed
+        ) && self.failure_samples.len() < 32
+        {
+            self.failure_samples.push(outcome);
         }
     }
 }
@@ -779,36 +786,36 @@ fn recalculate_summary(summary: &mut ExtractSummary) {
 mod tests {
     use super::*;
 
-    fn mk_outcome(status: ExtractEntryStatus) -> ExtractEntryOutcome {
-        ExtractEntryOutcome {
-            feed_entry_id: 1,
-            status,
-            article_id: None,
-            error_kind: None,
-        }
-    }
-
     #[test]
-    fn recalculate_summary_preserves_tasks_panicked() {
-        // codex P2-1 回归：panic/cancel 的 entry 在 join-error 分支累计到
-        // tasks_panicked，它不进 per_entry；recalc 只从 per_entry 重算业务
-        // 计数，必须**不**清零 tasks_panicked。旧实现把 permanent_failed += 1
-        // 后又被 recalc 清零，使 panic 在 summary / JSON 中报 0 failure。
+    fn summary_bounds_samples_without_losing_counts() {
         let mut summary = ExtractSummary {
-            permanent_failed: 99, // 脏值：recalc 应按 per_entry 重算覆盖
-            tasks_panicked: 4,    // join-error 累计；recalc 不得清零
-            per_entry: vec![
-                mk_outcome(ExtractEntryStatus::Persisted),
-                mk_outcome(ExtractEntryStatus::PermanentFailed),
-            ],
+            tasks_panicked: 4,
             ..Default::default()
         };
-        recalculate_summary(&mut summary);
-        assert_eq!(summary.persisted, 1);
-        assert_eq!(summary.permanent_failed, 1, "per_entry 重算应覆盖脏值");
-        assert_eq!(
-            summary.tasks_panicked, 4,
-            "recalc 必须保留 join-failure 计数"
-        );
+        for _ in 0..10_000 {
+            summary.record(ExtractEntryOutcome {
+                feed_entry_id: 1,
+                article_id: None,
+                status: ExtractEntryStatus::Persisted,
+                error_kind: None,
+            });
+            summary.record(ExtractEntryOutcome {
+                feed_entry_id: 1,
+                article_id: None,
+                status: ExtractEntryStatus::PermanentFailed,
+                error_kind: Some("failure".into()),
+            });
+        }
+        summary.record(ExtractEntryOutcome {
+            feed_entry_id: 1,
+            article_id: None,
+            status: ExtractEntryStatus::RetryableFailed,
+            error_kind: None,
+        });
+        assert_eq!(summary.persisted, 10_000);
+        assert_eq!(summary.permanent_failed, 10_000);
+        assert_eq!(summary.retryable_failed, 1);
+        assert_eq!(summary.failure_samples.len(), 32);
+        assert_eq!(summary.tasks_panicked, 4);
     }
 }
