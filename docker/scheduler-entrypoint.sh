@@ -35,8 +35,6 @@ if [ -s "$RSS_CRONTAB_FILE" ]; then
     # 外挂模式：直接把用户挂载的 crontab 交给 supercronic。
     # 用户自己负责完整命令前缀（含 binary 路径、--config-dir 等）。
     echo "[scheduler] using mounted crontab: $RSS_CRONTAB_FILE"
-    echo "[scheduler] crontab contents:"
-    cat "$RSS_CRONTAB_FILE"
     exec /usr/local/bin/supercronic "$RSS_CRONTAB_FILE"
 fi
 
@@ -50,9 +48,7 @@ cat > "$CRONTAB_FILE" <<EOF
 ${RSS_CRON_SCHEDULE} sh -c '/usr/local/bin/rss-ai-news --config-dir /app/configs ${RSS_CRON_COMMAND}'
 EOF
 
-echo "[scheduler] generated crontab from env:"
-cat "$CRONTAB_FILE"
-echo "[scheduler] supercronic starting (schedule='${RSS_CRON_SCHEDULE}', command='${RSS_CRON_COMMAND}')"
+echo "[scheduler] starting generated schedule"
 
 # `-passthrough-logs` 已是 supercronic 默认（since v0.2.x），无需显式传。
 exec /usr/local/bin/supercronic "$CRONTAB_FILE"

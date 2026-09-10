@@ -1,66 +1,19 @@
 # syntax=docker/dockerfile:1.7
 
-############################
-# Stage 1: deps cache
-############################
-FROM rust:1.97.0-slim-bookworm AS deps
-
+FROM rust:1.97.0-slim-bookworm AS builder
 WORKDIR /app
-
-# Copy workspace + crate manifests (and Cargo.lock) only.
-COPY Cargo.toml Cargo.lock ./
-COPY crates/cli/Cargo.toml         crates/cli/Cargo.toml
-COPY crates/domain/Cargo.toml      crates/domain/Cargo.toml
-COPY crates/config/Cargo.toml      crates/config/Cargo.toml
-COPY crates/runtime/Cargo.toml     crates/runtime/Cargo.toml
-COPY crates/storage/Cargo.toml     crates/storage/Cargo.toml
-COPY crates/feed/Cargo.toml        crates/feed/Cargo.toml
-COPY crates/extractor/Cargo.toml   crates/extractor/Cargo.toml
-COPY crates/ai/Cargo.toml          crates/ai/Cargo.toml
-COPY crates/report/Cargo.toml      crates/report/Cargo.toml
-COPY crates/publish/Cargo.toml     crates/publish/Cargo.toml
-COPY crates/observability/Cargo.toml crates/observability/Cargo.toml
-COPY tools/acceptance/Cargo.toml      tools/acceptance/Cargo.toml
-
-# Create stub sources so cargo can resolve and pre-build deps.
-RUN set -eux; \
-    mkdir -p src; \
-    echo 'fn main() {}' > src/main.rs; \
-    for c in cli domain config runtime storage feed extractor ai report publish observability; do \
-        mkdir -p "crates/$c/src"; \
-        : > "crates/$c/src/lib.rs"; \
-    done; \
-    mkdir -p tools/acceptance/src; \
-    echo 'fn main() {}' > tools/acceptance/src/main.rs
-
-# Pre-build dependencies. Allowed to fail on stub bodies; the goal is to populate
-# the registry / git / target caches.
-RUN cargo build --release --workspace --bin rss-ai-news || true
-
-############################
-# Stage 2: full build
-############################
-FROM deps AS builder
-
-WORKDIR /app
-
-# Bring in the real workspace sources. .dockerignore filters target/ etc.
 COPY . .
-
-# Force re-build now that real sources replace the stubs. The deps stage produced
-# .rmeta/.rlib for stub lib.rs files; nuke their fingerprints so cargo rebuilds the
-# workspace crates against the real sources, then bump every .rs mtime so cargo
-# also detects source changes regardless of how COPY normalized them.
-RUN set -eux; \
-    rm -rf target/release/.fingerprint/rss-ai-news* \
-           target/release/deps/librss_ai_news* \
-           target/release/deps/rss_ai_news*; \
-    find . -path ./target -prune -o -name '*.rs' -print -exec touch {} +; \
-    cargo build --release --bin rss-ai-news; \
-    strip target/release/rss-ai-news || true
+# Cache mounts accelerate repeated builds on the same BuildKit builder.
+# Export the executable outside the target mount for later stages.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --locked --bin rss-ai-news && \
+    cp target/release/rss-ai-news /app/rss-ai-news && \
+    strip /app/rss-ai-news
 
 ############################
-# Stage 3: production runtime
+# Production runtime
 ############################
 FROM debian:bookworm-slim AS runtime
 
@@ -81,7 +34,7 @@ RUN set -eux; \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/rss-ai-news /usr/local/bin/rss-ai-news
+COPY --from=builder /app/rss-ai-news /usr/local/bin/rss-ai-news
 
 USER appuser
 
@@ -89,7 +42,7 @@ ENTRYPOINT ["/usr/local/bin/rss-ai-news"]
 CMD ["--help"]
 
 ############################
-# Stage 4: debug image (built on top of runtime layers)
+# Debug image (built on top of runtime layers)
 ############################
 FROM runtime AS debug
 
@@ -113,7 +66,7 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/rss-ai-news"]
 CMD ["--help"]
 
 ############################
-# Stage 5: scheduler image (常驻容器 + 内置 cron 周期触发 single-shot CLI)
+# Scheduler image (常驻容器 + 内置 cron 周期触发 single-shot CLI)
 ############################
 # 设计意图：保持 binary 自身 single-shot 不变（blueprint §14 硬约束），
 # 在外层套一个 supercronic（github.com/aptible/supercronic）按 crontab
@@ -126,24 +79,24 @@ FROM runtime AS scheduler
 
 USER root
 
-ARG SUPERCRONIC_VERSION=0.2.30
-# SHA1 checksum 来源：https://github.com/aptible/supercronic/releases/tag/v0.2.30
-# （supercronic 官方 release 用 sha1sum 校验，不是 sha256）
-ARG SUPERCRONIC_SHA1_AMD64=9f27ad28c5c57cd133325b2a66bba69ba2235799
-ARG SUPERCRONIC_SHA1_ARM64=d5e02aa760b3d434bc7b991777aa89ef4a503e49
+ARG SUPERCRONIC_VERSION=0.2.49
+# SHA-256 verified against GitHub release asset.digest for v0.2.49.
+# https://github.com/aptible/supercronic/releases/tag/v0.2.49
+ARG SUPERCRONIC_SHA256_AMD64=a53ae236602c7338aba3fbaff40bda6300eae3b9fedb8261eb06cfe3724430c1
+ARG SUPERCRONIC_SHA256_ARM64=02aa0cb229ba09050cba6638059dadb9eedc2276632ea43d6a57a2f8c1629dd5
 
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates wget; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-        amd64) sc_arch=amd64; sc_sha=$SUPERCRONIC_SHA1_AMD64;; \
-        arm64) sc_arch=arm64; sc_sha=$SUPERCRONIC_SHA1_ARM64;; \
+        amd64) sc_arch=amd64; sc_sha=$SUPERCRONIC_SHA256_AMD64;; \
+        arm64) sc_arch=arm64; sc_sha=$SUPERCRONIC_SHA256_ARM64;; \
         *) echo "unsupported arch: $arch" >&2; exit 1;; \
     esac; \
     wget -q -O /usr/local/bin/supercronic \
         "https://github.com/aptible/supercronic/releases/download/v${SUPERCRONIC_VERSION}/supercronic-linux-${sc_arch}"; \
-    echo "${sc_sha}  /usr/local/bin/supercronic" | sha1sum -c -; \
+    echo "${sc_sha}  /usr/local/bin/supercronic" | sha256sum -c -; \
     chmod +x /usr/local/bin/supercronic; \
     apt-get purge -y wget; \
     apt-get autoremove -y; \

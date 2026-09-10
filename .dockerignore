@@ -4,6 +4,7 @@ target/
 .codex-tmp/
 .claude/
 docs/
+docs-backup/
 data/
 *.md
 README*
