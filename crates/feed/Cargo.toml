@@ -5,15 +5,11 @@ edition.workspace = true
 
 [dependencies]
 async-trait = "0.1"
-bytes = "1"
 rss-ai-news-domain.workspace = true
 feed-rs.workspace = true
 reqwest.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 time.workspace = true
-tokio.workspace = true
-url.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

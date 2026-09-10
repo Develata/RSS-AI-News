@@ -15,7 +15,7 @@
 
 # ── 生产路径：error-reporting / 脱敏 best-effort ──
 crates/cli/src/lib.rs:73:进程退出前 emit_failure 写 stderr 失败无救赎，尽力 emit + 失败不阻断 exit（§3.3 sink 失败豁免）
-crates/ai/src/client.rs:272:AI error envelope 解析失败降级到受限body错误分类，原已审核error-reporting豁免，路径随实现移动
+crates/ai/src/client.rs:254:AI error envelope 解析失败降级到受限body错误分类，原已审核error-reporting豁免，路径随实现移动
 crates/publish/src/github.rs:548:GitHub error body 非JSON时用原始受限body/状态码构造错误，原已审核error-reporting豁免
 
 # ── 测试 harness：teardown / fire-and-forget ──

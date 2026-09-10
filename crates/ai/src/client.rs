@@ -3,7 +3,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use async_openai::{Client, config::OpenAIConfig};
 use async_trait::async_trait;
 use rss_ai_news_domain::{SecretString, dto::ai::AiTask};
 use serde::Deserialize;
@@ -71,7 +70,6 @@ impl fmt::Debug for AiClientConfig {
 
 #[derive(Clone)]
 pub struct OpenAiCompatClient {
-    inner: Client<OpenAIConfig>,
     http_client: reqwest::Client,
     api_key: SecretString,
     chat_completions_url: Url,
@@ -81,7 +79,6 @@ pub struct OpenAiCompatClient {
 impl fmt::Debug for OpenAiCompatClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpenAiCompatClient")
-            .field("inner", &"<async_openai::Client>")
             .field("api_key", &self.api_key)
             .field(
                 "api_origin",
@@ -106,13 +103,7 @@ impl OpenAiCompatClient {
             .build()
             .map_err(|err| AiError::InvalidConfig(err.to_string()))?;
 
-        let openai_config = OpenAIConfig::new()
-            .with_api_base(cfg.api_base)
-            .with_api_key(cfg.api_key.expose_secret().to_owned());
-        let inner = Client::with_config(openai_config).with_http_client(http_client.clone());
-
         Ok(Self {
-            inner,
             http_client,
             api_key: cfg.api_key,
             chat_completions_url,
@@ -123,15 +114,6 @@ impl OpenAiCompatClient {
     pub fn request_timeout(&self) -> Duration {
         self.request_timeout
     }
-    pub fn async_openai_client(&self) -> &Client<OpenAIConfig> {
-        &self.inner
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct InvokeOptions {
-    /// 用于 prompt 渲染（render_prompt 内的截断 buffer）。默认沿用 task.body_text 长度。
-    pub max_input_chars: Option<usize>,
 }
 
 #[async_trait]

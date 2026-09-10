@@ -8,12 +8,8 @@ rss-ai-news-domain.workspace = true
 reqwest.workspace = true
 scraper.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 sha2.workspace = true
-tokio.workspace = true
-url.workspace = true
 async-trait = "0.1"
-bytes = "1"
 hex.workspace = true
 readability-rust = "0.1"
 

@@ -5,9 +5,7 @@ pub mod error;
 pub mod parser;
 pub mod prompt;
 
-pub use client::{
-    AiClient, AiClientConfig, AiResponse, InvokeOptions, OpenAiCompatClient, TokenUsage,
-};
+pub use client::{AiClient, AiClientConfig, AiResponse, OpenAiCompatClient, TokenUsage};
 pub use error::AiError;
 pub use parser::{ParsedResponse, parse_response};
 pub use prompt::{PromptInput, PromptRenderConfig, render_prompt};

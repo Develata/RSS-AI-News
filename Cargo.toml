@@ -97,9 +97,6 @@ feed-rs = "2.4"
 # Testing
 tempfile = "3"
 
-# AI client
-async-openai = "0.27"
-
 # GitHub API
 # Octocrab 0.54 即使 personal-token path 也要求一个 JWT backend；选择 AWS-LC，
 # 避免 jwt-rust-crypto 把无修复版 RUSTSEC-2023-0071 的 RSA 拉进 active graph。
@@ -128,12 +125,7 @@ edition.workspace = true
 
 [dependencies]
 rss-ai-news-cli.workspace = true
-rss-ai-news-config.workspace = true
-rss-ai-news-observability.workspace = true
-rss-ai-news-runtime.workspace = true
-rss-ai-news-storage.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 
 [lints]
 workspace = true
