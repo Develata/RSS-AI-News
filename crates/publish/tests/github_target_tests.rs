@@ -455,7 +455,12 @@ async fn github_error_diagnostics_are_bounded() {
             .await;
         let error = target(&server).publish(&sample_report()).await.unwrap_err();
         assert!(error.display_user().len() <= 16 * 1024);
-        assert!(error.display_user().contains("[truncated, original_bytes="));
+        if structured {
+            assert!(error.display_user().contains("[truncated, original_bytes="));
+        } else {
+            assert!(error.display_user().contains("error body omitted"));
+            assert!(!error.display_user().contains("中文"));
+        }
     }
 }
 
@@ -483,6 +488,29 @@ async fn unusual_error_json_does_not_retain_escaped_credentials() {
             error.display_user(),
         ] {
             assert!(!diagnostic.contains("oken"), "credential retained");
+        }
+    }
+}
+
+#[tokio::test]
+async fn unreadable_error_body_does_not_retain_escaped_credentials() {
+    let nested = format!("{}\"\\u0074oken\"{}", "[".repeat(140), "]".repeat(140));
+    for body in [nested.as_str(), r#"{"message":"\u0074oken""#] {
+        for status in [401, 503] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(status).set_body_raw(body, "application/json"))
+                .mount(&server)
+                .await;
+            let error = target(&server).publish(&sample_report()).await.unwrap_err();
+            assert_eq!(error.is_retryable(), status == 503);
+            for diagnostic in [
+                format!("{error:?}"),
+                error.to_string(),
+                error.display_user(),
+            ] {
+                assert!(!diagnostic.contains("oken"), "credential retained");
+            }
         }
     }
 }

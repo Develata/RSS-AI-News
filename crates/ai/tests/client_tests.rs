@@ -276,6 +276,32 @@ async fn plaintext_error_retains_http_retry_classification() {
     assert!(!error.display_user().contains("sk-test"));
 }
 
+#[tokio::test]
+async fn unreadable_error_body_does_not_retain_escaped_credentials() {
+    let nested = format!("{}\"\\u0073k-test\"{}", "[".repeat(140), "]".repeat(140));
+    for body in [nested.as_str(), r#"{"error":{"message":"\u0073k-test""#] {
+        for status in [401, 503] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(status).set_body_raw(body, "application/json"))
+                .mount(&server)
+                .await;
+            let error = test_client(server.uri())
+                .invoke(&test_task())
+                .await
+                .expect_err("HTTP error fails");
+            assert_eq!(error.is_retryable(), status == 503);
+            for diagnostic in [
+                format!("{error:?}"),
+                error.to_string(),
+                error.display_user(),
+            ] {
+                assert!(!diagnostic.contains("k-test"), "credential retained");
+            }
+        }
+    }
+}
+
 // A raw local HTTP fixture is intentional: wiremock supplies Content-Length,
 // so it cannot prove that the reader enforces its cap while streaming.
 fn chunked_server(body: Vec<u8>, delay: Duration) -> (String, std::thread::JoinHandle<()>) {
@@ -452,7 +478,12 @@ async fn provider_diagnostics_are_bounded_after_decoding_and_redaction() {
                     "diagnostic used {} bytes",
                     diagnostic.len()
                 );
-                assert!(diagnostic.contains("[truncated, original_bytes="));
+                if structured {
+                    assert!(diagnostic.contains("[truncated, original_bytes="));
+                } else {
+                    assert!(diagnostic.contains("error body omitted"));
+                    assert!(!diagnostic.contains("中文"));
+                }
                 assert!(!diagnostic.contains("sk-test"));
             }
         }

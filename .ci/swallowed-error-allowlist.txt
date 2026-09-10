@@ -15,8 +15,8 @@
 
 # ── 生产路径：error-reporting / 脱敏 best-effort ──
 crates/cli/src/lib.rs:73:进程退出前 emit_failure 写 stderr 失败无救赎，尽力 emit + 失败不阻断 exit（§3.3 sink 失败豁免）
-crates/ai/src/client.rs:240:AI 非JSON错误退回受限正文；合法但未知JSON结构仅输出状态说明，原error-reporting豁免
-crates/publish/src/github.rs:550:GitHub error body 非JSON时用原始受限body/状态码构造错误，原已审核error-reporting豁免
+crates/ai/src/client.rs:240:AI 错误JSON解析失败或结构未知时省略正文，保留分类与状态说明，原error-reporting豁免
+crates/publish/src/github.rs:550:GitHub 错误JSON解析失败时省略正文，仅保留状态码与422冲突信号，原已审核error-reporting豁免
 
 # ── 测试 harness：teardown / fire-and-forget ──
 crates/config/src/loader.rs:425:测试 fixture Workspace::drop 清理 temp 目录，Drop 内无法传播错误，best-effort

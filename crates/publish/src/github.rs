@@ -558,10 +558,11 @@ fn response_message(status: u16, body: &[u8], token: &str) -> String {
             })
     } else {
         let body = String::from_utf8_lossy(body);
-        if body.trim().is_empty() {
-            format!("github api returned status {status}")
+        if status == 422 && is_non_fast_forward_message(&body.replace(token, "***")) {
+            // Preserve only the retry signal, never the undecodable body.
+            "not a fast-forward".to_string()
         } else {
-            body.into_owned()
+            format!("github api returned status {status}; unreadable error body omitted")
         }
     };
     // Error JSON can encode the token with escapes. Scrub after decoding, before

@@ -239,7 +239,18 @@ fn classify_error_response(
 ) -> AiError {
     let parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
     let Some(parsed) = parsed else {
-        return classify_http_status(code, body.replace(api_key, "***"), retry_after_seconds);
+        let mut error =
+            classify_http_status(code, body.replace(api_key, "***"), retry_after_seconds);
+        // Preserve status/body-based classification, but never retain an error
+        // body whose JSON escapes could not be decoded safely.
+        if let AiError::HttpStatus { message, .. }
+        | AiError::RateLimited { message, .. }
+        | AiError::QuotaExceeded { message }
+        | AiError::ModelUnavailable { message } = &mut error
+        {
+            *message = format!("provider returned status {code}; unreadable error body omitted");
+        }
+        return error;
     };
     let api_error = parsed.get("error");
     let field = |name| {
