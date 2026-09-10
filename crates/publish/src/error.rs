@@ -11,6 +11,8 @@ pub enum PublishError {
     GitHubAuthFailed(String),
     #[error("github api error: status {status}")]
     GitHubApiError { status: u16, message: String },
+    #[error("remote publish deadline exceeded")]
+    RemoteTimeout,
     #[error("github rate limit until {reset_at}")]
     GitHubRateLimit { reset_at: time::OffsetDateTime },
 }
@@ -26,7 +28,7 @@ impl ClassifiedError for PublishError {
             ),
             Self::InvalidPath(_) | Self::GitHubAuthFailed(_) => false,
             Self::GitHubApiError { status, .. } => *status == 409 || *status >= 500,
-            Self::GitHubRateLimit { .. } => true,
+            Self::GitHubRateLimit { .. } | Self::RemoteTimeout => true,
         }
     }
 
@@ -37,6 +39,7 @@ impl ClassifiedError for PublishError {
             Self::GitHubAuthFailed(_) => "github_auth_failed",
             Self::GitHubApiError { .. } => "github_api_error",
             Self::GitHubRateLimit { .. } => "github_rate_limit",
+            Self::RemoteTimeout => "remote_timeout",
         }
     }
 

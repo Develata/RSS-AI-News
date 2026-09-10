@@ -30,8 +30,19 @@ pub mod config_check {
         }
 
         async fn run(&self) -> CheckOutcome {
-            let categories = self.loaded.categories.len();
-            CheckOutcome::Ok(format!("valid ({categories} categories)"))
+            match rss_ai_news_config::validate::run_command_checks(
+                &self.loaded,
+                rss_ai_news_config::CommandKind::Doctor,
+                &rss_ai_news_config::CommandFlags::default(),
+            ) {
+                Ok(()) => CheckOutcome::Ok(format!(
+                    "valid ({} categories)",
+                    self.loaded.categories.len()
+                )),
+                Err(error) => {
+                    CheckOutcome::Fail(redact_url_userinfo(&error.to_string()).into_owned())
+                }
+            }
         }
     }
 }
@@ -86,15 +97,11 @@ pub mod migration_check {
 
     pub struct MigrationVersionCheck {
         pool: StoragePool,
-        expected_version: i64,
     }
 
     impl MigrationVersionCheck {
         pub fn new(pool: StoragePool) -> Self {
-            Self {
-                pool,
-                expected_version: 1,
-            }
+            Self { pool }
         }
     }
 
@@ -105,34 +112,9 @@ pub mod migration_check {
         }
 
         async fn run(&self) -> CheckOutcome {
-            // W11-P4-C2：_sqlx_migrations 是 sqlx 框架表，SQLite/PG 同名同字段。
-            // PG `MAX(version)` decode `Option<i64>` 也工作（_sqlx_migrations.version BIGINT）。
-            let result = match &self.pool {
-                StoragePool::Sqlite(p) => {
-                    sqlx::query_scalar::<_, Option<i64>>(
-                        "SELECT MAX(version) FROM _sqlx_migrations",
-                    )
-                    .fetch_one(p)
-                    .await
-                }
-                StoragePool::Postgres(p) => {
-                    sqlx::query_scalar::<_, Option<i64>>(
-                        "SELECT MAX(version) FROM _sqlx_migrations",
-                    )
-                    .fetch_one(p)
-                    .await
-                }
-            };
-            match result {
-                Ok(Some(version)) if version >= self.expected_version => {
-                    CheckOutcome::Ok(format!("{version:04} (up to date)"))
-                }
-                Ok(Some(version)) => CheckOutcome::Fail(format!(
-                    "{version:04} (expected at least {:04})",
-                    self.expected_version
-                )),
-                Ok(None) => CheckOutcome::Fail("no migrations applied".to_string()),
-                Err(error) => CheckOutcome::Fail(format!("migration table unavailable: {error}")),
+            match rss_ai_news_storage::ensure_migration_state_exact(&self.pool).await {
+                Ok(()) => CheckOutcome::Ok("up to date (versions and checksums match)".to_string()),
+                Err(error) => CheckOutcome::Fail(format!("migration history mismatch: {error}")),
             }
         }
     }

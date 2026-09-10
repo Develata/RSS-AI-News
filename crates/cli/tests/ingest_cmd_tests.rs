@@ -14,6 +14,40 @@ use wiremock::{
 };
 
 #[tokio::test]
+async fn readability_is_active_without_ai_or_publish_credentials() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/feed.xml"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(rss_body(&server.uri())))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/article-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(include_str!(
+            "../../extractor/tests/fixtures/simple_article.html"
+        )))
+        .mount(&server)
+        .await;
+    let temp = TempDir::new().unwrap();
+    write_config(temp.path(), &server.uri());
+    let app_path = temp.path().join("app.toml");
+    let app = fs::read_to_string(&app_path)
+        .unwrap()
+        .replace(
+            "strategy_order = [\"summary_fallback\"]",
+            "strategy_order = [\"readability\", \"summary_fallback\"]",
+        )
+        .replace("enabled = false", "enabled = true");
+    fs::write(app_path, app).unwrap();
+    let args = IngestArgs::default();
+    let summary = ingest::run(&cli_for(temp.path(), args.clone()), &args)
+        .await
+        .unwrap();
+    assert_eq!(summary.articles_persisted, 1);
+    assert_eq!(summary.articles_fallback, 0);
+}
+
+#[tokio::test]
 async fn ingest_cmd_with_mock_feed_succeeds() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

@@ -31,6 +31,25 @@ pub(super) fn collect_general_checks(
 
     collect_category_checks(report, categories, env);
     collect_app_value_checks(report, app);
+    let mut strategies = HashSet::new();
+    for name in &app.extractor.strategy_order {
+        if !matches!(name.as_str(), "readability" | "summary_fallback") || !strategies.insert(name)
+        {
+            report.push(Diagnostic::new(
+                "app.toml",
+                "extractor.strategy_order",
+                "expected unique readability / summary_fallback strategies",
+            ));
+        }
+    }
+    if strategies.is_empty() {
+        report.push(Diagnostic::new(
+            "app.toml",
+            "extractor.strategy_order",
+            "at least one strategy is required",
+        ));
+    }
+
     collect_cross_category_path_collisions(report, app, categories);
 }
 
@@ -93,9 +112,20 @@ pub(super) fn collect_env_checks(
         }
     }
 
+    collect_source_env_checks(report, categories, env, category_filter);
+}
+
+pub(super) fn collect_source_env_checks(
+    report: &mut DiagnosticReport,
+    categories: &[CategoryConfig],
+    env: &EnvConfig,
+    category_filter: Option<&str>,
+) {
     if categories
         .iter()
+        .filter(|category| category_filter.is_none_or(|filter| category.category.key == filter))
         .flat_map(|category| &category.sources)
+        .filter(|source| source.enabled)
         .any(|source| rsshub::has_base_placeholder(&source.feed_url))
         && is_blank(env.rsshub_base_url.as_deref())
     {

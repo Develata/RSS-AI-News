@@ -143,6 +143,24 @@ mod tests {
 
     #[test]
     fn env_file_loads_non_empty_values() {
+        const CHILD: &str = "RSS_AI_NEWS_ENV_TEST_CHILD";
+        if env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "env::tests::env_file_loads_non_empty_values",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove("OPENAI_API_KEY")
+                .env_remove("OPENAI_BASE_URL")
+                .env_remove("RSSHUB_ACCESS_KEY")
+                .env_remove("HTTP_PROXY")
+                .status()
+                .expect("isolated env test");
+            assert!(status.success());
+            return;
+        }
         let mut path = env::temp_dir();
         let unique = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)

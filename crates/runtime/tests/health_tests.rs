@@ -47,14 +47,9 @@ async fn database_check_reports_fail_for_closed_pool() {
 #[tokio::test]
 async fn migration_check_reports_ok_when_migration_table_has_version() {
     let pool = memory_pool().await;
-    sqlx::query("CREATE TABLE _sqlx_migrations (version INTEGER PRIMARY KEY)")
-        .execute(&pool)
+    rss_ai_news_storage::run_migrations(&StoragePool::Sqlite(pool.clone()))
         .await
-        .expect("create migrations");
-    sqlx::query("INSERT INTO _sqlx_migrations (version) VALUES (1)")
-        .execute(&pool)
-        .await
-        .expect("insert migration");
+        .expect("apply migrations");
 
     let check = MigrationVersionCheck::new(StoragePool::Sqlite(pool));
     assert!(matches!(check.run().await, CheckOutcome::Ok(_)));
@@ -74,7 +69,7 @@ async fn openai_check_reports_ok_for_chat_completion_shape() {
         .await;
 
     let check = OpenAiPingCheck::new(
-        reqwest::Client::new(),
+        reqwest::Client::builder().no_proxy().build().unwrap(),
         Some(server.uri()),
         Some("sk-test".to_string()),
         "gpt-test".to_string(),
@@ -93,7 +88,7 @@ async fn openai_check_reports_fail_for_unauthorized() {
         .await;
 
     let check = OpenAiPingCheck::new(
-        reqwest::Client::new(),
+        reqwest::Client::builder().no_proxy().build().unwrap(),
         Some(server.uri()),
         Some("sk-test".to_string()),
         "gpt-test".to_string(),
@@ -104,7 +99,7 @@ async fn openai_check_reports_fail_for_unauthorized() {
 
 #[tokio::test]
 async fn github_check_reports_warn_without_token() {
-    let check = GitHubPingCheck::new(reqwest::Client::new(), None);
+    let check = GitHubPingCheck::new(reqwest::Client::builder().no_proxy().build().unwrap(), None);
     assert!(matches!(check.run().await, CheckOutcome::Warn(_)));
 }
 
@@ -393,4 +388,39 @@ fn app_config() -> AppConfig {
         },
         doctor: DoctorConfig::default(),
     }
+}
+
+#[tokio::test]
+async fn migration_check_rejects_incomplete_history() {
+    let pool = memory_pool().await;
+    sqlx::query("CREATE TABLE _sqlx_migrations (version INTEGER PRIMARY KEY, checksum BLOB NOT NULL, success BOOLEAN NOT NULL)")
+        .execute(&pool).await.expect("create migrations");
+    sqlx::query("INSERT INTO _sqlx_migrations VALUES (1, X'00', 1)")
+        .execute(&pool)
+        .await
+        .expect("seed incomplete history");
+    let check = MigrationVersionCheck::new(StoragePool::Sqlite(pool));
+    assert!(matches!(check.run().await, CheckOutcome::Fail(_)));
+}
+
+#[tokio::test]
+async fn config_check_reports_missing_required_credentials() {
+    let mut loaded = loaded_config();
+    loaded.app.ai.enabled = true;
+    let check = ConfigCheck::new(Arc::new(loaded));
+    assert!(matches!(check.run().await, CheckOutcome::Fail(_)));
+}
+
+#[tokio::test]
+async fn migration_check_rejects_checksum_drift() {
+    let pool = memory_pool().await;
+    rss_ai_news_storage::run_migrations(&StoragePool::Sqlite(pool.clone()))
+        .await
+        .expect("apply migrations");
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)")
+        .execute(&pool).await.expect("corrupt checksum");
+    let check = MigrationVersionCheck::new(StoragePool::Sqlite(pool));
+    let outcome = check.run().await;
+    assert!(matches!(outcome, CheckOutcome::Fail(_)));
+    assert!(outcome.message().contains("checksum mismatch"));
 }

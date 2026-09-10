@@ -56,7 +56,14 @@ impl CommandSummary for PublishCommandSummary {
 }
 
 pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary, CliError> {
-    let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
+    let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
+    config::validate::run_command_checks(
+        &loaded,
+        config::validate::CommandKind::Publish,
+        &config::validate::CommandFlags {
+            local_only: args.local_only,
+        },
+    )?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let category = super::ai_run::select_category(cli, &categories)?;
     let date = args.date.clone().unwrap_or_else(today_utc);

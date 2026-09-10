@@ -395,7 +395,10 @@ fn run_strategy_chain(
     let mut errors = Vec::new();
     for strategy in &ctx.strategies {
         match strategy.extract(task, &raw.body_bytes, &raw.final_url) {
-            Ok(article) => return ChainResult::Extracted(article),
+            Ok(article) if article.body_text.chars().count() >= ctx.min_body_chars as usize => {
+                return ChainResult::Extracted(article);
+            }
+            Ok(_) => continue,
             Err(error) if error.is_retryable() => return ChainResult::Retryable(error),
             Err(error) => errors.push(error),
         }

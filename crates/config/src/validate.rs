@@ -1,6 +1,8 @@
 mod checks;
 
-use checks::{collect_env_checks, collect_general_checks, collect_publish_checks};
+use checks::{
+    collect_env_checks, collect_general_checks, collect_publish_checks, collect_source_env_checks,
+};
 
 use crate::{AppConfig, CategoryConfig, ConfigError, DiagnosticReport, EnvConfig, LoadedConfig};
 
@@ -8,6 +10,7 @@ pub const SUPPORTED_SCHEMA_VERSION: &str = "1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandKind {
+    Ingest,
     Publish,
     AiRun,
     Doctor,
@@ -63,6 +66,16 @@ pub fn run_command_checks(
     flags: &CommandFlags,
 ) -> Result<(), ConfigError> {
     match command {
+        CommandKind::Ingest => {
+            let mut report = DiagnosticReport::new(Vec::new());
+            collect_source_env_checks(
+                &mut report,
+                &config.categories,
+                &config.env,
+                config.cli_overrides.category_filter.as_deref(),
+            );
+            fail_if_needed(report)
+        }
         CommandKind::Publish => {
             let mut report = DiagnosticReport::new(Vec::new());
             collect_publish_checks(&mut report, config, flags);
@@ -241,6 +254,22 @@ mod tests {
             source_secrets: crate::SourceSecrets::default(),
             config_sha256: String::new(),
             cli_overrides: crate::CliOverrides::default(),
+        }
+    }
+
+    #[test]
+    fn extraction_strategies_reject_unknown_duplicate_and_empty() {
+        for names in [vec![], vec!["unknown"], vec!["readability", "readability"]] {
+            let mut app = app(false);
+            app.extractor.strategy_order = names.into_iter().map(str::to_string).collect();
+            assert!(
+                run_structural_checks(
+                    &app,
+                    &[category("ai", "https://example.test/feed")],
+                    &EnvConfig::default()
+                )
+                .is_err()
+            );
         }
     }
 

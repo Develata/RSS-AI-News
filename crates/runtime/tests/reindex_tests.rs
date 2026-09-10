@@ -529,6 +529,15 @@ async fn dry_run_link_hash_matches_real_run_numbers_and_writes_nothing() {
     assert_eq!(dry.new_rule_version_id, 0, "dry-run 不写 rule_versions");
     assert_eq!(dry.reindex_job_id, 0, "dry-run 不写 reindex_jobs");
 
+    let event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM run_events")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        event_count, 0,
+        "dry-run must not persist observability events"
+    );
+
     let reindex_jobs_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM reindex_jobs WHERE target = 'link_hash'")
             .fetch_one(&pool)
@@ -568,6 +577,27 @@ async fn dry_run_content_hash_distinguishes_unchanged_updated_conflict() {
     assert_eq!(dry.unchanged, 1);
     assert_eq!(dry.conflict_skipped, 1);
     assert_eq!(dry.updated, 0);
+}
+
+#[tokio::test]
+async fn dry_run_content_hash_simulates_prior_moves_and_new_collisions() {
+    let moved_hash = sha256_hex(b"body B");
+    for (first_hash, first_body, second_body, updated, conflicts) in [
+        (moved_hash.as_str(), "body A", "body B", 2, 0),
+        ("first-old", "same body", "same body", 1, 1),
+    ] {
+        let (_dir, pool) = common::make_test_pool().await;
+        common::seed_persisted_article(&pool, first_hash, "First", first_body).await;
+        common::seed_persisted_article(&pool, "second-old", "Second", second_body).await;
+        let opts = reindex_opts(ReindexTarget::ContentHash, 1);
+        let dry = reindex(&pool).dry_run(opts.clone()).await.unwrap();
+        assert_eq!((dry.updated, dry.conflict_skipped), (updated, conflicts));
+        let actual = reindex(&pool).run(opts).await.unwrap();
+        assert_eq!(dry.scanned, actual.scanned);
+        assert_eq!(dry.updated, actual.updated);
+        assert_eq!(dry.unchanged, actual.unchanged);
+        assert_eq!(dry.conflict_skipped, actual.conflict_skipped);
+    }
 }
 
 #[tokio::test]

@@ -341,3 +341,166 @@ impl PublishTarget for MockAuthFailTarget {
         Err(PublishError::GitHubAuthFailed("bad token".to_string()))
     }
 }
+
+struct NeverCompletesTarget;
+
+struct StalledPublishStart {
+    starts_before_stall: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl rss_ai_news_storage::RunEventRepository for StalledPublishStart {
+    async fn insert(
+        &self,
+        event: &rss_ai_news_storage::NewRunEvent,
+    ) -> Result<i64, rss_ai_news_storage::StorageError> {
+        if event.event_kind == "publish_started"
+            && self
+                .starts_before_stall
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_err()
+        {
+            std::future::pending().await
+        } else {
+            Ok(1)
+        }
+    }
+}
+
+#[tokio::test]
+async fn publish_remote_deadline_also_bounds_preparation() {
+    for batch in [false, true] {
+        let (_dir, pool) = make_test_pool().await;
+        let first = seed_stored_local_publish_record(&pool).await;
+        let second = if batch {
+            Some(seed_stored_local_publish_record(&pool).await)
+        } else {
+            None
+        };
+        let mut app = app_config(RetentionPolicy::Always, 1);
+        app.lease.publish_duration_seconds = 1;
+        let mut deps = publish_deps(
+            pool.clone(),
+            Arc::new(app),
+            Arc::new(LocalFsTarget::new(std::env::temp_dir())),
+            Some(Arc::new(MockSuccessTarget)),
+        );
+        deps.event_repo = Arc::new(StalledPublishStart {
+            // In a batch, stall after one snapshot has already been prepared.
+            starts_before_stall: std::sync::atomic::AtomicUsize::new(usize::from(batch)),
+        });
+        let flow = PublishFlow::new(Arc::new(deps));
+        let outcomes = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            if let Some(second) = second {
+                flow.publish_remote_batch(PublishRemoteBatchOptions {
+                    items: vec![
+                        batch_item(first, "AI", "Daily AI"),
+                        batch_item(second, "ML", "Daily ML"),
+                    ],
+                })
+                .await
+                .items
+            } else {
+                vec![flow.publish_remote(remote_opts()).await]
+            }
+        })
+        .await
+        .expect("preparation must obey the same deadline as the remote request");
+        assert_eq!(outcomes.len(), if batch { 2 } else { 1 });
+        for item in outcomes {
+            assert!(
+                matches!(item.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "remote_timeout")
+            );
+            assert_record_state(&pool, item.publish_record_id, "stored_local").await;
+            assert_referenced_articles_state(&pool, item.publish_record_id, "ready_for_publish")
+                .await;
+            let owner: Option<String> =
+                sqlx::query_scalar("SELECT lease_owner FROM publish_records WHERE id = ?")
+                    .bind(item.publish_record_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(owner.is_none());
+        }
+    }
+}
+
+#[async_trait]
+impl PublishTarget for NeverCompletesTarget {
+    async fn publish(&self, _report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        std::future::pending().await
+    }
+}
+
+fn deadline_flow(pool: SqlitePool) -> PublishFlow {
+    let mut app = app_config(RetentionPolicy::Always, 1);
+    app.lease.publish_duration_seconds = 1;
+    PublishFlow::new(Arc::new(publish_deps(
+        pool,
+        Arc::new(app),
+        Arc::new(LocalFsTarget::new(std::env::temp_dir())),
+        Some(Arc::new(NeverCompletesTarget)),
+    )))
+}
+
+#[tokio::test]
+async fn publish_remote_deadline_releases_retryable_claim() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        deadline_flow(pool.clone()).publish_remote(remote_opts()),
+    )
+    .await
+    .expect("remote target must stop before its one-second lease expires");
+    assert!(
+        matches!(outcome.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "remote_timeout")
+    );
+    assert_record_state(&pool, id, "stored_local").await;
+    assert_last_error_kind(&pool, id, "remote_timeout").await;
+    assert_referenced_articles_state(&pool, id, "ready_for_publish").await;
+    let owner: Option<String> =
+        sqlx::query_scalar("SELECT lease_owner FROM publish_records WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(owner.is_none());
+}
+
+#[tokio::test]
+async fn publish_remote_batch_deadline_releases_all_retryable_claims() {
+    let (_dir, pool) = make_test_pool().await;
+    let first = seed_stored_local_publish_record(&pool).await;
+    let second = seed_stored_local_publish_record(&pool).await;
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        deadline_flow(pool.clone()).publish_remote_batch(PublishRemoteBatchOptions {
+            items: vec![
+                batch_item(first, "AI", "Daily AI"),
+                batch_item(second, "ML", "Daily ML"),
+            ],
+        }),
+    )
+    .await
+    .expect("batch shares one deadline before its lease expires");
+    assert_eq!(outcome.items.len(), 2);
+    for item in outcome.items {
+        assert!(
+            matches!(item.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "remote_timeout")
+        );
+        assert_record_state(&pool, item.publish_record_id, "stored_local").await;
+        assert_referenced_articles_state(&pool, item.publish_record_id, "ready_for_publish").await;
+        let owner: Option<String> =
+            sqlx::query_scalar("SELECT lease_owner FROM publish_records WHERE id = ?")
+                .bind(item.publish_record_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(owner.is_none());
+    }
+}

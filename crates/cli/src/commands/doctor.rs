@@ -1,5 +1,5 @@
 use rss_ai_news_domain::SecretString;
-use rss_ai_news_observability::health::{CheckReport, HealthCheck};
+use rss_ai_news_observability::health::{CheckOutcome, CheckReport, HealthCheck};
 use rss_ai_news_runtime::doctor::deep_scan;
 use rss_ai_news_runtime::doctor::health::{
     backlog_check::FailedBacklogCheck, config_check::ConfigCheck,
@@ -75,13 +75,19 @@ pub async fn run(cli: &Cli, args: &DoctorArgs, writer: &mut OutputWriter) -> Res
     ];
 
     let mut report = CheckReport::default();
+    let mut database_ready = true;
     for check in checks {
         let name = check.name().to_string();
         let outcome = check.run().await;
+        if matches!(name.as_str(), "Database connection" | "Migration version")
+            && matches!(outcome, CheckOutcome::Fail(_))
+        {
+            database_ready = false;
+        }
         report.items.push((name, outcome));
     }
 
-    let deep = if args.deep {
+    let deep = if args.deep && database_ready {
         Some(deep_scan::run(&deps.pool, &app.retry).await?)
     } else {
         None

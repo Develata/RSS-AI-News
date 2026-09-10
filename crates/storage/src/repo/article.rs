@@ -38,6 +38,13 @@ pub struct BackfillArticleCandidate {
     pub state: String,
 }
 
+/// Current hash ownership without loading article bodies.
+#[derive(Debug, Clone, FromRow)]
+pub struct ArticleContentHash {
+    pub id: i64,
+    pub content_hash: String,
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct ContentHashReindexCandidate {
     pub id: i64,
@@ -80,21 +87,26 @@ pub trait ArticleRepository: Send + Sync {
         after_id: i64,
         batch_size: u32,
     ) -> Result<Vec<ContentHashReindexCandidate>, StorageError>;
+    async fn list_content_hashes(
+        &self,
+        after_id: i64,
+        batch_size: u32,
+    ) -> Result<Vec<ArticleContentHash>, StorageError>;
     async fn update_content_hash(
         &self,
         id: i64,
         new_content_hash: &str,
     ) -> Result<UpdateContentHashOutcome, StorageError>;
-    /// dry-run 等价：复用 [`Self::update_content_hash`] 的判断逻辑但**不**
-    /// 落地任何写。返回值语义与 update_content_hash 完全一致：
+    /// Single-row preview of [`Self::update_content_hash`] without writing.
+    /// 返回值语义与 update_content_hash 完全一致：
     ///   - `Updated`：`current != new`，且 `new_content_hash` 在 articles
     ///     表中没有冲突行（实际 run 会 UPDATE 这一行）
     ///   - `Unchanged`：`current == new`
     ///   - `Conflict`：`current` 行已被删除，或 `new_content_hash` 已被其他
     ///     行占用（partial unique 会拒）
     ///
-    /// 仅供 `reindex --dry-run` 使用，让 dry-run 数字可信（cli-semantics
-    /// §4.8 line 325 的 "Would update N rows" 含 conflict 区分）。
+    /// Single-row probe used by update_content_hash; this does not simulate
+    /// preceding writes in a multi-row dry-run.
     async fn peek_content_hash_outcome(
         &self,
         id: i64,
@@ -170,6 +182,14 @@ LIMIT $4
 
 const LIST_ARTICLES_FOR_CONTENT_HASH_REINDEX_SQL: &str = r#"
 SELECT id, body_text, content_hash
+FROM articles
+WHERE id > $1
+ORDER BY id ASC
+LIMIT $2
+"#;
+
+const LIST_ARTICLE_CONTENT_HASHES_SQL: &str = r#"
+SELECT id, content_hash
 FROM articles
 WHERE id > $1
 ORDER BY id ASC
@@ -253,6 +273,27 @@ impl ArticleRepository for ArticleRepo {
             StoragePool::Postgres(p) => {
                 pg_list_for_content_hash_reindex(p, after_id, batch_size).await
             }
+        }
+    }
+
+    async fn list_content_hashes(
+        &self,
+        after_id: i64,
+        batch_size: u32,
+    ) -> Result<Vec<ArticleContentHash>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(pool) => sqlx::query_as(LIST_ARTICLE_CONTENT_HASHES_SQL)
+                .bind(after_id)
+                .bind(i64::from(batch_size))
+                .fetch_all(pool)
+                .await
+                .map_err(StorageError::from),
+            StoragePool::Postgres(pool) => sqlx::query_as(LIST_ARTICLE_CONTENT_HASHES_SQL)
+                .bind(after_id)
+                .bind(i64::from(batch_size))
+                .fetch_all(pool)
+                .await
+                .map_err(StorageError::from),
         }
     }
 

@@ -18,14 +18,7 @@ pub async fn rebuild_markdown(
         .ok_or_else(|| {
             ReportError::RenderFailed(format!("publish_record {publish_record_id} not found"))
         })?;
-    let items = item_repo
-        .list_by_publish_record(publish_record_id)
-        .await
-        .map_err(|error| ReportError::RenderFailed(error.to_string()))?;
-    let frozen = items
-        .into_iter()
-        .map(item_to_frozen)
-        .collect::<Result<Vec<_>, _>>()?;
+    let frozen = load_frozen_items(item_repo, publish_record_id).await?;
 
     render_markdown(
         record.id,
@@ -34,6 +27,23 @@ pub async fn rebuild_markdown(
         &frozen,
         render_config,
     )
+}
+
+/// Load and validate a frozen snapshot once. Remote publishing reuses this
+/// snapshot for both rendering and article promotion; neither operation reads
+/// current article/AI content back into the frozen report.
+pub async fn load_frozen_items(
+    item_repo: &dyn PublishItemRepository,
+    publish_record_id: i64,
+) -> Result<Vec<FrozenPublishItem>, ReportError> {
+    let items = item_repo
+        .list_by_publish_record(publish_record_id)
+        .await
+        .map_err(|error| ReportError::RenderFailed(error.to_string()))?;
+    items
+        .into_iter()
+        .map(item_to_frozen)
+        .collect::<Result<Vec<_>, _>>()
 }
 
 fn item_to_frozen(item: PublishItem) -> Result<FrozenPublishItem, ReportError> {

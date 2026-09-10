@@ -229,4 +229,15 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
         .expect("pg list page2");
     assert_eq!(page2.len(), 1);
     assert_eq!(page2[0].article_id, ids[2]);
+
+    let hashes = repo.list_content_hashes(ids[0], 1).await.unwrap();
+    assert_eq!(hashes.len(), 1);
+    assert_eq!(hashes[0].id, ids[1]);
+    assert_eq!(hashes[0].content_hash, "hash-list-1");
+    assert!(
+        repo.list_content_hashes(ids[2], 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -24,7 +24,7 @@ pub enum StoragePool {
 }
 
 impl StoragePool {
-    /// 按 URL scheme 路由：`postgres[ql]://` → Postgres，其余视为 SQLite 文件路径或 `sqlite://`。
+    /// 按 URL scheme 路由：支持 `postgres[ql]://`、`sqlite://`、`sqlite:` 和裸 SQLite 路径。
     ///
     /// `busy_timeout_ms` 仅对 SQLite 生效；PG 走 sqlx 默认的 connection 行为。
     pub async fn build(
@@ -32,12 +32,13 @@ impl StoragePool {
         max_connections: u32,
         busy_timeout_ms: u32,
     ) -> Result<Self, StorageError> {
+        Self::validate_url_scheme(url)?;
         if Self::is_postgres_url(url) {
             let pool = build_pg_pool(url, max_connections).await?;
             return Ok(Self::Postgres(pool));
         }
         let sqlite_path_str = strip_sqlite_scheme(url);
-        let sqlite_path = Path::new(sqlite_path_str.as_ref());
+        let sqlite_path = Path::new(sqlite_path_str);
         let pool = build_sqlite_pool(sqlite_path, max_connections, busy_timeout_ms).await?;
         Ok(Self::Sqlite(pool))
     }
@@ -46,12 +47,13 @@ impl StoragePool {
     /// connection 上设置 `default_transaction_read_only = on`。query CLI 固定单
     /// connection，避免一次性命令为只读 projection 建立不必要的连接池。
     pub async fn build_read_only(url: &str, busy_timeout_ms: u32) -> Result<Self, StorageError> {
+        Self::validate_url_scheme(url)?;
         if Self::is_postgres_url(url) {
             let pool = build_pg_read_only_pool(url).await?;
             return Ok(Self::Postgres(pool));
         }
         let sqlite_path_str = strip_sqlite_scheme(url);
-        let sqlite_path = Path::new(sqlite_path_str.as_ref());
+        let sqlite_path = Path::new(sqlite_path_str);
         let pool = build_sqlite_read_only_pool(sqlite_path, busy_timeout_ms).await?;
         Ok(Self::Sqlite(pool))
     }
@@ -59,14 +61,26 @@ impl StoragePool {
     /// 不区分大小写 + 容忍前导空白：`POSTGRES://`、`  postgresql://` 都识别为 PG，
     /// 避免大小写绕过让 PG URL 落进 sqlite 路径（会被当成文件名打开，行为离谱）。
     pub fn is_postgres_url(url: &str) -> bool {
-        let trimmed = url.trim_start();
-        // scheme 一定是 ASCII，用 ascii lowercase 足够且不分配整串副本时也只在前 11 字节比较。
-        let head: String = trimmed
-            .chars()
-            .take("postgresql://".len())
-            .flat_map(char::to_lowercase)
-            .collect();
-        head.starts_with("postgres://") || head.starts_with("postgresql://")
+        url.trim_start()
+            .split_once("://")
+            .is_some_and(|(scheme, _)| {
+                scheme.eq_ignore_ascii_case("postgres") || scheme.eq_ignore_ascii_case("postgresql")
+            })
+    }
+
+    /// Validate only the supported scheme boundary; never include the URL in errors.
+    /// Paths without `://` retain SQLite filename semantics.
+    pub fn validate_url_scheme(url: &str) -> Result<(), StorageError> {
+        if let Some((scheme, _)) = url.trim_start().split_once("://")
+            && !scheme.eq_ignore_ascii_case("sqlite")
+            && !scheme.eq_ignore_ascii_case("postgres")
+            && !scheme.eq_ignore_ascii_case("postgresql")
+        {
+            return Err(StorageError::UnsupportedBackend(
+                "expected sqlite, postgres, or postgresql URL scheme".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -87,12 +101,17 @@ impl fmt::Debug for StoragePool {
     }
 }
 
-fn strip_sqlite_scheme(url: &str) -> std::borrow::Cow<'_, str> {
-    if let Some(rest) = url.strip_prefix("sqlite://") {
-        std::borrow::Cow::Borrowed(rest)
-    } else {
-        std::borrow::Cow::Borrowed(url)
+fn strip_sqlite_scheme(url: &str) -> &str {
+    let trimmed = url.trim_start();
+    for prefix in ["sqlite://", "sqlite:"] {
+        if trimmed
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
+            return &trimmed[prefix.len()..];
+        }
     }
+    url
 }
 
 pub async fn build_sqlite_pool(
@@ -208,6 +227,74 @@ mod tests {
         assert!(!StoragePool::is_postgres_url(""));
         assert!(!StoragePool::is_postgres_url("postgr://x")); // 前缀不全
         assert!(!StoragePool::is_postgres_url("mysql://x"));
+    }
+
+    #[test]
+    fn sqlite_scheme_preserves_paths_and_supported_short_syntax() {
+        for (input, expected) in [
+            ("sqlite://data/news.db", "data/news.db"),
+            ("sqlite:///tmp/news.db", "/tmp/news.db"),
+            ("sqlite:data/news.db", "data/news.db"),
+            ("sqlite::memory:", ":memory:"),
+            (" SQLITE://data/news.db", "data/news.db"),
+            ("data/news.db", "data/news.db"),
+            ("  data/news.db", "  data/news.db"),
+            ("新闻.db", "新闻.db"),
+        ] {
+            assert_eq!(strip_sqlite_scheme(input), expected);
+            StoragePool::validate_url_scheme(input).unwrap();
+        }
+        for url in [
+            "postgres://u@h/db",
+            "postgresql://u@h/db",
+            " POSTGRES://u@h/db",
+        ] {
+            StoragePool::validate_url_scheme(url).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_memory_url_forms_open_without_creating_a_file() {
+        for url in [
+            ":memory:",
+            "sqlite::memory:",
+            "sqlite://:memory:",
+            "SQLITE://:memory:",
+        ] {
+            let StoragePool::Sqlite(pool) = StoragePool::build(url, 1, 100).await.unwrap() else {
+                panic!("SQLite URL must produce SQLite pool");
+            };
+            let file: String =
+                sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name = 'main'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(
+                file.is_empty(),
+                "memory URL must not create a database file"
+            );
+            pool.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_database_schemes_fail_before_opening_storage() {
+        for scheme in ["mysql", "http", "foo", "POSTGRE", "sqlité"] {
+            let url = format!("{scheme}://private_user:private_password@host/db?token=secret");
+            for error in [
+                StoragePool::build(&url, 1, 100).await.unwrap_err(),
+                StoragePool::build_read_only(&url, 100).await.unwrap_err(),
+            ] {
+                assert!(
+                    matches!(error, StorageError::UnsupportedBackend(_)),
+                    "{error:?}"
+                );
+                let diagnostic = format!("{error:?}");
+                for secret in ["private_user", "private_password", "token=secret"] {
+                    assert!(!diagnostic.contains(secret));
+                }
+            }
+        }
     }
 
     /// W11-P3-A：build 在 PG URL 上不再 stub，而是真实尝试连接。本测试用

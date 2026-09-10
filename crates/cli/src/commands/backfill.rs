@@ -71,7 +71,7 @@ impl CommandSummary for BackfillCommandSummary {
 }
 
 pub async fn run(cli: &Cli, args: &BackfillArgs) -> Result<BackfillCommandSummary, CliError> {
-    let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
+    let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let date_from = parse_date_start(args.date_from.as_deref())?;
     let date_to = parse_date_start(args.date_to.as_deref())?;

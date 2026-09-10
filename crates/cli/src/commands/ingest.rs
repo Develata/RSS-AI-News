@@ -72,7 +72,12 @@ pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, C
         return Err(CliError::IngestSourceFilterNotImplemented);
     }
 
-    let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
+    let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
+    config::validate::run_command_checks(
+        &loaded,
+        config::validate::CommandKind::Ingest,
+        &config::validate::CommandFlags::default(),
+    )?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let started = Instant::now();
     let pool = open_write_storage(&loaded).await?;

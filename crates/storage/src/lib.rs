@@ -19,10 +19,10 @@ pub use migrate::{
 pub use pool::{StoragePool, build_pg_pool, build_sqlite_pool, build_sqlite_read_only_pool};
 pub use repo::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
-    ArticleAiTaskCandidate, ArticleInsertOutcome, ArticleRepo, ArticleRepository,
-    BackfillArticleCandidate, ClaimedAiResult, ClaimedFeedEntry, ClaimedPublishRecord,
-    ClaimedReindexJob, ConfigRotation, ContentHashReindexCandidate, FeedEntry,
-    FeedEntryInsertOutcome, FeedEntryRepo, FeedEntryRepository, FeedSourceRepo,
+    ArticleAiTaskCandidate, ArticleContentHash, ArticleInsertOutcome, ArticleRepo,
+    ArticleRepository, BackfillArticleCandidate, ClaimedAiResult, ClaimedFeedEntry,
+    ClaimedPublishRecord, ClaimedReindexJob, ConfigRotation, ContentHashReindexCandidate,
+    FeedEntry, FeedEntryInsertOutcome, FeedEntryRepo, FeedEntryRepository, FeedSourceRepo,
     FeedSourceRepository, FinishReindexTxOutcome, FreezeSnapshotItem, FreezeSnapshotOutcome,
     FreezeSnapshotStatus, InsertPendingOutcome, LeaseGuardedWriteOutcome, LinkHashReindexCandidate,
     NewAiResult, NewArticle, NewFeedEntry, NewPublishRecord, NewRawArtifact, NewRunEvent,

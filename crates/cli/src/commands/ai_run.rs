@@ -76,7 +76,10 @@ impl CommandSummary for AiRunCommandSummary {
 }
 
 pub async fn run(cli: &Cli, args: &AiRunArgs) -> Result<AiRunCommandSummary, CliError> {
-    let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
+    let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
+    if !loaded.app.ai.enabled {
+        return Err(config::ConfigError::AiRunWhileDisabled.into());
+    }
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let category = select_category(cli, &categories)?;
     // W14-B：按选定板块解析有效凭证（override 非空 > 全局 env），缺失即

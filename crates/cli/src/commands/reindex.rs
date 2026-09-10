@@ -24,7 +24,7 @@ use serde::Serialize;
 use crate::{
     args::{Cli, ReindexArgs},
     commands::backfill::sha256_hex,
-    context_factory::{build_reindex_deps, open_write_storage},
+    context_factory::{build_reindex_deps, open_read_storage, open_write_storage},
     error::CliError,
     output::CommandSummary,
 };
@@ -138,6 +138,23 @@ impl CommandSummary for ReindexCommandSummary {
 }
 
 pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary, CliError> {
+    // Every reindex target upgrades a global rule. A filtered configuration is
+    // not an authoritative list of sources to archive, and the hash scans are
+    // global as well. Reject the misleading combination before opening storage.
+    if cli.category.is_some() {
+        return Err(CliError::ReindexCategoryFilterUnsupported);
+    }
+    let dry_run = cli.dry_run || args.dry_run;
+    if dry_run && args.abort.is_some() {
+        return Err(config::ConfigError::ValidationFailed {
+            report: config::DiagnosticReport::new(vec![config::Diagnostic::new(
+                "cli",
+                "reindex.abort",
+                "reindex --abort cannot be combined with --dry-run",
+            )]),
+        }
+        .into());
+    }
     // §4.8 line 290 abort 分支优先于 target 分支。clap 已通过 conflicts_with
     // 保证两者互斥；这里只需识别 `Some(job_id)` 即可。
     if let Some(raw) = &args.abort {
@@ -147,7 +164,7 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
             .filter(|id| *id > 0)
             .ok_or_else(|| CliError::ReindexAbortInvalidJobId { raw: raw.clone() })?;
 
-        let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
+        let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
         let pool = open_write_storage(&loaded).await?;
         let ctx = build_reindex_deps(&loaded, &pool)?;
         let outcome = ReindexFlow::new(ctx)
@@ -166,14 +183,20 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
     let target = args.target.ok_or(CliError::ReindexTargetRequired)?;
     let domain_targets = target.expand();
 
-    let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
-    let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
-    let pool = open_write_storage(&loaded).await?;
+    let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
+    let mut categories = if domain_targets.contains(&DomainReindexTarget::Categories) {
+        loaded.categories_filtered().cloned().collect()
+    } else {
+        Vec::new()
+    };
+    let pool = if dry_run {
+        open_read_storage(&loaded).await?
+    } else {
+        open_write_storage(&loaded).await?
+    };
     let ctx = build_reindex_deps(&loaded, &pool)?;
 
-    // F15-10：dry-run 与真实 run 共用 build_run_context（dry-run 仅读不写，
-    // 复用同一 RunContext 没有副作用）。
-    let mode = if args.dry_run {
+    let mode = if dry_run {
         ReindexMode::DryRun
     } else {
         ReindexMode::Run
@@ -186,8 +209,12 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
             flow,
             target,
             args.batch_size,
-            categories.clone(),
-            args.dry_run,
+            if target == DomainReindexTarget::Categories {
+                std::mem::take(&mut categories)
+            } else {
+                Vec::new()
+            },
+            dry_run,
         )
         .await?;
         outcomes.push(outcome);
@@ -275,7 +302,7 @@ mod tests {
     #[tokio::test]
     async fn abort_non_integer_job_id_short_circuits_with_user_error() {
         // F15-10 W9-F4: --abort 解析非法 job_id → UserError，short-circuit
-        // 在 build_run_context 之前。证据：config_dir 给一个不存在路径，仍能
+        // 在打开 storage 之前。证据：config_dir 给一个不存在路径，仍能
         // 跑通到 ReindexAbortInvalidJobId（若解析在 config 加载之后会先报
         // ConfigError）。
         let args = ReindexArgs {

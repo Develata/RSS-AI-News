@@ -70,6 +70,10 @@ pub enum CliError {
     /// clap 通过 `required_unless_present` 保证；这是兜底，正常分支不会触发。
     #[error("reindex requires --target unless --abort is given")]
     ReindexTargetRequired,
+    #[error(
+        "reindex upgrades global rules and cannot be restricted by --category; remove --category"
+    )]
+    ReindexCategoryFilterUnsupported,
     #[error("replay artifact not found: {kind}/{key}")]
     ReplayArtifactNotFound { kind: String, key: String },
     #[error("publish record not found: {idempotency_key}")]
@@ -91,6 +95,7 @@ impl CliError {
             Self::IngestSourceFilterNotImplemented => "ingest_source_not_implemented",
             Self::ReindexAbortInvalidJobId { .. } => "reindex_abort_invalid_job_id",
             Self::ReindexTargetRequired => "reindex_target_required",
+            Self::ReindexCategoryFilterUnsupported => "reindex_category_filter_unsupported",
             Self::MigrateBlockedByRunningReindex { .. } => "migrate_blocked_by_running_reindex",
             Self::MigrateCheckPending { .. } => "migrate_check_pending",
             Self::RecentEntriesCategoryRequired => "recent_entries_category_required",
@@ -110,6 +115,7 @@ impl CliError {
             // `ReindexTargetRequired` 与 `ReindexAbortInvalidJobId` 都是 clap
             // 没接住的输入校验失败，归类参数错误。
             Self::ReindexTargetRequired
+            | Self::ReindexCategoryFilterUnsupported
             | Self::ReindexAbortInvalidJobId { .. }
             | Self::RecentEntriesCategoryRequired => ExitCode::UserError,
             Self::Runtime(_)
@@ -146,6 +152,7 @@ impl CliError {
             Self::ReindexTargetRequired => {
                 "reindex requires --target unless --abort is given".to_string()
             }
+            Self::ReindexCategoryFilterUnsupported => self.to_string(),
             Self::MigrateBlockedByRunningReindex { job_ids, count } => format!(
                 "migrate run blocked: {count} reindex job(s) still active — \
                  abort them with `reindex --abort <id>` first; ids: {job_ids:?}"
@@ -185,7 +192,9 @@ impl CliError {
             Self::CommandContext { command, .. } => command,
             Self::DoctorFailed => "doctor",
             Self::DryRunNotImplemented | Self::IngestSourceFilterNotImplemented => "ingest",
-            Self::ReindexAbortInvalidJobId { .. } | Self::ReindexTargetRequired => "reindex",
+            Self::ReindexAbortInvalidJobId { .. }
+            | Self::ReindexTargetRequired
+            | Self::ReindexCategoryFilterUnsupported => "reindex",
             Self::MigrateBlockedByRunningReindex { .. } | Self::MigrateCheckPending { .. } => {
                 "migrate"
             }

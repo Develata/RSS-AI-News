@@ -44,7 +44,7 @@ pub async fn run(
     cli: &Cli,
     args: &RebuildReportArgs,
 ) -> Result<RebuildReportCommandSummary, CliError> {
-    let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
+    let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let pool = open_read_storage(&loaded).await?;
     let ctx = build_rebuild_report_deps(&loaded, &pool)?;
@@ -66,11 +66,13 @@ pub async fn run(
         let _ = parse_date_start(Some(date))?;
         let category = super::ai_run::select_category(cli, &categories)?;
         // F15-3: rebuild-report 仅用 render_version 重建 idempotency key，
-        // 走 active_rule_or_register 读路径；force 模式由 publish 命令
+        // 只读 active_rule；缺失时明确失败，不自动 seed。force 模式由 publish 命令
         // 单独负责，不在 rebuild-report 复制语义。
         let render_version = rule_version_repo
-            .active_rule_or_register("render", "default", "default render", "v1")
-            .await?;
+            .active_rule("render")
+            .await?
+            .ok_or_else(|| CliError::Runtime(RuntimeError::Config("no active render rule".into())))?
+            .id;
         let key = PublishFlow::build_idempotency_key(&category.category.key, date, render_version);
         ctx.publish_record_repo
             .find_by_idempotency_key(&key)

@@ -22,8 +22,9 @@ pub mod rule_version;
 pub mod run_event;
 
 pub use article::{
-    ArticleAiTaskCandidate, ArticleInsertOutcome, ArticleRepo, ArticleRepository,
-    BackfillArticleCandidate, ContentHashReindexCandidate, NewArticle, UpdateContentHashOutcome,
+    ArticleAiTaskCandidate, ArticleContentHash, ArticleInsertOutcome, ArticleRepo,
+    ArticleRepository, BackfillArticleCandidate, ContentHashReindexCandidate, NewArticle,
+    UpdateContentHashOutcome,
 };
 pub use article_ai_result::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,

@@ -1,20 +1,9 @@
-//! W11-P3-A-fix1.H1：按 storage-multi-dialect §5.4 解析 storage URL。
+//! Resolve the configured database location before opening storage.
 //!
-//! `AppConfig.database.driver` 与 `env.database_url` 同时存在，启动期必须
-//! 二选一定一个真实 URL，并校验 driver 与 URL scheme 一致：
-//!
-//! | driver   | DATABASE_URL  | 结果                                             |
-//! |----------|---------------|--------------------------------------------------|
-//! | sqlite   | (sqlite URL)  | 用 env URL                                       |
-//! | sqlite   | (postgres URL)| `UnsupportedBackend("driver/URL scheme mismatch")` |
-//! | sqlite   | None          | fallback `sqlite://<sqlite_path>`                |
-//! | postgres | (postgres URL)| 用 env URL                                       |
-//! | postgres | (sqlite URL)  | `UnsupportedBackend("driver/URL scheme mismatch")` |
-//! | postgres | None          | `UnsupportedBackend("driver=postgres requires DATABASE_URL")` |
-//!
-//! 失败统一走 `CliError::Storage(UnsupportedBackend)`，复用现有 exit
-//! 行为（CliError::Storage → RuntimeError exit）。Diagnostic 通路可在
-//! P3-A-fix2 / config-versioning 阶段再升级；本期只需启动期 fail-fast。
+//! `DATABASE_URL` must use a supported scheme and agree with `database.driver`.
+//! SQLite also accepts a bare path; without a URL it uses `database.sqlite_path`.
+//! PostgreSQL requires an explicit URL. Invalid combinations produce a config
+//! diagnostic (exit 78) that never includes credentials or the original URL.
 
 use std::path::Path;
 
@@ -40,6 +29,15 @@ pub fn resolve_storage_url_parts(
     sqlite_path: &Path,
 ) -> Result<String, CliError> {
     let url_env = database_url.map(str::trim).filter(|s| !s.is_empty());
+
+    if let Some(url) = url_env {
+        StoragePool::validate_url_scheme(url).map_err(|_| {
+            driver_url_mismatch(
+                "env.database_url",
+                "DATABASE_URL must use sqlite, postgres, or postgresql scheme, or a bare SQLite path",
+            )
+        })?;
+    }
 
     match (driver, url_env) {
         (DatabaseDriver::Sqlite, Some(url)) => {
@@ -145,6 +143,25 @@ mod tests {
             err,
             CliError::Config(ConfigError::ValidationFailed { .. })
         ));
+    }
+
+    #[test]
+    fn unsupported_url_scheme_is_config_error_without_secrets() {
+        for scheme in ["mysql", "http", "foo"] {
+            let url = format!("{scheme}://private_user:private_password@host/db?token=secret");
+            for driver in [DatabaseDriver::Sqlite, DatabaseDriver::Postgres] {
+                let error = resolve_storage_url_parts(driver, Some(&url), &sqlite_path())
+                    .expect_err("unsupported URL scheme must fail during configuration");
+                assert!(matches!(
+                    error,
+                    CliError::Config(ConfigError::ValidationFailed { .. })
+                ));
+                let diagnostic = format!("{error:?}");
+                for secret in ["private_user", "private_password", "token=secret"] {
+                    assert!(!diagnostic.contains(secret));
+                }
+            }
+        }
     }
 
     #[test]

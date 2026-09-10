@@ -4,16 +4,20 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
+use rss_ai_news_domain::dto::publish::RenderedReport;
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_publish::PublishError;
-use rss_ai_news_report::{RenderConfig, ReportError};
+use rss_ai_news_report::{RenderConfig, ReportError, load_frozen_items, render_markdown};
 use rss_ai_news_storage::{
-    ClaimRequest, PublishAdvanceExtras, PublishState, PublishTimestampField,
-    TerminalAdvanceOutcome, TerminalAdvanceStatus, build_owner_id, lease_expires_at,
+    ClaimRequest, ClaimedPublishRecord, PublishAdvanceExtras, PublishItemRepository, PublishState,
+    PublishTimestampField, TerminalAdvanceOutcome, TerminalAdvanceStatus, build_owner_id,
+    lease_expires_at,
 };
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
+use tokio::time::Instant;
 
 use super::PublishFlow;
 use super::dto::{
@@ -25,9 +29,70 @@ use crate::events::RunEventEmitter;
 
 struct PreparedRemote {
     publish_record_id: i64,
-    report: rss_ai_news_domain::dto::publish::RenderedReport,
     promote_article_ids: Vec<i64>,
     item_count: u32,
+}
+
+// Start the shared preparation/remote budget before claiming so claim latency
+// consumes it too. Reserve 20% for releases; claim and cleanup database writes
+// retain their own failure/recovery semantics rather than being cancelled here.
+fn remote_deadline(lease_seconds: u64) -> Instant {
+    let lease = StdDuration::from_secs(lease_seconds);
+    Instant::now() + (lease - lease / 5)
+}
+
+enum RemotePreparationError {
+    Report(ReportError),
+    Timeout,
+}
+
+impl RemotePreparationError {
+    fn error_kind(&self) -> &str {
+        match self {
+            Self::Report(error) => error.error_kind(),
+            Self::Timeout => "remote_timeout",
+        }
+    }
+}
+
+async fn prepare_remote_report(
+    item_repo: &dyn PublishItemRepository,
+    claimed: &ClaimedPublishRecord,
+    config: &RenderConfig,
+    deadline: Instant,
+    emitter: &RunEventEmitter<'_>,
+    phase: &'static str,
+) -> Result<(RenderedReport, Vec<i64>), RemotePreparationError> {
+    // A stalled event insert or snapshot read consumes the same lease budget
+    // as the remote call. A timed-out preparation must remain retryable.
+    if Instant::now() >= deadline {
+        return Err(RemotePreparationError::Timeout);
+    }
+    tokio::time::timeout_at(deadline, async {
+        emitter
+            .emit(
+                "publish_started",
+                "info",
+                Some("publish_record"),
+                Some(claimed.id),
+                "remote publish started",
+                Some(json!({ "phase": phase })),
+            )
+            .await;
+        let frozen = load_frozen_items(item_repo, claimed.id).await?;
+        let report = render_markdown(
+            claimed.id,
+            &claimed.category_key,
+            &claimed.report_date,
+            &frozen,
+            config,
+        )?;
+        let article_ids = frozen.into_iter().map(|item| item.article_id).collect();
+        Ok((report, article_ids))
+    })
+    .await
+    .map_err(|_| RemotePreparationError::Timeout)?
+    .map_err(RemotePreparationError::Report)
 }
 
 impl PublishFlow {
@@ -56,6 +121,7 @@ impl PublishFlow {
         // W15-P4 复审）。
         self.run_publish_maintenance(&emitter).await;
 
+        let deadline = remote_deadline(self.ctx.lease.publish_duration_seconds);
         let now = OffsetDateTime::now_utc();
         let owner = build_owner_id();
         let claim = ClaimRequest {
@@ -101,34 +167,25 @@ impl PublishFlow {
             }
         };
 
-        emitter
-            .emit(
-                "publish_started",
-                "info",
-                Some("publish_record"),
-                Some(claimed.id),
-                "remote publish started",
-                Some(json!({ "phase": "publish_remote" })),
-            )
-            .await;
-
         let render_config = RenderConfig {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
             generated_at: opts.generated_at,
             templates: render_templates_from_ctx(&self.ctx, opts.path_template.as_deref()),
         };
-        let report = match rss_ai_news_report::rebuild_markdown(
-            self.ctx.publish_record_repo.as_ref(),
+        let (report, promote_article_ids) = match prepare_remote_report(
             self.ctx.publish_item_repo.as_ref(),
-            claimed.id,
+            &claimed,
             &render_config,
+            deadline,
+            &emitter,
+            "publish_remote",
         )
         .await
         {
             Ok(report) => report,
             Err(error) => {
-                self.release_report_error(claimed.id, &owner, &error, now, &emitter)
+                self.release_preparation_error(claimed.id, &owner, &error, &emitter)
                     .await;
                 return PublishRemoteOutcome {
                     publish_record_id: claimed.id,
@@ -142,115 +199,27 @@ impl PublishFlow {
             }
         };
 
-        let items = match self
-            .ctx
-            .publish_item_repo
-            .list_by_publish_record(claimed.id)
-            .await
-        {
-            Ok(items) => items,
-            Err(error) => {
-                if let Err(persist_err) = self
-                    .ctx
-                    .publish_record_repo
-                    .release_permanent_failure(
-                        claimed.id,
-                        &owner,
-                        &error.to_string(),
-                        error.error_kind(),
-                        now,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        publish_record_id = claimed.id,
-                        phase = "publish_remote.list_items",
-                        ?persist_err,
-                        "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
-                    );
-                }
-                emitter
-                    .emit(
-                        "publish_failed",
-                        "error",
-                        Some("publish_record"),
-                        Some(claimed.id),
-                        &error.to_string(),
-                        Some(json!({
-                            "phase": "publish_remote",
-                            "error_kind": error.error_kind()
-                        })),
-                    )
-                    .await;
-                return PublishRemoteOutcome {
-                    publish_record_id: claimed.id,
-                    status: PublishRemoteStatus::Failed {
-                        error_kind: error.error_kind().to_string(),
-                    },
-                    commit_sha: None,
-                    remote_target: None,
-                    item_count: 0,
-                };
-            }
-        };
-        let item_count = items.len() as u32;
+        let item_count = promote_article_ids.len() as u32;
 
-        let artifact = match target.publish(&report).await {
+        let result = if Instant::now() >= deadline {
+            Err(PublishError::RemoteTimeout)
+        } else {
+            tokio::time::timeout_at(deadline, target.publish(&report))
+                .await
+                .unwrap_or(Err(PublishError::RemoteTimeout))
+        };
+        let now = OffsetDateTime::now_utc();
+        let artifact = match result {
             Ok(artifact) => artifact,
             Err(error) => {
-                // W15 §3：retryable 路径在 release SQL 内按预算折叠（耗尽 → failed）。
-                let mut budget_exhausted = false;
-                let release_result = if error.is_retryable() {
-                    self.ctx
-                        .publish_record_repo
-                        .release_retryable_failure(
-                            claimed.id,
-                            &owner,
-                            &error.display_user(),
-                            error.error_kind(),
-                            self.ctx.retry.publish_max_attempts,
-                            now,
-                        )
-                        .await
-                        .map(|outcome| {
-                            budget_exhausted = outcome.exhausted;
-                            outcome.released
-                        })
-                } else {
-                    self.ctx
-                        .publish_record_repo
-                        .release_permanent_failure(
-                            claimed.id,
-                            &owner,
-                            &error.display_user(),
-                            error.error_kind(),
-                            now,
-                        )
-                        .await
-                };
-                if let Err(persist_err) = release_result {
-                    tracing::warn!(
-                        publish_record_id = claimed.id,
-                        phase = "publish_remote.target_publish",
-                        retryable = error.is_retryable(),
-                        ?persist_err,
-                        "release_*_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
-                    );
-                }
-                emitter
-                    .emit(
-                        "publish_failed",
-                        "error",
-                        Some("publish_record"),
-                        Some(claimed.id),
-                        &error.display_user(),
-                        Some(json!({
-                            "phase": "publish_remote",
-                            "error_kind": error.error_kind(),
-                            "budget_exhausted": budget_exhausted
-                        })),
-                    )
-                    .await;
+                self.release_publish_error_for_record(
+                    claimed.id,
+                    &owner,
+                    &error,
+                    "publish_remote",
+                    &emitter,
+                )
+                .await;
                 return PublishRemoteOutcome {
                     publish_record_id: claimed.id,
                     status: PublishRemoteStatus::Failed {
@@ -263,7 +232,6 @@ impl PublishFlow {
             }
         };
 
-        let promote_article_ids = items.into_iter().map(|item| item.article_id).collect();
         let extras = PublishAdvanceExtras {
             local_path: None,
             remote_target: artifact.remote_target.clone(),
@@ -382,6 +350,7 @@ impl PublishFlow {
         // 首次 claim 前执行一次 ① reclaim + ② sweep（顺序固定，best-effort）。
         self.run_publish_maintenance(&emitter).await;
 
+        let deadline = remote_deadline(self.ctx.lease.publish_duration_seconds);
         let now = OffsetDateTime::now_utc();
         let owner = build_owner_id();
         let ids = opts
@@ -432,6 +401,7 @@ impl PublishFlow {
             .collect::<HashMap<_, _>>();
 
         let mut prepared = Vec::new();
+        let mut reports = Vec::new();
         let mut outcomes = Vec::with_capacity(opts.items.len());
         for item in opts.items {
             let claimed = match claimed_by_id.get(&item.publish_record_id) {
@@ -448,34 +418,25 @@ impl PublishFlow {
                 }
             };
 
-            emitter
-                .emit(
-                    "publish_started",
-                    "info",
-                    Some("publish_record"),
-                    Some(claimed.id),
-                    "remote batch publish item started",
-                    Some(json!({ "phase": "publish_remote_batch" })),
-                )
-                .await;
-
             let render_config = RenderConfig {
                 category_display_name: item.category_display_name,
                 report_title: item.report_title,
                 generated_at: item.generated_at,
                 templates: render_templates_from_ctx(&self.ctx, item.path_template.as_deref()),
             };
-            let report = match rss_ai_news_report::rebuild_markdown(
-                self.ctx.publish_record_repo.as_ref(),
+            let (report, promote_article_ids) = match prepare_remote_report(
                 self.ctx.publish_item_repo.as_ref(),
-                claimed.id,
+                claimed,
                 &render_config,
+                deadline,
+                &emitter,
+                "publish_remote_batch",
             )
             .await
             {
                 Ok(report) => report,
                 Err(error) => {
-                    self.release_report_error(claimed.id, &owner, &error, now, &emitter)
+                    self.release_preparation_error(claimed.id, &owner, &error, &emitter)
                         .await;
                     outcomes.push(PublishRemoteOutcome {
                         publish_record_id: claimed.id,
@@ -490,50 +451,11 @@ impl PublishFlow {
                 }
             };
 
-            let items = match self
-                .ctx
-                .publish_item_repo
-                .list_by_publish_record(claimed.id)
-                .await
-            {
-                Ok(items) => items,
-                Err(error) => {
-                    if let Err(persist_err) = self
-                        .ctx
-                        .publish_record_repo
-                        .release_permanent_failure(
-                            claimed.id,
-                            &owner,
-                            &error.to_string(),
-                            error.error_kind(),
-                            now,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            publish_record_id = claimed.id,
-                            phase = "publish_remote_batch.list_items",
-                            ?persist_err,
-                            "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
-                        );
-                    }
-                    outcomes.push(PublishRemoteOutcome {
-                        publish_record_id: claimed.id,
-                        status: PublishRemoteStatus::Failed {
-                            error_kind: error.error_kind().to_string(),
-                        },
-                        commit_sha: None,
-                        remote_target: None,
-                        item_count: 0,
-                    });
-                    continue;
-                }
-            };
-            let item_count = items.len() as u32;
+            let item_count = promote_article_ids.len() as u32;
+            reports.push(report);
             prepared.push(PreparedRemote {
                 publish_record_id: claimed.id,
-                report,
-                promote_article_ids: items.into_iter().map(|item| item.article_id).collect(),
+                promote_article_ids,
                 item_count,
             });
         }
@@ -545,11 +467,15 @@ impl PublishFlow {
             };
         }
 
-        let reports = prepared
-            .iter()
-            .map(|item| item.report.clone())
-            .collect::<Vec<_>>();
-        let batch = match target.publish_many(&reports).await {
+        let result = if Instant::now() >= deadline {
+            Err(PublishError::RemoteTimeout)
+        } else {
+            tokio::time::timeout_at(deadline, target.publish_many(&reports))
+                .await
+                .unwrap_or(Err(PublishError::RemoteTimeout))
+        };
+        let now = OffsetDateTime::now_utc();
+        let batch = match result {
             Ok(batch) if batch.artifacts.len() == prepared.len() => batch,
             Ok(batch) => {
                 let error = PublishError::GitHubApiError {
@@ -560,7 +486,7 @@ impl PublishFlow {
                         prepared.len()
                     ),
                 };
-                self.release_publish_error_for_prepared(&prepared, &owner, &error, now, &emitter)
+                self.release_publish_error_for_prepared(&prepared, &owner, &error, &emitter)
                     .await;
                 for item in prepared {
                     outcomes.push(PublishRemoteOutcome {
@@ -579,7 +505,7 @@ impl PublishFlow {
                 };
             }
             Err(error) => {
-                self.release_publish_error_for_prepared(&prepared, &owner, &error, now, &emitter)
+                self.release_publish_error_for_prepared(&prepared, &owner, &error, &emitter)
                     .await;
                 for item in prepared {
                     outcomes.push(PublishRemoteOutcome {
@@ -670,63 +596,106 @@ impl PublishFlow {
         prepared: &[PreparedRemote],
         owner: &str,
         error: &PublishError,
-        now: OffsetDateTime,
         emitter: &RunEventEmitter<'_>,
     ) {
         for item in prepared {
-            // W15 §3：retryable 路径在 release SQL 内按预算折叠（耗尽 → failed）。
-            let mut budget_exhausted = false;
-            let release_result = if error.is_retryable() {
-                self.ctx
-                    .publish_record_repo
-                    .release_retryable_failure(
-                        item.publish_record_id,
-                        owner,
-                        &error.display_user(),
-                        error.error_kind(),
-                        self.ctx.retry.publish_max_attempts,
-                        now,
-                    )
-                    .await
-                    .map(|outcome| {
-                        budget_exhausted = outcome.exhausted;
-                        outcome.released
-                    })
-            } else {
-                self.ctx
-                    .publish_record_repo
-                    .release_permanent_failure(
-                        item.publish_record_id,
-                        owner,
-                        &error.display_user(),
-                        error.error_kind(),
-                        now,
-                    )
-                    .await
-            };
-            if let Err(persist_err) = release_result {
-                tracing::warn!(
-                    publish_record_id = item.publish_record_id,
-                    phase = "publish_remote_batch.target_publish",
-                    retryable = error.is_retryable(),
-                    ?persist_err,
-                    "release_*_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
-                );
+            self.release_publish_error_for_record(
+                item.publish_record_id,
+                owner,
+                error,
+                "publish_remote_batch",
+                emitter,
+            )
+            .await;
+        }
+    }
+
+    async fn release_publish_error_for_record(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        error: &PublishError,
+        phase: &'static str,
+        emitter: &RunEventEmitter<'_>,
+    ) {
+        let now = OffsetDateTime::now_utc();
+        let message = error.display_user();
+        let mut budget_exhausted = false;
+        let release_result = if error.is_retryable() {
+            self.ctx
+                .publish_record_repo
+                .release_retryable_failure(
+                    publish_record_id,
+                    owner,
+                    &message,
+                    error.error_kind(),
+                    self.ctx.retry.publish_max_attempts,
+                    now,
+                )
+                .await
+                .map(|outcome| {
+                    budget_exhausted = outcome.exhausted;
+                    outcome.released
+                })
+        } else {
+            self.ctx
+                .publish_record_repo
+                .release_permanent_failure(
+                    publish_record_id,
+                    owner,
+                    &message,
+                    error.error_kind(),
+                    now,
+                )
+                .await
+        };
+        if let Err(persist_err) = release_result {
+            tracing::warn!(
+                publish_record_id,
+                phase,
+                retryable = error.is_retryable(),
+                ?persist_err,
+                "release failure could not be persisted; lease recovery remains available",
+            );
+        }
+        emitter
+            .emit(
+                "publish_failed",
+                "error",
+                Some("publish_record"),
+                Some(publish_record_id),
+                &message,
+                Some(json!({
+                    "phase": phase,
+                    "error_kind": error.error_kind(),
+                    "budget_exhausted": budget_exhausted,
+                })),
+            )
+            .await;
+    }
+
+    async fn release_preparation_error(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        error: &RemotePreparationError,
+        emitter: &RunEventEmitter<'_>,
+    ) {
+        match error {
+            RemotePreparationError::Report(error) => {
+                self.release_report_error(publish_record_id, owner, error, emitter)
+                    .await;
             }
-            emitter
-                .emit(
-                    "publish_failed",
-                    "error",
-                    Some("publish_record"),
-                    Some(item.publish_record_id),
-                    &error.display_user(),
-                    Some(json!({
-                        "phase": "publish_remote_batch",
-                        "error_kind": error.error_kind(),
-                        "budget_exhausted": budget_exhausted
-                    })),
+            RemotePreparationError::Timeout => {
+                self.release_publish_error_for_record(
+                    publish_record_id,
+                    owner,
+                    &PublishError::RemoteTimeout,
+                    "publish_remote.prepare",
+                    emitter,
                 )
                 .await;
+            }
         }
     }
 
@@ -735,7 +704,6 @@ impl PublishFlow {
         publish_record_id: i64,
         owner: &str,
         error: &ReportError,
-        now: OffsetDateTime,
         emitter: &RunEventEmitter<'_>,
     ) {
         if let Err(persist_err) = self
@@ -746,7 +714,7 @@ impl PublishFlow {
                 owner,
                 &error.display_user(),
                 error.error_kind(),
-                now,
+                OffsetDateTime::now_utc(),
             )
             .await
         {
@@ -770,5 +738,21 @@ impl PublishFlow {
                 })),
             )
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_deadline_reserves_subsecond_release_time() {
+        let before = Instant::now();
+        let deadline = remote_deadline(1);
+        let after = Instant::now();
+        let budget = StdDuration::from_millis(800);
+        assert!(deadline >= before + budget);
+        assert!(deadline <= after + budget);
+        assert!(remote_deadline(0) <= Instant::now());
     }
 }

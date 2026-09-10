@@ -2,7 +2,7 @@ use crate::{db_url::resolve_storage_url, error::CliError};
 use reqwest::Client;
 use rss_ai_news_ai::{AiClientConfig, OpenAiCompatClient};
 use rss_ai_news_config::{self as config, AiCredentials, LoadedConfig};
-use rss_ai_news_extractor::{ContentStrategy, ReqwestHtmlFetcher};
+use rss_ai_news_extractor::{ContentStrategy, ReadabilityStrategy, ReqwestHtmlFetcher};
 use rss_ai_news_feed::ReqwestFeedFetcher;
 use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, LocalFsTarget, PublishTarget};
 use rss_ai_news_runtime::{
@@ -34,7 +34,14 @@ pub async fn open_write_storage(loaded: &LoadedConfig) -> Result<StoragePool, Cl
 }
 
 pub async fn open_read_storage(loaded: &LoadedConfig) -> Result<StoragePool, CliError> {
-    open_write_storage(loaded).await
+    let url = resolve_storage_url(loaded)?;
+    let pool = StoragePool::build_read_only(
+        &url,
+        u32::try_from(loaded.app.database.busy_timeout_ms).unwrap_or(u32::MAX),
+    )
+    .await?;
+    ensure_migration_state_exact(&pool).await?;
+    Ok(pool)
 }
 
 pub fn build_ingest_deps(
@@ -63,7 +70,13 @@ pub fn build_extract_deps(
     run: RunMeta,
 ) -> Result<Arc<ExtractDeps>, CliError> {
     let app = &loaded.app;
-    let strategies: Vec<Arc<dyn ContentStrategy>> = Vec::new();
+    let strategies: Vec<Arc<dyn ContentStrategy>> = app
+        .extractor
+        .strategy_order
+        .iter()
+        .filter(|name| name.as_str() == "readability")
+        .map(|_| Arc::new(ReadabilityStrategy) as Arc<dyn ContentStrategy>)
+        .collect();
     Ok(Arc::new(ExtractDeps {
         run,
         http: app.http.clone(),
@@ -231,14 +244,12 @@ pub struct ReplayDeps {
 pub async fn build_replay_deps(cli: &crate::args::Cli) -> Result<ReplayDeps, CliError> {
     // W11-P4-C2：原 require_sqlite_driver 拦截已移除。replay 的 artifact /
     // article / feed_entry repo 在 P3-C/E 全部双轨化；html_diff SQL 已升 $1。
-    let loaded = config::load(&cli.config_dir, None, cli.to_cli_overrides())?;
+    let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
     let app = &loaded.app;
     let url = resolve_storage_url(&loaded)?;
     let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
-    let pool = StoragePool::build(&url, app.database.max_connections, busy_timeout_ms)
-        .await
-        .map_err(CliError::Storage)?;
-    run_migrations(&pool).await.map_err(CliError::Storage)?;
+    let pool = StoragePool::build_read_only(&url, busy_timeout_ms).await?;
+    ensure_migration_state_exact(&pool).await?;
 
     Ok(ReplayDeps {
         pool: pool.clone(),
@@ -260,15 +271,15 @@ pub async fn build_doctor_deps(cli: &crate::args::Cli) -> Result<DoctorDeps, Cli
     // W11-P4-C2：原 require_sqlite_driver 拦截已移除；observability::health.rs
     // 4 个 check（DatabaseConnectivity / MigrationVersion / ExpiredLease /
     // FailedBacklog）+ runtime::doctor::deep_scan 已全部接 &StoragePool。
-    let loaded = Arc::new(config::load(&cli.config_dir, None, cli.to_cli_overrides())?);
+    let loaded = Arc::new(config::load_skip_env_checks(
+        &cli.config_dir,
+        None,
+        cli.to_cli_overrides(),
+    )?);
     let app = &loaded.app;
     let url = resolve_storage_url(&loaded)?;
     let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
     let pool = StoragePool::build(&url, app.database.max_connections, busy_timeout_ms)
-        .await
-        .map_err(CliError::Storage)?;
-    run_migrations(&pool).await.map_err(CliError::Storage)?;
-    ensure_active_config_version(&pool, &loaded.config_sha256)
         .await
         .map_err(CliError::Storage)?;
     let http_client = Client::builder()

@@ -17,6 +17,7 @@ use tempfile::TempDir;
 async fn doctor_cmd_shallow_non_failing_checks_return_success() {
     let temp = TempDir::new().expect("temp dir");
     write_config(temp.path(), temp.path().join("rss.sqlite").as_path());
+    initialize_database(&temp.path().join("rss.sqlite")).await;
     let cli = cli_for(temp.path(), false, OutputFormat::Pretty);
     let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Pretty);
 
@@ -29,6 +30,7 @@ async fn doctor_cmd_shallow_non_failing_checks_return_success() {
 async fn doctor_cmd_missing_github_token_is_not_failure() {
     let temp = TempDir::new().expect("temp dir");
     write_config(temp.path(), temp.path().join("rss.sqlite").as_path());
+    initialize_database(&temp.path().join("rss.sqlite")).await;
     let cli = cli_for(temp.path(), false, OutputFormat::Pretty);
     let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Pretty);
 
@@ -56,6 +58,7 @@ async fn doctor_cmd_uncreatable_database_path_returns_storage_error() {
 async fn doctor_cmd_deep_happy_path_returns_success() {
     let temp = TempDir::new().expect("temp dir");
     write_config(temp.path(), temp.path().join("rss.sqlite").as_path());
+    initialize_database(&temp.path().join("rss.sqlite")).await;
     let cli = cli_for(temp.path(), true, OutputFormat::Pretty);
     let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Pretty);
 
@@ -389,4 +392,63 @@ fn uuidish() -> String {
         .expect("clock")
         .as_nanos()
         .to_string()
+}
+
+async fn initialize_database(db_path: &Path) {
+    let pool = build_sqlite_pool(db_path, 1, 5_000).await.expect("pool");
+    run_migrations(&StoragePool::Sqlite(pool.clone()))
+        .await
+        .expect("migrations");
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn doctor_reports_missing_migrations_without_mutating_database() {
+    for deep in [false, true] {
+        let temp = TempDir::new().expect("temp dir");
+        let db_path = temp.path().join("rss.sqlite");
+        write_config(temp.path(), &db_path);
+        let pool = build_sqlite_pool(&db_path, 1, 5_000)
+            .await
+            .expect("empty pool");
+        let cli = cli_for(temp.path(), deep, OutputFormat::Json);
+        let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Json);
+        let error = doctor::run(&cli, doctor_args(&cli), &mut writer)
+            .await
+            .expect_err("missing migrations fail doctor");
+        assert!(matches!(error, CliError::DoctorFailed), "{error:?}");
+        let tables: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'")
+                .fetch_one(&pool)
+                .await
+                .expect("count tables");
+        assert_eq!(
+            tables, 0,
+            "doctor must not migrate or seed an empty database"
+        );
+    }
+}
+
+#[tokio::test]
+async fn doctor_does_not_seed_configuration_or_sources() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config(temp.path(), &db_path);
+    initialize_database(&db_path).await;
+    let cli = cli_for(temp.path(), false, OutputFormat::Json);
+    let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Json);
+    doctor::run(&cli, doctor_args(&cli), &mut writer)
+        .await
+        .expect("healthy schema");
+    let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
+    for query in [
+        "SELECT COUNT(*) FROM rule_versions",
+        "SELECT COUNT(*) FROM feed_sources",
+    ] {
+        let count: i64 = sqlx::query_scalar(query)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 0, "doctor must not seed: {query}");
+    }
 }
