@@ -87,14 +87,8 @@ impl From<reqwest::Error> for FeedError {
             };
         }
 
-        if error.is_connect() || error.is_request() || error.is_builder() {
-            return Self::ConnectionFailed {
-                source: error.to_string(),
-            };
-        }
-
         Self::ConnectionFailed {
-            source: error.to_string(),
+            source: error.without_url().to_string(),
         }
     }
 }

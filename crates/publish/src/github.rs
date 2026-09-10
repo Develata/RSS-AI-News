@@ -1,8 +1,11 @@
 use std::path::{Component, Path};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use bytes::Bytes;
+use http_body_util::{BodyExt, Limited, combinators::BoxBody};
 use octocrab::Octocrab;
 use rss_ai_news_domain::{SecretString, dto::publish::RenderedReport};
 use serde_json::{Value, json};
@@ -34,6 +37,9 @@ pub struct GitHubTarget {
 impl GitHubTarget {
     pub fn new(cfg: GitHubTargetConfig) -> Result<Self, PublishError> {
         let client = Octocrab::builder()
+            .set_connect_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .set_write_timeout(Some(Duration::from_secs(30)))
             .personal_token(secrecy::SecretString::from(
                 cfg.token.expose_secret().to_owned(),
             ))
@@ -47,6 +53,9 @@ impl GitHubTarget {
 
     pub fn with_base_uri(cfg: GitHubTargetConfig, base_uri: &str) -> Result<Self, PublishError> {
         let client = Octocrab::builder()
+            .set_connect_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .set_write_timeout(Some(Duration::from_secs(30)))
             .personal_token(secrecy::SecretString::from(
                 cfg.token.expose_secret().to_owned(),
             ))
@@ -230,16 +239,12 @@ impl GitHubTarget {
             .get("X-RateLimit-Reset")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<i64>().ok());
-        let body = self
-            .client
-            .body_to_string(response)
-            .await
-            .map_err(classify::classify_octocrab_error)?;
+        let body = read_response_body(response).await?;
 
         if !(200..300).contains(&status) {
             return Err(classify::classify_github_status(
                 status,
-                response_message(status, &body),
+                response_message(status, &body, self.cfg.token.expose_secret()),
                 reset_epoch,
             ));
         }
@@ -259,16 +264,12 @@ impl GitHubTarget {
             .get("X-RateLimit-Reset")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<i64>().ok());
-        let body = self
-            .client
-            .body_to_string(response)
-            .await
-            .map_err(classify::classify_octocrab_error)?;
+        let body = read_response_body(response).await?;
 
         if !(200..300).contains(&status) {
             return Err(classify::classify_github_status(
                 status,
-                response_message(status, &body),
+                response_message(status, &body, self.cfg.token.expose_secret()),
                 reset_epoch,
             ));
         }
@@ -288,16 +289,12 @@ impl GitHubTarget {
             .get("X-RateLimit-Reset")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<i64>().ok());
-        let body = self
-            .client
-            .body_to_string(response)
-            .await
-            .map_err(classify::classify_octocrab_error)?;
+        let body = read_response_body(response).await?;
 
         if !(200..300).contains(&status) {
             return Err(classify::classify_github_status(
                 status,
-                response_message(status, &body),
+                response_message(status, &body, self.cfg.token.expose_secret()),
                 reset_epoch,
             ));
         }
@@ -409,19 +406,14 @@ impl GitHubTarget {
             .get("X-RateLimit-Reset")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<i64>().ok());
-        let body = self
-            .client
-            .body_to_string(response)
-            .await
-            .map_err(classify::classify_octocrab_error)?;
-
         if status == 404 {
             return Ok(None);
         }
+        let body = read_response_body(response).await?;
         if !(200..300).contains(&status) {
             return Err(classify::classify_github_status(
                 status,
-                response_message(status, &body),
+                response_message(status, &body, self.cfg.token.expose_secret()),
                 reset_epoch,
             ));
         }
@@ -463,16 +455,12 @@ impl GitHubTarget {
             .get("X-RateLimit-Reset")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<i64>().ok());
-        let body = self
-            .client
-            .body_to_string(response)
-            .await
-            .map_err(classify::classify_octocrab_error)?;
+        let body = read_response_body(response).await?;
 
         if !(200..300).contains(&status) {
             return Err(classify::classify_github_status(
                 status,
-                response_message(status, &body),
+                response_message(status, &body, self.cfg.token.expose_secret()),
                 reset_epoch,
             ));
         }
@@ -490,6 +478,57 @@ impl GitHubTarget {
     }
 }
 
+/// Includes base64 content returned by GitHub's Contents API. The cap is on
+/// received body bytes and applies even without a Content-Length header.
+const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+async fn read_response_body(
+    response: http::Response<BoxBody<Bytes, octocrab::Error>>,
+) -> Result<Bytes, PublishError> {
+    let status = response.status().as_u16();
+    let reset_epoch = response
+        .headers()
+        .get("X-RateLimit-Reset")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok());
+    let too_large = || {
+        if (200..300).contains(&status) {
+            PublishError::ResponseTooLarge {
+                limit: MAX_RESPONSE_BODY_BYTES,
+            }
+        } else {
+            classify::classify_github_status(
+                status,
+                format!("response body exceeded {MAX_RESPONSE_BODY_BYTES} bytes"),
+                reset_epoch,
+            )
+        }
+    };
+    if response
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_RESPONSE_BODY_BYTES as u64)
+    {
+        return Err(too_large());
+    }
+    Limited::new(response.into_body(), MAX_RESPONSE_BODY_BYTES)
+        .collect()
+        .await
+        .map(|body| body.to_bytes())
+        .map_err(|error| {
+            if error.is::<http_body_util::LengthLimitError>() {
+                too_large()
+            } else {
+                PublishError::GitHubApiError {
+                    status: 503,
+                    message: format!("failed reading GitHub response: {error}"),
+                }
+            }
+        })
+}
+
 fn validate_path_part(path: &str) -> Result<(), PublishError> {
     if path.is_empty() || path.contains("..") {
         return Err(PublishError::InvalidPath(path.to_string()));
@@ -505,21 +544,30 @@ fn validate_path_part(path: &str) -> Result<(), PublishError> {
     Ok(())
 }
 
-fn response_message(status: u16, body: &str) -> String {
-    if let Ok(value) = serde_json::from_str::<Value>(body)
+fn response_message(status: u16, body: &[u8], token: &str) -> String {
+    let message = if let Ok(value) = serde_json::from_slice::<Value>(body)
         && let Some(message) = value.get("message").and_then(|message| message.as_str())
     {
-        return message.to_string();
-    }
-    if body.trim().is_empty() {
-        format!("github api returned status {status}")
+        message.to_string()
     } else {
-        body.to_string()
+        let body = String::from_utf8_lossy(body);
+        if body.trim().is_empty() {
+            format!("github api returned status {status}")
+        } else {
+            body.into_owned()
+        }
+    };
+    // Error JSON can encode the token with escapes. Scrub after decoding, before
+    // this message reaches errors, tracing or persisted publish diagnostics.
+    if token.is_empty() {
+        message
+    } else {
+        message.replace(token, "***")
     }
 }
 
-fn parse_json_value(status: u16, body: &str) -> Result<Value, PublishError> {
-    serde_json::from_str::<Value>(body).map_err(|error| PublishError::GitHubApiError {
+fn parse_json_value(status: u16, body: &[u8]) -> Result<Value, PublishError> {
+    serde_json::from_slice::<Value>(body).map_err(|error| PublishError::GitHubApiError {
         status: 502,
         message: format!("invalid GitHub response for status {status}: {error}"),
     })
@@ -604,5 +652,51 @@ mod tests {
         assert!(rendered.contains("***"));
         assert!(rendered.contains("owner"));
         assert!(rendered.contains("repo"));
+    }
+
+    #[tokio::test]
+    async fn body_limit_without_content_length_preserves_status_semantics() {
+        use rss_ai_news_domain::error::ClassifiedError;
+        let data = Bytes::from(vec![b'x'; MAX_RESPONSE_BODY_BYTES + 1]);
+        for (status, kind, retryable) in [
+            (200, "response_too_large", false),
+            (429, "github_rate_limit", true),
+            (503, "github_api_error", true),
+        ] {
+            let body = http_body_util::Full::new(data.clone())
+                .map_err(|never| match never {})
+                .boxed();
+            let response = http::Response::builder()
+                .status(status)
+                .body(body)
+                .expect("response");
+            assert!(
+                !response
+                    .headers()
+                    .contains_key(http::header::CONTENT_LENGTH)
+            );
+            let error = match read_response_body(response).await {
+                Err(error) => error,
+                Ok(_) => panic!("oversized body must be rejected"),
+            };
+            assert_eq!(error.error_kind(), kind);
+            assert_eq!(error.is_retryable(), retryable);
+            assert!(format!("{error:?}").len() < 200);
+        }
+    }
+
+    #[tokio::test]
+    async fn body_at_exact_limit_is_accepted_without_copying_to_string() {
+        let body = http_body_util::Full::new(Bytes::from(vec![b' '; MAX_RESPONSE_BODY_BYTES]))
+            .map_err(|never| match never {})
+            .boxed();
+        let response = http::Response::new(body);
+        assert_eq!(
+            read_response_body(response)
+                .await
+                .expect("exact limit")
+                .len(),
+            MAX_RESPONSE_BODY_BYTES
+        );
     }
 }

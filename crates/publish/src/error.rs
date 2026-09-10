@@ -11,6 +11,8 @@ pub enum PublishError {
     GitHubAuthFailed(String),
     #[error("github api error: status {status}")]
     GitHubApiError { status: u16, message: String },
+    #[error("remote response body exceeds {limit} bytes")]
+    ResponseTooLarge { limit: usize },
     #[error("remote publish deadline exceeded")]
     RemoteTimeout,
     #[error("github rate limit until {reset_at}")]
@@ -26,7 +28,9 @@ impl ClassifiedError for PublishError {
                     | std::io::ErrorKind::WouldBlock
                     | std::io::ErrorKind::TimedOut
             ),
-            Self::InvalidPath(_) | Self::GitHubAuthFailed(_) => false,
+            Self::InvalidPath(_) | Self::GitHubAuthFailed(_) | Self::ResponseTooLarge { .. } => {
+                false
+            }
             Self::GitHubApiError { status, .. } => *status == 409 || *status >= 500,
             Self::GitHubRateLimit { .. } | Self::RemoteTimeout => true,
         }
@@ -40,6 +44,7 @@ impl ClassifiedError for PublishError {
             Self::GitHubApiError { .. } => "github_api_error",
             Self::GitHubRateLimit { .. } => "github_rate_limit",
             Self::RemoteTimeout => "remote_timeout",
+            Self::ResponseTooLarge { .. } => "response_too_large",
         }
     }
 

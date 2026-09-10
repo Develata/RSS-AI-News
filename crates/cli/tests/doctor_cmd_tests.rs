@@ -452,3 +452,21 @@ async fn doctor_does_not_seed_configuration_or_sources() {
         assert_eq!(count, 0, "doctor must not seed: {query}");
     }
 }
+
+#[test]
+fn doctor_summary_redacts_secrets_in_pretty_and_json() {
+    let mut deep = deep_report(1);
+    deep.results[0].violations[0].message = "https://host.test/?password=private-deep".into();
+    let summary = DoctorCommandSummary::new(CheckReport {
+        items: vec![("HTTP".into(), CheckOutcome::Fail(
+            "request failed: https://private-user:private-pass@host.test/?token=private-query Authorization: Bearer private-header".into()
+        ))],
+    }, None);
+    let mut pretty = Vec::new();
+    summary.render_pretty(&mut pretty).expect("pretty");
+    let pretty = String::from_utf8(pretty).unwrap();
+    let json = serde_json::to_string(&summary).unwrap();
+    assert!(!pretty.contains("private-"), "{pretty}");
+    assert!(!json.contains("private-"), "{json}");
+    assert!(pretty.contains("host.test"));
+}

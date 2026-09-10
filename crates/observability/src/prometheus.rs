@@ -28,6 +28,7 @@ use std::{
     io,
     net::SocketAddr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use prometheus::{
@@ -36,6 +37,7 @@ use prometheus::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
+    task::JoinSet,
 };
 
 use crate::metrics::MetricsRecorder;
@@ -213,36 +215,47 @@ impl MetricsRecorder for PrometheusMetrics {
     }
 }
 
-/// 启动 `/metrics` HTTP/1.1 服务，每个连接一个 tokio task 处理。
-///
-/// 协议处理极简：
-///   - 读首行：`<METHOD> <PATH> HTTP/1.1`
-///   - GET `/metrics` → 200 + text 渲染
-///   - 其它路径 / 方法 → 404
-///   - 不支持 keep-alive；服务一次即关闭连接（prometheus scraper 默认行为）
-///
-/// **错误处理边界**：accept / read / write 失败用 `tracing::warn!` 记录
-/// 后丢弃连接——`/metrics` 端点本身不能因为 scrape 端的网络问题影响
-/// 主流程。listener 创建失败（端口被占用）会向上抛 `io::Error`，由
-/// CLI 启动路径决定是 fail-fast 还是降级（建议 fail-fast：metrics 未就绪
-/// 等同于运维契约违例）。
+/// Serve `/metrics` with at most 32 active connections and a five-second total
+/// read/write deadline. Dropping the server cancels every connection handler.
 pub async fn serve_metrics(bind: SocketAddr, recorder: Arc<PrometheusMetrics>) -> io::Result<()> {
     let listener = TcpListener::bind(bind).await?;
     tracing::info!(addr = %bind, "prometheus /metrics endpoint listening");
+    serve_metrics_listener(listener, recorder, 32, Duration::from_secs(5)).await
+}
+
+async fn serve_metrics_listener(
+    listener: TcpListener,
+    recorder: Arc<PrometheusMetrics>,
+    max_connections: usize,
+    request_timeout: Duration,
+) -> io::Result<()> {
+    let mut connections = JoinSet::new();
     loop {
-        let (socket, peer) = match listener.accept().await {
-            Ok(pair) => pair,
-            Err(error) => {
-                tracing::warn!(?error, "metrics listener accept failed");
-                continue;
+        tokio::select! {
+            result = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = result {
+                    tracing::warn!(?error, "metrics connection task failed");
+                }
             }
-        };
-        let recorder = recorder.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle_metrics_connection(socket, recorder).await {
-                tracing::warn!(?error, peer = %peer, "metrics connection handler failed");
+            accepted = listener.accept(), if connections.len() < max_connections => {
+                let (socket, peer) = match accepted {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        tracing::warn!(?error, "metrics listener accept failed");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                let recorder = recorder.clone();
+                connections.spawn(async move {
+                    match tokio::time::timeout(request_timeout, handle_metrics_connection(socket, recorder)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => tracing::warn!(?error, %peer, "metrics connection handler failed"),
+                        Err(_) => tracing::warn!(%peer, "metrics connection timed out"),
+                    }
+                });
             }
-        });
+        }
     }
 }
 
@@ -250,35 +263,47 @@ async fn handle_metrics_connection(
     mut socket: tokio::net::TcpStream,
     recorder: Arc<PrometheusMetrics>,
 ) -> io::Result<()> {
-    // 4 KiB 足够 prometheus scraper 的请求头；超出说明对端在塞奇怪东西，
-    // 直接 400 闭连接。
-    let mut buf = vec![0u8; 4096];
-    let n = socket.read(&mut buf).await?;
-    if n == 0 {
-        return Ok(());
-    }
-    let head = String::from_utf8_lossy(&buf[..n]);
-    let mut lines = head.lines();
-    let request_line = lines.next().unwrap_or("");
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or("");
-    let path = parts.next().unwrap_or("");
-
-    if method == "GET" && path == "/metrics" {
+    let mut buf = [0u8; 4096];
+    let mut used = 0;
+    let headers_end = loop {
+        let read = socket.read(&mut buf[used..]).await?;
+        if read == 0 {
+            return Ok(());
+        }
+        // Include the previous three bytes to find a delimiter split across TCP reads.
+        let search_from = used.saturating_sub(3);
+        used += read;
+        if let Some(end) = buf[search_from..used]
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+        {
+            break search_from + end + 4;
+        }
+        if used == buf.len() {
+            socket
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+            socket.shutdown().await?;
+            return Ok(());
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..headers_end]);
+    let mut parts = head.lines().next().unwrap_or_default().split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let path = parts.next().unwrap_or_default();
+    let version = parts.next().unwrap_or_default();
+    if method == "GET" && path == "/metrics" && matches!(version, "HTTP/1.1" | "HTTP/1.0") {
         let body = recorder.render();
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len(),
-            body
         );
-        socket.write_all(response.as_bytes()).await?;
+        socket.write_all(header.as_bytes()).await?;
+        socket.write_all(body.as_bytes()).await?;
     } else {
-        let body = "Not Found\n";
-        let response = format!(
-            "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        socket.write_all(response.as_bytes()).await?;
+        socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 10\r\nConnection: close\r\n\r\nNot Found\n").await?;
     }
     socket.shutdown().await?;
     Ok(())
@@ -344,5 +369,129 @@ mod tests {
         let text = metrics.render();
         assert!(text.contains("a=\"1\""));
         assert!(!text.contains("b=\"2\""));
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+
+    async fn connection() -> (
+        tokio::net::TcpStream,
+        tokio::task::JoinHandle<io::Result<()>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await?;
+            handle_metrics_connection(socket, Arc::new(PrometheusMetrics::new())).await
+        });
+        (tokio::net::TcpStream::connect(address).await.unwrap(), task)
+    }
+
+    #[tokio::test]
+    async fn fragmented_request_is_read_until_headers_are_complete() {
+        let (mut socket, task) = connection().await;
+        socket.write_all(b"GET /met").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        socket
+            .write_all(b"rics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_headers_are_rejected() {
+        let (mut socket, task) = connection().await;
+        socket.write_all(&[b'a'; 4096]).await.unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "{response}"
+        );
+        task.await.unwrap().unwrap();
+    }
+
+    async fn server(
+        max_connections: usize,
+        timeout: Duration,
+    ) -> (SocketAddr, tokio::task::JoinHandle<io::Result<()>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(serve_metrics_listener(
+            listener,
+            Arc::new(PrometheusMetrics::new()),
+            max_connections,
+            timeout,
+        ));
+        (address, task)
+    }
+
+    #[tokio::test]
+    async fn idle_connection_expires() {
+        let (address, task) = server(2, Duration::from_millis(100)).await;
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn dropping_server_cancels_active_connections() {
+        let (address, task) = server(2, Duration::from_secs(10)).await;
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket.write_all(b"GET /met").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let mut byte = [0];
+        let result = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Ok(0)) || result.is_err(),
+            "server left a detached connection: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connections_wait_for_a_free_handler_slot() {
+        let (address, task) = server(1, Duration::from_secs(5)).await;
+        let mut first = tokio::net::TcpStream::connect(address).await.unwrap();
+        first.write_all(b"GET /met").await.unwrap();
+        // One incomplete request consumes the sole slot; the next remains in
+        // the kernel accept backlog until that handler releases its resources.
+        let mut second = tokio::net::TcpStream::connect(address).await.unwrap();
+        second
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                second.read_to_string(&mut response)
+            )
+            .await
+            .is_err()
+        );
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(2), second.read_to_string(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        task.abort();
     }
 }

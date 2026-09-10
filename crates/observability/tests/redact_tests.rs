@@ -79,3 +79,36 @@ fn redact_event_context_preserves_non_secret_string_values_unchanged() {
     assert_eq!(value["count"], json!(42));
     assert_eq!(value["url"], json!("https://api.example.test/v1/articles"));
 }
+
+#[test]
+fn redact_urls_inside_errors_and_sensitive_query_values() {
+    let input = "request failed for url (https://operator:private-pass@host.test/api?token=private-token&lang=zh)";
+    let output = redact_url_userinfo(input);
+    assert!(!output.contains("private-pass"));
+    assert!(!output.contains("private-token"));
+    assert!(output.contains("host.test/api"));
+    assert!(output.contains("lang=zh"));
+}
+
+#[test]
+fn redact_json_secrets_covers_bare_keys_and_nested_query_credentials() {
+    let mut value = json!({
+        "token": "private-token",
+        "password": "private-password",
+        "authorization": "private-auth",
+        "url": "https://host.test/feed?access_key=private-query&lang=zh",
+        "note": "unchanged"
+    });
+    redact_event_context(&mut value);
+    assert!(!value.to_string().contains("private-"));
+    assert_eq!(value["note"], "unchanged");
+}
+
+#[test]
+fn redaction_preserves_borrowing_for_public_urls() {
+    let input = "fetch https://host.test/feed?lang=zh succeeded";
+    assert!(matches!(
+        redact_url_userinfo(input),
+        std::borrow::Cow::Borrowed(_)
+    ));
+}

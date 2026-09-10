@@ -15,12 +15,8 @@
 
 # ── 生产路径：error-reporting / 脱敏 best-effort ──
 crates/cli/src/lib.rs:73:进程退出前 emit_failure 写 stderr 失败无救赎，尽力 emit + 失败不阻断 exit（§3.3 sink 失败豁免）
-crates/observability/src/redact.rs:19:URL parse 失败 → 输入本就不是 URL，无需脱敏；redact 自身的 best-effort 路径属于 §3.3 末段"日志/可观测性写入失败"豁免范围
-crates/observability/src/redact.rs:28:set_username 仅在 cannot-be-a-base URL 失败，本路径 URL 已验证含 authority；脱敏静默回退到 to_string 近似
-crates/observability/src/redact.rs:29:set_password 同上，脱敏 best-effort，不让 log/health 崩
-crates/ai/src/client.rs:230:AI error envelope JSON 解析失败 → 降级到原始 body 字符串作为 error message；不影响主流程错误传递（classify_http_status 兜底）
-crates/publish/src/github.rs:221:GitHub error body 非 JSON 时降级到原始字符串；本函数只服务 error message 构造，属于 error-reporting best-effort
-crates/publish/src/github.rs:511:response_message 解析 GitHub error body 取 message 字段失败时 fall-through 到原始字符串/状态码；纯 error-message 构造 best-effort
+crates/ai/src/client.rs:272:AI error envelope 解析失败降级到受限body错误分类，原已审核error-reporting豁免，路径随实现移动
+crates/publish/src/github.rs:548:GitHub error body 非JSON时用原始受限body/状态码构造错误，原已审核error-reporting豁免
 
 # ── 测试 harness：teardown / fire-and-forget ──
 crates/config/src/loader.rs:425:测试 fixture Workspace::drop 清理 temp 目录，Drop 内无法传播错误，best-effort

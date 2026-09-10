@@ -7,6 +7,10 @@ edition.workspace = true
 rss-ai-news-domain.workspace = true
 async-trait = "0.1"
 base64 = "0.22"
+# Octocrab response bodies need an explicit size cap before collection.
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
 octocrab.workspace = true
 # octocrab 0.54 `personal_token` accepts `impl Into<secrecy::SecretString>`;
 # we materialise its argument at the boundary from our own SecretString so

@@ -10,6 +10,36 @@ const CONTENT_BASE64: &str = "IyBoZWxsbwo=";
 const GITHUB_PATH: &str = "/repos/owner/repo/contents/reports/tech/2026-04-29.md";
 
 #[tokio::test]
+async fn provider_error_does_not_expose_configured_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(401).set_body_raw(
+            r#"{"message":"bad credential: \u0072eview-private-token"}"#,
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+    let target = GitHubTarget::with_base_uri(
+        GitHubTargetConfig {
+            token: "review-private-token".into(),
+            owner: "owner".into(),
+            repo: "repo".into(),
+            branch: "main".into(),
+            path_prefix: "reports".into(),
+            commit_message_prefix: "publish".into(),
+        },
+        &server.uri(),
+    )
+    .unwrap();
+    let error = target
+        .publish(&sample_report())
+        .await
+        .expect_err("401 fails");
+    assert!(!format!("{error:?} {error}").contains("review-private-token"));
+    assert!(error.display_user().contains("***"));
+}
+
+#[tokio::test]
 async fn create_new_file_returns_commit_sha() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -391,4 +421,20 @@ fn second_report() -> RenderedReport {
         markdown_content: "# ai\n".to_string(),
         relative_path: "ai/2026-04-29.md".to_string(),
     }
+}
+
+#[tokio::test]
+async fn oversized_github_success_body_is_permanent() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(GITHUB_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_string(" ".repeat(16 * 1024 * 1024 + 1)))
+        .mount(&server)
+        .await;
+    let error = match target(&server).publish(&sample_report()).await {
+        Err(error) => error,
+        Ok(_) => panic!("oversized response must be rejected"),
+    };
+    assert_eq!(error.error_kind(), "response_too_large");
+    assert!(!error.is_retryable());
 }

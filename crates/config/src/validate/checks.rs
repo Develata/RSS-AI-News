@@ -98,11 +98,7 @@ pub(super) fn collect_env_checks(
         {
             Some(value) if Url::parse(value).is_ok() => {}
             // 设置了但非法 URL：与是否被继承无关，一律报错。
-            Some(value) => report.push(Diagnostic::new(
-                ".env",
-                "OPENAI_BASE_URL",
-                format!("invalid URL {value:?}"),
-            )),
+            Some(_) => report.push(Diagnostic::new(".env", "OPENAI_BASE_URL", "invalid URL")),
             None if requires_global_base => report.push(Diagnostic::new(
                 ".env",
                 "OPENAI_BASE_URL",
@@ -254,7 +250,7 @@ fn collect_category_checks(
             report.push(Diagnostic::new(
                 source_file.clone(),
                 "category.ai_override.base_url",
-                format!("invalid URL {base_url:?}"),
+                "invalid URL",
             ));
         }
 
@@ -740,7 +736,7 @@ fn validate_feed_url(
         report.push(Diagnostic::new(
             source_file,
             format!("sources[{index}].feed_url"),
-            format!("invalid URL {feed_url:?}"),
+            "invalid URL",
         ));
     }
 }

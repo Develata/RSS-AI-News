@@ -15,6 +15,11 @@ use crate::{
     prompt::{PromptInput, PromptRenderConfig, render_prompt},
 };
 
+/// Maximum decoded HTTP response body, including provider error responses.
+/// News analysis returns compact JSON; 4 MiB is a generous fixed safety cap
+/// independent of an upstream Content-Length or max_tokens promise.
+pub const MAX_RESPONSE_BODY_BYTES: usize = 4 * 1024 * 1024;
+
 pub const SYSTEM_MESSAGE: &str =
     "你是新闻分析助手。严格返回 JSON 格式，不要添加 markdown 围栏或额外说明。";
 
@@ -42,11 +47,26 @@ pub trait AiClient: Send + Sync {
 /// raw value is redacted by the type's own `Debug` / `Display` /
 /// `Serialize` impls; callers should only `expose_secret()` at the actual
 /// HTTP authentication boundary.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AiClientConfig {
     pub api_base: String,
     pub api_key: SecretString,
     pub request_timeout: Duration,
+}
+
+impl fmt::Debug for AiClientConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AiClientConfig")
+            .field(
+                "api_base_origin",
+                &Url::parse(&self.api_base)
+                    .ok()
+                    .map(|url| url.origin().ascii_serialization()),
+            )
+            .field("api_key", &self.api_key)
+            .field("request_timeout", &self.request_timeout)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -63,7 +83,10 @@ impl fmt::Debug for OpenAiCompatClient {
         f.debug_struct("OpenAiCompatClient")
             .field("inner", &"<async_openai::Client>")
             .field("api_key", &self.api_key)
-            .field("chat_completions_url", &self.chat_completions_url)
+            .field(
+                "api_origin",
+                &self.chat_completions_url.origin().ascii_serialization(),
+            )
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -100,7 +123,6 @@ impl OpenAiCompatClient {
     pub fn request_timeout(&self) -> Duration {
         self.request_timeout
     }
-
     pub fn async_openai_client(&self) -> &Client<OpenAIConfig> {
         &self.inner
     }
@@ -158,21 +180,31 @@ impl AiClient for OpenAiCompatClient {
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
-        let body = response
-            .text()
-            .await
-            .map_err(|err| map_reqwest_error(err, self.request_timeout))?;
+        let body = match read_limited_body(response, self.request_timeout).await {
+            Ok(body) => body,
+            Err(AiError::ResponseTooLarge { .. }) if !status.is_success() => {
+                // Preserve retry semantics for a 429/5xx even if its error page
+                // exceeds the cap; never persist that page as an error message.
+                return Err(classify_http_status(
+                    status.as_u16(),
+                    format!("response body exceeded {MAX_RESPONSE_BODY_BYTES} bytes"),
+                    retry_after_seconds,
+                ));
+            }
+            Err(err) => return Err(err),
+        };
 
         if !status.is_success() {
             return Err(classify_error_response(
                 status.as_u16(),
-                body,
+                String::from_utf8_lossy(&body).into_owned(),
                 retry_after_seconds,
+                self.api_key.expose_secret(),
             ));
         }
 
         let envelope: ChatCompletionEnvelope =
-            serde_json::from_str(&body).map_err(|err| AiError::InvalidJson(err.to_string()))?;
+            serde_json::from_slice(&body).map_err(|err| AiError::InvalidJson(err.to_string()))?;
         let choice = envelope
             .choices
             .into_iter()
@@ -231,11 +263,19 @@ struct ApiErrorBody {
     code: Option<String>,
 }
 
-fn classify_error_response(code: u16, body: String, retry_after_seconds: Option<u64>) -> AiError {
+fn classify_error_response(
+    code: u16,
+    body: String,
+    retry_after_seconds: Option<u64>,
+    api_key: &str,
+) -> AiError {
     let parsed = serde_json::from_str::<ErrorEnvelope>(&body).ok();
-    let Some(api_error) = parsed.and_then(|envelope| envelope.error) else {
-        return classify_http_status(code, body, retry_after_seconds);
+    let Some(mut api_error) = parsed.and_then(|envelope| envelope.error) else {
+        return classify_http_status(code, body.replace(api_key, "***"), retry_after_seconds);
     };
+    // Decode JSON escapes before matching the credential. Scrubbing the wire
+    // text alone allows e.g. "\u0073k-..." to reappear in persisted diagnostics.
+    api_error.message = api_error.message.replace(api_key, "***");
 
     if is_quota_error(
         api_error.r#type.as_deref(),
@@ -260,7 +300,36 @@ fn classify_error_response(code: u16, body: String, retry_after_seconds: Option<
     classify_http_status(code, api_error.message, retry_after_seconds)
 }
 
+async fn read_limited_body(
+    mut response: reqwest::Response,
+    timeout: Duration,
+) -> Result<Vec<u8>, AiError> {
+    if response
+        .content_length()
+        .is_some_and(|bytes| bytes > MAX_RESPONSE_BODY_BYTES as u64)
+    {
+        return Err(AiError::ResponseTooLarge {
+            limit: MAX_RESPONSE_BODY_BYTES,
+        });
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| map_reqwest_error(err, timeout))?
+    {
+        if chunk.len() > MAX_RESPONSE_BODY_BYTES - body.len() {
+            return Err(AiError::ResponseTooLarge {
+                limit: MAX_RESPONSE_BODY_BYTES,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 fn map_reqwest_error(err: reqwest::Error, timeout: Duration) -> AiError {
+    let err = err.without_url();
     if err.is_timeout() {
         return AiError::HttpTimeout {
             seconds: timeout.as_secs(),
@@ -340,15 +409,35 @@ mod tests {
         // W14-A：reqwest 路径——JSON error 体里 code=model_not_found → ModelUnavailable。
         let body =
             r#"{"error":{"message":"The model `gpt-x` does not exist","code":"model_not_found"}}"#;
-        let err = classify_error_response(404, body.to_string(), None);
+        let err = classify_error_response(404, body.to_string(), None, "sk-test");
         assert!(matches!(err, AiError::ModelUnavailable { .. }));
     }
 
     #[test]
     fn classify_error_response_detects_model_unavailable_from_plain_text() {
         // W14-A：reqwest 路径——非 JSON 纯文本体含 "model not found" → ModelUnavailable。
-        let err =
-            classify_error_response(404, "404 page not found: model not found".to_string(), None);
+        let err = classify_error_response(
+            404,
+            "404 page not found: model not found".to_string(),
+            None,
+            "sk-test",
+        );
         assert!(matches!(err, AiError::ModelUnavailable { .. }));
+    }
+
+    #[test]
+    fn reqwest_errors_drop_sensitive_urls() {
+        let error = reqwest::Client::new()
+            .get("not a URL")
+            .build()
+            .expect_err("invalid URL")
+            .with_url(
+                Url::parse("https://user:password@example.test/private?key=secret").expect("URL"),
+            );
+        let error = map_reqwest_error(error, Duration::from_secs(2));
+        let rendered = format!("{error:?} {error}");
+        for secret in ["password", "private", "secret"] {
+            assert!(!rendered.contains(secret));
+        }
     }
 }

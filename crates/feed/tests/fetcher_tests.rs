@@ -203,3 +203,21 @@ async fn raw_payload_at_limit_is_preserved_exactly() {
         Some(RSS_BODY.as_bytes())
     );
 }
+
+#[tokio::test]
+async fn connection_error_does_not_expose_rsshub_key() {
+    let server = MockServer::start().await;
+    let mut req = request(&server, "/feed");
+    req.feed_url = "http://127.0.0.1:0/feed".into();
+    req.rsshub_access_key = Some("rsshub-secret".into());
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client");
+    let fetcher = ReqwestFeedFetcher::with_client(client, 1024);
+    let err = fetcher
+        .fetch_raw(&req)
+        .await
+        .expect_err("port zero cannot connect");
+    assert!(!format!("{err:?} {err}").contains("rsshub-secret"));
+}

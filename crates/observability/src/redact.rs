@@ -8,28 +8,74 @@ use url::Url;
 static AUTHZ_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)(authorization\s*:\s*)(bearer|basic|token)\s+\S+").unwrap());
 
-static SECRET_KEY_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)_(token|key|secret|password)$").unwrap());
+static SECRET_KEY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(^|[_-])(token|key|secret|password|signature|credential)$|^(authorization|cookie|set-cookie|sig|auth)$")
+        .expect("static secret-key pattern")
+});
+
+static URL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s<>"']+"#).expect("static URL pattern")
+});
 
 pub fn redact_authorization_header(input: &str) -> Cow<'_, str> {
     AUTHZ_RE.replace_all(input, "$1$2 ***")
 }
 
+/// Redact URL credentials and sensitive query values, including URLs embedded
+/// in error messages. Preserve the original text and borrowing when unchanged.
 pub fn redact_url_userinfo(input: &str) -> Cow<'_, str> {
-    if let Ok(mut url) = Url::parse(input)
-        && (!url.username().is_empty() || url.password().is_some())
-    {
-        // W11-P4-fix2.H2 lint：`let _ = result` 已 deny。这两个 setter 在
-        // cannot-be-a-base URL 上返 Err，但本路径 URL 经 `Url::parse` 验证
-        // 且 username/password 非空——意味着已经是 schemes-with-authority。
-        // 失败 case 仅在不变量被破坏时出现；redact 静默回退（仍走下面的
-        // `to_string()` 返回 redact 后的最佳近似）。`.ok()` 显式吞 Err 不被
-        // lint 拦截，比 `.expect` 在 redact 路径更稳（不让 log/health 崩）。
-        url.set_username("***").ok();
-        url.set_password(None).ok();
-        return Cow::Owned(url.to_string());
+    let mut output: Option<String> = None;
+    let mut copied_until = 0;
+    for matched in URL_RE.find_iter(input) {
+        let raw = matched.as_str();
+        let Ok(mut url) = Url::parse(raw) else {
+            // A malformed credential-bearing URL must not bypass redaction.
+            let result = output.get_or_insert_with(|| String::with_capacity(input.len()));
+            result.push_str(&input[copied_until..matched.start()]);
+            result.push_str("[invalid URL]");
+            copied_until = matched.end();
+            continue;
+        };
+        let has_userinfo = !url.username().is_empty() || url.password().is_some();
+        let has_secret_query = url
+            .query_pairs()
+            .any(|(key, _)| SECRET_KEY_RE.is_match(&key));
+        if !has_userinfo && !has_secret_query {
+            continue;
+        }
+        if has_userinfo && (url.set_username("***").is_err() || url.set_password(None).is_err()) {
+            // Fail closed if URL invariants ever change.
+            let result = output.get_or_insert_with(|| String::with_capacity(input.len()));
+            result.push_str(&input[copied_until..matched.start()]);
+            result.push_str("[redacted URL]");
+            copied_until = matched.end();
+            continue;
+        }
+        if has_secret_query {
+            let query = url.query().unwrap_or_default().to_owned();
+            url.query_pairs_mut().clear().extend_pairs(
+                url::form_urlencoded::parse(query.as_bytes()).map(|(key, value)| {
+                    let value = if SECRET_KEY_RE.is_match(&key) {
+                        Cow::Borrowed("***")
+                    } else {
+                        value
+                    };
+                    (key, value)
+                }),
+            );
+        }
+        let result = output.get_or_insert_with(|| String::with_capacity(input.len()));
+        result.push_str(&input[copied_until..matched.start()]);
+        result.push_str(url.as_str());
+        copied_until = matched.end();
     }
-    Cow::Borrowed(input)
+    match output {
+        Some(mut output) => {
+            output.push_str(&input[copied_until..]);
+            Cow::Owned(output)
+        }
+        None => Cow::Borrowed(input),
+    }
 }
 
 pub fn redact_json_secrets(value: &mut Value) {
@@ -55,8 +101,8 @@ pub fn redact_json_secrets(value: &mut Value) {
 /// One-stop redaction for `run_events.context_json` payloads (per
 /// error-and-observability §4.2). Combines:
 ///
-/// 1. [`redact_json_secrets`] — replaces values whose **key** matches
-///    `*_token` / `*_key` / `*_secret` / `*_password` with `"***"`.
+/// 1. [`redact_json_secrets`] — masks credential keys (bare names and suffixes),
+///    including token, key, secret, password, signature and Authorization.
 /// 2. A recursive sweep over every remaining string **value**, applying
 ///    [`redact_authorization_header`] and [`redact_url_userinfo`] so a
 ///    secret embedded in free-form text (HTTP request dumps, error
@@ -77,9 +123,13 @@ fn redact_strings_in_place(value: &mut Value) {
         Value::String(text) => {
             let after_authz = redact_authorization_header(text);
             let after_url = redact_url_userinfo(after_authz.as_ref());
-            let final_str = after_url.into_owned();
-            if final_str != *text {
-                *text = final_str;
+            let replacement = if after_url != *text {
+                Some(after_url.into_owned())
+            } else {
+                None
+            };
+            if let Some(replacement) = replacement {
+                *text = replacement;
             }
         }
         Value::Object(map) => {

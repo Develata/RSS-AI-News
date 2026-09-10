@@ -130,13 +130,37 @@ pub struct DoctorCommandSummary {
 
 impl DoctorCommandSummary {
     pub fn new(report: CheckReport, deep_scan: Option<DeepScanReport>) -> Self {
+        use rss_ai_news_observability::{
+            CheckOutcome,
+            redact::{redact_authorization_header, redact_url_userinfo},
+        };
+
+        fn redact(message: String) -> String {
+            let header_safe = redact_authorization_header(&message);
+            let url_safe = redact_url_userinfo(header_safe.as_ref());
+            if url_safe.as_ref() != message {
+                url_safe.into_owned()
+            } else {
+                message
+            }
+        }
+
         let shallow_checks = report
             .items
             .into_iter()
-            .map(|(name, outcome)| DoctorCheckSummary {
-                name,
-                outcome: outcome.status().to_string(),
-                message: outcome.message().to_string(),
+            .map(|(name, outcome)| {
+                let status = outcome.status().to_string();
+                let message = match outcome {
+                    CheckOutcome::Ok(message)
+                    | CheckOutcome::Warn(message)
+                    | CheckOutcome::Fail(message)
+                    | CheckOutcome::Info(message) => message,
+                };
+                DoctorCheckSummary {
+                    name,
+                    outcome: status,
+                    message: redact(message),
+                }
             })
             .collect();
         let deep_scan = deep_scan.map(|report| {
@@ -150,7 +174,7 @@ impl DoctorCommandSummary {
                     examples: result
                         .violations
                         .into_iter()
-                        .map(|row| row.message)
+                        .map(|row| redact(row.message))
                         .collect(),
                 })
                 .collect()

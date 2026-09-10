@@ -34,6 +34,9 @@ pub enum AiError {
     #[error("schema invalid: field `{field}` value invalid: {reason}")]
     InvalidFieldValue { field: String, reason: String },
 
+    #[error("response body exceeds {limit} bytes")]
+    ResponseTooLarge { limit: usize },
+
     #[error("response empty (no choices)")]
     EmptyResponse,
 
@@ -62,6 +65,7 @@ impl ClassifiedError for AiError {
             | Self::MissingField { .. }
             | Self::InvalidFieldValue { .. }
             | Self::EmptyResponse
+            | Self::ResponseTooLarge { .. }
             | Self::InvalidConfig(_) => false,
         }
     }
@@ -78,6 +82,7 @@ impl ClassifiedError for AiError {
             Self::MissingField { .. } => "missing_field",
             Self::InvalidFieldValue { .. } => "invalid_field_value",
             Self::EmptyResponse => "empty_response",
+            Self::ResponseTooLarge { .. } => "response_too_large",
             Self::InvalidConfig(_) => "invalid_config",
         }
     }
@@ -106,6 +111,7 @@ impl ClassifiedError for AiError {
                 format!("AI response field `{field}` is invalid: {reason}")
             }
             Self::EmptyResponse => "AI response contained no choices".to_string(),
+            Self::ResponseTooLarge { limit } => format!("AI response exceeded {limit} bytes"),
             Self::InvalidConfig(message) => format!("AI config invalid: {message}"),
         }
     }
@@ -278,6 +284,9 @@ mod tests {
             AiError::InvalidJson("x".into()),
             AiError::MissingField { field: "x".into() },
             AiError::EmptyResponse,
+            AiError::ResponseTooLarge {
+                limit: 4 * 1024 * 1024,
+            },
         ] {
             assert!(err.should_fallback(), "expected fallback for {err:?}");
         }

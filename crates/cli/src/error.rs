@@ -135,7 +135,10 @@ impl CliError {
     }
 
     pub fn display_user(&self) -> String {
-        match self {
+        use rss_ai_news_observability::redact::{redact_authorization_header, redact_url_userinfo};
+        use std::borrow::Cow;
+
+        let message = match self {
             Self::CommandContext { source, .. } => source.display_user(),
             Self::Config(error) => error.to_string(),
             Self::Runtime(error) => error.display_user(),
@@ -184,6 +187,14 @@ impl CliError {
             Self::PublishConflict { state } => {
                 format!("publish record is in conflicting state: {state}")
             }
+        };
+        let header_safe = redact_authorization_header(&message);
+        match redact_url_userinfo(&header_safe) {
+            Cow::Owned(redacted) => redacted,
+            Cow::Borrowed(_) => match header_safe {
+                Cow::Owned(redacted) => redacted,
+                Cow::Borrowed(_) => message,
+            },
         }
     }
 
@@ -239,5 +250,24 @@ impl From<rss_ai_news_ai::AiError> for CliError {
 impl From<rss_ai_news_publish::PublishError> for CliError {
     fn from(value: rss_ai_news_publish::PublishError) -> Self {
         Self::Runtime(RuntimeError::Publish(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_errors_redact_embedded_credentials() {
+        let error = CliError::Runtime(RuntimeError::Config("upstream https://private-user:private-pass@example.test/api?key=private-query Authorization: Bearer private-bearer".into()));
+        let message = error.display_user();
+        for secret in [
+            "private-user",
+            "private-pass",
+            "private-query",
+            "private-bearer",
+        ] {
+            assert!(!message.contains(secret));
+        }
     }
 }

@@ -1,14 +1,18 @@
-use std::{path::PathBuf, sync::Arc};
+//! Concrete diagnostic checks owned by the application composition boundary.
+
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use reqwest::Client;
 use rss_ai_news_config::LoadedConfig;
 use rss_ai_news_observability::health::{CheckOutcome, HealthCheck};
+use rss_ai_news_observability::redact::redact_url_userinfo;
 use rss_ai_news_storage::StoragePool;
 use sqlx::Row;
 use time::OffsetDateTime;
 
-use rss_ai_news_observability::redact::{redact_authorization_header, redact_url_userinfo};
+const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const PING_BODY_MAX_BYTES: usize = 64 * 1024;
 
 pub mod config_check {
     use super::*;
@@ -177,6 +181,7 @@ pub mod openai_check {
             let response = self
                 .http
                 .post(&url)
+                .timeout(HEALTH_REQUEST_TIMEOUT)
                 .bearer_auth(api_key)
                 .json(&serde_json::json!({
                     "model": self.model,
@@ -190,15 +195,18 @@ pub mod openai_check {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    let msg = redact_authorization_header(&error.to_string()).into_owned();
-                    return CheckOutcome::Fail(format!("request failed: {msg}"));
+                    return CheckOutcome::Fail(format!("request failed: {}", error.without_url()));
                 }
             };
             let status = response.status();
             if !status.is_success() {
                 return CheckOutcome::Fail(format!("HTTP {status}"));
             }
-            match response.json::<serde_json::Value>().await {
+            let body = match read_ping_body(response).await {
+                Ok(body) => body,
+                Err(message) => return CheckOutcome::Fail(message),
+            };
+            match serde_json::from_slice::<serde_json::Value>(&body) {
                 Ok(value)
                     if value
                         .get("choices")
@@ -259,6 +267,7 @@ pub mod github_check {
             let response = self
                 .http
                 .get(url)
+                .timeout(HEALTH_REQUEST_TIMEOUT)
                 .bearer_auth(token)
                 .header("User-Agent", "rss-ai-news-doctor")
                 .send()
@@ -269,8 +278,7 @@ pub mod github_check {
                 }
                 Ok(response) => CheckOutcome::Fail(format!("HTTP {}", response.status())),
                 Err(error) => {
-                    let msg = redact_authorization_header(&error.to_string()).into_owned();
-                    CheckOutcome::Fail(format!("request failed: {msg}"))
+                    CheckOutcome::Fail(format!("request failed: {}", error.without_url()))
                 }
             }
         }
@@ -306,14 +314,22 @@ pub mod rsshub_check {
                 return CheckOutcome::Info("not configured".to_string());
             };
             let safe_url = redact_url_userinfo(base_url).into_owned();
-            match self.http.get(base_url).send().await {
+            match self
+                .http
+                .get(base_url)
+                .timeout(HEALTH_REQUEST_TIMEOUT)
+                .send()
+                .await
+            {
                 Ok(response) if response.status().is_success() => {
                     CheckOutcome::Ok(format!("{safe_url} (reachable)"))
                 }
                 Ok(response) => {
                     CheckOutcome::Fail(format!("{safe_url} returned {}", response.status()))
                 }
-                Err(error) => CheckOutcome::Fail(format!("{safe_url} unreachable: {error}")),
+                Err(error) => {
+                    CheckOutcome::Fail(format!("{safe_url} unreachable: {}", error.without_url()))
+                }
             }
         }
     }
@@ -706,4 +722,21 @@ pub mod pending_backlog_check {
             }
         }
     }
+}
+
+/// Doctor requests a one-token completion: cap the decoded body independently
+/// of Content-Length (including chunked and compressed responses).
+async fn read_ping_body(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("response body failed: {}", error.without_url()))?
+    {
+        if chunk.len() > PING_BODY_MAX_BYTES - body.len() {
+            return Err(format!("response body exceeds {PING_BODY_MAX_BYTES} bytes"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }

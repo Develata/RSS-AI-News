@@ -7,7 +7,7 @@ use rss_ai_news_domain::SecretString;
 
 use crate::ConfigError;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct EnvConfig {
     pub openai_api_key: Option<SecretString>,
     pub openai_base_url: Option<String>,
@@ -20,6 +20,31 @@ pub struct EnvConfig {
     /// W14-B：`.env` 文件全量键值（私有），供 `resolve_secret` 按板块
     /// `api_key_env` 动态解析。值在 `Debug` 中固定 redact（见 [`EnvFileValues`]）。
     file_values: EnvFileValues,
+}
+
+// Environment URLs can contain userinfo, query tokens or signed paths. Debug
+// reports their presence only; parsing/redacting here would duplicate a policy
+// and add a dependency from configuration to observability.
+impl fmt::Debug for EnvConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnvConfig")
+            .field("openai_api_key", &self.openai_api_key)
+            .field(
+                "openai_base_url",
+                &self.openai_base_url.as_ref().map(|_| "***"),
+            )
+            .field("github_token", &self.github_token)
+            .field(
+                "rsshub_base_url",
+                &self.rsshub_base_url.as_ref().map(|_| "***"),
+            )
+            .field("rsshub_access_key", &self.rsshub_access_key)
+            .field("http_proxy", &self.http_proxy.as_ref().map(|_| "***"))
+            .field("https_proxy", &self.https_proxy.as_ref().map(|_| "***"))
+            .field("database_url", &self.database_url.as_ref().map(|_| "***"))
+            .field("file_values", &self.file_values)
+            .finish()
+    }
 }
 
 impl EnvConfig {
@@ -104,15 +129,16 @@ fn load_file_values(env_file: Option<&Path>) -> Result<Vec<(String, String)>, Co
 }
 
 fn load_existing_file(path: &Path) -> Result<Vec<(String, String)>, ConfigError> {
-    let mut values = Vec::new();
-    for item in dotenvy::from_path_iter(path).map_err(|err| ConfigError::ParseFailed {
+    let parse_error = |error| ConfigError::ParseFailed {
         path: path.display().to_string(),
-        reason: err.to_string(),
-    })? {
-        let (key, value) = item.map_err(|err| ConfigError::ParseFailed {
-            path: path.display().to_string(),
-            reason: err.to_string(),
-        })?;
+        reason: match error {
+            dotenvy::Error::Io(error) => error.to_string(),
+            _ => "invalid .env syntax or environment variable value".to_string(),
+        },
+    };
+    let mut values = Vec::new();
+    for item in dotenvy::from_path_iter(path).map_err(parse_error)? {
+        let (key, value) = item.map_err(parse_error)?;
         values.push((key, value));
     }
     Ok(values)
@@ -271,5 +297,38 @@ mod tests {
             rendered.contains("CUSTOM_PROVIDER_KEY"),
             "Debug should list key names for diagnostics: {rendered}"
         );
+    }
+
+    #[test]
+    fn env_debug_redacts_urls_that_may_contain_credentials() {
+        let credential_url = "https://private-user:private-pass@host.test/?key=private-query";
+        let config = EnvConfig {
+            openai_base_url: Some(credential_url.into()),
+            rsshub_base_url: Some(credential_url.into()),
+            http_proxy: Some(credential_url.into()),
+            https_proxy: Some(credential_url.into()),
+            database_url: Some("postgres://private-user:private-pass@host.test/db".into()),
+            ..EnvConfig::default()
+        };
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("private-"), "{rendered}");
+        assert!(rendered.contains("database_url: Some"));
+    }
+
+    #[test]
+    fn env_parse_error_does_not_include_secret_line() {
+        let path = env::temp_dir().join(format!(
+            "rss-env-parse-{}.env",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, "OPENAI_API_KEY=\"private-unterminated-secret\n").unwrap();
+        let error = load_existing_file(&path).expect_err("unterminated quote must fail");
+        fs::remove_file(&path).unwrap();
+        let rendered = error.to_string();
+        assert!(!rendered.contains("private-"), "{rendered}");
+        assert!(matches!(error, ConfigError::ParseFailed { .. }));
     }
 }

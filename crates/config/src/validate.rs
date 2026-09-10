@@ -258,6 +258,19 @@ mod tests {
     }
 
     #[test]
+    fn invalid_urls_do_not_echo_secrets_in_diagnostics() {
+        let mut category = category("ai", "not a URL?key=private-url-secret");
+        category.ai_override = Some(crate::AiOverride {
+            base_url: Some("bad URL private-base-secret".into()),
+            ..Default::default()
+        });
+        let error =
+            run_structural_checks(&app(false), &[category], &EnvConfig::default()).unwrap_err();
+        assert!(!error.to_string().contains("private-url-secret"));
+        assert!(!error.to_string().contains("private-base-secret"));
+    }
+
+    #[test]
     fn extraction_strategies_reject_unknown_duplicate_and_empty() {
         for names in [vec![], vec!["unknown"], vec!["readability", "readability"]] {
             let mut app = app(false);

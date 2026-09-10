@@ -9,12 +9,13 @@
 //! Redaction is applied **before** truncation so that even truncated
 //! values keep their secrets masked.
 
-use rss_ai_news_observability::redact::redact_event_context;
+use rss_ai_news_observability::redact::{
+    redact_authorization_header, redact_event_context, redact_url_userinfo,
+};
 use rss_ai_news_storage::{NewRunEvent, RunEventRepository};
 use serde_json::Value as JsonValue;
 
 const CONTEXT_JSON_MAX_BYTES: usize = 4096;
-const CONTEXT_JSON_PREVIEW_BYTES: usize = 3500;
 
 pub struct RunEventEmitter<'a> {
     pub run_id: &'a str,
@@ -33,6 +34,8 @@ impl<'a> RunEventEmitter<'a> {
         context: Option<JsonValue>,
     ) {
         let context_json = context.map(sanitize_and_serialize);
+        let header_safe = redact_authorization_header(message);
+        let message_safe = redact_url_userinfo(&header_safe);
         let event = NewRunEvent {
             run_id: self.run_id.to_string(),
             trace_id: None,
@@ -41,7 +44,7 @@ impl<'a> RunEventEmitter<'a> {
             event_kind: event_kind.to_string(),
             target_kind: target_kind.map(str::to_string),
             target_id,
-            message: message.to_string(),
+            message: message_safe.into_owned(),
             context_json,
         };
 
@@ -70,24 +73,56 @@ fn truncate_serialized(value: &JsonValue) -> String {
         return serialized;
     }
 
-    let preview = serialized
-        .char_indices()
-        .take_while(|(idx, _)| *idx <= CONTEXT_JSON_PREVIEW_BYTES)
-        .map(|(_, ch)| ch)
-        .collect::<String>();
-
-    serde_json::json!({
+    let mut envelope = serde_json::json!({
         "truncated": true,
         "original_len": serialized.len(),
-        "preview": preview,
-    })
-    .to_string()
+        "preview": "",
+    });
+    // `serialized` already escapes control characters. Encoding it as a JSON
+    // string can at most double its byte length (quotes and backslashes).
+    // Budget the complete envelope, including that second encoding step.
+    let mut end = (CONTEXT_JSON_MAX_BYTES - envelope.to_string().len()) / 2;
+    while !serialized.is_char_boundary(end) {
+        end -= 1;
+    }
+    envelope["preview"] = JsonValue::String(serialized[..end].to_owned());
+    envelope.to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn emit_redacts_message_as_well_as_context() {
+        struct Capture(std::sync::Mutex<Option<NewRunEvent>>);
+        #[async_trait::async_trait]
+        impl RunEventRepository for Capture {
+            async fn insert(
+                &self,
+                event: &NewRunEvent,
+            ) -> Result<i64, rss_ai_news_storage::StorageError> {
+                *self.0.lock().unwrap() = Some(event.clone());
+                Ok(1)
+            }
+        }
+        let capture = Capture(std::sync::Mutex::new(None));
+        RunEventEmitter { run_id: "test", stage: "test", repo: &capture }
+            .emit("failure", "error", None, None,
+                "failed https://private-user:private-password@example.test/?key=private-key Authorization: Bearer private-token",
+                Some(json!({"token": "private-context"}))).await;
+        let event = capture.0.lock().unwrap().take().unwrap();
+        for secret in [
+            "private-user",
+            "private-password",
+            "private-key",
+            "private-token",
+        ] {
+            assert!(!event.message.contains(secret));
+        }
+        assert!(!event.context_json.unwrap().contains("private-context"));
+    }
 
     #[test]
     fn sanitize_redacts_known_secret_keys_at_any_depth() {
@@ -147,5 +182,26 @@ mod tests {
         // preview path.
         assert!(!serialized.contains(secret));
         assert!(serialized.contains("\"truncated\":true"));
+    }
+
+    #[test]
+    fn truncated_context_respects_final_serialized_byte_limit() {
+        for padding in [
+            "\\\"".repeat(3_000),
+            "中文🦀".repeat(1_000),
+            "a".repeat(5_000),
+        ] {
+            let rendered = sanitize_and_serialize(json!({"padding": padding}));
+            assert!(
+                rendered.len() <= CONTEXT_JSON_MAX_BYTES,
+                "final JSON used {} bytes",
+                rendered.len()
+            );
+            let value: JsonValue =
+                serde_json::from_str(&rendered).expect("valid UTF-8 JSON envelope");
+            assert_eq!(value["truncated"], true);
+            assert!(value["original_len"].as_u64().unwrap() > CONTEXT_JSON_MAX_BYTES as u64);
+            assert!(!value["preview"].as_str().unwrap().is_empty());
+        }
     }
 }

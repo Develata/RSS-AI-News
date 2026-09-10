@@ -412,6 +412,39 @@ async fn config_check_reports_missing_required_credentials() {
 }
 
 #[tokio::test]
+async fn openai_check_rejects_oversized_success_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [], "padding": "x".repeat(65537)
+        })))
+        .mount(&server)
+        .await;
+    let check = OpenAiPingCheck::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        Some(server.uri()),
+        Some("sk-test".into()),
+        "test".into(),
+        true,
+    );
+    let outcome = check.run().await;
+    assert!(matches!(outcome, CheckOutcome::Fail(_)), "{outcome:?}");
+    assert!(outcome.message().contains("65536"));
+}
+
+#[tokio::test]
+async fn rsshub_check_does_not_expose_url_secrets_in_connection_errors() {
+    // Port zero cannot host a listening service.
+    let check = rss_ai_news_runtime::doctor::health::rsshub_check::RsshubPingCheck::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        Some("http://private-user:private-pass@127.0.0.1:0/?key=private-key".into()),
+    );
+    let outcome = check.run().await;
+    assert!(matches!(outcome, CheckOutcome::Fail(_)));
+    assert!(!outcome.message().contains("private-"), "{outcome:?}");
+}
+
+#[tokio::test]
 async fn migration_check_rejects_checksum_drift() {
     let pool = memory_pool().await;
     rss_ai_news_storage::run_migrations(&StoragePool::Sqlite(pool.clone()))
