@@ -586,3 +586,96 @@ async fn set_article_category(pool: &SqlitePool, article_id: i64, category_key: 
     .await
     .expect("article source category should update");
 }
+
+#[tokio::test]
+async fn ai_live_tasks_are_bounded_by_concurrency() {
+    struct ObserveTasks {
+        deps: std::sync::OnceLock<std::sync::Weak<rss_ai_news_runtime::context::AiDeps>>,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait]
+    impl AiClient for ObserveTasks {
+        async fn invoke(&self, _: &AiTask) -> Result<AiResponse, AiError> {
+            self.peak.fetch_max(
+                self.deps.get().unwrap().strong_count(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            tokio::task::yield_now().await;
+            Err(AiError::ConnectionFailed("expected failure".into()))
+        }
+    }
+    let (_dir, pool) = make_test_pool().await;
+    for i in 0..20 {
+        seed_persisted_article(&pool, &format!("bounded-{i}"), "title", "body").await;
+    }
+    let client = Arc::new(ObserveTasks {
+        deps: Default::default(),
+        peak: Default::default(),
+    });
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let deps = Arc::new(common::ai_deps(pool, app, client.clone()));
+    client.deps.set(Arc::downgrade(&deps)).unwrap();
+    let mut options = opts();
+    options.task_gen_batch_size = 20;
+    options.process_batch_size = 20;
+    options.max_batches = 1;
+    let summary = AiRunFlow::new(deps).run(options).await;
+    assert_eq!(summary.process.claimed, 20);
+    assert_eq!(summary.process.retryable_failed, 20);
+    assert_eq!(summary.process.tasks_panicked, 0);
+    let peak = client.peak.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        peak <= 3,
+        "{peak} context owners: only flow + 2 live tasks allowed"
+    );
+}
+
+#[tokio::test]
+async fn oversized_ai_failures_remain_bounded_in_database_and_events() {
+    for code in [400, 503] {
+        let (_dir, pool) = make_test_pool().await;
+        let article_id = seed_persisted_article(&pool, "large-error", "title", "body").await;
+        let client = Arc::new(MockAiClient::default());
+        let flow = flow(pool.clone(), client.clone());
+        flow.task_gen(&opts()).await;
+        let result_id = ai_result_id_by_article(&pool, article_id).await;
+        client
+            .insert_error(
+                result_id,
+                AiError::HttpStatus {
+                    code,
+                    message: "中文🦀".repeat(200_000),
+                },
+            )
+            .await;
+        let summary = flow.process_ai_tasks(&opts()).await;
+        assert_eq!(summary.claimed, 1);
+        assert_eq!(summary.retryable_failed, u32::from(code == 503));
+        assert_eq!(summary.permanent_failed, u32::from(code == 400));
+        let last_error: String =
+            sqlx::query_scalar("SELECT last_error FROM article_ai_results WHERE id = ?")
+                .bind(result_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let event: String = sqlx::query_scalar(
+            "SELECT message FROM run_events WHERE event_kind = 'ai_failed' AND target_id = ?",
+        )
+        .bind(result_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for diagnostic in [last_error, event] {
+            assert!(diagnostic.len() <= 16 * 1024);
+            assert!(diagnostic.contains("[truncated, original_bytes="));
+        }
+        assert_eq!(
+            ai_result_state(&pool, result_id).await,
+            if code == 503 {
+                "pending"
+            } else {
+                "permanent_failed"
+            }
+        );
+    }
+}

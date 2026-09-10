@@ -5,6 +5,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use reqwest::Client;
 use rss_ai_news_config::LoadedConfig;
+use rss_ai_news_domain::SecretString;
 use rss_ai_news_observability::health::{CheckOutcome, HealthCheck};
 use rss_ai_news_observability::redact::redact_url_userinfo;
 use rss_ai_news_storage::StoragePool;
@@ -130,7 +131,7 @@ pub mod openai_check {
     pub struct OpenAiPingCheck {
         http: Client,
         base_url: Option<String>,
-        api_key: Option<String>,
+        api_key: Option<SecretString>,
         model: String,
         enabled: bool,
     }
@@ -139,7 +140,7 @@ pub mod openai_check {
         pub fn new(
             http: Client,
             base_url: Option<String>,
-            api_key: Option<String>,
+            api_key: Option<SecretString>,
             model: String,
             enabled: bool,
         ) -> Self {
@@ -165,8 +166,8 @@ pub mod openai_check {
             }
             let Some(api_key) = self
                 .api_key
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
+                .as_ref()
+                .filter(|value| !value.expose_secret().trim().is_empty())
             else {
                 return CheckOutcome::Info("skipped (OPENAI_API_KEY not configured)".to_string());
             };
@@ -182,7 +183,7 @@ pub mod openai_check {
                 .http
                 .post(&url)
                 .timeout(HEALTH_REQUEST_TIMEOUT)
-                .bearer_auth(api_key)
+                .bearer_auth(api_key.expose_secret())
                 .json(&serde_json::json!({
                     "model": self.model,
                     "messages": [{"role": "user", "content": "ping"}],
@@ -227,18 +228,18 @@ pub mod github_check {
 
     pub struct GitHubPingCheck {
         http: Client,
-        token: Option<String>,
+        token: Option<SecretString>,
         api_base: String,
     }
 
     impl GitHubPingCheck {
-        pub fn new(http: Client, token: Option<String>) -> Self {
+        pub fn new(http: Client, token: Option<SecretString>) -> Self {
             Self::with_base_url(http, token, "https://api.github.com")
         }
 
         pub fn with_base_url(
             http: Client,
-            token: Option<String>,
+            token: Option<SecretString>,
             api_base: impl Into<String>,
         ) -> Self {
             Self {
@@ -258,8 +259,8 @@ pub mod github_check {
         async fn run(&self) -> CheckOutcome {
             let Some(token) = self
                 .token
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
+                .as_ref()
+                .filter(|value| !value.expose_secret().trim().is_empty())
             else {
                 return CheckOutcome::Warn("not configured (publish will fail)".to_string());
             };
@@ -268,7 +269,7 @@ pub mod github_check {
                 .http
                 .get(url)
                 .timeout(HEALTH_REQUEST_TIMEOUT)
-                .bearer_auth(token)
+                .bearer_auth(token.expose_secret())
                 .header("User-Agent", "rss-ai-news-doctor")
                 .send()
                 .await;

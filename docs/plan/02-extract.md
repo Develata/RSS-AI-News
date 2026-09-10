@@ -111,6 +111,9 @@ loop:
 
 ### 5.2 并发与 lease
 
+滚动 JoinSet 将存活任务数限制在 `http.concurrent_fetches.max(1)`，不为整个 claim 批次预建等待任务。
+claim 行集合仍占 O(batch size) 内存；CLI 批大小范围见 [09-cli-and-runtime](./09-cli-and-runtime.md)。
+
 claim SQL 用 `FOR UPDATE SKIP LOCKED`（PG）或单条 UPDATE...RETURNING 的数据库写锁（SQLite）保证并发安全。
 lease 字段约束见 [./08-state-machines.md](./08-state-machines.md) §2.3 + [./05-storage.md](./05-storage.md)。
 

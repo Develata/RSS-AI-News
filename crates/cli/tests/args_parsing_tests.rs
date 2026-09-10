@@ -569,3 +569,23 @@ async fn args_parsing_max_batches_in_overrides_is_none_for_unsupporting_subcomma
     let overrides = cli.to_cli_overrides();
     assert_eq!(overrides.max_batches, None);
 }
+
+#[test]
+fn processing_batch_sizes_have_explicit_bounds() {
+    for (command, flag) in [
+        ("ingest", "--batch-size"),
+        ("ai-run", "--batch-size"),
+        ("run", "--ingest-batch-size"),
+        ("run", "--ai-batch-size"),
+    ] {
+        for size in ["0", "10001", "1000000"] {
+            assert!(
+                Cli::try_parse_from(["rss-ai-news", command, flag, size]).is_err(),
+                "accepted {command} {flag} {size}"
+            );
+        }
+        for size in ["1", "10000"] {
+            assert!(Cli::try_parse_from(["rss-ai-news", command, flag, size]).is_ok());
+        }
+    }
+}

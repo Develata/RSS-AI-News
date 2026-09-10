@@ -8,7 +8,6 @@ use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_storage::{ClaimRequest, NewAiResult, build_owner_id, lease_expires_at};
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
-use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::context::AiDeps;
@@ -237,26 +236,21 @@ impl AiRunFlow {
             summary.batches_executed += 1;
             let retryable_before = summary.retryable_failed;
 
-            let semaphore = Arc::new(Semaphore::new(
-                self.ctx.http.concurrent_fetches.max(1) as usize
-            ));
+            let concurrency = self.ctx.http.concurrent_fetches.max(1) as usize;
             let mut join_set = JoinSet::new();
-
-            for task in claimed {
-                let ctx = Arc::clone(&self.ctx);
-                let owner = owner.clone();
-                let opts = Arc::clone(&opts);
-                let semaphore = Arc::clone(&semaphore);
-                join_set.spawn(async move {
-                    let _permit = semaphore
-                        .acquire_owned()
-                        .await
-                        .expect("semaphore should not be closed");
-                    process::process_one(ctx, owner, task, opts).await
-                });
-            }
-
-            while let Some(result) = join_set.join_next().await {
+            let mut pending = claimed.into_iter();
+            loop {
+                // Only materialize task state for the next concurrency window.
+                while join_set.len() < concurrency {
+                    let Some(task) = pending.next() else { break };
+                    let ctx = Arc::clone(&self.ctx);
+                    let owner = owner.clone();
+                    let opts = Arc::clone(&opts);
+                    join_set.spawn(process::process_one(ctx, owner, task, opts));
+                }
+                let Some(result) = join_set.join_next().await else {
+                    break;
+                };
                 match result {
                     Ok(outcome) => summary.record(outcome),
                     Err(error) => {

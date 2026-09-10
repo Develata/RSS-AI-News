@@ -470,3 +470,37 @@ fn doctor_summary_redacts_secrets_in_pretty_and_json() {
     assert!(!json.contains("private-"), "{json}");
     assert!(pretty.contains("host.test"));
 }
+
+#[tokio::test]
+async fn doctor_missing_database_never_creates_file() {
+    for deep in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let db_path = temp.path().join("absent.sqlite");
+        write_config(temp.path(), &db_path);
+        let cli = cli_for(temp.path(), deep, OutputFormat::Json);
+        let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Json);
+        let result = doctor::run(&cli, doctor_args(&cli), &mut writer).await;
+        assert!(!db_path.exists(), "diagnostics created an absent database");
+        assert!(matches!(result, Err(CliError::Storage(_))));
+    }
+}
+#[tokio::test]
+async fn doctor_pool_rejects_writes() {
+    let temp = TempDir::new().unwrap();
+    let db_path = temp.path().join("rss.sqlite");
+    write_config(temp.path(), &db_path);
+    initialize_database(&db_path).await;
+    let cli = cli_for(temp.path(), false, OutputFormat::Json);
+    let deps = rss_ai_news_cli::context_factory::build_doctor_deps(&cli)
+        .await
+        .unwrap();
+    let StoragePool::Sqlite(pool) = deps.pool else {
+        panic!("sqlite")
+    };
+    assert!(
+        sqlx::query("CREATE TABLE doctor_must_not_write (id INTEGER)")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+}

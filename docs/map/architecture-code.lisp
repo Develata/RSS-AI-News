@@ -148,7 +148,7 @@
       :downstream (ingest-deps feed-crate repo-feed-source repo-feed-entry artifact-writer
                    run-event-emitter)
       :state active
-      :notes "run() 按 source 执行；仅持有 IngestDeps。")
+      :notes "run() 按 source 滚动执行；仅持有 IngestDeps；增量计数和最多 32 个失败样例。")
 
 (node :id flow-extract
       :label "ExtractFlow"
@@ -160,7 +160,7 @@
       :downstream (extract-deps extractor-crate repo-feed-entry repo-article artifact-writer
                    run-event-emitter)
       :state active
-      :notes "run() 批次领取，失败时懒读取摘要；仅保存计数与最多 32 个失败样例。")
+      :notes "run() 批次领取、滚动 JoinSet 限制存活任务数，失败时懒读取摘要；仅保存计数与最多 32 个失败样例。")
 
 (node :id flow-ai-run
       :label "AiRunFlow"
@@ -172,7 +172,7 @@
       :downstream (ai-deps ai-crate repo-article repo-article-ai-result artifact-writer
                    run-event-emitter)
       :state active
-      :notes "mod 编排 + dto / process / release；Arc<AiRunOptions> 与 Arc<str> 共享不可变配置，最多 32 个失败样例。")
+      :notes "mod 滚动 JoinSet 编排 + dto / process / release；Arc<AiRunOptions> 与 Arc<str> 共享不可变配置，最多 32 个失败样例。")
 
 (node :id flow-publish
       :label "PublishFlow"
@@ -264,7 +264,7 @@
       :upstream (flow-ingest flow-extract flow-ai-run flow-publish flow-backfill flow-reindex)
       :downstream (repo-run-event redact-event-context)
       :state active
-      :notes "emit() 脱敏 message 与 context，context 最终序列化 JSON ≤4096 bytes；
+      :notes "emit() 脱敏 message 与 context；message ≤16 KiB，context 最终序列化 JSON ≤4096 bytes；
               insert 失败仅 tracing::error!，不向上抛错（'禁止静默吞错' 的唯一豁免点）。")
 
 ;; ====================================================================
@@ -507,7 +507,7 @@
       :upstream (cli-commands)
       :downstream (health-check config-validate storage-pool)
       :state active
-      :notes "13 项具体 config/DB/migration/HTTP/disk/liveness checks。doctor 不自动 migrate 或 seed；
+      :notes "13 项具体 config/DB/migration/HTTP/disk/liveness checks。doctor 使用只读 pool，不创建数据库、不自动 migrate 或 seed；
               migration 校验版本、checksum 和 success；HTTP ping 有时间与 body 上限。")
 
 (node :id redact-event-context

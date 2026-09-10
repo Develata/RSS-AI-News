@@ -176,12 +176,14 @@ fn is_branch_concurrently_updated(error: &PublishError) -> bool {
         PublishError::GitHubApiError {
             status: 422,
             message,
-        } => {
-            let lower = message.to_lowercase();
-            lower.contains("fast forward") || lower.contains("not a fast-forward")
-        }
+        } => is_non_fast_forward_message(message),
         _ => false,
     }
+}
+
+fn is_non_fast_forward_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("fast forward") || lower.contains("not a fast-forward")
 }
 
 impl GitHubTarget {
@@ -559,11 +561,17 @@ fn response_message(status: u16, body: &[u8], token: &str) -> String {
     };
     // Error JSON can encode the token with escapes. Scrub after decoding, before
     // this message reaches errors, tracing or persisted publish diagnostics.
-    if token.is_empty() {
+    let mut safe = if token.is_empty() {
         message
     } else {
         message.replace(token, "***")
+    };
+    // The atomic publish retry path classifies 422 by message. Preserve its
+    // semantic signal even when the original wording falls outside the prefix.
+    if safe.len() > 8 * 1024 && status == 422 && is_non_fast_forward_message(&safe) {
+        safe.insert_str(0, "not a fast-forward: ");
     }
+    rss_ai_news_domain::error::truncate_diagnostic(safe, 8 * 1024)
 }
 
 fn parse_json_value(status: u16, body: &[u8]) -> Result<Value, PublishError> {
@@ -625,6 +633,17 @@ pub use classify::classify_octocrab_error;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_cap_preserves_branch_conflict_classification() {
+        for (tail, expected) in [("not a fast-forward", true), ("validation failed", false)] {
+            let body = format!("{} {tail}", "x".repeat(20_000));
+            let message = response_message(422, body.as_bytes(), "test-token");
+            assert!(message.len() <= 8 * 1024);
+            let error = classify::classify_github_status(422, message, None);
+            assert_eq!(is_branch_concurrently_updated(&error), expected);
+        }
+    }
 
     #[test]
     fn debug_redacts_token_to_prevent_log_leakage() {

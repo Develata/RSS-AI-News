@@ -682,3 +682,56 @@ fn new_article(content_hash: &str, entry_id: i64, rule_id: i64) -> NewArticle {
         origin_feed_entry_id: entry_id,
     }
 }
+
+#[tokio::test]
+async fn extract_live_tasks_are_bounded_by_concurrency() {
+    struct ObserveTasks {
+        deps: std::sync::OnceLock<std::sync::Weak<rss_ai_news_runtime::context::ExtractDeps>>,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait]
+    impl HtmlFetcher for ObserveTasks {
+        async fn fetch_html(&self, _: &ArticleFetchTask) -> Result<RawHtmlFetch, ExtractorError> {
+            self.peak.fetch_max(
+                self.deps.get().unwrap().strong_count(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            tokio::task::yield_now().await;
+            Err(ExtractorError::ConnectionFailed)
+        }
+    }
+    let (_dir, pool) = make_test_pool().await;
+    let (_, source_id) = setup_base(&pool).await;
+    for i in 0..20 {
+        seed_pending_fetch_entry(
+            &pool,
+            source_id,
+            &format!("bounded-{i}"),
+            &format!("bounded-hash-{i}"),
+            None,
+        )
+        .await;
+    }
+    let fetcher = Arc::new(ObserveTasks {
+        deps: Default::default(),
+        peak: Default::default(),
+    });
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1)); // concurrent_fetches = 2
+    let deps = Arc::new(common::extract_deps(pool, app, fetcher.clone(), vec![]));
+    fetcher.deps.set(Arc::downgrade(&deps)).unwrap();
+    let summary = ExtractFlow::new(deps)
+        .run(ExtractOptions {
+            batch_size: 20,
+            max_attempts: 3,
+            max_batches: 1,
+        })
+        .await;
+    assert_eq!(summary.claimed, 20);
+    assert_eq!(summary.retryable_failed, 20);
+    assert_eq!(summary.tasks_panicked, 0);
+    let peak = fetcher.peak.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        peak <= 3,
+        "{peak} context owners: only flow + 2 live tasks allowed"
+    );
+}

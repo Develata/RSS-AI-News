@@ -17,3 +17,11 @@ extract/AI 的历史 outcome 集合改为 counters + 最多32条失败样例；�
 代价与兼容：runtime/domain 的 Rust DTO/API 发生源代码级变化，workspace 内调用方已同步；公开 TOML 格式与持久化 schema 保持兼容。需要迁移的只读命令现在报错，用户须显式 migrate run。若配置已指定远端仓库但缺凭据，publish 明确失败；--local-only 可独立运行。
 
 Docker 采用普通 locked Cargo build + cache mounts，放弃 stub/fingerprint 技巧。新建 GitHub runner 的 cache mounts 不自动跨 runner 持久化，冷构建耗时需由真实 CI 持续测量。保留单次 CLI 与外部 scheduler，不改 runtime/ORM，不引入 batch insert 或未经测量的新索引。
+
+## Resource Boundary Follow-up（2026-09-10）
+
+沿用上述边界：doctor 打开只读 pool；provider 诊断与事件 message 设字节上限；
+extract/AI 的存活任务数与 ingest 一样受并发度限制；ingest 汇总也只保留 32 个失败样例。
+同步 preparation 完成后检查 deadline，不引入线程池。细节以 plan/01、02、03、04、07、09 为准。
+`IngestSummary.per_source → failure_samples`、health 构造器 `Option<String> → Option<SecretString>`
+为源码级 API 变化；CLI 处理批大小新增 `1..=10000` 范围。持久化 schema、依赖图和部署机制不变。

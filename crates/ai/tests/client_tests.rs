@@ -367,3 +367,45 @@ async fn invoke_classifies_quota_and_missing_model_on_real_request_path() {
         assert!(err.should_fallback());
     }
 }
+
+#[tokio::test]
+async fn provider_diagnostics_are_bounded_after_decoding_and_redaction() {
+    for (status, kind) in [
+        (503, "http_status"),
+        (429, "quota_exceeded"),
+        (404, "model_unavailable"),
+    ] {
+        for structured in [false, true] {
+            let server = MockServer::start().await;
+            let tail = match status {
+                429 => " quota",
+                404 => " model not found",
+                _ => "",
+            };
+            let message = format!("sk-test {}{tail}", "中文🦀".repeat(200_000));
+            let body = if structured {
+                json!({"error":{"message":message}}).to_string()
+            } else {
+                message
+            };
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .mount(&server)
+                .await;
+            let error = test_client(server.uri())
+                .invoke(&test_task())
+                .await
+                .unwrap_err();
+            assert_eq!(error.error_kind(), kind);
+            for diagnostic in [error.to_string(), error.display_user()] {
+                assert!(
+                    diagnostic.len() <= 16 * 1024,
+                    "diagnostic used {} bytes",
+                    diagnostic.len()
+                );
+                assert!(diagnostic.contains("[truncated, original_bytes="));
+                assert!(!diagnostic.contains("sk-test"));
+            }
+        }
+    }
+}

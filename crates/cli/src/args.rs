@@ -128,7 +128,7 @@ pub struct IngestArgs {
     pub source: Option<String>,
     #[arg(long = "skip-fetch")]
     pub skip_fetch: bool,
-    #[arg(long = "batch-size", default_value_t = 50)]
+    #[arg(long = "batch-size", default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=10_000))]
     pub batch_size: u32,
     /// 覆盖 `runtime.max_batches_per_run`。`0` = 不限（仅由 lease + 宿主
     /// 超时兜底）。F7-1 修复：从 [`Cli`] 全局 flag 改为子命令本地
@@ -140,7 +140,7 @@ pub struct IngestArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct AiRunArgs {
-    #[arg(long = "batch-size", default_value_t = 20)]
+    #[arg(long = "batch-size", default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=10_000))]
     pub batch_size: u32,
     #[arg(long)]
     pub model: Option<String>,
@@ -328,9 +328,9 @@ pub enum MigrateAction {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct RunArgs {
-    #[arg(long = "ingest-batch-size")]
+    #[arg(long = "ingest-batch-size", value_parser = clap::value_parser!(u32).range(1..=10_000))]
     pub ingest_batch_size: Option<u32>,
-    #[arg(long = "ai-batch-size")]
+    #[arg(long = "ai-batch-size", value_parser = clap::value_parser!(u32).range(1..=10_000))]
     pub ai_batch_size: Option<u32>,
     #[arg(long = "publish-date")]
     pub publish_date: Option<String>,

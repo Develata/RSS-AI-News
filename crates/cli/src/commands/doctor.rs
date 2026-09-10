@@ -1,4 +1,3 @@
-use rss_ai_news_domain::SecretString;
 use rss_ai_news_observability::health::{CheckOutcome, CheckReport, HealthCheck};
 use rss_ai_news_runtime::doctor::deep_scan;
 use rss_ai_news_runtime::doctor::health::{
@@ -22,28 +21,21 @@ pub async fn run(cli: &Cli, args: &DoctorArgs, writer: &mut OutputWriter) -> Res
     let app = &deps.loaded.app;
     let env = &deps.loaded.env;
     let min_free_bytes = 100 * 1024 * 1024;
-    let github_token: Option<String> = if app.publish.github_owner.trim().is_empty()
+    let github_token = if app.publish.github_owner.trim().is_empty()
         || app.publish.github_repo.trim().is_empty()
     {
         None
     } else {
-        env.github_token
-            .as_ref()
-            .map(|secret| secret.expose_secret().to_owned())
+        env.github_token.clone()
     };
-    let openai_api_key: Option<String> = env
-        .openai_api_key
-        .as_ref()
-        .map(SecretString::expose_secret)
-        .map(str::to_owned);
-    let checks: Vec<Box<dyn HealthCheck>> = vec![
+    let mut checks: Vec<Box<dyn HealthCheck>> = vec![
         Box::new(ConfigCheck::new(deps.loaded.clone())),
         Box::new(DatabaseConnectivityCheck::new(deps.pool.clone())),
         Box::new(MigrationVersionCheck::new(deps.pool.clone())),
         Box::new(OpenAiPingCheck::new(
             deps.http_client.clone(),
             env.openai_base_url.clone(),
-            openai_api_key,
+            env.openai_api_key.clone(),
             app.ai.model.clone(),
             app.ai.enabled,
         )),
@@ -53,10 +45,6 @@ pub async fn run(cli: &Cli, args: &DoctorArgs, writer: &mut OutputWriter) -> Res
             env.rsshub_base_url.clone(),
         )),
         Box::new(TimezoneCheck::new(app.publish.target_timezone.clone())),
-        Box::new(DiskSpaceCheck::new(
-            app.database.sqlite_path.clone(),
-            min_free_bytes,
-        )),
         Box::new(ExpiredLeaseCheck::new(deps.pool.clone())),
         Box::new(FailedBacklogCheck::new(deps.pool.clone())),
         Box::new(StuckReindexCheck::new(
@@ -75,6 +63,19 @@ pub async fn run(cli: &Cli, args: &DoctorArgs, writer: &mut OutputWriter) -> Res
     ];
 
     let mut report = CheckReport::default();
+    if matches!(deps.pool, rss_ai_news_storage::StoragePool::Sqlite(_)) {
+        checks.push(Box::new(DiskSpaceCheck::new(
+            app.database.sqlite_path.clone(),
+            min_free_bytes,
+        )));
+    } else {
+        report.items.push((
+            "Disk space".to_string(),
+            CheckOutcome::Info(
+                "skipped (PostgreSQL database disk is not observable locally)".to_string(),
+            ),
+        ));
+    }
     let mut database_ready = true;
     for check in checks {
         let name = check.name().to_string();

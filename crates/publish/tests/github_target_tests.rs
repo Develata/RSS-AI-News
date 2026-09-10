@@ -438,3 +438,23 @@ async fn oversized_github_success_body_is_permanent() {
     assert_eq!(error.error_kind(), "response_too_large");
     assert!(!error.is_retryable());
 }
+
+#[tokio::test]
+async fn github_error_diagnostics_are_bounded() {
+    for structured in [false, true] {
+        let server = MockServer::start().await;
+        let message = "中文🦀".repeat(200_000);
+        let body = if structured {
+            json!({"message":message}).to_string()
+        } else {
+            message
+        };
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401).set_body_string(body))
+            .mount(&server)
+            .await;
+        let error = target(&server).publish(&sample_report()).await.unwrap_err();
+        assert!(error.display_user().len() <= 16 * 1024);
+        assert!(error.display_user().contains("[truncated, original_bytes="));
+    }
+}

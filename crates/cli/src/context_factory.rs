@@ -279,7 +279,7 @@ pub async fn build_doctor_deps(cli: &crate::args::Cli) -> Result<DoctorDeps, Cli
     let app = &loaded.app;
     let url = resolve_storage_url(&loaded)?;
     let busy_timeout_ms = u32::try_from(app.database.busy_timeout_ms).unwrap_or(u32::MAX);
-    let pool = StoragePool::build(&url, app.database.max_connections, busy_timeout_ms)
+    let pool = StoragePool::build_read_only(&url, busy_timeout_ms)
         .await
         .map_err(CliError::Storage)?;
     let http_client = Client::builder()

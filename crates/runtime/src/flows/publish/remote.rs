@@ -68,7 +68,7 @@ async fn prepare_remote_report(
     if Instant::now() >= deadline {
         return Err(RemotePreparationError::Timeout);
     }
-    tokio::time::timeout_at(deadline, async {
+    let prepared = tokio::time::timeout_at(deadline, async {
         emitter
             .emit(
                 "publish_started",
@@ -92,7 +92,12 @@ async fn prepare_remote_report(
     })
     .await
     .map_err(|_| RemotePreparationError::Timeout)?
-    .map_err(RemotePreparationError::Report)
+    .map_err(RemotePreparationError::Report)?;
+    // Timeout cannot preempt synchronous rendering inside a single future poll.
+    if Instant::now() >= deadline {
+        return Err(RemotePreparationError::Timeout);
+    }
+    Ok(prepared)
 }
 
 impl PublishFlow {
@@ -754,5 +759,102 @@ mod tests {
         assert!(deadline >= before + budget);
         assert!(deadline <= after + budget);
         assert!(remote_deadline(0) <= Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use rss_ai_news_storage::*;
+
+    struct ReadyAfterDeadline(Instant);
+    #[async_trait::async_trait]
+    impl PublishItemRepository for ReadyAfterDeadline {
+        async fn select_ai_path_candidates(
+            &self,
+            _: &str,
+            _: i32,
+            _: OffsetDateTime,
+            _: OffsetDateTime,
+            _: std::num::NonZeroU32,
+        ) -> Result<Vec<PublishCandidateRow>, StorageError> {
+            unreachable!()
+        }
+        async fn select_ai_off_passthrough_candidates(
+            &self,
+            _: &str,
+            _: OffsetDateTime,
+            _: OffsetDateTime,
+            _: std::num::NonZeroU32,
+        ) -> Result<Vec<PublishCandidateRow>, StorageError> {
+            unreachable!()
+        }
+        async fn freeze_snapshot(
+            &self,
+            _: i64,
+            _: &str,
+            _: Vec<FreezeSnapshotItem>,
+            _: Vec<i64>,
+            _: OffsetDateTime,
+        ) -> Result<FreezeSnapshotOutcome, StorageError> {
+            unreachable!()
+        }
+        async fn list_by_publish_record(
+            &self,
+            _: i64,
+        ) -> Result<Vec<rss_ai_news_domain::model::PublishItem>, StorageError> {
+            // Reproduce a single poll that consumes the remaining budget without
+            // yielding, as synchronous rendering can do. No polling timer race.
+            while Instant::now() < self.0 {
+                std::thread::sleep(self.0.saturating_duration_since(Instant::now()));
+            }
+            Ok(vec![])
+        }
+    }
+    struct NoopEvents;
+    #[async_trait::async_trait]
+    impl RunEventRepository for NoopEvents {
+        async fn insert(&self, _: &NewRunEvent) -> Result<i64, StorageError> {
+            Ok(1)
+        }
+    }
+    #[tokio::test]
+    async fn preparation_ready_after_deadline_is_rejected() {
+        let claimed = ClaimedPublishRecord {
+            id: 1,
+            idempotency_key: "test".into(),
+            category_key: "ai".into(),
+            report_date: "2026-09-10".into(),
+            target_timezone: "UTC".into(),
+            render_version: 1,
+            selection_policy_version: 1,
+            state: "stored_local".into(),
+            remote_target: None,
+            attempt_count: 1,
+        };
+        let config = RenderConfig {
+            category_display_name: "AI".into(),
+            report_title: "Daily".into(),
+            generated_at: OffsetDateTime::now_utc(),
+            templates: Default::default(),
+        };
+        let deadline = Instant::now() + StdDuration::from_millis(20);
+        let result = prepare_remote_report(
+            &ReadyAfterDeadline(deadline),
+            &claimed,
+            &config,
+            deadline,
+            &RunEventEmitter {
+                run_id: "test",
+                stage: "publish",
+                repo: &NoopEvents,
+            },
+            "remote",
+        )
+        .await;
+        assert!(
+            matches!(result, Err(RemotePreparationError::Timeout)),
+            "a ready future must not escape an elapsed preparation budget"
+        );
     }
 }

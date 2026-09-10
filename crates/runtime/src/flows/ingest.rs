@@ -30,16 +30,15 @@ pub struct IngestSummary {
     pub sources_succeeded: u32,
     pub sources_not_modified: u32,
     pub sources_failed: u32,
-    /// 因 task panic / cancel 而失败的 source 数（codex P2-1）。这类失败没有
-    /// source 身份、不进入 `per_source`，故 `recalculate_summary` 不重算它——
-    /// 与 `sources_failed`（带 error_kind 的业务失败）分开计。不变量：
-    /// `sources_attempted == succeeded + not_modified + failed + tasks_panicked`。
+    /// Task panic/cancel has no source outcome. Kept separate from business failures.
+    /// `sources_attempted == succeeded + not_modified + failed + tasks_panicked`.
     pub tasks_panicked: u32,
     pub entries_discovered: u32,
     pub entries_inserted: u32,
     pub entries_uid_dup: u32,
     pub entries_link_dup: u32,
-    pub per_source: Vec<IngestSourceOutcome>,
+    /// First 32 business failures in completion order; success details are not retained.
+    pub failure_samples: Vec<IngestSourceOutcome>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,7 +124,7 @@ impl IngestFlow {
                 && let Some(result) = join_set.join_next().await
             {
                 match result {
-                    Ok(outcome) => summary.per_source.push(outcome),
+                    Ok(outcome) => summary.record(outcome),
                     Err(error) => {
                         tracing::error!("ingest source task panicked or was cancelled: {error}");
                         summary.tasks_panicked += 1;
@@ -143,7 +142,7 @@ impl IngestFlow {
                         source_key = %source.key,
                         "failed to resolve feed source: {error}"
                     );
-                    summary.per_source.push(IngestSourceOutcome {
+                    summary.record(IngestSourceOutcome {
                         source_id: 0,
                         category_key: category.category.key.clone(),
                         source_key: source.key.clone(),
@@ -160,7 +159,7 @@ impl IngestFlow {
 
         while let Some(result) = join_set.join_next().await {
             match result {
-                Ok(outcome) => summary.per_source.push(outcome),
+                Ok(outcome) => summary.record(outcome),
                 Err(error) => {
                     tracing::error!("ingest source task panicked or was cancelled: {error}");
                     summary.tasks_panicked += 1;
@@ -168,7 +167,6 @@ impl IngestFlow {
             }
         }
 
-        recalculate_summary(&mut summary);
         emitter
             .emit(
                 "run_completed",
@@ -627,25 +625,20 @@ async fn process_entries(
     }
 }
 
-fn recalculate_summary(summary: &mut IngestSummary) {
-    summary.sources_succeeded = 0;
-    summary.sources_not_modified = 0;
-    summary.sources_failed = 0;
-    summary.entries_discovered = 0;
-    summary.entries_inserted = 0;
-    summary.entries_uid_dup = 0;
-    summary.entries_link_dup = 0;
-
-    for outcome in &summary.per_source {
+impl IngestSummary {
+    fn record(&mut self, outcome: IngestSourceOutcome) {
         match outcome.status {
-            IngestSourceStatus::Succeeded => summary.sources_succeeded += 1,
-            IngestSourceStatus::NotModified => summary.sources_not_modified += 1,
-            IngestSourceStatus::Failed => summary.sources_failed += 1,
+            IngestSourceStatus::Succeeded => self.sources_succeeded += 1,
+            IngestSourceStatus::NotModified => self.sources_not_modified += 1,
+            IngestSourceStatus::Failed => self.sources_failed += 1,
         }
-        summary.entries_discovered += outcome.entries_discovered;
-        summary.entries_inserted += outcome.entries_inserted;
-        summary.entries_uid_dup += outcome.entries_uid_dup;
-        summary.entries_link_dup += outcome.entries_link_dup;
+        self.entries_discovered += outcome.entries_discovered;
+        self.entries_inserted += outcome.entries_inserted;
+        self.entries_uid_dup += outcome.entries_uid_dup;
+        self.entries_link_dup += outcome.entries_link_dup;
+        if outcome.status == IngestSourceStatus::Failed && self.failure_samples.len() < 32 {
+            self.failure_samples.push(outcome);
+        }
     }
 }
 
@@ -668,26 +661,35 @@ mod tests {
     }
 
     #[test]
-    fn recalculate_summary_preserves_tasks_panicked() {
-        // codex P2-1 回归：panic/cancel 的 source 在 join-error 分支累计到
-        // tasks_panicked，它不进 per_source；recalc 只从 per_source 重算业务
-        // 计数，必须**不**清零 tasks_panicked。旧实现把 sources_failed += 1
-        // 后又被 recalc 清零，使 panic 在 summary / JSON 中报 0 failure。
+    fn summary_counts_all_outcomes_without_retaining_successes() {
         let mut summary = IngestSummary {
-            sources_failed: 99, // 脏值：recalc 应按 per_source 重算覆盖
-            tasks_panicked: 3,  // join-error 累计；recalc 不得清零
-            per_source: vec![
-                mk_outcome(IngestSourceStatus::Succeeded),
-                mk_outcome(IngestSourceStatus::Failed),
-            ],
+            tasks_panicked: 3,
             ..Default::default()
         };
-        recalculate_summary(&mut summary);
-        assert_eq!(summary.sources_succeeded, 1);
-        assert_eq!(summary.sources_failed, 1, "per_source 重算应覆盖脏值");
-        assert_eq!(
-            summary.tasks_panicked, 3,
-            "recalc 必须保留 join-failure 计数"
+        for _ in 0..100 {
+            let mut outcome = mk_outcome(IngestSourceStatus::Succeeded);
+            outcome.entries_discovered = 4;
+            outcome.entries_inserted = 2;
+            outcome.entries_uid_dup = 1;
+            outcome.entries_link_dup = 1;
+            summary.record(outcome);
+            summary.record(mk_outcome(IngestSourceStatus::NotModified));
+            summary.record(mk_outcome(IngestSourceStatus::Failed));
+        }
+        assert_eq!(summary.sources_succeeded, 100);
+        assert_eq!(summary.sources_not_modified, 100);
+        assert_eq!(summary.sources_failed, 100);
+        assert_eq!(summary.tasks_panicked, 3);
+        assert_eq!(summary.entries_discovered, 400);
+        assert_eq!(summary.entries_inserted, 200);
+        assert_eq!(summary.entries_uid_dup, 100);
+        assert_eq!(summary.entries_link_dup, 100);
+        assert_eq!(summary.failure_samples.len(), 32);
+        assert!(
+            summary
+                .failure_samples
+                .iter()
+                .all(|outcome| outcome.status == IngestSourceStatus::Failed)
         );
     }
 }

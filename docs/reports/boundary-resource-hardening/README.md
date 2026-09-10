@@ -2,7 +2,13 @@
 
 后续 `review and fix` 的发现与修复见 [review.md](review.md)。本页性能/验证JSON保留审查前的测量快照；后续代码的验证以审查记录为准。
 
-基准 HEAD：`95ae450fda35416a59325c05decbf3b577873e52`（v0.7.1）。本轮是工作区修改，未 commit、push、发布镜像或更新实际部署。初始工作区干净。持久化 schema 与迁移文件未改动。
+后续状态：上述实现及 review 修复已提交为 `4c99e5b` 并推送 main。
+其 [远端 CI](https://github.com/Develata/RSS-AI-News/actions/runs/34492172689) 的五个 jobs 全部成功，
+包括 PostgreSQL integration/migration 和 Docker runtime/debug/scheduler smoke，补齐了当时的本地验证缺口。
+更晚的局部修复见 [Resource Boundary Follow-up](../../handoffs/2026-09-10-resource-boundary-follow-up.md)；
+这次 CI 只证明 `4c99e5b`，不作为后续未提交代码的验证结果。
+
+基准 HEAD：`95ae450fda35416a59325c05decbf3b577873e52`（v0.7.1）。以下为当时的工作区测量快照，记录时尚未 commit、push、发布镜像或更新实际部署。初始工作区干净。持久化 schema 与迁移文件未改动。
 
 ## A. 工程结论
 

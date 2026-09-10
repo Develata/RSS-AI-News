@@ -265,7 +265,7 @@ fn classify_error_response(
         &api_error.message,
     ) {
         return AiError::QuotaExceeded {
-            message: api_error.message,
+            message: rss_ai_news_domain::error::truncate_diagnostic(api_error.message, 8 * 1024),
         };
     }
 
@@ -275,7 +275,7 @@ fn classify_error_response(
         &api_error.message,
     ) {
         return AiError::ModelUnavailable {
-            message: api_error.message,
+            message: rss_ai_news_domain::error::truncate_diagnostic(api_error.message, 8 * 1024),
         };
     }
 

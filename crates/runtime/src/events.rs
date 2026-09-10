@@ -44,7 +44,10 @@ impl<'a> RunEventEmitter<'a> {
             event_kind: event_kind.to_string(),
             target_kind: target_kind.map(str::to_string),
             target_id,
-            message: message_safe.into_owned(),
+            message: rss_ai_news_domain::error::truncate_diagnostic(
+                message_safe.into_owned(),
+                16 * 1024,
+            ),
             context_json,
         };
 
@@ -122,6 +125,41 @@ mod tests {
             assert!(!event.message.contains(secret));
         }
         assert!(!event.context_json.unwrap().contains("private-context"));
+    }
+
+    #[tokio::test]
+    async fn event_message_is_bounded_after_redaction() {
+        struct Capture(std::sync::Mutex<Option<NewRunEvent>>);
+        #[async_trait::async_trait]
+        impl RunEventRepository for Capture {
+            async fn insert(
+                &self,
+                event: &NewRunEvent,
+            ) -> Result<i64, rss_ai_news_storage::StorageError> {
+                *self.0.lock().unwrap() = Some(event.clone());
+                Ok(1)
+            }
+        }
+        let capture = Capture(std::sync::Mutex::new(None));
+        let message = format!(
+            "Authorization: Bearer private-token\n{}",
+            "中文🦀".repeat(200_000)
+        );
+        RunEventEmitter {
+            run_id: "test",
+            stage: "test",
+            repo: &capture,
+        }
+        .emit("error", "error", None, None, &message, None)
+        .await;
+        let event = capture.0.lock().unwrap().take().unwrap();
+        assert!(
+            event.message.len() <= 16 * 1024,
+            "message used {} bytes",
+            event.message.len()
+        );
+        assert!(event.message.contains("[truncated, original_bytes="));
+        assert!(!event.message.contains("private-token"));
     }
 
     #[test]

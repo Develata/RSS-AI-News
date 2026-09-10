@@ -257,7 +257,9 @@ remote 使用 claim 返回的记录元信息，只加载一次 frozen items，�
 从 claim 前起计算共享 deadline = publish lease 的80%；准备阶段（started事件与快照读取）和远端调用均受此限制，
 超时按 retryable 释放，预留20%用于数据库收尾。claim与收尾写入沿用数据库自身的失败/恢复机制，
 不因deadline主动取消；数据库不可用时仍须依赖lease回收，不能保证整个函数必在lease内返回。
+同步渲染不能被 Tokio 抢占；preparation 完成后重新检查 deadline，超时返回 retryable timeout。
+单条/批量调用远端前也各自检查 deadline，已超预算不发起远端调用。
 网络取消不能撤销服务端已经完成的提交，仍依靠既有幂等发布与重试恢复。
 Octocrab connect/read/write timeout 为5/30/30秒，所有 GitHub 响应最多16 MiB（含 base64 Contents 响应）。
 成功响应超限不可重试；429/5xx 错误页超限仍保留对应 retry 分类。
-GitHub错误消息先解析JSON，再遮蔽当前token，避免JSON转义绕过凭据脱敏。
+GitHub错误消息先解析JSON，再遮蔽当前token，避免JSON转义绕过凭据脱敏；诊断正文最多 8 KiB，包含截断标记；422 的 fast-forward 冲突分类信号在截断后保留。

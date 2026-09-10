@@ -21,7 +21,7 @@ exit code：含 `Fail` → 1；其余（含 `Warn`）→ 0。
 - JSON 输出含 `command`、`status`、`checks[]`
 - `ai.enabled=false` 时 doctor **不视为失败**（仅 ai-run 拦）
 - 远端 401 → `openai_check_reports_fail_for_unauthorized`
-- DB 不可创建 → 立即报 `StorageError`
+- DB 不存在或不可读 → 立即报 `StorageError`
 
 ### 失败条件（failure path）
 
@@ -37,7 +37,9 @@ exit code：含 `Fail` → 1；其余（含 `Warn`）→ 0。
 | `args_parsing_parses_doctor_with_deep` | `crates/cli/tests/args_parsing_tests.rs` | `--deep` 解析 |
 | `doctor_cmd_shallow_non_failing_checks_return_success` | `crates/cli/tests/doctor_cmd_tests.rs` | shallow happy |
 | `doctor_cmd_missing_github_token_is_not_failure` | 同上 | token 缺失非致命 |
-| `doctor_cmd_uncreatable_database_path_returns_storage_error` | 同上 | DB 不可创建 |
+| `doctor_cmd_uncreatable_database_path_returns_storage_error` | 同上 | DB 不存在或不可读 |
+| `doctor_missing_database_never_creates_file` | 同上 | shallow/deep 均不创建缺失的 SQLite 文件 |
+| `doctor_pool_rejects_writes` | 同上 | 实际 doctor 连接拒绝 DDL 写入 |
 | `doctor_cmd_deep_happy_path_returns_success` | 同上 | deep happy |
 | `doctor_cmd_deep_i6_violation_returns_doctor_failed` | 同上 | deep 不变量违规 |
 | `doctor_summary_pretty_snapshot_contains_status_lines` | 同上 | pretty 输出 |
@@ -49,7 +51,7 @@ exit code：含 `Fail` → 1；其余（含 `Warn`）→ 0。
 | `i9_feed_violation_claimable_entry_with_exhausted_budget` | 同上 | I9.feed 违规 |
 | `i9_ai_violation_counts_only_exhausted_pending` | 同上 | I9.ai 违规（预算未满不计） |
 | `i9_publish_violation_exhausted_stage_state` | 同上 | I9.publish 违规 |
-| `config_check_reports_ok` | `crates/observability/tests/health_tests.rs` | config check |
+| `config_check_reports_ok` | `crates/runtime/tests/health_tests.rs` | config check |
 | `database_check_reports_ok` | 同上 | database happy |
 | `database_check_reports_fail_for_closed_pool` | 同上 | 关闭 pool fail |
 | `migration_check_reports_ok_when_migration_table_has_version` | 同上 | migration check |

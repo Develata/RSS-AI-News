@@ -126,14 +126,18 @@ flow 不持有 `AppConfig`。小型 `RunMeta { run_id, started_at }` 提供追�
 - 写命令用 `open_write_storage` 执行迁移及 config version 轮换，再建立该 flow 所需客户端。
 - `recent-entries`、`replay`、`rebuild-report`、`reindex --dry-run` 使用只读连接与精确迁移校验；
   不创建数据库、不自动修复迁移、不轮换配置、不构造网络客户端。dry-run 只输出 tracing，不写 run_events。
-- `doctor` 不自动迁移或轮换版本，检查真实数据库状态；数据库/迁移未就绪时跳过 deep scan。
+- `doctor` 用 `StoragePool::build_read_only` 打开现有数据库，不创建 SQLite 文件、不自动迁移或轮换版本；数据库不存在时返回存储错误，迁移未就绪时跳过 deep scan。
 - 单阶段命令先做结构校验，再检查实际启用能力所需凭据。ingest 不要求 AI/GitHub 凭据；
   `ai-run` 在 ai.enabled=false 时明确失败；publish --local-only 不构造 GitHub client。
 - 原来的 `NullAiClient` 已删除，未启用的能力不装配占位对象。
 
-结果内存：extract/AI 每批持有 claim 数据，完成后只累计 counters，并保留最多 32 条失败样例；
-成功结果不累计。无限批次不再导致 summary 随历史处理量增长。ingest 同时存活任务数不超过
-concurrent_feeds，源配置通过引用迭代。运行总内存仍受当前 body、批大小、并发和配置规模影响。
+结果内存：ingest/extract/AI 均增量累计 counters，只保留最多 32 条失败样例。
+`IngestSummary.per_source` 已替换为 `failure_samples`；这是 Rust API 源码级变化，CLI 聚合输出不变。
+ingest 存活任务数不超过 `http.concurrent_feeds`；extract/AI 使用滚动 JoinSet，不超过
+`http.concurrent_fetches`。当前 claim 数据仍为 O(batch size)，不是整个运行的常量内存保证。
+`ingest/ai-run --batch-size`、`run --ingest-batch-size/--ai-batch-size` 只接受 `1..=10000`；
+程序直接调用 flow 时仍由调用方选择批大小，AI 原有 lease budget 校验继续生效。
+源配置通过引用迭代；运行总内存仍受 body 上限、批大小、并发和配置规模影响。
 
 ## 5. exit code 速查
 

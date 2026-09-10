@@ -154,8 +154,9 @@ INSERT 直接写入 `feed_entries`：数据库以 `(source_id, feed_entry_uid)` 
 
 ### 6.1 并发与批次
 
-- feed 抓取并发度由 `app.feed.concurrent_feeds` 控制
+- feed 抓取使用滚动 JoinSet，存活任务数由 `http.concurrent_feeds` 控制
 - 每个 source 内串行处理 entry（避免对同源批量并发）
+- `IngestSummary` 增量统计所有源，只保留最先收集的 32 条失败样例 `failure_samples`；不再提供全量 `per_source`。panic/cancel 单列 `tasks_panicked`，不丢失失败计数。
 - ingest **不**进入 extract 的 batch 循环；extract 由 `--max-batches` 控制（见 [./02-extract.md](./02-extract.md)）
 
 ## 7. RawArtifact 留档

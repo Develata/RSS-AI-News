@@ -115,7 +115,10 @@ async fn feed_entry_persist_error_marks_source_failed() {
     let summary = flow.run(IngestOptions::default()).await;
     assert_eq!(summary.sources_succeeded, 0);
     assert_eq!(summary.sources_failed, 1);
-    assert_eq!(summary.per_source[0].status, IngestSourceStatus::Failed);
+    assert_eq!(
+        summary.failure_samples[0].status,
+        IngestSourceStatus::Failed
+    );
     let source_failures: i64 =
         sqlx::query_scalar("SELECT consecutive_failures FROM feed_sources WHERE id = ?")
             .bind(source_id)
@@ -232,7 +235,10 @@ async fn single_source_5xx_marks_failed_writes_event() {
     .await
     .expect("event count should be readable");
 
-    assert_eq!(summary.per_source[0].status, IngestSourceStatus::Failed);
+    assert_eq!(
+        summary.failure_samples[0].status,
+        IngestSourceStatus::Failed
+    );
     assert_eq!(failures, 1);
     assert_eq!(event_count, 1);
 }
@@ -347,7 +353,10 @@ async fn parse_failure_keeps_artifact_marks_failed() {
     .await
     .expect("event count should be readable");
 
-    assert_eq!(summary.per_source[0].status, IngestSourceStatus::Failed);
+    assert_eq!(
+        summary.failure_samples[0].status,
+        IngestSourceStatus::Failed
+    );
     assert_eq!(artifact_count, 1);
     assert_eq!(event_count, 1);
 }
@@ -590,4 +599,23 @@ fn single_item(uid: &str, link: &str) -> String {
   </channel>
 </rss>"#
     )
+}
+
+#[tokio::test]
+async fn ingest_summary_retains_only_bounded_failure_samples() {
+    let (_dir, pool) = make_test_pool().await;
+    let keys: Vec<_> = (0..80).map(|i| format!("failed-{i}")).collect();
+    let refs: Vec<_> = keys.iter().map(String::as_str).collect();
+    let flow = flow(
+        pool,
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&refs),
+        HashMap::new(),
+    );
+    let summary = flow.run(IngestOptions::default()).await;
+    assert_eq!(summary.sources_attempted, 80);
+    assert_eq!(summary.sources_failed, 80);
+    assert_eq!(summary.tasks_panicked, 0);
+    assert_eq!(summary.failure_samples.len(), 32);
 }

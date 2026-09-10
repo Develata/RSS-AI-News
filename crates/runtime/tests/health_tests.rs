@@ -71,7 +71,7 @@ async fn openai_check_reports_ok_for_chat_completion_shape() {
     let check = OpenAiPingCheck::new(
         reqwest::Client::builder().no_proxy().build().unwrap(),
         Some(server.uri()),
-        Some("sk-test".to_string()),
+        Some("sk-test".into()),
         "gpt-test".to_string(),
         true,
     );
@@ -90,7 +90,7 @@ async fn openai_check_reports_fail_for_unauthorized() {
     let check = OpenAiPingCheck::new(
         reqwest::Client::builder().no_proxy().build().unwrap(),
         Some(server.uri()),
-        Some("sk-test".to_string()),
+        Some("sk-test".into()),
         "gpt-test".to_string(),
         true,
     );

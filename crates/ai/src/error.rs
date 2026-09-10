@@ -1,4 +1,4 @@
-use rss_ai_news_domain::error::ClassifiedError;
+use rss_ai_news_domain::error::{ClassifiedError, truncate_diagnostic};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -87,7 +87,7 @@ impl ClassifiedError for AiError {
     }
 
     fn display_user(&self) -> String {
-        match self {
+        let message = match self {
             Self::HttpTimeout { seconds } => format!("AI request timed out after {seconds}s"),
             Self::ConnectionFailed(message) => format!("AI connection failed: {message}"),
             Self::HttpStatus { code, message } => {
@@ -112,7 +112,8 @@ impl ClassifiedError for AiError {
             Self::EmptyResponse => "AI response contained no choices".to_string(),
             Self::ResponseTooLarge { limit } => format!("AI response exceeded {limit} bytes"),
             Self::InvalidConfig(message) => format!("AI config invalid: {message}"),
-        }
+        };
+        truncate_diagnostic(message, 16 * 1024)
     }
 
     fn display_debug(&self) -> String {
@@ -125,8 +126,11 @@ pub(crate) fn classify_http_status(
     message: String,
     retry_after_seconds: Option<u64>,
 ) -> AiError {
+    let quota = code == 429 && is_quota_message(&message);
+    let model_unavailable = code != 429 && is_model_unavailable_message(&message);
+    let message = truncate_diagnostic(message, 8 * 1024);
     if code == 429 {
-        if is_quota_message(&message) {
+        if quota {
             return AiError::QuotaExceeded { message };
         }
 
@@ -136,7 +140,7 @@ pub(crate) fn classify_http_status(
         };
     }
 
-    if is_model_unavailable_message(&message) {
+    if model_unavailable {
         return AiError::ModelUnavailable { message };
     }
 

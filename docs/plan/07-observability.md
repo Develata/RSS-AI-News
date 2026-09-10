@@ -124,6 +124,11 @@ redaction 在**截断之前**执行，保证即使内容超长，密钥也已被
 
 ### 5.2 截断
 
+`run_events.message` 经脱敏后最多 16 KiB（UTF-8 字节，包含 `… [truncated, original_bytes=N]`）。
+AI/GitHub provider 的错误正文在能力边界先限制到 8 KiB；AI 的 `display_user()` 最终文本再限制为 16 KiB。
+共用 `domain::error::truncate_diagnostic`；`original_bytes` 指脱敏后、截断前的诊断字节数，非 wire body 长度。
+此边界不修改成功响应与 artifact retention 语义，也不清理数据库中既存的大消息。
+
 `CONTEXT_JSON_MAX_BYTES = 4096`。超长 context 被替换为：
 
 ```json
@@ -190,7 +195,7 @@ pub trait HealthCheck: Send + Sync {
 `doctor` 子命令（[`crates/cli/src/commands/doctor.rs`](../../crates/cli/src/commands/doctor.rs)）依次执行所有注册的
 check，汇总成 `CheckReport`，按 outcome 染色输出。
 
-当前注册的 check（按代码顺序）：
+当前注册的 check：
 
 | name | 验证项 |
 |---|---|
@@ -201,7 +206,7 @@ check，汇总成 `CheckReport`，按 outcome 染色输出。
 | `github` | 远端 publish 启用时探测 `https://api.github.com/repos/<owner>/<repo>` |
 | `rsshub` | 任一 source 使用占位符时探测 `RSSHUB_BASE_URL` 健康端点 |
 | `Timezone` | `[publish].target_timezone` 是合法 IANA 时区 |
-| `disk` | `local_output_dir` + `[artifact].file_storage_dir` 可写 |
+| `disk` | SQLite 数据库所在文件系统的剩余空间；PostgreSQL 返回 Info/skip，本地路径不能代表数据库磁盘 |
 | `Expired leases` | 无过期未回收的 running AI 租约（与 deep I8 同源） |
 | `Failed backlog` | 终态失败计数（feed/ai/publish 三表），Info |
 | `Stuck reindex jobs` | reindex_jobs 卡在 running（租约过期，且会因 partial-unique index 静默挡住该 target 后续 reindex）或 pending（滞留超 `[doctor].stuck_reindex_pending_secs`） |
@@ -225,6 +230,9 @@ W15——sweep 接线后常态应为绿，见 [./15-retry-exhaustion-and-reclaim
 - 含 `Fail` → exit 1（`DoctorFailed` → RuntimeError；详见 [./11-error-and-recovery.md](./11-error-and-recovery.md) §5）
 
 ### 6.1 显示侧redaction
+
+`doctor` 的 SQLite/PG pool 均只读；不存在的 SQLite 文件不创建，数据库不就绪直接报存储错误。
+OpenAI/GitHub 检查保留 `SecretString`，仅在空值检查和 HTTP bearer 组装时借用明文，不提前复制为普通 `String`。
 
 `CheckReport` 内 message 经过 `redact_authorization_header` + `redact_url_userinfo` 两层过滤后才输出。
 
