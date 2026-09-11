@@ -17,6 +17,7 @@ use tokio::task::JoinSet;
 use crate::artifact::ArtifactWriter;
 use crate::context::IngestDeps;
 use crate::events::RunEventEmitter;
+use crate::flows::maintenance::purge_expired_artifacts;
 
 #[derive(Debug, Clone, Default)]
 pub struct IngestOptions {
@@ -113,6 +114,7 @@ impl IngestFlow {
             )
             .await;
 
+        purge_expired_artifacts(self.ctx.artifact_repo.as_ref(), &emitter).await;
         let mut summary = IngestSummary::default();
         let source_configs = self.collect_enabled_sources(&opts);
         let concurrent_feeds = self.ctx.http.concurrent_feeds.max(1) as usize;

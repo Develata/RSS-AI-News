@@ -19,11 +19,10 @@ use time::{Duration, OffsetDateTime};
 /// - 若未来扩展写入请求体（如调试场景下保留 outgoing request 用于
 ///   replay），调用方必须先剥离 secret-bearing headers。
 ///
-/// `ArtifactConfig.file_storage_dir` / `inline_threshold_bytes` 配置项当前
-/// 未被任何代码消费——v0.1.0 仅实装 inline 路径（artifact 全部走数据库，
-/// SQLite BLOB / PG BYTEA）。该字段为 v0.2 large-payload 外置存储预留；
-/// schema CHECK 约束已支持 `storage_kind='file'`，未来切换不需要 migration。
-/// 详见 [`docs/design/replay-and-artifacts.md`] §2.3。
+/// `file_storage_dir` / `inline_threshold_bytes` are reserved: all payloads
+/// currently use database inline storage. `ttl_days=0` means no expiry.
+/// Expired inline rows are purged in bounded batches at ingest / AI startup;
+/// see `docs/plan/10-replay-and-backfill.md` section 3.
 pub struct ArtifactWriter<'a> {
     pub config: &'a ArtifactConfig,
     pub repo: &'a dyn RawArtifactRepository,

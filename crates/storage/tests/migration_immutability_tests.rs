@@ -49,6 +49,14 @@ const PINNED_UP_MIGRATIONS: &[(&str, &str)] = &[
         "migrations/postgres/0004_feed_entry_link_dedup_atomicity.up.sql",
         "77aa6e7d980ca444b5523712f84d35041e78f56d3b898daf2878b4ae23a08c30",
     ),
+    (
+        "migrations/sqlite/0005_artifact_reference_indexes.up.sql",
+        "3c9e9cb9e5289adba5f4d21084a2c61a821d3998c8336c176122d455170efa0b",
+    ),
+    (
+        "migrations/postgres/0005_artifact_reference_indexes.up.sql",
+        "3c9e9cb9e5289adba5f4d21084a2c61a821d3998c8336c176122d455170efa0b",
+    ),
 ];
 
 fn repo_root() -> std::path::PathBuf {

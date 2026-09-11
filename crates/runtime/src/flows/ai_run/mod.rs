@@ -12,7 +12,7 @@ use tokio::task::JoinSet;
 
 use crate::context::AiDeps;
 use crate::events::RunEventEmitter;
-use crate::flows::maintenance::emit_maintenance_outcome;
+use crate::flows::maintenance::{emit_maintenance_outcome, purge_expired_artifacts};
 
 mod dto;
 mod process;
@@ -150,6 +150,7 @@ impl AiRunFlow {
             )
             .await;
 
+        purge_expired_artifacts(self.ctx.artifact_repo.as_ref(), &emitter).await;
         // W15 §5：首次 claim 前执行一次 ① reclaim + ② sweep（顺序固定，best-effort）。
         let maintenance_now = OffsetDateTime::now_utc();
         let reclaimed = self

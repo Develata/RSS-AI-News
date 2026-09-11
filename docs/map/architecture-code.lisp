@@ -247,13 +247,14 @@
       :label "ArtifactWriter"
       :layer flow-coord
       :crate runtime
-      :path "crates/runtime/src/artifact.rs:27"
+      :path "crates/runtime/src/artifact.rs:26"
       :kind struct
       :upstream (flow-ingest flow-extract flow-ai-run)
       :downstream (repo-raw-artifact)
       :state active
       :notes "should_write() 按 retention_policy + on_failure 决策；
-              write_inline() 当前只写数据库；inline_threshold_bytes/file_storage_dir 为保留配置。")
+              write_inline() 当前只写数据库；inline_threshold_bytes/file_storage_dir 为保留配置；
+              ingest / AI process 启动由 flows/maintenance.rs 调 purge_expired，一批 500 条。")
 
 (node :id run-event-emitter
       :label "RunEventEmitter"
@@ -385,7 +386,8 @@
       :crate storage
       :path "crates/storage/src/repo/raw_artifact.rs"
       :kind trait
-      :state active)
+      :state active
+      :notes "purge_expired 删除有界过期 inline payload；0005 索引支持 FK SET NULL，保留业务行。")
 
 (node :id repo-run-event
       :label "RunEventRepository"

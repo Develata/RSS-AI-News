@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use rss_ai_news_domain::{model::RawArtifact, state::ArtifactKind};
 use sqlx::{FromRow, PgPool, SqlitePool};
-use time::OffsetDateTime;
+use std::num::NonZeroU32;
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::{StorageError, StoragePool, classify_db_error};
 
@@ -26,6 +27,20 @@ pub trait RawArtifactRepository: Send + Sync {
         artifact_key: &str,
     ) -> Result<Option<RawArtifact>, StorageError>;
     async fn find_by_id(&self, id: i64) -> Result<Option<RawArtifact>, StorageError>;
+
+    /// Delete at most `batch_size` expired inline artifacts, oldest first.
+    /// Uses the start of the current UTC second as a conservative TTL cutoff.
+    /// NULL expiry and file-backed rows are retained. Existing foreign keys
+    /// clear artifact references without deleting the owning business rows.
+    async fn purge_expired(
+        &self,
+        _now: OffsetDateTime,
+        _batch_size: NonZeroU32,
+    ) -> Result<u64, StorageError> {
+        Err(StorageError::UnsupportedBackend(
+            "artifact TTL cleanup is not implemented by this repository".into(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +95,33 @@ FROM raw_artifacts
 WHERE id = $1
 "#;
 
+// Keep the indexed candidate set bounded before validating SQLite timestamps.
+// The numeric guard prevents different RFC3339 fractional precisions from
+// deleting an artifact early within the cutoff second.
+const PURGE_EXPIRED_SQLITE_SQL: &str = r#"
+DELETE FROM raw_artifacts
+WHERE id IN (
+    SELECT id FROM raw_artifacts
+    WHERE expires_at < $1 AND storage_kind = 'inline'
+    ORDER BY expires_at
+    LIMIT $2
+)
+AND unixepoch(expires_at) < $3
+"#;
+
+const PURGE_EXPIRED_POSTGRES_SQL: &str = r#"
+WITH candidates AS (
+    SELECT id FROM raw_artifacts
+    WHERE expires_at < $1 AND storage_kind = 'inline'
+    ORDER BY expires_at
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+DELETE FROM raw_artifacts AS artifact
+USING candidates
+WHERE artifact.id = candidates.id AND artifact.expires_at < $1
+"#;
+
 // ── trait 实现 ─────────────────────────────────────────────────
 
 #[async_trait]
@@ -108,6 +150,47 @@ impl RawArtifactRepository for RawArtifactRepo {
             StoragePool::Postgres(p) => pg_find_by_id(p, id).await,
         }
     }
+
+    async fn purge_expired(
+        &self,
+        now: OffsetDateTime,
+        batch_size: NonZeroU32,
+    ) -> Result<u64, StorageError> {
+        let cutoff =
+            now.to_offset(UtcOffset::UTC) - Duration::nanoseconds(i64::from(now.nanosecond()));
+        let limit = i64::from(batch_size.get());
+        match &self.pool {
+            StoragePool::Sqlite(pool) => sqlx::query(PURGE_EXPIRED_SQLITE_SQL)
+                .bind(cutoff)
+                .bind(limit)
+                .bind(cutoff.unix_timestamp())
+                .execute(pool)
+                .await
+                .map(|result| result.rows_affected())
+                .map_err(StorageError::from),
+            StoragePool::Postgres(pool) => {
+                // SKIP LOCKED only covers artifact candidates. Foreign-key
+                // SET NULL can still wait on a locked article / AI result.
+                // Bound that wait and total statement work on the server;
+                // transaction-local settings do not leak into the pool.
+                let mut tx = pool.begin().await?;
+                sqlx::query("SET LOCAL lock_timeout = '1s'")
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("SET LOCAL statement_timeout = '5s'")
+                    .execute(&mut *tx)
+                    .await?;
+                let count = sqlx::query(PURGE_EXPIRED_POSTGRES_SQL)
+                    .bind(cutoff)
+                    .bind(limit)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                tx.commit().await?;
+                Ok(count)
+            }
+        }
+    }
 }
 
 // ── SQLite helper ──────────────────────────────────────────────
@@ -124,7 +207,11 @@ async fn sqlite_upsert_inline(
         .bind(artifact.byte_size)
         .bind(&artifact.sha256)
         .bind(&artifact.retention_policy)
-        .bind(artifact.expires_at)
+        .bind(
+            artifact
+                .expires_at
+                .map(|expiry| expiry.to_offset(UtcOffset::UTC)),
+        )
         .fetch_one(pool)
         .await
         .map_err(|error| classify_upsert_error(error, artifact))

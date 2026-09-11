@@ -7,10 +7,43 @@
 //! 两步均为 best-effort：失败只记 warn 不中断 run。maintenance 不可用时
 //! flow 本体仍能工作，滞留行等下一次 run 或 doctor 兜底（15 §7）。
 
-use rss_ai_news_storage::StorageError;
+use std::num::NonZeroU32;
+
+use rss_ai_news_storage::{RawArtifactRepository, StorageError};
 use serde_json::json;
+use time::OffsetDateTime;
 
 use crate::events::RunEventEmitter;
+
+/// One batch per ingest / AI-process invocation, independently of the current write
+/// retention policy. No background task and no drain-until-empty loop.
+pub(crate) async fn purge_expired_artifacts(
+    repo: &dyn RawArtifactRepository,
+    emitter: &RunEventEmitter<'_>,
+) {
+    const BATCH_SIZE: NonZeroU32 = NonZeroU32::new(500).unwrap();
+    match repo
+        .purge_expired(OffsetDateTime::now_utc(), BATCH_SIZE)
+        .await
+    {
+        Ok(0) => {}
+        Ok(count) => {
+            emitter
+                .emit(
+                    "artifacts_purged",
+                    "info",
+                    None,
+                    None,
+                    "expired inline artifacts purged at run start",
+                    Some(json!({ "table": "raw_artifacts", "count": count })),
+                )
+                .await
+        }
+        Err(error) => {
+            tracing::warn!("artifact TTL cleanup failed; continuing run (best-effort): {error}")
+        }
+    }
+}
 
 /// 把 ① reclaim / ② sweep 的结果落成 run_events（15 §7）：
 ///

@@ -73,6 +73,7 @@
 | AC-P-04 | [publish-local-and-github.md](./pipelines/04-publish-local-and-github.md) | passing |
 | AC-P-05 | [multi-dialect-storage.md](./pipelines/05-multi-dialect-storage.md) | passing |
 | AC-P-06 | [config-loading.md](./pipelines/06-config-loading.md) | passing |
+| AC-P-07 | [artifact-maintenance.md](./pipelines/07-artifact-maintenance.md) | partial（本地通过，待最终 CI） |
 
 ### commands/
 

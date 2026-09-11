@@ -44,19 +44,35 @@
 | `always` | 每次抓取/调用都留档 |
 | `on_failure` | 仅当下游解析失败时回写 |
 | `sampled` | 按 `sample_rate` 随机留档（用于线上抽样诊断） |
-| `debug_only` | 仅 `RUST_LOG=debug` 时留档 |
+| `debug_only` | 保留兼容值，尚未实现；当前不留档，validate-config 会告警 |
 | `off` | 完全不留档 |
 
-写入位置：
-- `byte_size ≤ inline_threshold_bytes` → 直接内嵌 `raw_artifacts.inline_body`
-- 超过阈值 → 写 `[artifact].file_storage_dir/<run_id>/<kind>/<key>` 文件，`inline_body = NULL`
+写入位置：当前全部存入 `raw_artifacts.inline_body`（SQLite BLOB / PostgreSQL BYTEA）。
+`inline_threshold_bytes` / `file_storage_dir` 是保留字段，没有 threshold 分流或文件写入实现。
+`replay` 仅支持 inline；手工导入的 file-backed 行仍明确拒绝，不由 TTL 清理删除文件或元数据。
+配置警告的权威列表见 [06-config.md](./06-config.md#独立能力与保留字段2026-09-10)。
 
-> **当前实现限制**（W9c 备注）：`replay` 仅支持 `inline_body` 非空的 artifact；
-> 文件后端 artifact 当前会被 `replay` 报 "file-backed artifacts not supported"。
-> 见 [`crates/cli/src/commands/replay.rs`](../../crates/cli/src/commands/replay.rs)。
+生命周期：
 
-生命周期：`[artifact].ttl_days` 到期由清理任务回收（独立于状态机）。详见
-[../adr/0005-storage-pool-dual-dialect.md](../adr/0005-storage-pool-dual-dialect.md) 周边讨论。
+- `ttl_days > 0` 在写入/upsert 时计算新的 `expires_at`；`ttl_days=0` 写 `NULL`，永久保留。
+  修改配置不会追溯改写已有行的期限；`off` 只停止新增留档，已有到期记录仍会清理。
+- ingest 与 AI process 启动、领取任务前各调用一次 `purge_expired(now, batch_size)`，固定一批 500 条。
+  无后台 GC，无循环排空；没有相关运行时不会推进清理，积压可能需要多次运行。
+- 只删除到期的 inline 行，按 `expires_at` 最旧优先（相同期限不保证顺序，直接使用既有到期索引）；期限严格早于当前 UTC 秒，
+  SQLite 数值时间复核防止不同小数精度造成提前删除，临界记录允许延后。
+- SQLite 单语句原子删除；PG 锁定候选并 `SKIP LOCKED`，并发 upsert/cleanup 不复用陈旧候选集。
+  `NULL`、未来期限及 file-backed 行保留；续期后的行不删除。
+  PG 清理事务局部设置 1 秒 lock timeout、5 秒 statement timeout，覆盖外键置空的引用行锁等待；
+  超时回滚本批，后续运行可重试，不修改连接池的长期设置。
+- 现有 `ON DELETE SET NULL` 只清空 `articles.body_html_artifact_id` 和
+  `article_ai_results.raw_response_artifact_id`；业务行、已解析正文/摘要和报告快照不删除。
+  过期原文将无法 replay，这是 TTL 的预期结果。
+- 删除条数有界不等于耗时严格 `O(batch)`：还包括索引访问、payload 页回收与受影响引用数 R。
+  `0005_artifact_reference_indexes` 为两个引用列添加索引，避免每删一条 artifact 都扫描整张业务表。
+  新旧迁移的 up/down 文件保持双方言配对；旧 0001–0004 不修改。升级显式 `migrate run/check`；
+  降级到仅识别 0001–0004 的二进制前，先用 SQLx migration undo 撤销 0005 及记录。
+- 清理失败只记 warning，后续流程继续；删除非零时写 `artifacts_purged` 事件，count 为实际删除行数。
+  零删除静默。清理不会自动执行 VACUUM，也不保证 SQLite 文件立刻缩小。
 
 ## 4. `replay` 子命令
 
