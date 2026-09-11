@@ -1,0 +1,124 @@
+schema_version = "1"
+
+[database]
+driver = "sqlite"
+sqlite_path = "data/rss-ai-news.db"
+max_connections = 5
+busy_timeout_ms = 5000
+
+[http]
+user_agent = "RSS-AI-News/1.0"
+timeout_seconds = 30
+max_retries = 3
+retry_backoff_base_ms = 1000
+concurrent_feeds = 10
+concurrent_fetches = 5
+
+[ai]
+enabled = true
+model = "gpt-4o-mini"
+# 失败回退链（W14-A）：主模型调用失败时，依次改用下列模型重试同一篇文章。
+# 仅在"换模型可能有救"的失败上触发（如 quota/限流/模型不可用/5xx/解析失败）；
+# 凭证/配置错与连不上 endpoint 不回退。空 [] = 不回退。共用全局凭证，不做跨
+# provider 路由。注意 lease.ai_duration_seconds 须覆盖 (1+链长) 倍的批处理耗时
+# （ai-run 启动时会按 --batch-size 做预算校验，超了会直接报错）。
+fallback_models = []
+max_tokens = 4096
+temperature = 0.3
+request_timeout_seconds = 60
+max_input_chars = 8000
+
+[ai.rate_limit]
+requests_per_minute = 60
+tokens_per_minute = 0
+
+[publish]
+target_timezone = "Asia/Shanghai"
+github_owner = ""
+github_repo = ""
+github_branch = "main"
+github_path_prefix = "archive"
+local_output_dir = "output"
+include_unscored = false
+max_items_per_report = 30
+min_importance_score = 30
+candidate_window_hours = 48
+
+[publish.template]
+path_template = "{CATEGORY_KEY}/{YYYY}/{YYYYMMDD}.md"
+frontmatter_template = """
+---
+title: {date}
+date: {date}
+excerpt: {excerpt_yaml}
+---
+"""
+report_template = """
+{frontmatter}
+# {title_md}
+{excerpt_block}
+{items}
+"""
+item_template = """
+## {item_title_md}{score_badge}
+
+{tags_block}- **Source:** `{source_code}` | [阅读原文]({url_md})
+
+> [摘要]  
+{summary_blockquote}
+
+---
+
+"""
+
+[dedup]
+enable_link_dedup = true
+enable_content_dedup = true
+link_normalizer_version = "1"
+
+[extractor]
+strategy_order = ["readability", "summary_fallback"]
+# HTML 文章正文抓取的响应体上限（字节）。
+max_body_bytes = 1_048_576
+# Feed 下载的响应体上限（字节）。可选；省略时沿用 max_body_bytes（旧配置行为不变）。
+# 把全文嵌进 feed 的源（如 GitHub releases.atom）体积远超文章页，需要更高上限；
+# 单独设此项可抬高 feed 上限而不连带放大每篇 HTML 抓取的内存/带宽天花板。
+# feed_max_body_bytes = 5_242_880
+min_body_chars = 100
+
+[lease]
+fetch_duration_seconds = 300
+ai_duration_seconds = 600
+publish_duration_seconds = 600
+reclaim_interval_seconds = 120
+
+[retry]
+feed_entry_max_attempts = 5
+ai_max_attempts = 3
+publish_max_attempts = 5
+
+# 单次 run 工作量边界。详见 docs/design/config-schema.md §4.4
+[runtime]
+max_batches_per_run = 10  # ingest / ai-run 内部批次循环上限；0 = 不限
+
+[artifact]
+retention_policy = "on_failure"
+sample_rate = 0.1
+inline_threshold_bytes = 65536
+file_storage_dir = "data/artifacts"
+ttl_days = 30
+
+[observability]
+log_level = "info"
+log_format = "pretty"
+log_file = ""
+enable_metrics = false
+metrics_bind = "127.0.0.1:9090"
+
+# doctor 子命令的诊断阈值（运维调参，非业务规则）。整段 [doctor] 可省略，
+# 缺省值见 DoctorConfig::default。详见 docs/plan/07-observability.md §6。
+[doctor]
+stuck_reindex_pending_secs = 3600            # reindex job pending 超此秒数未被 claim → Warn
+silent_source_max_age_secs = 86400           # active source 距上次成功抓取超此秒数 → Warn
+silent_source_max_consecutive_failures = 10  # active source 连续失败达此值 → Warn
+pending_backlog_warn_threshold = 1000        # pending_fetch / pending AI 队列深度超此值 → Warn

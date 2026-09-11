@@ -46,7 +46,9 @@ pub enum DatabaseDriver {
 pub struct HttpConfig {
     pub user_agent: String,
     pub timeout_seconds: u64,
+    /// Compatibility-only inputs; see validate::inert_config_warnings.
     pub max_retries: u32,
+    /// Compatibility-only input; HTTP clients do not consume this backoff.
     pub retry_backoff_base_ms: u64,
     pub concurrent_feeds: u32,
     pub concurrent_fetches: u32,
@@ -68,6 +70,7 @@ pub struct AiConfig {
     pub rate_limit: AiRateLimitConfig,
 }
 
+/// Reserved RPM/TPM inputs, currently without a rate-limiter implementation.
 #[derive(Clone, Debug, Deserialize)]
 pub struct AiRateLimitConfig {
     pub requests_per_minute: u32,
@@ -145,7 +148,9 @@ impl Default for PublishTemplateConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct DedupConfig {
+    /// Compatibility switches; database deduplication remains enabled.
     pub enable_link_dedup: bool,
+    /// Compatibility switch; database deduplication remains enabled.
     pub enable_content_dedup: bool,
     pub link_normalizer_version: String,
 }
@@ -181,6 +186,7 @@ pub struct LeaseConfig {
     pub fetch_duration_seconds: u64,
     pub ai_duration_seconds: u64,
     pub publish_duration_seconds: u64,
+    /// Reserved interval; maintenance currently runs at flow startup.
     pub reclaim_interval_seconds: u64,
 }
 
@@ -222,8 +228,11 @@ impl Default for RuntimeConfig {
 pub struct ArtifactConfig {
     pub retention_policy: RetentionPolicy,
     pub sample_rate: f32,
+    /// Reserved for file-backed storage; current artifacts are all inline.
     pub inline_threshold_bytes: u64,
+    /// Reserved; no artifact files are read or written here.
     pub file_storage_dir: PathBuf,
+    /// Zero writes no expiry; existing row deadlines are not rewritten.
     pub ttl_days: u32,
 }
 
@@ -233,10 +242,13 @@ pub enum RetentionPolicy {
     Always,
     OnFailure,
     Sampled,
+    /// Reserved compatibility value; currently writes no artifacts.
     DebugOnly,
     Off,
 }
 
+/// CLI observability initializes from flags before TOML is loaded. These
+/// compatibility fields do not configure that startup; see plan/06-config.md.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ObservabilityConfig {
     pub log_level: String,

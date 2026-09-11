@@ -8,3 +8,7 @@ docker/scheduler-entrypoint.sh text eol=lf
 # 校验和——同一个库被不同平台构建的二进制 migrate 会互报 VersionMismatch。
 # 钉 LF 使所有平台构建嵌入相同字节。
 migrations/**/*.sql text eol=lf
+
+# Frozen configs retain exact LF bytes, including Markdown hard-break spaces
+# inside the historical TOML report template.
+crates/cli/tests/fixtures/v0.7.1/*.toml text eol=lf whitespace=-blank-at-eol

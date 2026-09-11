@@ -2,7 +2,7 @@
 
 本章详解三层配置体系：`.env`（密钥）/ `app.toml`（全局）/ `categories/*.toml`（分类）。
 
-配置是宪法 §3.4 单一真相源在"运行时输入"维度的体现：除 CLI 覆盖项外，所有行为都由这三类文件决定。
+配置是宪法 §3.4 单一真相源在"运行时输入"维度的体现：除 CLI 覆盖项和本章明确列出的保留字段外，配置行为由这三类文件决定。
 
 ## 1. 边界
 
@@ -283,8 +283,22 @@ diagnostic 列表渲染到 stderr。
 完整 run/validate-config 检查整套配置。EnvConfig Debug 不打印可能带凭据的 URL/proxy，
 dotenv 语法错误不回显原始行。
 
-当前未驱动实现的兼容字段仍可解析，但不能作为运行保证：ai.rate_limit、http.max_retries /
-retry_backoff_base_ms、dedup.enable_link_dedup / enable_content_dedup、artifact.inline_threshold_bytes /
-file_storage_dir（artifact 持久化当前走数据库 inline；目录仍供 doctor 检查）。
-数据库 dedup 始终启用；网络限流靠并发上限，失败重试由状态机与后续 run 完成。
-本轮不悄悄改变公开配置格式，后续删除这些字段需单独迁移说明。
+兼容字段仍接受解析。`validate-config` 对偏离 `configs/app.toml.example` 示例基线的字段
+输出非致命 warning（`code=inert_config`、`field`、固定 `message`；不回显用户值），保持 exit 0。
+JSON 增加非空 `summary.warnings`；空列表不序列化，既有 aggregate 字段保留。
+示例基线静默不表示这些值已实施。这不是运行限流或重试保证，也不因 warn 自动修改配置。CLI 启动日志参数已生效，诊断读取
+原始 TOML 的 observability 值，避免被 CLI 默认值覆盖后漏报。
+
+| 字段 | 示例基线 | 当前实际行为 |
+|---|---|---|
+| `ai.rate_limit.requests_per_minute` / `tokens_per_minute` | `60` / `0` | 无 RPM/TPM limiter；并发上限不等价于时间窗口限流 |
+| `http.max_retries` / `retry_backoff_base_ms` | `3` / `1000` | 不驱动 HTTP 内层重试；task 重试走 `[retry]` 和后续 run，AI 模型 fallback 仍按独立预算执行 |
+| `dedup.enable_link_dedup` / `enable_content_dedup` | `true` / `true` | 数据库去重始终启用，false 无效 |
+| `artifact.inline_threshold_bytes` / `file_storage_dir` | `65536` / `data/artifacts` | 全部 inline；没有文件分流，doctor 也不使用该目录参数 |
+| `artifact.retention_policy=debug_only` | 非默认值 | 尚未实现，当前不留档；使用该值即 warn |
+| `lease.reclaim_interval_seconds` | `120` | 无间隔计时器，目标 flow 启动时执行 lease maintenance |
+| `observability.log_level` / `log_format` / `log_file` | `info` / `pretty` / 空字符串 | CLI 初始化不读 TOML；使用 `--log-level`（或 RUST_LOG）、`--log-format`、`--log-file` |
+| `observability.enable_metrics` / `metrics_bind` | `false` / `127.0.0.1:9090` | CLI 初始化不读 TOML；使用 `--metrics-bind` 启动并指定端点 |
+
+本轮不移除字段、不新增 governor 或 HTTP 重试层。删除兼容字段需后续独立的配置迁移说明。
+Artifact 的存储、TTL 与引用处理以 [10-replay-and-backfill.md §3](./10-replay-and-backfill.md#3-raw_artifacts-留档策略) 为准。

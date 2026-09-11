@@ -1,0 +1,45 @@
+schema_version = "1"
+
+[category]
+key = "ai"
+display_name = "AI & Machine Learning"
+priority = 10
+
+[category.ai_override]
+prompt_template = """
+你是一个 AI/ML 领域的新闻分析师。请提炼文章要点，判断其技术重要性，并输出符合当前 AI 输出 schema 的 JSON。
+"""
+max_input_chars = 10000
+model = ""
+# 板块级失败回退链（W14-A，可选）。三态：整行省略 = 继承全局 [ai].fallback_models；
+# [] = 本板块显式禁用回退；["m1","m2"] = 覆盖全局。链内会自动 trim/去空白/去重，并去掉
+# 与主模型重复的项。
+# fallback_models = ["gpt-4o", "gpt-4o-mini"]
+# 板块独立凭证（W14-B，可选）。省略或空串 = 继承全局 OPENAI_BASE_URL / OPENAI_API_KEY，
+# 两者相互独立（可只换 key 不换 endpoint）。api_key_env 的值是 env 变量名引用——key 本身
+# 绝不写进 toml，部署时在 .env 或进程环境配置该变量。全部板块自带凭证时全局 OPENAI_*
+# 可不设；本板块凭证缺失会在 ai-run 启动时报错（错误只含变量名，不含值）。
+# base_url = "https://api.deepseek.com/v1"
+# api_key_env = "DEEPSEEK_API_KEY"
+
+[category.publish_override]
+max_items_per_report = 30
+min_importance_score = 30
+include_unscored = false
+# path_template = "ai/{YYYY}/{YYYYMMDD}.md"
+
+[[sources]]
+key = "openai-blog"
+display_name = "OpenAI Blog"
+feed_url = "https://openai.com/blog/rss.xml"
+feed_kind = "rss"
+priority = 10
+enabled = true
+
+[[sources]]
+key = "huggingface-papers"
+display_name = "HuggingFace Daily Papers"
+feed_url = "{RSSHUB}/huggingface/daily-papers"
+feed_kind = "rsshub"
+priority = 20
+enabled = true

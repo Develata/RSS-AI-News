@@ -1,4 +1,7 @@
 mod checks;
+mod warnings;
+
+pub use warnings::{ConfigWarning, inert_config_warnings};
 
 use checks::{
     collect_env_checks, collect_general_checks, collect_publish_checks, collect_source_env_checks,
