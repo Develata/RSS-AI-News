@@ -34,9 +34,9 @@
 
 ## 当前状态
 
-`partial`
+`passing`
 
-本地实现与验收已通过，最终提交 CI / PG16 Docker 验收尚未运行。
+v0.8.1 提交 `69c1722` 的本地矩阵及 [CI 34558585394](https://github.com/Develata/RSS-AI-News/actions/runs/34558585394) 均通过，包含 PG16 Docker fixture 与新增引用行锁超时/回滚/恢复测试。
 
 PG Docker fixture 默认 ignore，CI storage `--include-ignored` 执行；本轮本地额外使用隔离的原生
 PostgreSQL 17 执行了升级、并发、SKIP LOCKED、引用保留及回退测试。实际命令和范围见本轮 handoff。

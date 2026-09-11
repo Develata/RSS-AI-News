@@ -4,9 +4,9 @@
 - 作者：Codex
 - 分支：main
 - 基准 HEAD：`b3ec59856796f34610432e508b3637ace61c80b6`
-- 相关 commit：pending
-- 相关 release：v0.8.1 维护候选；用户已授权验收通过后发布，workspace 版本已提升
-- 状态：`validated`（本地；远端 CI 未运行）
+- 相关 commit：`92423ba`（TTL）、`b746251`（配置）、`69c1722`（发版准备）
+- 相关 release：v0.8.1，已发布并核验 stable / latest
+- 状态：`validated`（已发布；本地、远端 CI、镜像与 Release 读回通过）
 
 ## 关键变更
 
@@ -61,3 +61,6 @@ SKIP LOCKED 仅覆盖候选 artifact。已在清理事务内设置 1 秒 lock ti
 最终 local matrix / exact-SHA CI / GHCR 与 GitHub Release 回执见 [v0.8.1 report](../reports/releases/v0.8.1.md)。
 
 最终 v0.8.1 local matrix：4 lanes / 27 steps 全通过，包含完整 workspace build/test 与 fmt/Clippy。
+
+发布完成：tag `v0.8.1` → `69c1722`，CI `34558585394` 五项通过，镜像 workflow `34559035919` 成功。
+GitHub Release、两套 immutable image tags 与 stable aliases 读回通过；镜像具体 digest 和执行范围见 release report。
