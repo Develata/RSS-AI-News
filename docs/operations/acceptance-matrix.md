@@ -26,19 +26,19 @@ cargo acceptance run --profile local --dry-run
 cargo acceptance run --profile full --dry-run
 
 # 本机可复现的 pre-tag matrix
-cargo acceptance run --profile local --expected-version 0.8.0
+cargo acceptance run --profile local --expected-version 0.8.1
 
 # 完整 matrix；缺 Docker / DATABASE_URL / PostgreSQL 时必须失败
 DATABASE_URL='postgres://...' \
-  cargo acceptance run --profile full --expected-version 0.8.0
+  cargo acceptance run --profile full --expected-version 0.8.1
 
 # 单 lane，适合 CI 或故障复现
 cargo acceptance run --lane static
 cargo acceptance run --lane workspace
-cargo acceptance run --lane sqlite --expected-version 0.8.0
+cargo acceptance run --lane sqlite --expected-version 0.8.1
 cargo acceptance run --lane postgres
 cargo acceptance run --lane docker
-cargo acceptance run --lane release --expected-version 0.8.0
+cargo acceptance run --lane release --expected-version 0.8.1
 ```
 
 `--lane` 可重复；显式 lanes 与 `--profile` 互斥。默认 profile 为 `local`。默认收集全部选中 lane 的结果；`--fail-fast` 可在首个失败后停止。

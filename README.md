@@ -1,6 +1,6 @@
 # RSS-AI-News
 
-当前版本：`v0.8.0`。
+当前版本：`v0.8.1`。
 
 RSS-AI-News 是一个一次性运行的 RSS 新闻处理 CLI。它按外部调度触发，完成：
 
@@ -336,14 +336,14 @@ rss-ai-news \
 cargo acceptance list
 
 # credential-free pre-tag matrix：static / workspace / SQLite+CLI / release identity
-cargo acceptance run --profile local --expected-version 0.8.0
+cargo acceptance run --profile local --expected-version 0.8.1
 
 # 包含 PostgreSQL 与 Docker；缺 prerequisite 直接失败
 DATABASE_URL='postgres://...' \
-  cargo acceptance run --profile full --expected-version 0.8.0
+  cargo acceptance run --profile full --expected-version 0.8.1
 
 # 机器可读 evidence；不执行命令、不创建 smoke resources
-cargo acceptance --format json run --profile full --expected-version 0.8.0 --dry-run
+cargo acceptance --format json run --profile full --expected-version 0.8.1 --dry-run
 ```
 
 完整 lane contract、cleanup 与 exit semantics 见 [`docs/operations/acceptance-matrix.md`](docs/operations/acceptance-matrix.md)。
@@ -540,7 +540,7 @@ include_unscored = true
 | `fallback_models` | `[]` | 主模型失败时依次回退的备选模型（W14-A）；仅"换模型可能有救"的失败触发（quota/限流/模型不可用/5xx/解析失败），凭证错与连不上不回退；链上所有模型共用该次运行的板块凭证（W14-B 板块可经 `[category.ai_override].base_url`/`api_key_env` 自带凭证），不跨 provider 路由。注意 `lease.ai_duration_seconds` 要覆盖 `(1+链长)` 倍批耗时（ai-run 启动时会预算校验）。板块可在 `[category.ai_override].fallback_models` 覆盖（省略=继承 / `[]`=禁用） |
 | `max_input_chars` | `8000` | 单篇文章送入 AI 前的字符截断；越大成本越高，越小可能丢上下文 |
 | `request_timeout_seconds` | `60` | 慢模型 / 长输入要调到 `120`+；过短会让 AI 阶段大量 `timeout` 重试 |
-| `ai.rate_limit.requests_per_minute` | `60` | 按你的 API tier 调；超出会被 governor 排队，不会丢请求 |
+| `ai.rate_limit.requests_per_minute` | `60` | 保留兼容字段，当前不执行 RPM 限流；通过并发上限与外部调度控制调用负载 |
 
 **发布筛选（`[publish]`）**
 
@@ -558,6 +558,17 @@ include_unscored = true
 |---|---|---|
 | `runtime.max_batches_per_run` | `10` | 单次 run 处理批次上限；积压多想一次清空时用 `--max-batches=0` 临时覆盖（仅 ingest/ai-run/run 三个子命令支持），不要直接改默认 |
 | `artifact.retention_policy` | `"on_failure"` | 排错期改 `"always"`，让所有 raw artifact 都进 `raw_artifacts` 表供 `replay` 取；恢复后改回 `"on_failure"` 控成本 |
+
+`validate-config` 对偏离随附示例基线的无效字段输出 `inert_config` warning（JSON 位于
+`summary.warnings`），仍返回 exit 0。`ai.rate_limit`、HTTP 内层 retry/backoff、dedup 两个开关、
+artifact 文件参数、lease 回收间隔和 TOML observability 启动参数均有明确说明；
+`debug_only` 当前不留档，也会告警。完整语义以 [配置保留字段表](docs/plan/06-config.md#独立能力与保留字段2026-09-10) 为准。
+
+v0.8.1 的 artifact TTL：ingest 和 AI process 启动各清理一批，最多 500 条过期 inline artifact，
+`ttl_days=0` 写入永久保留记录。清理仅移除原始诊断 payload，并清空业务行的 artifact 外键；
+文章正文、AI 结果与冻结报告保留。无运行时不会自动清理，SQLite 文件也不会因此自动缩小。
+v0.8.1 新增 `0005` 外键索引迁移：升级时执行 `migrate run` 后再 `migrate check`；
+回退到 v0.8.0/v0.7.1 前需先撤销 `0005` 及其迁移记录。已发布 v0.8.0 的数据库兼容结论不变。
 
 **未列出但需要知道的**：
 
@@ -693,7 +704,7 @@ output/AI_ML/2026/20260103.md
 
 注意：
 
-- v0.1.0 **raw artifact 全部走数据库 inline（SQLite BLOB / PG BYTEA）**，不落本地文件；`[artifact].file_storage_dir` 字段是 v0.2 large-payload 外置存储预留，当前未消费。`replay` 命令直接从 `raw_artifacts` 表读。
+- **raw artifact 全部走数据库 inline（SQLite BLOB / PG BYTEA）**，不落本地文件；`inline_threshold_bytes` / `file_storage_dir` 为尚未实现的保留字段。`replay` 直接从 `raw_artifacts` 表读取仍在保留期内的内容。
 - `rebuild-report` 从数据库 `publish_record` / `publish_item` 表重渲染，不需要本地 snapshot 文件；删 `output/<category>/<date>.md` 不会影响重渲，只是看不到旧产物对比。
 - Docker 部署时挂 `data/`（含 db + 未来 artifact 外置存储）+ `output/` 两个 volume 即可。
 
@@ -828,7 +839,7 @@ rss-ai-news --config-dir configs publish --date 2026-05-18 --force
 
 每篇文章 1 次 OpenAI 调用，默认 `[ai].request_timeout_seconds = 60` 较保守。优化方向：
 
-- 调大 `--ai-batch-size`（命令行单次批 size），同时让 `[ai.rate_limit].requests_per_minute` 留够预算。
+- 按实际延迟与 provider 429 调整 `--ai-batch-size`、并发上限和调度频率；`[ai.rate_limit]` 当前不执行限流。
 - 换更快的模型（`[ai].model`，例如 `gpt-4o-mini` 替成更轻量的）。
 - 减小 `[ai].max_input_chars` 让 prompt 更短，减少 token 耗时。
 - 关闭 `[ai].enabled` 后只跑 `ingest`，待集中处理时再批量 `ai-run`。
@@ -856,7 +867,7 @@ rss-ai-news --config-dir configs publish --date 2026-05-18 --force
 rss-ai-news --config-dir configs validate-config
 ```
 
-## 当前版本状态（v0.8.0）
+## 当前版本状态（v0.8.1）
 
 - production graph：11 个 library crates + 1 个 single-shot binary；SQLite / PostgreSQL 双方言。
 - CLI：13 个顶层子命令；`recent-entries` 提供 read-only discovery surface，`--published-after` 默认关闭。
@@ -864,7 +875,7 @@ rss-ai-news --config-dir configs validate-config
 - CI：lint / workspace test / SQLite migration smoke / PostgreSQL / Docker 5 个并行 jobs。
 - release：runtime + scheduler GHCR images；版本、README、lockfile 与 binary identity 在 pre-tag matrix 中联动检查。
 
-完整发布快照见 [`docs/reports/releases/v0.8.0.md`](docs/reports/releases/v0.8.0.md)。
+完整发布快照见 [`docs/reports/releases/v0.8.1.md`](docs/reports/releases/v0.8.1.md)。
 
 ## 更多文档
 
