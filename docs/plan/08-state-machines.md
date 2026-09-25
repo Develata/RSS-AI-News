@@ -190,6 +190,10 @@ retryable 失败**不**作为独立状态。语义上"暂时失败、稍后再�
 | PublishedRemote | `published_remote` | 成功终态 | GitHub 推送成功 |
 | Failed | `failed` | 失败终态 | 中途任一步永久失败 |
 
+**无候选不是失败**：freeze 选不到候选（`SnapshotEmpty`）时，记录释放回可再领取的 `pending`，
+清 lease、退还本次 claim 计入的 `attempt_count`，并记 `last_error_kind = 'snapshot_empty'`。
+同一天后续运行在有新文章时仍能冻结发布；反复空跑不消耗重试预算。
+
 ### 6.2 不可变契约
 
 `SnapshotFrozen` 之后，`publish_items.frozen_*` 列**只读不改**。即使源 article 后续被

@@ -817,6 +817,9 @@ feed_url = "{RSSHUB}/huggingface/daily-papers"
 4. `min_importance_score` 是否过高。
 5. `[ai].enabled = false` 时，`include_unscored` 是否为 `true`。
 
+当天暂无候选时 `publish` 以 `freeze=SnapshotEmpty` 正常退出（exit 0），当天记录保持 `pending`；
+之后再运行 `run` / `publish`，有新文章时会照常生成当天报告，无需 `--force`。
+
 ### 想重新发布同一天报告
 
 普通重复执行 `publish` 会复用幂等记录并避免覆盖。确实需要重新生成新的发布批次时：

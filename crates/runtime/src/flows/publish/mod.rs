@@ -151,11 +151,7 @@ impl PublishFlow {
         emitter
             .emit(
                 "publish_failed",
-                if matches!(error, ReportError::SnapshotEmpty) {
-                    "warn"
-                } else {
-                    "error"
-                },
+                "error",
                 Some("publish_record"),
                 Some(publish_record_id),
                 &error.display_user(),

@@ -131,6 +131,11 @@ WHERE id = $5 AND lease_owner = $6
 RETURNING state
 "#;
 pub(super) const RELEASE_PERMANENT_FAILURE_SQL: &str = "UPDATE publish_records SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL, last_error = $1, last_error_kind = $2, updated_at = $3 WHERE id = $4 AND lease_owner = $5";
+/// Freeze found no candidates: return the record to claimable `pending`
+/// instead of `failed`, and refund the attempt counted by the claim — an empty
+/// snapshot is not a publish attempt, so repeated empty runs must not exhaust
+/// the retry budget. Guarded by owner + state like every release.
+pub(super) const RELEASE_EMPTY_SNAPSHOT_SQL: &str = "UPDATE publish_records SET lease_owner = NULL, lease_expires_at = NULL, attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, last_error = 'no publish candidates', last_error_kind = 'snapshot_empty', updated_at = $1 WHERE id = $2 AND lease_owner = $3 AND state = 'pending'";
 pub(super) const RECLAIM_PUBLISH_LEASES_SQL: &str = r#"
 UPDATE publish_records
 SET lease_owner = NULL, lease_expires_at = NULL, updated_at = $1

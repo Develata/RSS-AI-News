@@ -15,7 +15,7 @@
 - **freeze**：将命中 `[publish].min_importance_score` × `include_unscored` × `candidate_window_hours` 的 article 冻结为 `publish_items`；
   - AI 路径：选 `ArticleState=ReadyForPublish`
   - AI-off 直通：`Persisted` article 在同 tx 内提升为候选（无需 ai_result）
-  - 候选为空 → 返回 `SnapshotEmpty`（不算失败）
+  - 候选为空 → 返回 `SnapshotEmpty`（不算失败）；记录回到 `pending`、退还 attempt，同日后续运行有新候选时照常发布
 - **render**：snapshot_frozen → rendered；空 items 失败
 - **store-local**：写本地文件 + 推进 article 到 `Published`（无远端目标时）/ 保持文章不动（有远端目标待 push）；
   - 分类 `path_template` override 生效
@@ -45,6 +45,7 @@
 | `freeze_record_isolates_two_concurrent_pending_records_by_id` | 同上 | 并发隔离 |
 | `freeze_with_ai_off_passthrough_promotes_persisted_articles_in_same_tx` | 同上 | AI-off 直通 |
 | `freeze_returns_snapshot_empty_when_no_candidates_match` | 同上 | SnapshotEmpty |
+| `freeze_after_empty_snapshot_publishes_articles_that_arrive_later` | 同上 | 空跑不耗预算、后到文章可发布 |
 | `freeze_returns_nothing_to_claim_when_no_pending_records` | 同上 | 空闲 |
 | `freeze_skips_articles_without_correct_category_key` | 同上 | category 隔离 |
 | `render_advances_snapshot_frozen_to_rendered_when_items_exist` | `crates/runtime/tests/publish_render_tests.rs` | render happy |

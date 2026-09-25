@@ -185,6 +185,50 @@ async fn pg_create_if_new_then_claim_then_release_advance() {
 
 #[tokio::test]
 #[ignore = "需要 docker daemon"]
+async fn pg_release_empty_snapshot_returns_record_to_pending_and_refunds_attempt() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "empty").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .create_if_new(&new_record("idem-empty", "ai", render, policy))
+        .await
+        .expect("create")
+        .expect("inserted");
+    let now = OffsetDateTime::now_utc();
+    let request = ClaimRequest {
+        owner: "worker-A".to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+    let claimed = repo
+        .claim_publish_by_ids(&request, PublishState::Pending, &[id])
+        .await
+        .expect("claim");
+    assert_eq!(claimed.len(), 1);
+
+    assert!(
+        !repo
+            .release_empty_snapshot(id, "someone-else", now)
+            .await
+            .expect("foreign owner")
+    );
+    assert!(
+        repo.release_empty_snapshot(id, "worker-A", now)
+            .await
+            .expect("release")
+    );
+
+    let after = repo.find_by_id(id).await.unwrap().unwrap();
+    assert_eq!(after.state, "pending");
+    assert_eq!(after.attempt_count, 0);
+    assert_eq!(after.lease_owner, None);
+    assert_eq!(after.last_error_kind.as_deref(), Some("snapshot_empty"));
+}
+
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
 async fn pg_claim_by_ids_skips_row_locked_by_another_transaction() {
     let ctx = make_pg_test_pool().await;
     let (render, policy) = seed_render_and_policy_rules(&ctx, "skip-locked").await;

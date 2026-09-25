@@ -195,14 +195,37 @@ async fn freeze_returns_snapshot_empty_when_no_candidates_match() {
     let outcome = flow.freeze(freeze_opts(true, false)).await;
 
     assert_eq!(outcome.status, PublishFreezeStatus::SnapshotEmpty);
-    assert_record_state(&pool, publish_record_id, "failed").await;
-    let kind: Option<String> =
-        sqlx::query_scalar("SELECT last_error_kind FROM publish_records WHERE id = ?")
-            .bind(publish_record_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    // Empty is not a failure: back to claimable pending, attempt refunded.
+    assert_record_state(&pool, publish_record_id, "pending").await;
+    let (kind, attempts, lease_owner): (Option<String>, i64, Option<String>) = sqlx::query_as(
+        "SELECT last_error_kind, attempt_count, lease_owner FROM publish_records WHERE id = ?",
+    )
+    .bind(publish_record_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(kind.as_deref(), Some("snapshot_empty"));
+    assert_eq!(attempts, 0);
+    assert_eq!(lease_owner, None);
+}
+
+#[tokio::test]
+async fn freeze_after_empty_snapshot_publishes_articles_that_arrive_later() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flow(pool.clone());
+    let publish_record_id = init_record(&flow, &pool).await;
+
+    // Repeated empty runs never exhaust the retry budget.
+    for _ in 0..10 {
+        let outcome = flow.freeze(freeze_opts(true, false)).await;
+        assert_eq!(outcome.status, PublishFreezeStatus::SnapshotEmpty);
+    }
+    seed_ai_succeeded_article(&pool, "ai", "late-ai", "Title", "body", "summary", 88, 1).await;
+
+    let outcome = flow.freeze(freeze_opts(true, false)).await;
+    assert_eq!(outcome.status, PublishFreezeStatus::Frozen);
+    assert_eq!(outcome.publish_record_id, publish_record_id);
+    assert_record_state(&pool, publish_record_id, "snapshot_frozen").await;
 }
 
 #[tokio::test]
@@ -226,7 +249,7 @@ async fn freeze_skips_articles_without_correct_category_key() {
     let outcome = flow.freeze(freeze_opts(true, false)).await;
 
     assert_eq!(outcome.status, PublishFreezeStatus::SnapshotEmpty);
-    assert_record_state(&pool, publish_record_id, "failed").await;
+    assert_record_state(&pool, publish_record_id, "pending").await;
 }
 
 // === W15: freeze 入口启动期 maintenance（docs/plan/15 §5） ===

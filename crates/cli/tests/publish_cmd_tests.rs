@@ -107,10 +107,17 @@ async fn publish_all_records_a_category_conflict_and_keeps_other_categories() {
         _ => unreachable!(),
     };
 
-    // First run: ai publishes; math has no candidates (SnapshotEmpty), which
-    // leaves math's record for today terminal.
+    // First run: ai publishes; math has no candidates and stays pending.
     let first = publish_all::run(&cli, args).await.expect("first run");
     assert_eq!(first.exit_code(), ExitCode::Success, "{first:?}");
+
+    // Make math's record for today terminal (e.g. retry budget exhausted).
+    let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
+    sqlx::query("UPDATE publish_records SET state = 'failed' WHERE category_key = 'math'")
+        .execute(&pool)
+        .await
+        .expect("mark math failed");
+    pool.close().await;
 
     // Second run: math's terminal record is a conflict. It must be reported
     // for math only, not abort the whole command.

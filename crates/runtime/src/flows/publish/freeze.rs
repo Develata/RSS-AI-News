@@ -5,8 +5,7 @@
 use rss_ai_news_domain::dto::publish::PublishRequest;
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_report::{
-    ReportError, SelectionConfig, SnapshotConfig, freeze as snapshot_freeze, load_candidates,
-    to_storage_items,
+    SelectionConfig, SnapshotConfig, freeze as snapshot_freeze, load_candidates, to_storage_items,
 };
 use rss_ai_news_storage::{
     ClaimRequest, FreezeSnapshotOutcome, FreezeSnapshotStatus, PublishState, build_owner_id,
@@ -150,8 +149,34 @@ impl PublishFlow {
         };
 
         if candidates.is_empty() {
-            let error = ReportError::SnapshotEmpty;
-            self.fail_claimed(claimed.id, &owner, &error, now, &emitter)
+            // No candidates yet is not a failure: the record goes back to
+            // claimable `pending` (attempt refunded) so a later run of the same
+            // day can still publish once articles arrive.
+            match self
+                .ctx
+                .publish_record_repo
+                .release_empty_snapshot(claimed.id, &owner, now)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    publish_record_id = claimed.id,
+                    "empty snapshot release lost the lease; record left to reclaim"
+                ),
+                Err(error) => tracing::warn!(
+                    publish_record_id = claimed.id,
+                    "empty snapshot release failed; lease expiry will reclaim: {error}"
+                ),
+            }
+            emitter
+                .emit(
+                    "publish_skipped",
+                    "info",
+                    Some("publish_record"),
+                    Some(claimed.id),
+                    "no publish candidates; record kept pending",
+                    Some(json!({ "phase": "freeze", "error_kind": "snapshot_empty" })),
+                )
                 .await;
             return PublishFreezeOutcome {
                 publish_record_id: claimed.id,

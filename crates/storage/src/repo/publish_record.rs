@@ -163,6 +163,15 @@ pub trait PublishRecordRepository: Send + Sync {
         max_attempts: u32,
         now: OffsetDateTime,
     ) -> Result<ReleaseFailureOutcome, StorageError>;
+    /// Releases a `pending` record whose freeze found no candidates back to
+    /// claimable `pending`, refunding the claim's attempt. Returns `false` when
+    /// the lease was lost.
+    async fn release_empty_snapshot(
+        &self,
+        id: i64,
+        owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
     async fn release_permanent_failure(
         &self,
         id: i64,
