@@ -26,7 +26,7 @@ exit code：含 `Fail` → 1；其余（含 `Warn`）→ 0。
 ### 失败条件（failure path）
 
 - 任一 check 返回 `Fail` → exit 1
-- `--deep` 命中不变量违规 → `DoctorFailed` 错误
+- `--deep` 命中不变量违规 → summary `status=fail`、exit 1；JSON 模式只输出一个文档
 - DB pool 已关闭 → fail
 - disk 最小空间无法满足 → fail
 

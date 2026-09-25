@@ -116,14 +116,27 @@ CLI 退出码由 [`crates/cli/src/exit_code.rs`](../../crates/cli/src/exit_code.
 | Code | 变体 | 含义 |
 |---:|---|---|
 | `0` | `Success` | 全量成功；也含部分非致命跳过（如 `SnapshotEmpty` / 无候选） |
-| `1` | `RuntimeError` | 业务 / 运行时错误（含 `RuntimeError::*`、`DoctorFailed`、`MigrateCheckPending`、`ReplayArtifactNotFound`、`PublishRecordNotFound` 等所有非配置类失败） |
+| `1` | `RuntimeError` | 业务 / 运行时错误（含 `RuntimeError::*`、阶段失败、`MigrateCheckPending`、`ReplayArtifactNotFound`、`PublishRecordNotFound` 等所有非配置类失败） |
 | `2` | `UserError` | CLI 参数错（clap 解析失败 / 不合法 flag 组合 / `ReindexTargetRequired` 等） |
 | `78` | `ConfigError` | 配置错（sysexits `EX_CONFIG`）—— 所有 `ConfigError` 包括 `validate-config` 失败、`AiRunWhileDisabled` 等 |
+
+**阶段失败走 summary，不走 `Err`**：命令一旦产出 summary 就只输出一次（JSON 模式恰好一个文档），
+退出码由 `CommandSummary::exit_code()` 给出，`status` 为 `success` / `fail`（doctor 为 `ok` / `warn` / `fail`），
+失败明细进 `errors[]`。规则：
+
+- `publish` / `publish-all`：每个阶段带 `verdict`。`ok`；`skipped`（`SnapshotEmpty`、`NothingToClaim`、
+  `Conflicted`——无可发布内容，或记录被其他 worker 持有 / 已推进，下次调度接手）→ exit 0；
+  `failed`（`Failed`、`ArticleConflict`、`MissingTarget`）→ exit 1。已知缺口：record 绑定 claim 时
+  `NothingToClaim` 也可能表示重试预算耗尽，由 sweep 转 `failed` 后下一次运行以 `PublishConflict` 报出。
+- `ingest` / `ai-run`：数据库 claim / 候选查询失败、pending 行插入失败 → exit 1；单个 feed、条目或文章的
+  业务失败只计数（由状态机重试），不改变退出码。
+- `doctor`：任一 check `Fail` 或 `--deep` 不变量违规 → exit 1。
+- `run`：子阶段的 `Err` 与子阶段 summary 的非零退出码都记入 `stage_failures`，取最严重者。
 
 特殊行为：
 - `migrate run` / `validate-config` / 任何 `ConfigError` → exit 78（CI / Docker scheduler 据此区分"配置问题"vs"业务问题"）
 - `reindex --dry-run` 即使数据有不一致也返 0（仅打印 plan，不写库）
-- `doctor` 任一 `Fail` outcome → `DoctorFailed` → exit 1（仅 `Warn` / `Ok` → exit 0）
+- `doctor` 任一 `Fail` outcome → summary `status=fail` → exit 1（仅 `Warn` / `Ok` → exit 0）
 - `replay` 找不到 artifact → `ReplayArtifactNotFound` → exit 1
 - `rebuild-report` 找不到 publish_record → `PublishRecordNotFound` → exit 1
 

@@ -12,7 +12,8 @@ use crate::{
     args::{AiRunArgs, Cli},
     context_factory::{build_ai_deps, open_write_storage},
     error::CliError,
-    output::CommandSummary,
+    exit_code::ExitCode,
+    output::{CommandSummary, RenderedError},
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,12 +29,68 @@ pub struct AiRunCommandSummary {
     /// 因 task panic / cancel 而失败的 AI 任务数（codex P2-1）。与业务永久失败
     /// 分列，避免 panic 在运维输出中报 0 failure。
     pub process_tasks_panicked: u32,
+    /// Pending-row inserts that failed with a storage error.
+    pub task_gen_insert_failed: u32,
+    /// `error_kind` when listing task-gen candidates failed.
+    pub task_gen_error: Option<String>,
+    /// `error_kind` when claiming AI tasks failed.
+    pub process_claim_error: Option<String>,
     pub duration_seconds: f64,
 }
 
+impl AiRunCommandSummary {
+    /// Storage-level failures of the run itself. Per-article AI failures are
+    /// retried by the state machine and do not count here.
+    fn infra_errors(&self) -> Vec<RenderedError> {
+        let mut errors = Vec::new();
+        if let Some(kind) = &self.task_gen_error {
+            errors.push(RenderedError {
+                kind: format!("ai_task_gen_{kind}"),
+                message: format!("listing AI task candidates failed ({kind})"),
+            });
+        }
+        if self.task_gen_insert_failed > 0 {
+            errors.push(RenderedError {
+                kind: "ai_task_gen_insert_failed".to_string(),
+                message: format!(
+                    "{} pending AI task inserts failed",
+                    self.task_gen_insert_failed
+                ),
+            });
+        }
+        if let Some(kind) = &self.process_claim_error {
+            errors.push(RenderedError {
+                kind: format!("ai_claim_{kind}"),
+                message: format!("claiming AI tasks failed ({kind})"),
+            });
+        }
+        errors
+    }
+}
+
 impl CommandSummary for AiRunCommandSummary {
+    fn exit_code(&self) -> ExitCode {
+        if self.infra_errors().is_empty() {
+            ExitCode::Success
+        } else {
+            ExitCode::RuntimeError
+        }
+    }
+
+    fn errors(&self) -> Vec<RenderedError> {
+        self.infra_errors()
+    }
+
     fn render_pretty(&self, writer: &mut dyn Write) -> io::Result<()> {
-        writeln!(writer, "AI run completed:")?;
+        let errors = self.infra_errors();
+        if errors.is_empty() {
+            writeln!(writer, "AI run completed:")?;
+        } else {
+            writeln!(writer, "AI run failed:")?;
+            for error in &errors {
+                writeln!(writer, "  ! {}", error.message)?;
+            }
+        }
         writeln!(writer, "  Task-gen scanned:      {}", self.task_gen_scanned)?;
         writeln!(
             writer,
@@ -185,6 +242,9 @@ pub async fn run(cli: &Cli, args: &AiRunArgs) -> Result<AiRunCommandSummary, Cli
         process_retryable_failed: summary.process.retryable_failed,
         process_permanent_failed: summary.process.permanent_failed,
         process_tasks_panicked: summary.process.tasks_panicked,
+        task_gen_insert_failed: summary.task_gen.insert_failed,
+        task_gen_error: summary.task_gen.list_error,
+        process_claim_error: summary.process.claim_error,
         duration_seconds: started.elapsed().as_secs_f64(),
     })
 }

@@ -5,7 +5,7 @@ use rss_ai_news_runtime::doctor::deep_scan::DeepScanReport;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::{args, error::CliError};
+use crate::{args, error::CliError, exit_code::ExitCode};
 
 pub use crate::commands::ai_run::AiRunCommandSummary;
 pub use crate::commands::backfill::BackfillCommandSummary;
@@ -39,8 +39,19 @@ pub struct RenderedError {
 }
 
 pub trait CommandSummary: Serialize {
+    /// Exit code implied by this summary. Commands that can finish with a
+    /// failed stage while still producing a summary override this, so the
+    /// failure reaches the scheduler instead of exiting 0.
+    fn exit_code(&self) -> ExitCode {
+        ExitCode::Success
+    }
+
     fn status(&self) -> &'static str {
-        "success"
+        if self.exit_code() == ExitCode::Success {
+            "success"
+        } else {
+            "fail"
+        }
     }
 
     /// Errors to surface in the JSON envelope's `errors` array. Default is
@@ -81,6 +92,16 @@ impl OutputWriter {
                 writeln!(handle)
             }
         }
+    }
+
+    /// Emits the summary exactly once and returns the exit code it implies.
+    pub fn emit_summary<S: CommandSummary>(
+        &mut self,
+        command: &str,
+        summary: &S,
+    ) -> Result<ExitCode, CliError> {
+        self.emit_success(command, summary).map_err(CliError::Io)?;
+        Ok(summary.exit_code())
     }
 
     pub fn emit_failure(&mut self, command: &str, error: &CliError) -> io::Result<()> {
@@ -203,6 +224,14 @@ impl DoctorCommandSummary {
 }
 
 impl CommandSummary for DoctorCommandSummary {
+    fn exit_code(&self) -> ExitCode {
+        if self.has_fail() {
+            ExitCode::RuntimeError
+        } else {
+            ExitCode::Success
+        }
+    }
+
     fn status(&self) -> &'static str {
         if self.has_fail() {
             "fail"
@@ -242,6 +271,9 @@ impl CommandSummary for DoctorCommandSummary {
                     }
                 }
             }
+        }
+        if self.has_fail() {
+            writeln!(writer, "doctor detected failing checks")?;
         }
         Ok(())
     }

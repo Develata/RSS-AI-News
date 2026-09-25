@@ -5,7 +5,7 @@ use rss_ai_news_cli::{
         ai_run::AiRunCommandSummary,
         backfill::{BackfillCommandSummary, parse_date_start, sha256_hex},
         migrate::MigrateCommandSummary,
-        publish::{PublishCommandSummary, PublishStageOutcome},
+        publish::{PublishCommandSummary, PublishStageOutcome, StageVerdict},
         publish_all::{PublishAllCategorySummary, PublishAllCommandSummary},
         rebuild_report::RebuildReportCommandSummary,
         recent_entries::{
@@ -16,6 +16,7 @@ use rss_ai_news_cli::{
         run::RunCommandSummary,
     },
     error::CliError,
+    exit_code::ExitCode,
     output::{CommandSummary, failure_envelope, success_envelope},
 };
 use serde_json::json;
@@ -33,6 +34,45 @@ fn ai_run_summary_serializes_json_fields() {
 #[test]
 fn publish_summary_pretty_renders() {
     assert_pretty_contains(&publish_summary(), "Publish completed");
+}
+
+#[test]
+fn publish_summary_with_failed_stage_exits_nonzero() {
+    let mut summary = publish_summary();
+    summary.stages.push(PublishStageOutcome {
+        stage: "store_local".to_string(),
+        status: "Failed { error_kind: \"local_io\" }".to_string(),
+        verdict: StageVerdict::Failed,
+    });
+
+    assert_eq!(summary.exit_code(), ExitCode::RuntimeError);
+    let envelope = success_envelope("publish", &summary);
+    assert_eq!(envelope["status"], "fail");
+    assert_eq!(envelope["errors"][0]["kind"], "publish_store_local");
+    assert_pretty_contains(&summary, "Publish failed");
+}
+
+#[test]
+fn publish_summary_with_skipped_stage_still_succeeds() {
+    let mut summary = publish_summary();
+    summary.stages.push(PublishStageOutcome {
+        stage: "freeze".to_string(),
+        status: "SnapshotEmpty".to_string(),
+        verdict: StageVerdict::Skipped,
+    });
+
+    assert_eq!(summary.exit_code(), ExitCode::Success);
+    assert_eq!(success_envelope("publish", &summary)["status"], "success");
+}
+
+#[test]
+fn ai_run_summary_with_claim_error_exits_nonzero() {
+    let mut summary = ai_summary();
+    summary.process_claim_error = Some("storage_unavailable".to_string());
+
+    assert_eq!(summary.exit_code(), ExitCode::RuntimeError);
+    assert_eq!(success_envelope("ai-run", &summary)["status"], "fail");
+    assert_pretty_contains(&summary, "AI run failed");
 }
 
 #[test]
@@ -248,6 +288,9 @@ fn ai_summary() -> AiRunCommandSummary {
         process_retryable_failed: 0,
         process_permanent_failed: 0,
         process_tasks_panicked: 0,
+        task_gen_insert_failed: 0,
+        task_gen_error: None,
+        process_claim_error: None,
         duration_seconds: 1.25,
     }
 }
@@ -266,6 +309,7 @@ fn publish_summary() -> PublishCommandSummary {
         stages: vec![PublishStageOutcome {
             stage: "init".to_string(),
             status: "created".to_string(),
+            verdict: StageVerdict::Ok,
         }],
         forced: false,
     }
@@ -286,6 +330,7 @@ fn publish_all_summary() -> PublishAllCommandSummary {
             stages: vec![PublishStageOutcome {
                 stage: "init".to_string(),
                 status: "created".to_string(),
+                verdict: StageVerdict::Ok,
             }],
         }],
         commit_sha: None,
@@ -401,6 +446,7 @@ fn run_summary() -> RunCommandSummary {
             articles_fallback: 0,
             fetch_failed: 0,
             tasks_panicked: 0,
+            extract_claim_error: None,
             duration_seconds: 1.0,
         }),
         ai_run: Some(ai_summary()),

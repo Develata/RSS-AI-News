@@ -55,6 +55,10 @@ pub struct TaskGenSummary {
     pub inserted: u32,
     pub conflict_skipped: u32,
     pub article_already_advanced: u32,
+    /// Pending-row inserts that failed with a storage error (not conflicts).
+    pub insert_failed: u32,
+    /// `error_kind` when listing candidates failed; the sweep did not run.
+    pub list_error: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -77,6 +81,8 @@ pub struct AiProcessSummary {
     /// retryable_deferred)` = `(T, F)` / `(F, T)` / `(F, F)` 区分 cap-hit /
     /// retryable-deferred / queue-exhausted 三种退出路径。
     pub retryable_deferred: bool,
+    /// `error_kind` when claiming a batch failed; the loop stopped there.
+    pub claim_error: Option<String>,
     pub failure_samples: Vec<AiTaskOutcome>,
 }
 

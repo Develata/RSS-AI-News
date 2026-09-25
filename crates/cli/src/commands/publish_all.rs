@@ -4,8 +4,7 @@ use std::io::{self, Write};
 use rss_ai_news_config::{self as config, CategoryConfig};
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishInitOptions, PublishInitOutcome,
-    PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRemoteStatus,
-    PublishRenderOptions, RuntimeError,
+    PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRenderOptions, RuntimeError,
 };
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -14,11 +13,15 @@ use crate::{
     args::{Cli, PublishArgs},
     commands::{
         backfill::parse_date_start,
-        publish::{PublishStageOutcome, run_local_stages, stage, today_utc},
+        publish::{
+            PublishStageOutcome, StageVerdict, run_local_stages, stage, stage_errors, stage_trail,
+            stages_exit_code, today_utc,
+        },
     },
     context_factory::{build_publish_deps, open_write_storage},
     error::CliError,
-    output::CommandSummary,
+    exit_code::ExitCode,
+    output::{CommandSummary, RenderedError},
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,8 +46,23 @@ pub struct PublishAllCategorySummary {
 }
 
 impl CommandSummary for PublishAllCommandSummary {
+    fn exit_code(&self) -> ExitCode {
+        stages_exit_code(self.categories.iter().flat_map(|category| &category.stages))
+    }
+
+    fn errors(&self) -> Vec<RenderedError> {
+        self.categories
+            .iter()
+            .flat_map(|category| stage_errors(&category.category, &category.stages))
+            .collect()
+    }
+
     fn render_pretty(&self, writer: &mut dyn Write) -> io::Result<()> {
-        writeln!(writer, "Publish-all completed:")?;
+        if self.exit_code() == ExitCode::Success {
+            writeln!(writer, "Publish-all completed:")?;
+        } else {
+            writeln!(writer, "Publish-all failed:")?;
+        }
         writeln!(writer, "  Date:       {}", self.date)?;
         writeln!(writer, "  Categories: {}", self.categories.len())?;
         writeln!(
@@ -57,6 +75,18 @@ impl CommandSummary for PublishAllCommandSummary {
         )?;
         if let Some(commit) = &self.commit_sha {
             writeln!(writer, "  Commit:     {commit}")?;
+        }
+        for category in &self.categories {
+            writeln!(
+                writer,
+                "  - {:<12} {:>3} items  {}",
+                category.category,
+                category.items,
+                stage_trail(&category.stages)
+            )?;
+            if let Some(path) = &category.local_path {
+                writeln!(writer, "    {path}")?;
+            }
         }
         Ok(())
     }
@@ -142,14 +172,18 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishAllCommandSumma
             .await?;
         let (publish_record_id, state) = match init {
             PublishInitOutcome::Created { publish_record_id } => {
-                stages.push(stage("init", "created"));
+                stages.push(stage("init", "created", StageVerdict::Ok));
                 (publish_record_id, "pending".to_string())
             }
             PublishInitOutcome::AlreadyExists {
                 publish_record_id,
                 state,
             } => {
-                stages.push(stage("init", &format!("already_exists:{state}")));
+                stages.push(stage(
+                    "init",
+                    &format!("already_exists:{state}"),
+                    StageVerdict::Ok,
+                ));
                 (publish_record_id, state)
             }
         };
@@ -246,17 +280,15 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishAllCommandSumma
                 summary.stages.push(stage(
                     "publish_remote_batch",
                     &format!("{:?}", remote.status),
+                    StageVerdict::of_remote(&remote.status),
                 ));
                 summary.items = summary.items.max(remote.item_count);
                 summary.commit_sha = remote.commit_sha;
                 summary.remote_target = remote.remote_target;
             }
-            if !matches!(
-                remote.status,
-                PublishRemoteStatus::PublishedRemote | PublishRemoteStatus::NothingToClaim
-            ) {
-                // 保持与单 category publish 相同风格：流程结果进 summary，
-                // 是否重试由状态机和下一轮调度决定。
+            if StageVerdict::of_remote(&remote.status) == StageVerdict::Failed {
+                // 结果进 summary（verdict=failed → exit 1）；是否重试由状态机
+                // 和下一轮调度决定。
                 tracing::warn!(
                     publish_record_id = remote.publish_record_id,
                     status = ?remote.status,

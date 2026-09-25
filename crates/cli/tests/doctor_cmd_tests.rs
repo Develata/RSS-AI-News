@@ -4,7 +4,8 @@ use rss_ai_news_cli::{
     args::{Cli, Command, DoctorArgs, LogFormat, OutputFormat},
     commands::doctor,
     error::CliError,
-    output::{CommandSummary, DoctorCommandSummary, OutputWriter},
+    exit_code::ExitCode,
+    output::{CommandSummary, DoctorCommandSummary},
 };
 use rss_ai_news_observability::health::{CheckOutcome, CheckReport};
 use rss_ai_news_runtime::doctor::deep_scan::{
@@ -19,11 +20,11 @@ async fn doctor_cmd_shallow_non_failing_checks_return_success() {
     write_config(temp.path(), temp.path().join("rss.sqlite").as_path());
     initialize_database(&temp.path().join("rss.sqlite")).await;
     let cli = cli_for(temp.path(), false, OutputFormat::Pretty);
-    let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Pretty);
 
-    doctor::run(&cli, doctor_args(&cli), &mut writer)
+    let summary = doctor::run(&cli, doctor_args(&cli))
         .await
         .expect("doctor succeeds with warn/info only");
+    assert_eq!(summary.exit_code(), ExitCode::Success);
 }
 
 #[tokio::test]
@@ -32,11 +33,10 @@ async fn doctor_cmd_missing_github_token_is_not_failure() {
     write_config(temp.path(), temp.path().join("rss.sqlite").as_path());
     initialize_database(&temp.path().join("rss.sqlite")).await;
     let cli = cli_for(temp.path(), false, OutputFormat::Pretty);
-    let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Pretty);
 
-    let result = doctor::run(&cli, doctor_args(&cli), &mut writer).await;
+    let result = doctor::run(&cli, doctor_args(&cli)).await;
 
-    assert!(result.is_ok());
+    assert_eq!(result.expect("doctor runs").exit_code(), ExitCode::Success);
 }
 
 #[tokio::test]
@@ -45,9 +45,8 @@ async fn doctor_cmd_uncreatable_database_path_returns_storage_error() {
     let db_path = temp.path().join("missing-parent").join("rss.sqlite");
     write_config(temp.path(), &db_path);
     let cli = cli_for(temp.path(), false, OutputFormat::Pretty);
-    let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Pretty);
 
-    let error = doctor::run(&cli, doctor_args(&cli), &mut writer)
+    let error = doctor::run(&cli, doctor_args(&cli))
         .await
         .expect_err("database path should fail");
 
@@ -60,11 +59,11 @@ async fn doctor_cmd_deep_happy_path_returns_success() {
     write_config(temp.path(), temp.path().join("rss.sqlite").as_path());
     initialize_database(&temp.path().join("rss.sqlite")).await;
     let cli = cli_for(temp.path(), true, OutputFormat::Pretty);
-    let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Pretty);
 
-    doctor::run(&cli, doctor_args(&cli), &mut writer)
+    let summary = doctor::run(&cli, doctor_args(&cli))
         .await
         .expect("deep doctor succeeds");
+    assert_eq!(summary.exit_code(), ExitCode::Success);
 }
 
 #[tokio::test]
@@ -74,13 +73,14 @@ async fn doctor_cmd_deep_i6_violation_returns_doctor_failed() {
     write_config(temp.path(), &db_path);
     seed_i6_violation(&db_path).await;
     let cli = cli_for(temp.path(), true, OutputFormat::Pretty);
-    let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Pretty);
 
-    let error = doctor::run(&cli, doctor_args(&cli), &mut writer)
+    let summary = doctor::run(&cli, doctor_args(&cli))
         .await
-        .expect_err("I6 should fail doctor");
+        .expect("doctor reports through its summary");
 
-    assert!(matches!(error, CliError::DoctorFailed));
+    assert!(summary.has_fail());
+    assert_eq!(summary.exit_code(), ExitCode::RuntimeError);
+    assert_eq!(summary.status(), "fail");
 }
 
 #[test]
@@ -412,11 +412,10 @@ async fn doctor_reports_missing_migrations_without_mutating_database() {
             .await
             .expect("empty pool");
         let cli = cli_for(temp.path(), deep, OutputFormat::Json);
-        let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Json);
-        let error = doctor::run(&cli, doctor_args(&cli), &mut writer)
+        let summary = doctor::run(&cli, doctor_args(&cli))
             .await
-            .expect_err("missing migrations fail doctor");
-        assert!(matches!(error, CliError::DoctorFailed), "{error:?}");
+            .expect("doctor reports through its summary");
+        assert_eq!(summary.exit_code(), ExitCode::RuntimeError);
         let tables: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'")
                 .fetch_one(&pool)
@@ -436,10 +435,10 @@ async fn doctor_does_not_seed_configuration_or_sources() {
     write_config(temp.path(), &db_path);
     initialize_database(&db_path).await;
     let cli = cli_for(temp.path(), false, OutputFormat::Json);
-    let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Json);
-    doctor::run(&cli, doctor_args(&cli), &mut writer)
+    let summary = doctor::run(&cli, doctor_args(&cli))
         .await
         .expect("healthy schema");
+    assert_eq!(summary.exit_code(), ExitCode::Success);
     let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
     for query in [
         "SELECT COUNT(*) FROM rule_versions",
@@ -478,8 +477,7 @@ async fn doctor_missing_database_never_creates_file() {
         let db_path = temp.path().join("absent.sqlite");
         write_config(temp.path(), &db_path);
         let cli = cli_for(temp.path(), deep, OutputFormat::Json);
-        let mut writer = OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Json);
-        let result = doctor::run(&cli, doctor_args(&cli), &mut writer).await;
+        let result = doctor::run(&cli, doctor_args(&cli)).await;
         assert!(!db_path.exists(), "diagnostics created an absent database");
         assert!(matches!(result, Err(CliError::Storage(_))));
     }

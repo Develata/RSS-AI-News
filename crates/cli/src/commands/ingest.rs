@@ -11,7 +11,8 @@ use crate::{
     args::{Cli, IngestArgs},
     context_factory::{build_extract_deps, build_ingest_deps, open_write_storage},
     error::CliError,
-    output::CommandSummary,
+    exit_code::ExitCode,
+    output::{CommandSummary, RenderedError},
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,12 +29,40 @@ pub struct IngestCommandSummary {
     /// 因 task panic / cancel 而失败的任务数（ingest source + extract entry 之和；
     /// codex P2-1）。与业务失败计数分列，避免 panic 在运维输出中报 0 failure。
     pub tasks_panicked: u32,
+    /// `error_kind` when claiming extract work failed (database unavailable,
+    /// …); per-source and per-entry failures stay in the counters above.
+    pub extract_claim_error: Option<String>,
     pub duration_seconds: f64,
 }
 
 impl CommandSummary for IngestCommandSummary {
+    fn exit_code(&self) -> ExitCode {
+        if self.extract_claim_error.is_some() {
+            ExitCode::RuntimeError
+        } else {
+            ExitCode::Success
+        }
+    }
+
+    fn errors(&self) -> Vec<RenderedError> {
+        self.extract_claim_error
+            .iter()
+            .map(|kind| RenderedError {
+                kind: format!("extract_claim_{kind}"),
+                message: format!("claiming extract work failed ({kind})"),
+            })
+            .collect()
+    }
+
     fn render_pretty(&self, writer: &mut dyn Write) -> io::Result<()> {
-        writeln!(writer, "Ingest completed:")?;
+        if let Some(kind) = &self.extract_claim_error {
+            writeln!(
+                writer,
+                "Ingest failed: claiming extract work failed ({kind})"
+            )?;
+        } else {
+            writeln!(writer, "Ingest completed:")?;
+        }
         writeln!(writer, "  Sources attempted:    {}", self.sources_attempted)?;
         writeln!(writer, "  Sources succeeded:    {}", self.sources_succeeded)?;
         writeln!(
@@ -115,6 +144,7 @@ pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, C
         articles_fallback: extract_summary.fallback_persisted,
         fetch_failed: extract_summary.permanent_failed + extract_summary.retryable_failed,
         tasks_panicked: ingest_summary.tasks_panicked + extract_summary.tasks_panicked,
+        extract_claim_error: extract_summary.claim_error,
         duration_seconds: started.elapsed().as_secs_f64(),
     })
 }

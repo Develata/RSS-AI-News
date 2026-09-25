@@ -227,7 +227,7 @@ W15——sweep 接线后常态应为绿，见 [./15-retry-exhaustion-and-reclaim
 
 - 全部 `Ok` 或仅 `Info` → exit 0
 - 含 `Warn` 不含 `Fail` → exit 0（仅输出 warning）
-- 含 `Fail` → exit 1（`DoctorFailed` → RuntimeError；详见 [./11-error-and-recovery.md](./11-error-and-recovery.md) §5）
+- 含 `Fail` → exit 1（summary `status=fail` → RuntimeError，JSON 仍只有一个文档；详见 [./11-error-and-recovery.md](./11-error-and-recovery.md) §5）
 
 ### 6.1 显示侧redaction
 

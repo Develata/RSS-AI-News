@@ -53,6 +53,8 @@ pub struct ExtractSummary {
     /// `(cap_hit, retryable, queue_exhausted)` → `(T, F)`, `(F, T)`, `(F, F)`。
     /// 让 observability 消费者无须靠 `batches_executed < cap` 隐式推断。
     pub retryable_deferred: bool,
+    /// `error_kind` when claiming a batch failed; the loop stopped there.
+    pub claim_error: Option<String>,
     pub failure_samples: Vec<ExtractEntryOutcome>,
 }
 
@@ -170,6 +172,7 @@ impl ExtractFlow {
                             })),
                         )
                         .await;
+                    summary.claim_error = Some(error.error_kind().to_string());
                     return summary;
                 }
             };

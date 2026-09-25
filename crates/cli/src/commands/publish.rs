@@ -4,8 +4,8 @@ use std::io::{self, Write};
 use rss_ai_news_config::{self as config, CategoryConfig};
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishFreezeStatus, PublishInitOptions, PublishInitOutcome,
-    PublishRemoteOptions, PublishRenderOptions, PublishRenderStatus, PublishStoreLocalOptions,
-    PublishStoreLocalStatus, RuntimeError,
+    PublishRemoteOptions, PublishRemoteStatus, PublishRenderOptions, PublishRenderStatus,
+    PublishStoreLocalOptions, PublishStoreLocalStatus, RuntimeError,
 };
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -15,7 +15,8 @@ use crate::{
     commands::backfill::parse_date_start,
     context_factory::{build_publish_deps, open_write_storage},
     error::CliError,
-    output::CommandSummary,
+    exit_code::ExitCode,
+    output::{CommandSummary, RenderedError},
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,11 +38,122 @@ pub struct PublishCommandSummary {
 pub struct PublishStageOutcome {
     pub stage: String,
     pub status: String,
+    pub verdict: StageVerdict,
+}
+
+/// How a publish stage outcome affects the command result
+/// (docs/plan/11-error-and-recovery.md §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageVerdict {
+    /// The stage reached its success state.
+    Ok,
+    /// Non-fatal: nothing to publish (`SnapshotEmpty`), or the record is
+    /// leased / advanced by another worker (`NothingToClaim`, `Conflicted`).
+    /// Exit 0; the next scheduled run picks it up if still pending.
+    Skipped,
+    /// The stage failed; the command exits 1.
+    Failed,
+}
+
+impl StageVerdict {
+    pub fn of_freeze(status: &PublishFreezeStatus) -> Self {
+        match status {
+            PublishFreezeStatus::Frozen => Self::Ok,
+            PublishFreezeStatus::SnapshotEmpty
+            | PublishFreezeStatus::NothingToClaim
+            | PublishFreezeStatus::Conflicted => Self::Skipped,
+            PublishFreezeStatus::ArticleConflict { .. } | PublishFreezeStatus::Failed { .. } => {
+                Self::Failed
+            }
+        }
+    }
+
+    pub fn of_render(status: &PublishRenderStatus) -> Self {
+        match status {
+            PublishRenderStatus::Rendered => Self::Ok,
+            PublishRenderStatus::NothingToClaim | PublishRenderStatus::Conflicted => Self::Skipped,
+            PublishRenderStatus::Failed { .. } => Self::Failed,
+        }
+    }
+
+    pub fn of_store_local(status: &PublishStoreLocalStatus) -> Self {
+        match status {
+            PublishStoreLocalStatus::StoredLocal | PublishStoreLocalStatus::PublishedLocal => {
+                Self::Ok
+            }
+            PublishStoreLocalStatus::NothingToClaim | PublishStoreLocalStatus::Conflicted => {
+                Self::Skipped
+            }
+            PublishStoreLocalStatus::ArticleConflict { .. }
+            | PublishStoreLocalStatus::Failed { .. } => Self::Failed,
+        }
+    }
+
+    pub fn of_remote(status: &PublishRemoteStatus) -> Self {
+        match status {
+            PublishRemoteStatus::PublishedRemote => Self::Ok,
+            PublishRemoteStatus::NothingToClaim | PublishRemoteStatus::Conflicted => Self::Skipped,
+            PublishRemoteStatus::ArticleConflict { .. }
+            | PublishRemoteStatus::MissingTarget
+            | PublishRemoteStatus::Failed { .. } => Self::Failed,
+        }
+    }
+}
+
+/// Exit code for a set of stage outcomes: any failed stage → runtime error.
+pub(crate) fn stages_exit_code<'a>(
+    stages: impl IntoIterator<Item = &'a PublishStageOutcome>,
+) -> ExitCode {
+    if stages
+        .into_iter()
+        .any(|stage| stage.verdict == StageVerdict::Failed)
+    {
+        ExitCode::RuntimeError
+    } else {
+        ExitCode::Success
+    }
+}
+
+/// Failed stages rendered for the JSON envelope's `errors` array.
+pub(crate) fn stage_errors<'a>(
+    category: &str,
+    stages: impl IntoIterator<Item = &'a PublishStageOutcome>,
+) -> Vec<RenderedError> {
+    stages
+        .into_iter()
+        .filter(|stage| stage.verdict == StageVerdict::Failed)
+        .map(|stage| RenderedError {
+            kind: format!("publish_{}", stage.stage),
+            message: format!("[{category}] {} {}", stage.stage, stage.status),
+        })
+        .collect()
+}
+
+/// `init=created → freeze=Frozen → …`, the stage trail shown in pretty output.
+pub(crate) fn stage_trail(stages: &[PublishStageOutcome]) -> String {
+    stages
+        .iter()
+        .map(|stage| format!("{}={}", stage.stage, stage.status))
+        .collect::<Vec<_>>()
+        .join(" → ")
 }
 
 impl CommandSummary for PublishCommandSummary {
+    fn exit_code(&self) -> ExitCode {
+        stages_exit_code(&self.stages)
+    }
+
+    fn errors(&self) -> Vec<RenderedError> {
+        stage_errors(&self.category, &self.stages)
+    }
+
     fn render_pretty(&self, writer: &mut dyn Write) -> io::Result<()> {
-        writeln!(writer, "Publish completed:")?;
+        if self.exit_code() == ExitCode::Success {
+            writeln!(writer, "Publish completed:")?;
+        } else {
+            writeln!(writer, "Publish failed:")?;
+        }
         writeln!(writer, "  Category: {}", self.category)?;
         writeln!(writer, "  Date:     {}", self.date)?;
         writeln!(writer, "  Items:    {}", self.items)?;
@@ -51,6 +163,7 @@ impl CommandSummary for PublishCommandSummary {
         if let Some(commit) = &self.commit_sha {
             writeln!(writer, "  Commit:   {commit}")?;
         }
+        writeln!(writer, "  Stages:   {}", stage_trail(&self.stages))?;
         Ok(())
     }
 }
@@ -127,14 +240,18 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
     let mut stages = Vec::new();
     let (publish_record_id, state) = match init {
         PublishInitOutcome::Created { publish_record_id } => {
-            stages.push(stage("init", "created"));
+            stages.push(stage("init", "created", StageVerdict::Ok));
             (publish_record_id, "pending".to_string())
         }
         PublishInitOutcome::AlreadyExists {
             publish_record_id,
             state,
         } => {
-            stages.push(stage("init", &format!("already_exists:{state}")));
+            stages.push(stage(
+                "init",
+                &format!("already_exists:{state}"),
+                StageVerdict::Ok,
+            ));
             (publish_record_id, state)
         }
     };
@@ -199,7 +316,11 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
                 },
             )
             .await;
-        stages.push(stage("publish_remote", &format!("{:?}", remote.status)));
+        stages.push(stage(
+            "publish_remote",
+            &format!("{:?}", remote.status),
+            StageVerdict::of_remote(&remote.status),
+        ));
         items = items.max(remote.item_count);
         commit_sha = remote.commit_sha;
         remote_target = remote.remote_target;
@@ -249,16 +370,24 @@ pub(crate) async fn run_local_stages(
     };
     if state == "pending" {
         let freeze = flow.freeze_record(publish_record_id, freeze).await;
-        stages.push(stage("freeze", &format!("{:?}", freeze.status)));
+        stages.push(stage(
+            "freeze",
+            &format!("{:?}", freeze.status),
+            StageVerdict::of_freeze(&freeze.status),
+        ));
         outcome.items = freeze.item_count;
-        if !matches!(freeze.status, PublishFreezeStatus::Frozen) {
+        if StageVerdict::of_freeze(&freeze.status) != StageVerdict::Ok {
             return outcome;
         }
     }
     if matches!(state, "pending" | "snapshot_frozen") {
         let rendered = flow.render_record(publish_record_id, render.clone()).await;
-        stages.push(stage("render", &format!("{:?}", rendered.status)));
-        if !matches!(rendered.status, PublishRenderStatus::Rendered) {
+        stages.push(stage(
+            "render",
+            &format!("{:?}", rendered.status),
+            StageVerdict::of_render(&rendered.status),
+        ));
+        if StageVerdict::of_render(&rendered.status) != StageVerdict::Ok {
             return outcome;
         }
     }
@@ -274,13 +403,14 @@ pub(crate) async fn run_local_stages(
                 },
             )
             .await;
-        stages.push(stage("store_local", &format!("{:?}", store.status)));
+        stages.push(stage(
+            "store_local",
+            &format!("{:?}", store.status),
+            StageVerdict::of_store_local(&store.status),
+        ));
         outcome.items = outcome.items.max(store.item_count);
         outcome.local_path = store.local_path;
-        if !matches!(
-            store.status,
-            PublishStoreLocalStatus::StoredLocal | PublishStoreLocalStatus::PublishedLocal
-        ) {
+        if StageVerdict::of_store_local(&store.status) != StageVerdict::Ok {
             return outcome;
         }
     }
@@ -317,10 +447,11 @@ fn summary(
     }
 }
 
-pub(crate) fn stage(stage: &str, status: &str) -> PublishStageOutcome {
+pub(crate) fn stage(stage: &str, status: &str, verdict: StageVerdict) -> PublishStageOutcome {
     PublishStageOutcome {
         stage: stage.to_string(),
         status: status.to_string(),
+        verdict,
     }
 }
 

@@ -19,98 +19,41 @@ pub mod replay;
 pub mod run;
 pub mod validate_config;
 
+/// Runs the selected command and emits its summary exactly once.
+///
+/// A command either fails before producing a summary (`Err`, rendered once by
+/// `lib::run` as a failure envelope) or returns a summary whose
+/// [`CommandSummary::exit_code`](crate::output::CommandSummary::exit_code)
+/// carries stage-level failures (e.g. `publish` store-local failed, `doctor`
+/// found a failing check, `run` aggregated a stage failure). Never both.
 pub async fn dispatch(cli: Cli, writer: &mut OutputWriter) -> Result<ExitCode, CliError> {
     match &cli.command {
         Command::ValidateConfig => {
-            let summary = validate_config::run(&cli).await?;
-            writer
-                .emit_success("validate-config", &summary)
-                .map_err(CliError::Io)?;
+            writer.emit_summary("validate-config", &validate_config::run(&cli).await?)
         }
-        Command::Ingest(args) => {
-            let summary = ingest::run(&cli, args).await?;
-            writer
-                .emit_success("ingest", &summary)
-                .map_err(CliError::Io)?;
-        }
-        Command::AiRun(args) => {
-            let summary = ai_run::run(&cli, args).await?;
-            writer
-                .emit_success("ai-run", &summary)
-                .map_err(CliError::Io)?;
-        }
-        Command::Publish(args) => {
-            let summary = publish::run(&cli, args).await?;
-            writer
-                .emit_success("publish", &summary)
-                .map_err(CliError::Io)?;
-        }
+        Command::Ingest(args) => writer.emit_summary("ingest", &ingest::run(&cli, args).await?),
+        Command::AiRun(args) => writer.emit_summary("ai-run", &ai_run::run(&cli, args).await?),
+        Command::Publish(args) => writer.emit_summary("publish", &publish::run(&cli, args).await?),
         Command::PublishAll(args) => {
-            let summary = publish_all::run(&cli, args).await?;
-            writer
-                .emit_success("publish-all", &summary)
-                .map_err(CliError::Io)?;
+            writer.emit_summary("publish-all", &publish_all::run(&cli, args).await?)
         }
-        Command::Doctor(args) => {
-            doctor::run(&cli, args, writer).await?;
-        }
-        Command::Replay(args) => {
-            let summary = replay::run(&cli, args).await?;
-            writer
-                .emit_success("replay", &summary)
-                .map_err(CliError::Io)?;
-        }
+        Command::Doctor(args) => writer.emit_summary("doctor", &doctor::run(&cli, args).await?),
+        Command::Replay(args) => writer.emit_summary("replay", &replay::run(&cli, args).await?),
         Command::Backfill(args) => {
-            let summary = backfill::run(&cli, args).await?;
-            writer
-                .emit_success("backfill", &summary)
-                .map_err(CliError::Io)?;
+            writer.emit_summary("backfill", &backfill::run(&cli, args).await?)
         }
         Command::RebuildReport(args) => {
-            let summary = rebuild_report::run(&cli, args).await?;
-            writer
-                .emit_success("rebuild-report", &summary)
-                .map_err(CliError::Io)?;
+            writer.emit_summary("rebuild-report", &rebuild_report::run(&cli, args).await?)
         }
-        Command::Reindex(args) => {
-            let summary = reindex::run(&cli, args).await?;
-            writer
-                .emit_success("reindex", &summary)
-                .map_err(CliError::Io)?;
-        }
-        Command::RecentEntries(args) => {
-            let summary = recent_entries::run(&cli, args).await?;
-            writer
-                .emit_success(recent_entries::COMMAND_NAME, &summary)
-                .map_err(CliError::Io)?;
-        }
+        Command::Reindex(args) => writer.emit_summary("reindex", &reindex::run(&cli, args).await?),
+        Command::RecentEntries(args) => writer.emit_summary(
+            recent_entries::COMMAND_NAME,
+            &recent_entries::run(&cli, args).await?,
+        ),
         Command::Migrate(args) => match args.action {
-            MigrateAction::Run => {
-                let summary = migrate::run(&cli).await?;
-                writer
-                    .emit_success("migrate", &summary)
-                    .map_err(CliError::Io)?;
-            }
-            MigrateAction::Check => {
-                let summary = migrate::check(&cli).await?;
-                writer
-                    .emit_success("migrate", &summary)
-                    .map_err(CliError::Io)?;
-            }
+            MigrateAction::Run => writer.emit_summary("migrate", &migrate::run(&cli).await?),
+            MigrateAction::Check => writer.emit_summary("migrate", &migrate::check(&cli).await?),
         },
-        // `run` is the only command that aggregates stage-level failures
-        // into the summary itself (per cli-semantics §4.11). It always
-        // emits the success summary (which carries `stage_failures` /
-        // `errors` / `status="fail"` so JSON consumers see the full
-        // picture in one envelope), then derives the exit code from the
-        // most severe stage failure. Returning the derived ExitCode lets
-        // `lib::run` propagate non-zero exits without triggering a second
-        // `emit_failure` envelope.
-        Command::Run(args) => {
-            let summary = run::run(&cli, args).await?;
-            writer.emit_success("run", &summary).map_err(CliError::Io)?;
-            return Ok(summary.derive_exit_code());
-        }
+        Command::Run(args) => writer.emit_summary("run", &run::run(&cli, args).await?),
     }
-    Ok(ExitCode::Success)
 }

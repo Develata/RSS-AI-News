@@ -13,10 +13,13 @@ use crate::{
     args::{Cli, DoctorArgs},
     context_factory::build_doctor_deps,
     error::CliError,
-    output::{DoctorCommandSummary, OutputWriter},
+    output::DoctorCommandSummary,
 };
 
-pub async fn run(cli: &Cli, args: &DoctorArgs, writer: &mut OutputWriter) -> Result<(), CliError> {
+/// Runs all health checks. Failing checks are reported through the summary
+/// (status `fail`, exit 1), never as an `Err`, so JSON output stays a single
+/// document.
+pub async fn run(cli: &Cli, args: &DoctorArgs) -> Result<DoctorCommandSummary, CliError> {
     let deps = build_doctor_deps(cli).await?;
     let app = &deps.loaded.app;
     let env = &deps.loaded.env;
@@ -93,14 +96,5 @@ pub async fn run(cli: &Cli, args: &DoctorArgs, writer: &mut OutputWriter) -> Res
     } else {
         None
     };
-    let summary = DoctorCommandSummary::new(report, deep);
-    let has_fail = summary.has_fail();
-    writer
-        .emit_success("doctor", &summary)
-        .map_err(CliError::Io)?;
-    if has_fail {
-        Err(CliError::DoctorFailed)
-    } else {
-        Ok(())
-    }
+    Ok(DoctorCommandSummary::new(report, deep))
 }

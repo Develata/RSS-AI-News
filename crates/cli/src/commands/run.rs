@@ -81,12 +81,8 @@ impl RunCommandSummary {
 }
 
 impl CommandSummary for RunCommandSummary {
-    fn status(&self) -> &'static str {
-        if self.stage_failures.is_empty() {
-            "success"
-        } else {
-            "fail"
-        }
+    fn exit_code(&self) -> ExitCode {
+        self.derive_exit_code()
     }
 
     fn errors(&self) -> Vec<RenderedError> {
@@ -100,7 +96,11 @@ impl CommandSummary for RunCommandSummary {
     }
 
     fn render_pretty(&self, writer: &mut dyn Write) -> io::Result<()> {
-        writeln!(writer, "Run completed:")?;
+        if self.stage_failures.is_empty() {
+            writeln!(writer, "Run completed:")?;
+        } else {
+            writeln!(writer, "Run failed:")?;
+        }
         match &self.ingest {
             Some(ingest) => writeln!(
                 writer,
@@ -156,6 +156,36 @@ fn record_stage_failure(failures: &mut Vec<StageFailure>, stage: &'static str, e
     });
 }
 
+/// Records the failures a stage reported through its summary (it returned
+/// `Ok` but its own exit code is non-zero, e.g. publish store-local failed).
+fn record_summary_failures<S: CommandSummary>(
+    failures: &mut Vec<StageFailure>,
+    stage: &'static str,
+    summary: &S,
+) {
+    let exit_code = summary.exit_code();
+    if exit_code == ExitCode::Success {
+        return;
+    }
+    let errors = summary.errors();
+    if errors.is_empty() {
+        failures.push(StageFailure {
+            stage,
+            error_kind: "stage_failed".to_string(),
+            message: format!("{stage} reported status {}", summary.status()),
+            exit_code_value: exit_code.as_i32(),
+        });
+    }
+    for error in errors {
+        failures.push(StageFailure {
+            stage,
+            error_kind: error.kind,
+            message: error.message,
+            exit_code_value: exit_code.as_i32(),
+        });
+    }
+}
+
 pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliError> {
     let started = Instant::now();
 
@@ -191,7 +221,10 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
     let mut ai_run_skip_reason: Option<&'static str> = None;
 
     let ingest_summary = match ingest::run(cli, &ingest_args).await {
-        Ok(summary) => Some(summary),
+        Ok(summary) => {
+            record_summary_failures(&mut stage_failures, "ingest", &summary);
+            Some(summary)
+        }
         Err(err) => {
             record_stage_failure(&mut stage_failures, "ingest", &err);
             None
@@ -219,7 +252,10 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
             None
         } else {
             match ai_run::run(cli, &ai_args).await {
-                Ok(summary) => Some(summary),
+                Ok(summary) => {
+                    record_summary_failures(&mut stage_failures, "ai-run", &summary);
+                    Some(summary)
+                }
                 Err(err) => {
                     record_stage_failure(&mut stage_failures, "ai-run", &err);
                     None
@@ -227,7 +263,10 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
             }
         };
         let publish_summary = match publish_all::run(cli, &publish_args).await {
-            Ok(summary) => Some(summary),
+            Ok(summary) => {
+                record_summary_failures(&mut stage_failures, "publish", &summary);
+                Some(summary)
+            }
             Err(err) => {
                 record_stage_failure(&mut stage_failures, "publish", &err);
                 None

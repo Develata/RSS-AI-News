@@ -100,9 +100,11 @@
 | Code | 变体 | 含义 |
 |---:|---|---|
 | `0` | `Success` | 全量成功；也含部分非致命跳过（如 `SnapshotEmpty`） |
-| `1` | `RuntimeError` | 业务 / 运行时错误（`RuntimeError::*` 透传，含 `DoctorFailed` / `ReplayArtifactNotFound` / `PublishRecordNotFound` / `MigrateCheckPending` 等） |
+| `1` | `RuntimeError` | 业务 / 运行时错误（`RuntimeError::*` 透传、publish 阶段 `failed`、ingest/ai-run 数据库失败、doctor `Fail`，以及 `ReplayArtifactNotFound` / `PublishRecordNotFound` / `MigrateCheckPending` 等） |
 | `2` | `UserError` | CLI 参数错（clap 解析失败 / 非法 flag 组合 / `ReindexTargetRequired` 等） |
 | `78` | `ConfigError` | 配置错（schema / env 缺失 / 模板非法 / `AiRunWhileDisabled`）—— sysexits `EX_CONFIG` |
+
+阶段失败通过 summary 报告：JSON 模式始终只输出一个文档，`status` 为 `fail` 时退出码非 0，失败明细在 `errors[]`。
 
 详尽分类与 sysexits 收敛历史见 [../plan/11-error-and-recovery.md](../plan/11-error-and-recovery.md) §5。
 

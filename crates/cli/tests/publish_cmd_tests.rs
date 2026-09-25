@@ -5,10 +5,13 @@ use std::{fs, path::Path};
 
 use rss_ai_news_cli::{
     args::{Cli, Command, LogFormat, OutputFormat, PublishArgs},
-    commands::publish,
+    commands::publish::{self, StageVerdict},
+    exit_code::ExitCode,
+    output::CommandSummary,
 };
 use rss_ai_news_storage::{StoragePool, build_sqlite_pool, run_migrations};
 use tempfile::TempDir;
+use time::{Duration, OffsetDateTime};
 
 const REPORT_DATE: &str = "2026-05-18";
 
@@ -44,6 +47,77 @@ async fn publish_category_never_claims_another_categorys_pending_record() {
     assert_eq!(state, "pending", "foreign record must stay untouched");
     assert_eq!(attempts, 0, "foreign record must not be claimed");
     assert_eq!(lease_owner, None);
+}
+
+#[tokio::test]
+async fn publish_store_local_failure_is_reported_as_failure() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    // A regular file where the output directory's parent should be: every
+    // write below it fails with ENOTDIR, independent of uid/permissions.
+    let blocker = temp.path().join("blocker");
+    fs::write(&blocker, b"not a directory").expect("blocker file");
+    write_config(temp.path(), &db_path, &blocker.join("out"));
+    let pool = migrated_pool(&db_path).await;
+    seed_persisted_article(&pool, "ai").await;
+    pool.close().await;
+
+    let mut cli = cli_for(temp.path(), "ai");
+    cli.command = Command::Publish(PublishArgs {
+        date: None,
+        local_only: true,
+        force: false,
+    });
+    let summary = publish::run(&cli, publish_args(&cli))
+        .await
+        .expect("stage failures are reported through the summary");
+
+    let store = summary
+        .stages
+        .iter()
+        .find(|stage| stage.stage == "store_local")
+        .expect("store_local stage ran");
+    assert_eq!(store.verdict, StageVerdict::Failed, "{store:?}");
+    assert_eq!(summary.exit_code(), ExitCode::RuntimeError);
+    assert_eq!(summary.status(), "fail");
+    assert_eq!(summary.errors()[0].kind, "publish_store_local");
+}
+
+async fn seed_persisted_article(pool: &sqlx::SqlitePool, category: &str) {
+    let config = insert_rule(pool, "config", category).await;
+    let extractor = insert_rule(pool, "extractor", category).await;
+    let source_id = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO feed_sources (category_key, source_key, display_name, feed_url, feed_kind, config_version) VALUES (?, 'seed', 'Seed', 'https://example.test/seed.xml', 'rss', ?) RETURNING id",
+    )
+    .bind(category)
+    .bind(config)
+    .fetch_one(pool)
+    .await
+    .expect("source");
+    let published_at = OffsetDateTime::now_utc() - Duration::hours(1);
+    let entry_id = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO feed_entries (source_id, feed_entry_uid, normalized_link, link_hash, title_raw, summary_raw, published_at, discovered_at, state, dedup_decision) VALUES (?, 'u', 'https://example.test/a', 'h', 'Title', 'Summary', ?, ?, 'persisted', 'fresh') RETURNING id",
+    )
+    .bind(source_id)
+    .bind(published_at)
+    .bind(published_at)
+    .fetch_one(pool)
+    .await
+    .expect("entry");
+    let article_id = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO articles (content_hash, canonical_link, title, body_text, extractor_strategy, extractor_version, content_quality, word_count, origin_feed_entry_id, state) VALUES ('c', 'https://example.test/a', 'Title', 'body', 'readability', ?, 'high', 1, ?, 'persisted') RETURNING id",
+    )
+    .bind(extractor)
+    .bind(entry_id)
+    .fetch_one(pool)
+    .await
+    .expect("article");
+    sqlx::query("UPDATE feed_entries SET article_id = ? WHERE id = ?")
+        .bind(article_id)
+        .bind(entry_id)
+        .execute(pool)
+        .await
+        .expect("link");
 }
 
 async fn migrated_pool(db_path: &Path) -> sqlx::SqlitePool {

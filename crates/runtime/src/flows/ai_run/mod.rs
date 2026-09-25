@@ -70,7 +70,10 @@ impl AiRunFlow {
                         })),
                     )
                     .await;
-                return TaskGenSummary::default();
+                return TaskGenSummary {
+                    list_error: Some(error.error_kind().to_string()),
+                    ..TaskGenSummary::default()
+                };
             }
         };
 
@@ -107,6 +110,7 @@ impl AiRunFlow {
                         article_id = candidate.article_id,
                         "failed to insert AI pending result: {error}"
                     );
+                    summary.insert_failed += 1;
                 }
             }
         }
@@ -225,6 +229,7 @@ impl AiRunFlow {
                             })),
                         )
                         .await;
+                    summary.claim_error = Some(error.error_kind().to_string());
                     return summary;
                 }
             };

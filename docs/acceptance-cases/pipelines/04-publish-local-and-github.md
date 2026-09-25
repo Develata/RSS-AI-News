@@ -27,7 +27,7 @@
 
 ### 失败条件（failure path）
 
-- store-local 目录不可写 → record → `Failed`，errors 表登记
+- store-local 目录不可写 → record → `Failed`，errors 表登记；命令 summary 该阶段 `verdict=failed`、`status=fail`、exit 1
 - 远端 401 → `GithubAuthFailed`（终态，不重试）
 - 远端 429 → `GithubRateLimit`，state 保持、article 不晋升
 - 远端 422 重试达上限 → 仍报错，record 保持 `StoredLocal`
@@ -67,6 +67,7 @@
 | `local_fs_target_rejects_path_with_parent_traversal` | `crates/publish/tests/local_target_tests.rs` | 路径穿越拒绝 |
 | `local_fs_target_creates_parent_directories` | 同上 | 父目录自建 |
 | `publish_category_never_claims_another_categorys_pending_record` | `crates/cli/tests/publish_cmd_tests.rs` | 命令层跨分类 record 隔离 |
+| `publish_store_local_failure_is_reported_as_failure` | 同上 | 本地写失败 → exit 1 |
 
 ## 当前状态
 
