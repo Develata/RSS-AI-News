@@ -22,6 +22,8 @@
 - **publish-remote**：批量提交一个 commit 覆盖多 publish_records；422 lost-update 自动重试一次；429 保持状态可重试
 - **path 防穿越**：含 `..` / 反斜杠 / 无日期 token 的模板在 validate 阶段就报错（详见 [./06-config-loading.md](./06-config-loading.md)）
 - 远端 publish 成功后 article → `Published`；批次成功后 record → `PublishedRemote`
+- **record 隔离**：`publish` 与 `publish-all` 的每个阶段（freeze / render / store-local / publish-remote）都只 claim init 得到的 `publish_record_id`；
+  单分类 `publish` 不得领取或推进其他分类残留的记录
 
 ### 失败条件（failure path）
 
@@ -53,6 +55,7 @@
 | `store_local_returns_failed_with_local_io_error_when_target_dir_unwritable` | 同上 | 不可写 |
 | `store_local_retryable_failure_keeps_rendered_state_and_reclaim_succeeds` | 同上 | 可重试保态 |
 | `publish_remote_succeeds_promotes_articles` | `crates/runtime/tests/publish_remote_tests.rs` | 远端 happy + promote |
+| `publish_remote_record_claims_only_the_requested_record` | 同上 | 远端 claim 指定 record |
 | `publish_remote_batch_succeeds_with_one_commit_for_multiple_records` | 同上 | 多 record 单 commit |
 | `publish_remote_rate_limit_keeps_state_and_articles` | 同上 | 429 |
 | `publish_remote_auth_failed_is_terminal_without_promoting_articles` | 同上 | 401 终态 |
@@ -63,6 +66,7 @@
 | `rate_limit_maps_to_github_rate_limit` | 同上 | 429 映射 |
 | `local_fs_target_rejects_path_with_parent_traversal` | `crates/publish/tests/local_target_tests.rs` | 路径穿越拒绝 |
 | `local_fs_target_creates_parent_directories` | 同上 | 父目录自建 |
+| `publish_category_never_claims_another_categorys_pending_record` | `crates/cli/tests/publish_cmd_tests.rs` | 命令层跨分类 record 隔离 |
 
 ## 当前状态
 

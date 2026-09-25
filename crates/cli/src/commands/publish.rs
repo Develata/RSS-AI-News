@@ -4,8 +4,8 @@ use std::io::{self, Write};
 use rss_ai_news_config::{self as config, CategoryConfig};
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishFreezeStatus, PublishInitOptions, PublishInitOutcome,
-    PublishRemoteOptions, PublishRemoteStatus, PublishRenderOptions, PublishRenderStatus,
-    PublishStoreLocalOptions, PublishStoreLocalStatus, RuntimeError,
+    PublishRemoteOptions, PublishRenderOptions, PublishRenderStatus, PublishStoreLocalOptions,
+    PublishStoreLocalStatus, RuntimeError,
 };
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -154,131 +154,55 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
         })?;
     let path_template = Some(effective.path_template.clone());
     let generated_at = OffsetDateTime::now_utc();
-    let mut items = 0;
-    let mut local_path = None;
+    let local = run_local_stages(
+        &flow,
+        publish_record_id,
+        &state,
+        PublishFreezeOptions {
+            category_key: category.category.key.clone(),
+            max_items: effective.max_items_per_report,
+            min_importance_score: effective.min_importance_score,
+            include_unscored: effective.include_unscored,
+            ai_enabled: effective.ai_enabled,
+            candidate_window_hours: loaded.app.publish.candidate_window_hours,
+            excerpt_max_chars: 240,
+        },
+        PublishRenderOptions {
+            category_display_name: display_name.clone(),
+            report_title: title.clone(),
+            generated_at,
+            path_template: path_template.clone(),
+        },
+        &mut stages,
+    )
+    .await;
+    let mut items = local.items;
+    let local_path = local.local_path;
     let mut commit_sha = None;
     let mut remote_target = None;
 
-    if matches!(state.as_str(), "pending") {
-        let freeze = flow
-            .freeze(PublishFreezeOptions {
-                category_key: category.category.key.clone(),
-                max_items: effective.max_items_per_report,
-                min_importance_score: effective.min_importance_score,
-                include_unscored: effective.include_unscored,
-                ai_enabled: effective.ai_enabled,
-                candidate_window_hours: loaded.app.publish.candidate_window_hours,
-                excerpt_max_chars: 240,
-            })
-            .await;
-        stages.push(stage("freeze", &format!("{:?}", freeze.status)));
-        items = freeze.item_count;
-        if !matches!(freeze.status, PublishFreezeStatus::Frozen) {
-            return Ok(summary(
-                category,
-                date,
-                render_version,
-                publish_record_id,
-                mode,
-                items,
-                local_path,
-                commit_sha,
-                remote_target,
-                stages,
-                args.force,
-            ));
-        }
-    }
-    if matches!(state.as_str(), "pending" | "snapshot_frozen") {
-        let render = flow
-            .render(PublishRenderOptions {
-                category_display_name: display_name.clone(),
-                report_title: title.clone(),
-                generated_at,
-                path_template: path_template.clone(),
-            })
-            .await;
-        stages.push(stage("render", &format!("{:?}", render.status)));
-        if !matches!(render.status, PublishRenderStatus::Rendered) {
-            return Ok(summary(
-                category,
-                date,
-                render_version,
-                publish_record_id,
-                mode,
-                items,
-                local_path,
-                commit_sha,
-                remote_target,
-                stages,
-                args.force,
-            ));
-        }
-    }
-    if matches!(state.as_str(), "pending" | "snapshot_frozen" | "rendered") {
-        let store = flow
-            .store_local(PublishStoreLocalOptions {
-                category_display_name: display_name.clone(),
-                report_title: title.clone(),
-                generated_at,
-                path_template: path_template.clone(),
-            })
-            .await;
-        stages.push(stage("store_local", &format!("{:?}", store.status)));
-        items = items.max(store.item_count);
-        local_path = store.local_path;
-        if !matches!(
-            store.status,
-            PublishStoreLocalStatus::StoredLocal | PublishStoreLocalStatus::PublishedLocal
-        ) {
-            return Ok(summary(
-                category,
-                date,
-                render_version,
-                publish_record_id,
-                mode,
-                items,
-                local_path,
-                commit_sha,
-                remote_target,
-                stages,
-                args.force,
-            ));
-        }
-    }
-    if mode == "remote"
+    if local.completed
+        && mode == "remote"
         && matches!(
             state.as_str(),
             "pending" | "snapshot_frozen" | "rendered" | "stored_local"
         )
     {
         let remote = flow
-            .publish_remote(PublishRemoteOptions {
-                category_display_name: display_name,
-                report_title: title,
-                generated_at,
-                path_template,
-            })
+            .publish_remote_record(
+                publish_record_id,
+                PublishRemoteOptions {
+                    category_display_name: display_name,
+                    report_title: title,
+                    generated_at,
+                    path_template,
+                },
+            )
             .await;
         stages.push(stage("publish_remote", &format!("{:?}", remote.status)));
         items = items.max(remote.item_count);
         commit_sha = remote.commit_sha;
         remote_target = remote.remote_target;
-        if !matches!(remote.status, PublishRemoteStatus::PublishedRemote) {
-            return Ok(summary(
-                category,
-                date,
-                render_version,
-                publish_record_id,
-                mode,
-                items,
-                local_path,
-                commit_sha,
-                remote_target,
-                stages,
-                args.force,
-            ));
-        }
     }
 
     Ok(summary(
@@ -294,6 +218,74 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
         stages,
         args.force,
     ))
+}
+
+/// Result of the local publish stages (freeze → render → store_local) for one
+/// category.
+pub(crate) struct LocalStages {
+    pub items: u32,
+    pub local_path: Option<String>,
+    /// `true` iff every stage required by the starting `state` reached its
+    /// success status, so the record may continue to remote publish.
+    pub completed: bool,
+}
+
+/// Drives the local stages for exactly one `publish_record_id`, starting from
+/// the record's persisted `state`. Every claim is bound to that id, so a
+/// category run can never claim or advance another category's record.
+/// Stage outcomes are appended to `stages`.
+pub(crate) async fn run_local_stages(
+    flow: &PublishFlow,
+    publish_record_id: i64,
+    state: &str,
+    freeze: PublishFreezeOptions,
+    render: PublishRenderOptions,
+    stages: &mut Vec<PublishStageOutcome>,
+) -> LocalStages {
+    let mut outcome = LocalStages {
+        items: 0,
+        local_path: None,
+        completed: false,
+    };
+    if state == "pending" {
+        let freeze = flow.freeze_record(publish_record_id, freeze).await;
+        stages.push(stage("freeze", &format!("{:?}", freeze.status)));
+        outcome.items = freeze.item_count;
+        if !matches!(freeze.status, PublishFreezeStatus::Frozen) {
+            return outcome;
+        }
+    }
+    if matches!(state, "pending" | "snapshot_frozen") {
+        let rendered = flow.render_record(publish_record_id, render.clone()).await;
+        stages.push(stage("render", &format!("{:?}", rendered.status)));
+        if !matches!(rendered.status, PublishRenderStatus::Rendered) {
+            return outcome;
+        }
+    }
+    if matches!(state, "pending" | "snapshot_frozen" | "rendered") {
+        let store = flow
+            .store_local_record(
+                publish_record_id,
+                PublishStoreLocalOptions {
+                    category_display_name: render.category_display_name,
+                    report_title: render.report_title,
+                    generated_at: render.generated_at,
+                    path_template: render.path_template,
+                },
+            )
+            .await;
+        stages.push(stage("store_local", &format!("{:?}", store.status)));
+        outcome.items = outcome.items.max(store.item_count);
+        outcome.local_path = store.local_path;
+        if !matches!(
+            store.status,
+            PublishStoreLocalStatus::StoredLocal | PublishStoreLocalStatus::PublishedLocal
+        ) {
+            return outcome;
+        }
+    }
+    outcome.completed = true;
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -325,14 +317,14 @@ fn summary(
     }
 }
 
-fn stage(stage: &str, status: &str) -> PublishStageOutcome {
+pub(crate) fn stage(stage: &str, status: &str) -> PublishStageOutcome {
     PublishStageOutcome {
         stage: stage.to_string(),
         status: status.to_string(),
     }
 }
 
-fn today_utc() -> String {
+pub(crate) fn today_utc() -> String {
     let date = OffsetDateTime::now_utc().date();
     format!(
         "{:04}-{:02}-{:02}",

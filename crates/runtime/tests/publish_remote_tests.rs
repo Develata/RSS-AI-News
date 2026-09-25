@@ -39,6 +39,21 @@ async fn publish_remote_succeeds_promotes_articles() {
 }
 
 #[tokio::test]
+async fn publish_remote_record_claims_only_the_requested_record() {
+    let (_dir, pool) = make_test_pool().await;
+    let other_id = seed_stored_local_publish_record(&pool).await;
+    let target_id = seed_stored_local_publish_record(&pool).await;
+    let flow = flow(pool.clone(), Some(Arc::new(MockSuccessTarget)));
+
+    let outcome = flow.publish_remote_record(target_id, remote_opts()).await;
+
+    assert_eq!(outcome.publish_record_id, target_id);
+    assert_eq!(outcome.status, PublishRemoteStatus::PublishedRemote);
+    assert_record_state(&pool, target_id, "published_remote").await;
+    assert_record_state(&pool, other_id, "stored_local").await;
+}
+
+#[tokio::test]
 async fn publish_remote_batch_succeeds_with_one_commit_for_multiple_records() {
     let (_dir, pool) = make_test_pool().await;
     let first_id = seed_stored_local_publish_record(&pool).await;

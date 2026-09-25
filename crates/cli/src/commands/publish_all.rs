@@ -3,17 +3,19 @@ use std::io::{self, Write};
 
 use rss_ai_news_config::{self as config, CategoryConfig};
 use rss_ai_news_runtime::{
-    PublishFlow, PublishFreezeOptions, PublishFreezeStatus, PublishInitOptions, PublishInitOutcome,
+    PublishFlow, PublishFreezeOptions, PublishInitOptions, PublishInitOutcome,
     PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRemoteStatus,
-    PublishRenderOptions, PublishRenderStatus, PublishStoreLocalOptions, PublishStoreLocalStatus,
-    RuntimeError,
+    PublishRenderOptions, RuntimeError,
 };
 use serde::Serialize;
 use time::OffsetDateTime;
 
 use crate::{
     args::{Cli, PublishArgs},
-    commands::{backfill::parse_date_start, publish::PublishStageOutcome},
+    commands::{
+        backfill::parse_date_start,
+        publish::{PublishStageOutcome, run_local_stages, stage, today_utc},
+    },
     context_factory::{build_publish_deps, open_write_storage},
     error::CliError,
     output::CommandSummary,
@@ -166,95 +168,41 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishAllCommandSumma
                 )))
             })?;
         let path_template = Some(effective.path_template.clone());
-        let mut items = 0;
-        let mut local_path = None;
-
-        if matches!(state.as_str(), "pending") {
-            let freeze = flow
-                .freeze_record(
-                    publish_record_id,
-                    PublishFreezeOptions {
-                        category_key: category.category.key.clone(),
-                        max_items: effective.max_items_per_report,
-                        min_importance_score: effective.min_importance_score,
-                        include_unscored: effective.include_unscored,
-                        ai_enabled: effective.ai_enabled,
-                        candidate_window_hours: loaded.app.publish.candidate_window_hours,
-                        excerpt_max_chars: 240,
-                    },
-                )
-                .await;
-            stages.push(stage("freeze", &format!("{:?}", freeze.status)));
-            items = freeze.item_count;
-            if !matches!(freeze.status, PublishFreezeStatus::Frozen) {
-                summaries.push(category_summary(
-                    category,
-                    publish_record_id,
-                    items,
-                    local_path,
-                    None,
-                    None,
-                    stages,
-                ));
-                continue;
-            }
-        }
-        if matches!(state.as_str(), "pending" | "snapshot_frozen") {
-            let render = flow
-                .render_record(
-                    publish_record_id,
-                    PublishRenderOptions {
-                        category_display_name: display_name.clone(),
-                        report_title: title.clone(),
-                        generated_at,
-                        path_template: path_template.clone(),
-                    },
-                )
-                .await;
-            stages.push(stage("render", &format!("{:?}", render.status)));
-            if !matches!(render.status, PublishRenderStatus::Rendered) {
-                summaries.push(category_summary(
-                    category,
-                    publish_record_id,
-                    items,
-                    local_path,
-                    None,
-                    None,
-                    stages,
-                ));
-                continue;
-            }
-        }
-        if matches!(state.as_str(), "pending" | "snapshot_frozen" | "rendered") {
-            let store = flow
-                .store_local_record(
-                    publish_record_id,
-                    PublishStoreLocalOptions {
-                        category_display_name: display_name.clone(),
-                        report_title: title.clone(),
-                        generated_at,
-                        path_template: path_template.clone(),
-                    },
-                )
-                .await;
-            stages.push(stage("store_local", &format!("{:?}", store.status)));
-            items = items.max(store.item_count);
-            local_path = store.local_path;
-            if !matches!(
-                store.status,
-                PublishStoreLocalStatus::StoredLocal | PublishStoreLocalStatus::PublishedLocal
-            ) {
-                summaries.push(category_summary(
-                    category,
-                    publish_record_id,
-                    items,
-                    local_path,
-                    None,
-                    None,
-                    stages,
-                ));
-                continue;
-            }
+        let local = run_local_stages(
+            &flow,
+            publish_record_id,
+            &state,
+            PublishFreezeOptions {
+                category_key: category.category.key.clone(),
+                max_items: effective.max_items_per_report,
+                min_importance_score: effective.min_importance_score,
+                include_unscored: effective.include_unscored,
+                ai_enabled: effective.ai_enabled,
+                candidate_window_hours: loaded.app.publish.candidate_window_hours,
+                excerpt_max_chars: 240,
+            },
+            PublishRenderOptions {
+                category_display_name: display_name.clone(),
+                report_title: title.clone(),
+                generated_at,
+                path_template: path_template.clone(),
+            },
+            &mut stages,
+        )
+        .await;
+        let items = local.items;
+        let local_path = local.local_path;
+        if !local.completed {
+            summaries.push(category_summary(
+                category,
+                publish_record_id,
+                items,
+                local_path,
+                None,
+                None,
+                stages,
+            ));
+            continue;
         }
 
         if mode == "remote"
@@ -347,21 +295,4 @@ fn category_summary(
         remote_target,
         stages,
     }
-}
-
-fn stage(stage: &str, status: &str) -> PublishStageOutcome {
-    PublishStageOutcome {
-        stage: stage.to_string(),
-        status: status.to_string(),
-    }
-}
-
-fn today_utc() -> String {
-    let date = OffsetDateTime::now_utc().date();
-    format!(
-        "{:04}-{:02}-{:02}",
-        date.year(),
-        u8::from(date.month()),
-        date.day()
-    )
 }

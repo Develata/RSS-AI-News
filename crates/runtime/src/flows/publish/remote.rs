@@ -102,6 +102,25 @@ async fn prepare_remote_report(
 
 impl PublishFlow {
     pub async fn publish_remote(&self, opts: PublishRemoteOptions) -> PublishRemoteOutcome {
+        self.publish_remote_inner(None, opts).await
+    }
+
+    /// 只领取指定 `publish_record_id`（且处于 `StoredLocal`）的记录；单分类
+    /// `publish` 命令使用，避免全库 claim 领到其他分类的记录。
+    pub async fn publish_remote_record(
+        &self,
+        publish_record_id: i64,
+        opts: PublishRemoteOptions,
+    ) -> PublishRemoteOutcome {
+        self.publish_remote_inner(Some(publish_record_id), opts)
+            .await
+    }
+
+    async fn publish_remote_inner(
+        &self,
+        publish_record_id: Option<i64>,
+        opts: PublishRemoteOptions,
+    ) -> PublishRemoteOutcome {
         let emitter = RunEventEmitter {
             run_id: &self.ctx.run.run_id,
             stage: "publish",
@@ -139,12 +158,18 @@ impl PublishFlow {
             batch_size: 1,
             max_attempts: self.ctx.retry.publish_max_attempts,
         };
-        let claimed = match self
-            .ctx
-            .publish_record_repo
-            .claim_local_for_remote_publish(&claim)
-            .await
-        {
+        let claimed_result = if let Some(publish_record_id) = publish_record_id {
+            self.ctx
+                .publish_record_repo
+                .claim_local_for_remote_publish_by_ids(&claim, &[publish_record_id])
+                .await
+        } else {
+            self.ctx
+                .publish_record_repo
+                .claim_local_for_remote_publish(&claim)
+                .await
+        };
+        let claimed = match claimed_result {
             Ok(claimed) => claimed,
             Err(error) => {
                 tracing::error!("claim local for remote publish failed: {error}");
