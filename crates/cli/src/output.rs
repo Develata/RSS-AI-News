@@ -232,6 +232,30 @@ impl CommandSummary for DoctorCommandSummary {
         }
     }
 
+    fn errors(&self) -> Vec<RenderedError> {
+        let failing_checks = self
+            .shallow_checks
+            .iter()
+            .filter(|item| item.outcome == "fail")
+            .map(|item| RenderedError {
+                kind: "doctor_check_failed".to_string(),
+                message: format!("{}: {}", item.name, item.message),
+            });
+        let violated_invariants = self
+            .deep_scan
+            .iter()
+            .flatten()
+            .filter(|item| item.violations > 0)
+            .map(|item| RenderedError {
+                kind: "doctor_invariant_violated".to_string(),
+                message: format!(
+                    "{} {} ({} violating rows)",
+                    item.id, item.description, item.violations
+                ),
+            });
+        failing_checks.chain(violated_invariants).collect()
+    }
+
     fn status(&self) -> &'static str {
         if self.has_fail() {
             "fail"

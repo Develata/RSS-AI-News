@@ -329,6 +329,57 @@ mod tests {
     }
 
     #[test]
+    fn failed_publish_all_summary_becomes_a_stage_failure() {
+        use crate::commands::publish::{StageVerdict, stage};
+        use crate::commands::publish_all::PublishAllCategorySummary;
+
+        let publish = publish_all::PublishAllCommandSummary {
+            date: "2026-05-18".to_string(),
+            render_version: 1,
+            mode: "local".to_string(),
+            categories: vec![PublishAllCategorySummary {
+                category: "ai".to_string(),
+                publish_record_id: 1,
+                items: 1,
+                local_path: None,
+                commit_sha: None,
+                remote_target: None,
+                stages: vec![
+                    stage("init", "created", StageVerdict::Ok),
+                    stage(
+                        "store_local",
+                        "Failed { error_kind: \"local_io\" }",
+                        StageVerdict::Failed,
+                    ),
+                ],
+            }],
+            commit_sha: None,
+            forced: false,
+        };
+        assert_eq!(publish.exit_code(), ExitCode::RuntimeError);
+
+        let mut failures = Vec::new();
+        record_summary_failures(&mut failures, "publish", &publish);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].stage, "publish");
+        assert_eq!(failures[0].error_kind, "publish_store_local");
+        assert_eq!(failures[0].exit_code_value, 1);
+
+        let mut summary = empty_summary();
+        summary.publish = Some(publish);
+        summary.stage_failures = failures;
+        assert_eq!(summary.exit_code(), ExitCode::RuntimeError);
+        assert_eq!(summary.status(), "fail");
+    }
+
+    #[test]
+    fn successful_child_summary_records_no_failure() {
+        let mut failures = Vec::new();
+        record_summary_failures(&mut failures, "ai-run", &empty_summary());
+        assert!(failures.is_empty());
+    }
+
+    #[test]
     fn config_failure_outranks_runtime_failure() {
         let mut summary = empty_summary();
         summary.stage_failures.push(failure("ai-run", "runtime", 1));

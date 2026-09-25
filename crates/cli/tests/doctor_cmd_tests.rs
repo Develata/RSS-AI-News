@@ -81,6 +81,15 @@ async fn doctor_cmd_deep_i6_violation_returns_doctor_failed() {
     assert!(summary.has_fail());
     assert_eq!(summary.exit_code(), ExitCode::RuntimeError);
     assert_eq!(summary.status(), "fail");
+    let envelope = rss_ai_news_cli::output::success_envelope("doctor", &summary);
+    assert_eq!(envelope["status"], "fail");
+    assert_eq!(envelope["errors"][0]["kind"], "doctor_invariant_violated");
+    assert!(
+        envelope["errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("I6 ")
+    );
 }
 
 #[test]
