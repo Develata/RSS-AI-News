@@ -26,7 +26,8 @@ use crate::{
     commands::backfill::sha256_hex,
     context_factory::{build_reindex_deps, open_read_storage, open_write_storage},
     error::CliError,
-    output::CommandSummary,
+    exit_code::ExitCode,
+    output::{CommandSummary, RenderedError},
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,7 +71,36 @@ pub struct ReindexAbortReport {
     pub previous_state: Option<String>,
 }
 
+impl ReindexCommandSummary {
+    /// `--abort` of a job id that does not exist (acceptance: exit 1).
+    /// Aborting an already-terminal job stays an idempotent success.
+    fn abort_target_missing(&self) -> bool {
+        self.abort
+            .as_ref()
+            .is_some_and(|report| report.previous_state.is_none())
+    }
+}
+
 impl CommandSummary for ReindexCommandSummary {
+    fn exit_code(&self) -> ExitCode {
+        if self.abort_target_missing() {
+            ExitCode::RuntimeError
+        } else {
+            ExitCode::Success
+        }
+    }
+
+    fn errors(&self) -> Vec<RenderedError> {
+        self.abort
+            .iter()
+            .filter(|_| self.abort_target_missing())
+            .map(|report| RenderedError {
+                kind: "reindex_job_not_found".to_string(),
+                message: format!("reindex job {} does not exist", report.job_id),
+            })
+            .collect()
+    }
+
     fn render_pretty(&self, writer: &mut dyn Write) -> io::Result<()> {
         match self.mode {
             ReindexMode::Abort => {

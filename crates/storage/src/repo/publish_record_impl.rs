@@ -614,6 +614,9 @@ async fn pg_terminalize_exhausted(
     Ok(result.rows_affected())
 }
 
+/// PG claim by ids: same filters as [`sqlite_claim_by_ids`], but the candidate
+/// rows are locked with `FOR UPDATE SKIP LOCKED` (like the global claim) so a
+/// row held by another transaction is skipped instead of blocking this claim.
 async fn pg_claim_by_ids(
     pool: &PgPool,
     request: &ClaimRequest,
@@ -627,7 +630,7 @@ async fn pg_claim_by_ids(
         .push_bind(request.lease_expires_at)
         .push(", attempt_count = attempt_count + 1, updated_at = ")
         .push_bind(request.now)
-        .push(" WHERE state = ")
+        .push(" WHERE id IN (SELECT id FROM publish_records WHERE state = ")
         .push_bind(state)
         .push(" AND id IN (");
     {
@@ -641,6 +644,7 @@ async fn pg_claim_by_ids(
         .push_bind(request.now)
         .push(") AND attempt_count < ")
         .push_bind(i64::from(request.max_attempts))
+        .push(" ORDER BY id FOR UPDATE SKIP LOCKED)")
         .push(" RETURNING id, idempotency_key, category_key, report_date, target_timezone, ")
         .push("render_version, selection_policy_version, state, remote_target, attempt_count");
 

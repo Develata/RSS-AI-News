@@ -5,7 +5,10 @@ use std::{fs, path::Path};
 
 use rss_ai_news_cli::{
     args::{Cli, Command, LogFormat, OutputFormat, PublishArgs},
-    commands::publish::{self, StageVerdict},
+    commands::{
+        publish::{self, StageVerdict},
+        publish_all,
+    },
     exit_code::ExitCode,
     output::CommandSummary,
 };
@@ -81,6 +84,57 @@ async fn publish_store_local_failure_is_reported_as_failure() {
     assert_eq!(summary.exit_code(), ExitCode::RuntimeError);
     assert_eq!(summary.status(), "fail");
     assert_eq!(summary.errors()[0].kind, "publish_store_local");
+}
+
+#[tokio::test]
+async fn publish_all_records_a_category_conflict_and_keeps_other_categories() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config(temp.path(), &db_path, &temp.path().join("output"));
+    let pool = migrated_pool(&db_path).await;
+    seed_persisted_article(&pool, "ai").await;
+    pool.close().await;
+
+    let mut cli = cli_for(temp.path(), "ai");
+    cli.category = None;
+    cli.command = Command::PublishAll(PublishArgs {
+        date: None,
+        local_only: true,
+        force: false,
+    });
+    let args = match &cli.command {
+        Command::PublishAll(args) => args,
+        _ => unreachable!(),
+    };
+
+    // First run: ai publishes; math has no candidates (SnapshotEmpty), which
+    // leaves math's record for today terminal.
+    let first = publish_all::run(&cli, args).await.expect("first run");
+    assert_eq!(first.exit_code(), ExitCode::Success, "{first:?}");
+
+    // Second run: math's terminal record is a conflict. It must be reported
+    // for math only, not abort the whole command.
+    let second = publish_all::run(&cli, args)
+        .await
+        .expect("category conflicts are reported through the summary");
+    assert_eq!(second.categories.len(), 2, "{second:?}");
+    let math = second
+        .categories
+        .iter()
+        .find(|category| category.category == "math")
+        .expect("math summary");
+    assert!(
+        math.stages
+            .iter()
+            .any(|stage| stage.stage == "conflict" && stage.verdict == StageVerdict::Failed)
+    );
+    assert!(
+        second
+            .categories
+            .iter()
+            .any(|category| category.category == "ai")
+    );
+    assert_eq!(second.exit_code(), ExitCode::RuntimeError);
 }
 
 async fn seed_persisted_article(pool: &sqlx::SqlitePool, category: &str) {

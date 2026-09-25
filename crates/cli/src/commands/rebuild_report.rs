@@ -1,8 +1,5 @@
 use rss_ai_news_storage::RuleVersionRepository;
-use std::{
-    io::{self, Write},
-    path::PathBuf,
-};
+use std::io::{self, Write};
 
 use rss_ai_news_config::{self as config, CategoryConfig};
 use rss_ai_news_runtime::{PublishFlow, RebuildReportFlow, RebuildReportOptions, RuntimeError};
@@ -24,10 +21,18 @@ pub struct RebuildReportCommandSummary {
     pub output_path: Option<String>,
     pub markdown_bytes: u32,
     pub items: u32,
+    /// The rendered report when no `--output` file was given. Pretty mode
+    /// prints only this (so stdout can be redirected into a `.md` file);
+    /// JSON mode carries it inside the single envelope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<String>,
 }
 
 impl CommandSummary for RebuildReportCommandSummary {
     fn render_pretty(&self, writer: &mut dyn Write) -> io::Result<()> {
+        if let Some(markdown) = &self.markdown {
+            return writeln!(writer, "{markdown}");
+        }
         writeln!(writer, "Rebuild report completed:")?;
         writeln!(writer, "  Publish record: {}", self.publish_record_id)?;
         writeln!(writer, "  Category:       {}", self.category)?;
@@ -105,23 +110,21 @@ pub async fn run(
         .list_by_publish_record(record.id)
         .await?
         .len();
-    let output_path = write_or_stdout(args.output.clone(), &report.markdown_content)?;
+    let markdown_bytes = u32::try_from(report.markdown_content.len()).unwrap_or(u32::MAX);
+    let (output_path, markdown) = match args.output.clone() {
+        Some(path) => {
+            std::fs::write(&path, &report.markdown_content)?;
+            (Some(path.display().to_string()), None)
+        }
+        None => (None, Some(report.markdown_content)),
+    };
     Ok(RebuildReportCommandSummary {
         publish_record_id: record.id,
         category: record.category_key,
         date: record.report_date,
         output_path,
-        markdown_bytes: u32::try_from(report.markdown_content.len()).unwrap_or(u32::MAX),
+        markdown_bytes,
         items: u32::try_from(items).unwrap_or(u32::MAX),
+        markdown,
     })
-}
-
-fn write_or_stdout(path: Option<PathBuf>, markdown: &str) -> Result<Option<String>, CliError> {
-    if let Some(path) = path {
-        std::fs::write(&path, markdown)?;
-        Ok(Some(path.display().to_string()))
-    } else {
-        println!("{markdown}");
-        Ok(None)
-    }
 }

@@ -128,8 +128,13 @@ CLI 退出码由 [`crates/cli/src/exit_code.rs`](../../crates/cli/src/exit_code.
   `Conflicted`——无可发布内容，或记录被其他 worker 持有 / 已推进，下次调度接手）→ exit 0；
   `failed`（`Failed`、`ArticleConflict`、`MissingTarget`）→ exit 1。已知缺口：record 绑定 claim 时
   `NothingToClaim` 也可能表示重试预算耗尽，由 sweep 转 `failed` 后下一次运行以 `PublishConflict` 报出。
-- `ingest` / `ai-run`：数据库 claim / 候选查询失败、pending 行插入失败 → exit 1；单个 feed、条目或文章的
-  业务失败只计数（由状态机重试），不改变退出码。
+- `publish-all`：分类级 init 失败或已终态 `failed` 记录（`conflict` 阶段）只记入该分类 summary（exit 1），
+  其他分类与已就绪的远端 batch 照常执行。单分类 `publish` 遇终态记录仍直接报 `PublishConflict`。
+- `ingest` / `ai-run`：自身存储失败（entry 插入、source 行、claim / 候选查询、pending 行插入）→ exit 1；
+  远端 feed / 网络 / 解析与单篇文章的业务失败只计数（由状态机或下次运行重试），不改变退出码。
+- `reindex --abort <id>`：job 不存在 → exit 1；已终态 job → 幂等成功。
+- `rebuild-report` 未给 `--output`：pretty 模式 stdout 只有 Markdown 正文（可直接重定向为 `.md`），
+  JSON 模式正文放在 `summary.markdown`。
 - `doctor`：任一 check `Fail` 或 `--deep` 不变量违规 → exit 1。
 - `run`：子阶段的 `Err` 与子阶段 summary 的非零退出码都记入 `stage_failures`，取最严重者。
 

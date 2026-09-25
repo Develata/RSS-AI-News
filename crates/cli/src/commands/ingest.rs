@@ -32,36 +32,58 @@ pub struct IngestCommandSummary {
     /// `error_kind` when claiming extract work failed (database unavailable,
     /// …); per-source and per-entry failures stay in the counters above.
     pub extract_claim_error: Option<String>,
+    /// Sources that failed because of our own storage (entry inserts, source
+    /// rows); included in `sources_failed`.
+    pub sources_storage_failed: u32,
     pub duration_seconds: f64,
+}
+
+impl IngestCommandSummary {
+    /// Storage-level failures of the run. Remote feed / network / parse
+    /// failures stay in the counters and are retried by the next run.
+    fn infra_errors(&self) -> Vec<RenderedError> {
+        let mut errors = Vec::new();
+        if self.sources_storage_failed > 0 {
+            errors.push(RenderedError {
+                kind: "ingest_storage_failed".to_string(),
+                message: format!(
+                    "{} sources failed to persist entries",
+                    self.sources_storage_failed
+                ),
+            });
+        }
+        if let Some(kind) = &self.extract_claim_error {
+            errors.push(RenderedError {
+                kind: format!("extract_claim_{kind}"),
+                message: format!("claiming extract work failed ({kind})"),
+            });
+        }
+        errors
+    }
 }
 
 impl CommandSummary for IngestCommandSummary {
     fn exit_code(&self) -> ExitCode {
-        if self.extract_claim_error.is_some() {
-            ExitCode::RuntimeError
-        } else {
+        if self.infra_errors().is_empty() {
             ExitCode::Success
+        } else {
+            ExitCode::RuntimeError
         }
     }
 
     fn errors(&self) -> Vec<RenderedError> {
-        self.extract_claim_error
-            .iter()
-            .map(|kind| RenderedError {
-                kind: format!("extract_claim_{kind}"),
-                message: format!("claiming extract work failed ({kind})"),
-            })
-            .collect()
+        self.infra_errors()
     }
 
     fn render_pretty(&self, writer: &mut dyn Write) -> io::Result<()> {
-        if let Some(kind) = &self.extract_claim_error {
-            writeln!(
-                writer,
-                "Ingest failed: claiming extract work failed ({kind})"
-            )?;
-        } else {
+        let errors = self.infra_errors();
+        if errors.is_empty() {
             writeln!(writer, "Ingest completed:")?;
+        } else {
+            writeln!(writer, "Ingest failed:")?;
+            for error in &errors {
+                writeln!(writer, "  ! {}", error.message)?;
+            }
         }
         writeln!(writer, "  Sources attempted:    {}", self.sources_attempted)?;
         writeln!(writer, "  Sources succeeded:    {}", self.sources_succeeded)?;
@@ -145,6 +167,7 @@ pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, C
         fetch_failed: extract_summary.permanent_failed + extract_summary.retryable_failed,
         tasks_panicked: ingest_summary.tasks_panicked + extract_summary.tasks_panicked,
         extract_claim_error: extract_summary.claim_error,
+        sources_storage_failed: ingest_summary.sources_storage_failed,
         duration_seconds: started.elapsed().as_secs_f64(),
     })
 }

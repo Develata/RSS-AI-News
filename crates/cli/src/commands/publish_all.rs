@@ -2,6 +2,7 @@ use rss_ai_news_storage::RuleVersionRepository;
 use std::io::{self, Write};
 
 use rss_ai_news_config::{self as config, CategoryConfig};
+use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishInitOptions, PublishInitOutcome,
     PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRenderOptions, RuntimeError,
@@ -151,9 +152,13 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishAllCommandSumma
     let mut remote_items = Vec::new();
     let generated_at = OffsetDateTime::now_utc();
 
+    // A category-level init failure or conflict is recorded in that category's
+    // summary (verdict failed → exit 1) instead of aborting: categories are
+    // independent, and results already stored locally must still reach the
+    // remote batch below.
     for category in &categories {
         let mut stages = Vec::new();
-        let init = flow
+        let init = match flow
             .init(PublishInitOptions {
                 category_key: category.category.key.clone(),
                 report_date: date.clone(),
@@ -169,7 +174,23 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishAllCommandSumma
                     )
                 }),
             })
-            .await?;
+            .await
+        {
+            Ok(init) => init,
+            Err(error) => {
+                tracing::error!(
+                    category_key = %category.category.key,
+                    "publish init failed: {error}"
+                );
+                stages.push(stage(
+                    "init",
+                    &format!("error:{}", error.error_kind()),
+                    StageVerdict::Failed,
+                ));
+                summaries.push(category_summary(category, 0, 0, None, None, None, stages));
+                continue;
+            }
+        };
         let (publish_record_id, state) = match init {
             PublishInitOutcome::Created { publish_record_id } => {
                 stages.push(stage("init", "created", StageVerdict::Ok));
@@ -188,7 +209,18 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishAllCommandSumma
             }
         };
         if state == "failed" {
-            return Err(CliError::PublishConflict { state });
+            // Terminal record for this (category, date); `--force` re-publishes.
+            stages.push(stage("conflict", "record_failed", StageVerdict::Failed));
+            summaries.push(category_summary(
+                category,
+                publish_record_id,
+                0,
+                None,
+                None,
+                None,
+                stages,
+            ));
+            continue;
         }
 
         let display_name = category.category.display_name.clone();

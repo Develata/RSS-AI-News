@@ -11,7 +11,7 @@ use rss_ai_news_cli::{
         recent_entries::{
             RecentEntriesCommandSummary, RecentEntrySummary, RecentSourceHealthSummary,
         },
-        reindex::{ReindexCommandSummary, ReindexMode, ReindexTargetOutcome},
+        reindex::{ReindexAbortReport, ReindexCommandSummary, ReindexMode, ReindexTargetOutcome},
         replay::ReplayCommandSummary,
         run::RunCommandSummary,
     },
@@ -84,6 +84,38 @@ fn publish_summary_serializes_stages() {
 #[test]
 fn rebuild_report_summary_pretty_renders() {
     assert_pretty_contains(&rebuild_summary(), "Rebuild report completed");
+}
+
+#[test]
+fn rebuild_report_to_stdout_prints_only_markdown_or_one_envelope() {
+    let mut summary = rebuild_summary();
+    summary.markdown = Some("# Report".to_string());
+
+    let mut buf = Vec::new();
+    summary.render_pretty(&mut buf).unwrap();
+    assert_eq!(String::from_utf8(buf).unwrap(), "# Report\n");
+    let envelope = success_envelope("rebuild-report", &summary);
+    assert_eq!(envelope["summary"]["markdown"], "# Report");
+}
+
+#[test]
+fn reindex_abort_of_missing_job_exits_nonzero() {
+    let summary = |previous_state: Option<&str>| ReindexCommandSummary {
+        mode: ReindexMode::Abort,
+        per_target: Vec::new(),
+        abort: Some(ReindexAbortReport {
+            job_id: 42,
+            aborted: false,
+            target: None,
+            previous_state: previous_state.map(str::to_string),
+        }),
+    };
+
+    let missing = summary(None);
+    assert_eq!(missing.exit_code(), ExitCode::RuntimeError);
+    assert_eq!(missing.errors()[0].kind, "reindex_job_not_found");
+    // Already-terminal job: idempotent no-op, still success.
+    assert_eq!(summary(Some("completed")).exit_code(), ExitCode::Success);
 }
 
 #[test]
@@ -346,6 +378,7 @@ fn rebuild_summary() -> RebuildReportCommandSummary {
         output_path: None,
         markdown_bytes: 42,
         items: 2,
+        markdown: None,
     }
 }
 
@@ -447,6 +480,7 @@ fn run_summary() -> RunCommandSummary {
             fetch_failed: 0,
             tasks_panicked: 0,
             extract_claim_error: None,
+            sources_storage_failed: 0,
             duration_seconds: 1.0,
         }),
         ai_run: Some(ai_summary()),

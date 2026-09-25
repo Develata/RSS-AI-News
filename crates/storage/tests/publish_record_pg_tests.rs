@@ -185,6 +185,52 @@ async fn pg_create_if_new_then_claim_then_release_advance() {
 
 #[tokio::test]
 #[ignore = "需要 docker daemon"]
+async fn pg_claim_by_ids_skips_row_locked_by_another_transaction() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "skip-locked").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .create_if_new(&new_record("idem-locked", "ai", render, policy))
+        .await
+        .expect("create")
+        .expect("inserted");
+
+    let mut holder = ctx.pg_pool().begin().await.expect("begin");
+    sqlx::query("SELECT id FROM publish_records WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *holder)
+        .await
+        .expect("hold row lock");
+
+    let now = OffsetDateTime::now_utc();
+    let request = ClaimRequest {
+        owner: "worker-B".to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+    // A plain UPDATE would block here until `holder` ends.
+    let claimed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        repo.claim_publish_by_ids(&request, PublishState::Pending, &[id]),
+    )
+    .await
+    .expect("claim must not wait for the row lock")
+    .expect("claim");
+    assert!(claimed.is_empty(), "locked row is skipped");
+
+    holder.rollback().await.expect("release lock");
+    let claimed = repo
+        .claim_publish_by_ids(&request, PublishState::Pending, &[id])
+        .await
+        .expect("claim after release");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, id);
+}
+
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
 async fn pg_release_terminal_advance_with_articles_promotes_atomically() {
     let ctx = make_pg_test_pool().await;
     let (render, policy) = seed_render_and_policy_rules(&ctx, "case2").await;

@@ -82,7 +82,7 @@
 
 ### `rebuild-report`
 - `--publish-id <I64>` **或** `--date <YYYY-MM-DD>`：互斥
-- `--output <PATH>`：自定义输出路径
+- `--output <PATH>`：写入文件；省略时 pretty 模式 stdout 只输出 Markdown 正文，JSON 模式放入 `summary.markdown`
 
 ### `migrate`
 - 子动作：`migrate run` / `migrate check`

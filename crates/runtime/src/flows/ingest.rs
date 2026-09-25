@@ -38,6 +38,8 @@ pub struct IngestSummary {
     pub entries_inserted: u32,
     pub entries_uid_dup: u32,
     pub entries_link_dup: u32,
+    /// Sources whose failure came from our own storage (subset of `sources_failed`).
+    pub sources_storage_failed: u32,
     /// First 32 business failures in completion order; success details are not retained.
     pub failure_samples: Vec<IngestSourceOutcome>,
 }
@@ -53,6 +55,9 @@ pub struct IngestSourceOutcome {
     pub entries_uid_dup: u32,
     pub entries_link_dup: u32,
     pub error_kind: Option<String>,
+    /// The failure came from our own storage (source row, entry inserts),
+    /// not from the remote feed; the CLI reports it as a run failure.
+    pub storage_failed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +159,7 @@ impl IngestFlow {
                         entries_uid_dup: 0,
                         entries_link_dup: 0,
                         error_kind: Some(error.error_kind().to_string()),
+                        storage_failed: true,
                     });
                 }
             }
@@ -347,6 +353,7 @@ impl IngestFlow {
             entries_uid_dup: 0,
             entries_link_dup: 0,
             error_kind: None,
+            storage_failed: false,
         };
 
         let fetch_request = FeedFetchRequest {
@@ -508,6 +515,7 @@ impl IngestFlow {
                 );
             }
             outcome.error_kind = Some(error.error_kind().to_string());
+            outcome.storage_failed = true;
             return outcome;
         }
 
@@ -634,6 +642,9 @@ impl IngestSummary {
             IngestSourceStatus::NotModified => self.sources_not_modified += 1,
             IngestSourceStatus::Failed => self.sources_failed += 1,
         }
+        if outcome.storage_failed {
+            self.sources_storage_failed += 1;
+        }
         self.entries_discovered += outcome.entries_discovered;
         self.entries_inserted += outcome.entries_inserted;
         self.entries_uid_dup += outcome.entries_uid_dup;
@@ -659,6 +670,7 @@ mod tests {
             entries_uid_dup: 0,
             entries_link_dup: 0,
             error_kind: None,
+            storage_failed: false,
         }
     }
 
