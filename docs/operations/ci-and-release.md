@@ -71,7 +71,8 @@ major-only alias（如 `0` / `1`）。
 git checkout main && git pull
 
 # 2. 决定版本号：bug fix → vX.Y.Z+1；feature → vX.Y+1.0；breaking → vX+1.0.0
-#    本项目只发 stable tag，不创建 prerelease tag
+#    本项目只发 stable tag，不创建 prerelease tag；release.yml 的 verify gate 只接受 X.Y.Z，
+#    推送 prerelease tag 会在 verify 失败、不推镜像（下方 rc 行仅说明 metadata-action 的映射规则）
 
 # 3. 在 tag 前写好 release report，使 release notes 随 tag 一起冻结
 $EDITOR docs/reports/releases/v0.7.0.md
