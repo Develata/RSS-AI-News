@@ -210,6 +210,32 @@ async fn freeze_returns_snapshot_empty_when_no_candidates_match() {
 }
 
 #[tokio::test]
+async fn freeze_reports_failed_when_the_empty_snapshot_release_fails() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flow(pool.clone());
+    let publish_record_id = init_record(&flow, &pool).await;
+    // Make exactly the empty-snapshot release UPDATE fail.
+    sqlx::query(
+        "CREATE TRIGGER fail_empty_release BEFORE UPDATE ON publish_records \
+         WHEN NEW.last_error_kind = 'snapshot_empty' \
+         BEGIN SELECT RAISE(ABORT, 'injected'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let outcome = flow.freeze(freeze_opts(true, false)).await;
+
+    // Not reported as a harmless skip: the record was not released.
+    assert!(
+        matches!(outcome.status, PublishFreezeStatus::Failed { .. }),
+        "{:?}",
+        outcome.status
+    );
+    assert_eq!(outcome.publish_record_id, publish_record_id);
+}
+
+#[tokio::test]
 async fn freeze_after_empty_snapshot_publishes_articles_that_arrive_later() {
     let (_dir, pool) = make_test_pool().await;
     let flow = flow(pool.clone());

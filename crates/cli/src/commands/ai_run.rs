@@ -195,6 +195,11 @@ pub async fn run(cli: &Cli, args: &AiRunArgs) -> Result<AiRunCommandSummary, Cli
         return Err(config::ConfigError::AiRunWhileDisabled.into());
     }
     let categories = selected_categories(cli, &loaded)?;
+    // A single category keeps the fail-fast contract: missing credentials
+    // exit 78 before any storage is opened, migrated or written.
+    if let [category] = categories.as_slice() {
+        loaded.ai_credentials_for_category(&category.category.key)?;
+    }
     let pool = open_write_storage(&loaded).await?;
     run_categories(&loaded, &pool, &categories, args).await
 }

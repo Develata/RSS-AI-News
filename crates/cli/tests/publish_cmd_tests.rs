@@ -176,6 +176,31 @@ async fn ai_run_without_category_runs_every_category_and_reports_each_failure() 
     assert_eq!(summary.errors().len(), 2);
 }
 
+#[tokio::test]
+async fn single_category_ai_run_reports_missing_credentials_before_touching_storage() {
+    let temp = TempDir::new().expect("temp dir");
+    // An unopenable database path: reaching storage would fail with exit 1.
+    let blocker = temp.path().join("blocker");
+    fs::write(&blocker, b"not a directory").expect("blocker file");
+    write_config_with(
+        temp.path(),
+        &blocker.join("rss.sqlite"),
+        &temp.path().join("output"),
+        true,
+    );
+
+    let mut cli = cli_for(temp.path(), "ai");
+    cli.command = Command::AiRun(AiRunArgs::default());
+    let args = match &cli.command {
+        Command::AiRun(args) => args,
+        _ => unreachable!(),
+    };
+    let error = ai_run::run(&cli, args)
+        .await
+        .expect_err("missing credentials");
+    assert_eq!(error.exit_code(), ExitCode::ConfigError, "{error:?}");
+}
+
 async fn seed_persisted_article(pool: &sqlx::SqlitePool, category: &str) {
     let config = insert_rule(pool, "config", category).await;
     let extractor = insert_rule(pool, "extractor", category).await;

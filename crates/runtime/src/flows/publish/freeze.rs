@@ -151,36 +151,47 @@ impl PublishFlow {
         if candidates.is_empty() {
             // No candidates yet is not a failure: the record goes back to
             // claimable `pending` (attempt refunded) so a later run of the same
-            // day can still publish once articles arrive.
-            match self
+            // day can still publish once articles arrive. Only a successful
+            // release may be reported as SnapshotEmpty.
+            let status = match self
                 .ctx
                 .publish_record_repo
                 .release_empty_snapshot(claimed.id, &owner, now)
                 .await
             {
-                Ok(true) => {}
-                Ok(false) => tracing::warn!(
-                    publish_record_id = claimed.id,
-                    "empty snapshot release lost the lease; record left to reclaim"
-                ),
-                Err(error) => tracing::warn!(
-                    publish_record_id = claimed.id,
-                    "empty snapshot release failed; lease expiry will reclaim: {error}"
-                ),
+                Ok(true) => PublishFreezeStatus::SnapshotEmpty,
+                Ok(false) => {
+                    tracing::warn!(
+                        publish_record_id = claimed.id,
+                        "empty snapshot release lost the lease"
+                    );
+                    PublishFreezeStatus::Conflicted
+                }
+                Err(error) => {
+                    tracing::error!(
+                        publish_record_id = claimed.id,
+                        "empty snapshot release failed: {error}"
+                    );
+                    PublishFreezeStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    }
+                }
+            };
+            if status == PublishFreezeStatus::SnapshotEmpty {
+                emitter
+                    .emit(
+                        "publish_skipped",
+                        "info",
+                        Some("publish_record"),
+                        Some(claimed.id),
+                        "no publish candidates; record kept pending",
+                        Some(json!({ "phase": "freeze", "error_kind": "snapshot_empty" })),
+                    )
+                    .await;
             }
-            emitter
-                .emit(
-                    "publish_skipped",
-                    "info",
-                    Some("publish_record"),
-                    Some(claimed.id),
-                    "no publish candidates; record kept pending",
-                    Some(json!({ "phase": "freeze", "error_kind": "snapshot_empty" })),
-                )
-                .await;
             return PublishFreezeOutcome {
                 publish_record_id: claimed.id,
-                status: PublishFreezeStatus::SnapshotEmpty,
+                status,
                 item_count: 0,
             };
         }
