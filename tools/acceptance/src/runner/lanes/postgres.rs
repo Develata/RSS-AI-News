@@ -62,18 +62,20 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         "run".to_string(),
     ];
     let url = database_url.as_deref().unwrap_or("$DATABASE_URL");
-    executor.command(
+    executor.product_command(
         "postgres-migrate-run",
         &binary,
         &args,
+        smoke.path(),
         &[("DATABASE_URL", url)],
         0,
     );
     *args.last_mut().expect("migrate action") = "check".to_string();
-    executor.command(
+    executor.product_command(
         "postgres-migrate-check",
         &binary,
         &args,
+        smoke.path(),
         &[("DATABASE_URL", url)],
         0,
     );

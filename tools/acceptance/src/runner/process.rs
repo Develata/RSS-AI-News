@@ -9,11 +9,17 @@
 //!   walking `ps --ppid`), so no orphan `rustc`/`cargo` keeps running.
 //! - Children stay in the runner's process group, so a terminal Ctrl-C (sent
 //!   to the foreground group) stops them together with the runner.
-//! - `run_bounded` always reaps the child before returning.
+//! - `run_bounded` always reaps the child before returning, and returns by
+//!   the deadline even when a leftover background process keeps the child's
+//!   output pipes open (the step then fails with `pipes_held`; the reader
+//!   threads are detached and end when that process exits).
+//! - Descendant discovery uses `ps --ppid` (procps, Linux). Elsewhere only the
+//!   direct child is killed.
 
 use std::{
     io::{self, Read},
     process::{Child, Command, Stdio},
+    sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
     time::{Duration, Instant},
 };
@@ -35,6 +41,9 @@ pub(crate) struct Captured {
 pub(crate) struct Finished {
     pub(crate) exit_code: Option<i32>,
     pub(crate) timed_out: bool,
+    /// The child exited but its stdout/stderr stayed open past the deadline
+    /// (a background process it started still holds them).
+    pub(crate) pipes_held: bool,
     pub(crate) stdout: Captured,
     pub(crate) stderr: Captured,
 }
@@ -60,15 +69,34 @@ pub(crate) fn run_bounded(mut command: Command, timeout: Duration) -> io::Result
         thread::sleep(POLL_INTERVAL);
     };
 
+    // A killed tree closes its pipes promptly; allow a short grace for that.
+    let pipe_deadline = deadline.max(Instant::now()) + Duration::from_secs(2);
+    let (stdout, stdout_held) = receive(stdout, pipe_deadline);
+    let (stderr, stderr_held) = receive(stderr, pipe_deadline);
     Ok(Finished {
         exit_code: status.code(),
         timed_out,
-        stdout: join_reader(stdout),
-        stderr: join_reader(stderr),
+        pipes_held: stdout_held || stderr_held,
+        stdout,
+        stderr,
     })
 }
 
-fn spawn_reader(mut stream: impl Read + Send + 'static) -> thread::JoinHandle<Captured> {
+/// Waits for a reader's result until `deadline`; `true` when it did not
+/// finish (pipe still held open).
+fn receive(receiver: Option<Receiver<Captured>>, deadline: Instant) -> (Captured, bool) {
+    let Some(receiver) = receiver else {
+        return (Captured::default(), false);
+    };
+    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(captured) => (captured, false),
+        Err(RecvTimeoutError::Timeout) => (Captured::default(), true),
+        Err(RecvTimeoutError::Disconnected) => (Captured::default(), false),
+    }
+}
+
+fn spawn_reader(mut stream: impl Read + Send + 'static) -> Receiver<Captured> {
+    let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut kept = Vec::new();
         let mut truncated = false;
@@ -90,31 +118,37 @@ fn spawn_reader(mut stream: impl Read + Send + 'static) -> thread::JoinHandle<Ca
             kept.drain(..kept.len() - CAPTURE_LIMIT_BYTES);
             truncated = true;
         }
-        Captured {
+        // The receiver may have given up (pipe held past the deadline); the
+        // result is then intentionally discarded.
+        drop(sender.send(Captured {
             text: String::from_utf8_lossy(&kept).into_owned(),
             truncated,
-        }
-    })
-}
-
-fn join_reader(handle: Option<thread::JoinHandle<Captured>>) -> Captured {
-    handle
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default()
+        }));
+    });
+    receiver
 }
 
 fn kill_tree(child: &mut Child) {
-    // Descendants first (deepest last in the list, killed first), so none is
-    // re-parented and missed while its parent dies.
+    // Descendants first (deepest last in the list, killed first) while the
+    // child is still alive, so none is re-parented away from the tree; repeat
+    // to catch processes forked during the previous round.
     #[cfg(unix)]
-    for pid in descendants(child.id()).into_iter().rev() {
-        let status = Command::new("kill")
-            .args(["-KILL", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if let Err(error) = status {
-            eprintln!("acceptance: failed to kill descendant {pid}: {error}");
+    for _round in 0..5 {
+        let pids = descendants(child.id());
+        if pids.is_empty() {
+            break;
+        }
+        for pid in pids.into_iter().rev() {
+            match Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+            {
+                // A non-zero status usually means the process already exited.
+                Ok(_) => {}
+                Err(error) => eprintln!("acceptance: failed to kill descendant {pid}: {error}"),
+            }
         }
     }
     if let Err(error) = child.kill() {
@@ -150,6 +184,17 @@ mod tests {
     use std::{process::Command, time::Duration};
 
     use super::{CAPTURE_LIMIT_BYTES, run_bounded};
+
+    #[test]
+    fn leftover_background_process_cannot_stall_the_step() {
+        let mut command = Command::new("sh");
+        // The child exits at once but its background `sleep` inherits stdout.
+        command.args(["-c", "sleep 30 & exit 0"]);
+        let started = std::time::Instant::now();
+        let finished = run_bounded(command, Duration::from_millis(300)).unwrap();
+        assert!(finished.pipes_held);
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 
     #[test]
     fn output_is_capped_to_the_tail() {

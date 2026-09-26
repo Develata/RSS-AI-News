@@ -69,14 +69,21 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
     let base = smoke_base(smoke.path());
     let mut args = base.clone();
     args.extend(strings(["migrate", "run"]));
-    executor.command("sqlite-migrate-run", &binary, &args, &[], 0);
+    executor.product_command("sqlite-migrate-run", &binary, &args, smoke.path(), &[], 0);
     let mut args = base.clone();
     args.extend(strings(["migrate", "check"]));
-    executor.command("sqlite-migrate-check", &binary, &args, &[], 0);
+    executor.product_command("sqlite-migrate-check", &binary, &args, smoke.path(), &[], 0);
     verify_binary_identity(executor, &binary);
 
     let args = recent_entries_args(&base, None);
-    let default_output = executor.command("recent-entries-default", &binary, &args, &[], 0);
+    let default_output = executor.product_command(
+        "recent-entries-default",
+        &binary,
+        &args,
+        smoke.path(),
+        &[],
+        0,
+    );
     if let Some(output) = default_output {
         executor.check(
             "recent-entries-default-contract",
@@ -86,8 +93,14 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
     }
 
     let args = recent_entries_args(&base, Some(EXPLICIT_CUTOFF));
-    let explicit_output =
-        executor.command("recent-entries-explicit-cutoff", &binary, &args, &[], 0);
+    let explicit_output = executor.product_command(
+        "recent-entries-explicit-cutoff",
+        &binary,
+        &args,
+        smoke.path(),
+        &[],
+        0,
+    );
     if let Some(output) = explicit_output {
         executor.check(
             "recent-entries-explicit-contract",
@@ -98,7 +111,9 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
 
     for (id, command, expected_exit) in JSON_CONTRACT_SMOKES {
         let args = json_contract_args(&base, command);
-        if let Some(output) = executor.command(id, &binary, &args, &[], expected_exit) {
+        if let Some(output) =
+            executor.product_command(id, &binary, &args, smoke.path(), &[], expected_exit)
+        {
             executor.check(
                 &format!("{id}-contract"),
                 "stdout is exactly one JSON document whose status matches the exit code",
@@ -113,31 +128,39 @@ fn plan_commands(executor: &mut LaneExecutor<'_>, smoke: &Path) {
     let base = smoke_base(smoke);
     let mut args = base.clone();
     args.extend(strings(["migrate", "run"]));
-    executor.command("sqlite-migrate-run", &binary, &args, &[], 0);
+    executor.product_command("sqlite-migrate-run", &binary, &args, smoke, &[], 0);
     let mut args = base.clone();
     args.extend(strings(["migrate", "check"]));
-    executor.command("sqlite-migrate-check", &binary, &args, &[], 0);
+    executor.product_command("sqlite-migrate-check", &binary, &args, smoke, &[], 0);
     verify_binary_identity(executor, &binary);
 
     let args = recent_entries_args(&base, None);
-    executor.command("recent-entries-default", &binary, &args, &[], 0);
+    executor.product_command("recent-entries-default", &binary, &args, smoke, &[], 0);
     executor.check(
         "recent-entries-default-contract",
         "omitted --published-after yields summary.published_after = null",
         Ok(()),
     );
     let args = recent_entries_args(&base, Some(EXPLICIT_CUTOFF));
-    executor.command("recent-entries-explicit-cutoff", &binary, &args, &[], 0);
+    executor.product_command(
+        "recent-entries-explicit-cutoff",
+        &binary,
+        &args,
+        smoke,
+        &[],
+        0,
+    );
     executor.check(
         "recent-entries-explicit-contract",
         "explicit --published-after is reflected in the JSON contract",
         Ok(()),
     );
     for (id, command, expected_exit) in JSON_CONTRACT_SMOKES {
-        executor.command(
+        executor.product_command(
             id,
             &binary,
             &json_contract_args(&base, command),
+            smoke,
             &[],
             expected_exit,
         );

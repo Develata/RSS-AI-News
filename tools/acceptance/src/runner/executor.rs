@@ -121,7 +121,33 @@ impl<'a> LaneExecutor<'a> {
         envs: &[(&str, &str)],
         expected_exit: i32,
     ) -> Option<ProcessOutput> {
-        self.command_inner(id, program.as_ref(), args, envs, expected_exit, false)
+        self.command_inner(id, program.as_ref(), args, envs, None, expected_exit, false)
+    }
+
+    /// Runs the product CLI against a smoke workspace, isolated from the
+    /// developer's environment: the working directory is `workdir` (so no
+    /// repo-root `.env` is read) and every variable the product reads from
+    /// the environment is removed before `envs` is applied. Without this, an
+    /// inherited `DATABASE_URL` would win over `--db-path` and point smokes
+    /// at a real database.
+    pub(crate) fn product_command(
+        &mut self,
+        id: &str,
+        binary: impl AsRef<Path>,
+        args: &[String],
+        workdir: &Path,
+        envs: &[(&str, &str)],
+        expected_exit: i32,
+    ) -> Option<ProcessOutput> {
+        self.command_inner(
+            id,
+            binary.as_ref(),
+            args,
+            envs,
+            Some(workdir),
+            expected_exit,
+            false,
+        )
     }
 
     pub(crate) fn cleanup_command(
@@ -131,7 +157,7 @@ impl<'a> LaneExecutor<'a> {
         args: &[String],
         expected_exit: i32,
     ) -> Option<ProcessOutput> {
-        self.command_inner(id, program.as_ref(), args, &[], expected_exit, true)
+        self.command_inner(id, program.as_ref(), args, &[], None, expected_exit, true)
     }
 
     fn command_inner(
@@ -140,6 +166,7 @@ impl<'a> LaneExecutor<'a> {
         program: &Path,
         args: &[String],
         envs: &[(&str, &str)],
+        product_workdir: Option<&Path>,
         expected_exit: i32,
         always_run: bool,
     ) -> Option<ProcessOutput> {
@@ -170,6 +197,12 @@ impl<'a> LaneExecutor<'a> {
         if self.options.low_resource {
             apply_small_volume_cargo_defaults(program, &mut command);
         }
+        if let Some(workdir) = product_workdir {
+            command.current_dir(workdir);
+            for key in PRODUCT_ENV_KEYS {
+                command.env_remove(key);
+            }
+        }
         for (key, value) in envs {
             command.env(key, value);
         }
@@ -177,7 +210,8 @@ impl<'a> LaneExecutor<'a> {
         match run_bounded(command, self.options.step_timeout) {
             Ok(finished) => {
                 let code = finished.exit_code;
-                let passed = !finished.timed_out && code == Some(expected_exit);
+                let passed =
+                    !finished.timed_out && !finished.pipes_held && code == Some(expected_exit);
                 let safe_stdout = self.redact(&finished.stdout.text, envs);
                 let safe_stderr = self.redact(&finished.stderr.text, envs);
                 if !passed {
@@ -185,9 +219,14 @@ impl<'a> LaneExecutor<'a> {
                 }
                 let error = if finished.timed_out {
                     Some(format!(
-                        "timed out after {}s; process group killed",
+                        "timed out after {}s; process tree killed",
                         self.options.step_timeout.as_secs()
                     ))
+                } else if finished.pipes_held {
+                    Some(
+                        "exited, but a leftover background process kept its output open past the deadline"
+                            .to_string(),
+                    )
                 } else {
                     (!passed).then(|| format!("expected exit {expected_exit}, observed {:?}", code))
                 };
@@ -288,6 +327,18 @@ impl<'a> LaneExecutor<'a> {
     }
 }
 
+/// Environment variables the product CLI reads (crates/config/src/env.rs).
+const PRODUCT_ENV_KEYS: [&str; 8] = [
+    "DATABASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "GITHUB_TOKEN",
+    "RSSHUB_BASE_URL",
+    "RSSHUB_ACCESS_KEY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+];
+
 fn apply_small_volume_cargo_defaults(program: &Path, command: &mut Command) {
     if program.file_name().and_then(|name| name.to_str()) != Some("cargo") {
         return;
@@ -363,6 +414,38 @@ mod tests {
         let evidence = report.stderr_tail.expect("stderr evidence");
         assert!(!evidence.contains(secret));
         assert!(evidence.contains("[REDACTED]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn product_command_ignores_inherited_database_url_and_repo_dotenv() {
+        let workdir = std::env::temp_dir().join(format!("acceptance-iso-{}", std::process::id()));
+        std::fs::create_dir_all(&workdir).unwrap();
+        let workdir = workdir.canonicalize().unwrap();
+        // SAFETY: only this test reads or writes this variable name.
+        unsafe { std::env::set_var("DATABASE_URL", "sqlite:///real/production.db") };
+        let mut executor = LaneExecutor::new(
+            Path::new("."),
+            Path::new("target"),
+            "0.7.1",
+            ExecOptions::default(),
+        );
+        let output = executor.product_command(
+            "isolated",
+            "sh",
+            &[
+                "-c".to_string(),
+                "printf '%s|%s' \"${DATABASE_URL-unset}\" \"$(pwd -P)\"".to_string(),
+            ],
+            &workdir,
+            &[],
+            0,
+        );
+        // SAFETY: see above.
+        unsafe { std::env::remove_var("DATABASE_URL") };
+        std::fs::remove_dir_all(&workdir).unwrap();
+        let stdout = output.expect("command passes").stdout;
+        assert_eq!(stdout, format!("unset|{}", workdir.display()));
     }
 
     #[test]
