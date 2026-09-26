@@ -5,8 +5,10 @@
 //! - Memory per step is O(`CAPTURE_LIMIT_BYTES`) per stream regardless of how
 //!   much the child writes; the *last* bytes are kept, since failures are
 //!   reported at the end of the output.
-//! - A timed-out step is killed together with its descendants (Unix: the child
-//!   leads its own process group), so no orphan `rustc`/`cargo` keeps running.
+//! - A timed-out step is killed together with its descendants (Unix: found by
+//!   walking `ps --ppid`), so no orphan `rustc`/`cargo` keeps running.
+//! - Children stay in the runner's process group, so a terminal Ctrl-C (sent
+//!   to the foreground group) stops them together with the runner.
 //! - `run_bounded` always reaps the child before returning.
 
 use std::{
@@ -42,11 +44,6 @@ pub(crate) fn run_bounded(mut command: Command, timeout: Duration) -> io::Result
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
     let mut child = command.spawn()?;
     let stdout = child.stdout.take().map(spawn_reader);
     let stderr = child.stderr.take().map(spawn_reader);
@@ -107,25 +104,45 @@ fn join_reader(handle: Option<thread::JoinHandle<Captured>>) -> Captured {
 }
 
 fn kill_tree(child: &mut Child) {
+    // Descendants first (deepest last in the list, killed first), so none is
+    // re-parented and missed while its parent dies.
     #[cfg(unix)]
-    {
-        // The child leads its own process group (process_group(0) above), so
-        // signalling -pid reaches cargo's rustc/linker descendants as well.
-        let group = format!("-{}", child.id());
-        if let Ok(status) = Command::new("kill")
-            .args(["-KILL", "--", &group])
+    for pid in descendants(child.id()).into_iter().rev() {
+        let status = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            && status.success()
-        {
-            return;
+            .status();
+        if let Err(error) = status {
+            eprintln!("acceptance: failed to kill descendant {pid}: {error}");
         }
     }
-    // Fallback (non-Unix, or `kill` unavailable): at least stop the child.
     if let Err(error) = child.kill() {
         eprintln!("acceptance: failed to kill timed-out child: {error}");
     }
+}
+
+/// All descendants of `root`, parents before children (`ps` from procps).
+#[cfg(unix)]
+fn descendants(root: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        let Ok(output) = Command::new("ps")
+            .args(["-o", "pid=", "--ppid", &parent.to_string()])
+            .output()
+        else {
+            break;
+        };
+        for pid in String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .filter_map(|pid| pid.parse::<u32>().ok())
+        {
+            found.push(pid);
+            frontier.push(pid);
+        }
+    }
+    found
 }
 
 #[cfg(all(test, unix))]
@@ -146,13 +163,28 @@ mod tests {
     }
 
     #[test]
-    fn timeout_kills_the_process_group() {
+    fn timeout_kills_descendants() {
+        let dir = std::env::temp_dir().join(format!("acceptance-kill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("grandchild.pid");
         let mut command = Command::new("sh");
         // The grandchild `sleep` would keep the pipe open if it survived.
-        command.args(["-c", "sleep 30 & sleep 30"]);
+        command.args([
+            "-c",
+            &format!("sleep 30 & echo $! > {}; wait", pid_file.display()),
+        ]);
         let started = std::time::Instant::now();
-        let finished = run_bounded(command, Duration::from_millis(300)).unwrap();
+        let finished = run_bounded(command, Duration::from_millis(500)).unwrap();
         assert!(finished.timed_out);
         assert!(started.elapsed() < Duration::from_secs(10));
+
+        let grandchild = std::fs::read_to_string(&pid_file).unwrap();
+        let alive = Command::new("kill")
+            .args(["-0", grandchild.trim()])
+            .status()
+            .unwrap()
+            .success();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!alive, "grandchild {grandchild} survived the timeout");
     }
 }

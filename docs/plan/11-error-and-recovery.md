@@ -107,6 +107,9 @@ Reindex 无预算（claim 不过滤 attempt_count，失败 `mark_failed` 直转�
 - 失败时**不**改值（已在 claim 时递增）
 - reclaim（lease 过期）时**不**改值
 - 这样保证：worker 崩溃 / lease 过期不会刷预算，预算严格反映尝试次数
+- **唯一例外**：Publish freeze 选不到候选（`SnapshotEmpty`）时退还本次 claim 计入的 1 次
+  （`release_empty_snapshot`，记录回 `pending`）。空快照不是一次发布尝试，否则同日反复空跑会耗尽预算、
+  被 sweep 转 `failed`（见 [./08-state-machines.md](./08-state-machines.md) §6.1）
 
 ## 5. exit code 速查
 

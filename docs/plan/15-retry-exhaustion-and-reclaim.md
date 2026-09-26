@@ -171,7 +171,8 @@ count=0 静默，同一 run 内多次执行无害（codex W15-P4 复审补全）
 ## 8. 不变契约
 
 1. claim SQL 一字不动（含 `attempt_count < max` 过滤与 PG `FOR UPDATE SKIP LOCKED`）。
-2. `attempt_count` 契约不变（11 §4.1：claim 时自增，成功不清零，失败/reclaim 不改值）。
+2. `attempt_count` 契约不变（11 §4.1：claim 时自增，成功不清零，失败/reclaim 不改值；
+   唯一例外是 Publish `SnapshotEmpty` 退还该次 claim 的计数，空快照不计入 sweep 预算）。
 3. `release_permanent_failure` / `release_success*` 语义与签名不变。
 4. reclaim SQL 不变（仍只做 running 类 → pending 类，不动 attempt_count）——耗尽判定
    全部收口在 ②③。
