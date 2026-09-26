@@ -50,6 +50,8 @@
 - `--max-batches <N>`：覆盖 `runtime.max_batches_per_run`；`0` = 不限
 
 ### `ai-run`
+- 未给全局 `--category` 时依次处理所有分类（各用自己的凭证 / 模型 / prompt）；单个分类失败记入
+  `summary.category_failures`，其他分类照常执行，退出码取最严重者（凭证缺失 → 78）
 - `--batch-size <N>`（默认 `20`）
 - `--model <ID>`：覆盖 `[ai].model`
 - `--max-batches <N>`
@@ -87,6 +89,8 @@
 - 子动作：`migrate run` / `migrate check`
 
 ### `run`
+- 依次执行 ingest → ai-run（全部分类；`ai.enabled=false` 时跳过）→ publish-all；整次运行只加载一次配置、
+  只打开一次数据库连接池，各阶段看到同一份配置
 - `--ingest-batch-size <N>` / `--ai-batch-size <N>`
 - `--publish-date <YYYY-MM-DD>`
 - `--max-batches <N>`

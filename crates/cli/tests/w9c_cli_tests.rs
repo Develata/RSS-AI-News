@@ -365,6 +365,8 @@ fn ingest_source_flag_no_longer_exists() {
 
 fn ai_summary() -> AiRunCommandSummary {
     AiRunCommandSummary {
+        categories: vec!["ai".to_string()],
+        category_failures: Vec::new(),
         task_gen_scanned: 4,
         task_gen_inserted: 3,
         task_gen_conflict_skipped: 1,

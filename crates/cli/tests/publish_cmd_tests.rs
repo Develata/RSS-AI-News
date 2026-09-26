@@ -1,11 +1,13 @@
-//! Command-level counterexamples for `publish`: record isolation across
-//! categories and failure propagation into the summary / exit code.
+//! Command-level counterexamples for multi-category commands (`publish`,
+//! `publish-all`, `ai-run`): record isolation across categories and failure
+//! propagation into the summary / exit code.
 
 use std::{fs, path::Path};
 
 use rss_ai_news_cli::{
-    args::{Cli, Command, LogFormat, OutputFormat, PublishArgs},
+    args::{AiRunArgs, Cli, Command, LogFormat, OutputFormat, PublishArgs},
     commands::{
+        ai_run,
         publish::{self, StageVerdict},
         publish_all,
     },
@@ -144,6 +146,36 @@ async fn publish_all_records_a_category_conflict_and_keeps_other_categories() {
     assert_eq!(second.exit_code(), ExitCode::RuntimeError);
 }
 
+#[tokio::test]
+async fn ai_run_without_category_runs_every_category_and_reports_each_failure() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config_with(temp.path(), &db_path, &temp.path().join("output"), true);
+
+    let mut cli = cli_for(temp.path(), "ai");
+    cli.category = None;
+    cli.command = Command::AiRun(AiRunArgs::default());
+    let args = match &cli.command {
+        Command::AiRun(args) => args,
+        _ => unreachable!(),
+    };
+    // Previously: Err("category is required when multiple ... categories"),
+    // so `run` never processed AI with more than one category.
+    let summary = ai_run::run(&cli, args)
+        .await
+        .expect("multi-category ai-run reports per-category failures");
+
+    let failed = summary
+        .category_failures
+        .iter()
+        .map(|failure| failure.category.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(failed, ["ai", "math"], "{summary:?}");
+    // Missing credentials are a config error for each category.
+    assert_eq!(summary.exit_code(), ExitCode::ConfigError);
+    assert_eq!(summary.errors().len(), 2);
+}
+
 async fn seed_persisted_article(pool: &sqlx::SqlitePool, category: &str) {
     let config = insert_rule(pool, "config", category).await;
     let extractor = insert_rule(pool, "extractor", category).await;
@@ -245,6 +277,12 @@ fn publish_args(cli: &Cli) -> &PublishArgs {
 }
 
 fn write_config(root: &Path, db_path: &Path, output_dir: &Path) {
+    write_config_with(root, db_path, output_dir, false);
+}
+
+/// `ai_enabled = true` also points every category at an API-key env var that
+/// is never set, so credential resolution fails per category without network.
+fn write_config_with(root: &Path, db_path: &Path, output_dir: &Path, ai_enabled: bool) {
     fs::create_dir_all(root.join("categories")).expect("create categories");
     let db_path = db_path.to_string_lossy().replace('\\', "/");
     let output_dir = output_dir.to_string_lossy().replace('\\', "/");
@@ -271,7 +309,7 @@ concurrent_feeds = 1
 concurrent_fetches = 1
 
 [ai]
-enabled = false
+enabled = {ai_enabled}
 model = "test-model"
 max_tokens = 1024
 temperature = 0.0
@@ -345,6 +383,11 @@ metrics_bind = "127.0.0.1:9090"
     )
     .expect("write app");
 
+    let ai_override = if ai_enabled {
+        "\n[category.ai_override]\napi_key_env = \"RSS_AI_NEWS_TEST_UNSET_KEY\"\n"
+    } else {
+        ""
+    };
     for (key, name, priority) in [("ai", "AI", 10), ("math", "Math", 20)] {
         fs::write(
             root.join("categories").join(format!("{key}.toml")),
@@ -356,7 +399,7 @@ schema_version = "1"
 key = "{key}"
 display_name = "{name}"
 priority = {priority}
-
+{ai_override}
 [[sources]]
 key = "{key}-mock"
 display_name = "Mock {name}"

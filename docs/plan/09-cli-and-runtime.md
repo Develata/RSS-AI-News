@@ -85,7 +85,7 @@ CLI 框架：`clap` derive。每个子命令是独立 enum 变体。
 | 子命令 | 入口 | 主 Flow | 备注 |
 |---|---|---|---|
 | ingest | `commands/ingest.rs` | `flows::ingest::IngestFlow` | 含 feed + extract 两阶段 |
-| ai-run | `commands/ai_run.rs` | `flows::ai_run::AiRunFlow` | category-scoped (v0.3) |
+| ai-run | `commands/ai_run.rs` | `flows::ai_run::AiRunFlow` | 逐分类执行：`--category` 限定一个，否则全部分类（`run` 同样） |
 | publish | `commands/publish.rs` + `publish_all.rs` | `flows::publish::PublishFlow` | publish_all = atomic batch |
 | doctor | `commands/doctor.rs` | `runtime/src/doctor/` | 6 个 check |
 | replay | `commands/replay.rs` | `flows::ingest::extract` + `flows::ai_run` | --kind={html,ai} |

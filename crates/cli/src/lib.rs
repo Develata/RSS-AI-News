@@ -63,6 +63,9 @@ pub async fn run() -> ExitCode {
     spawn_metrics_server(&cli.metrics_bind);
 
     let mut writer = OutputWriter::new(OutputFormat::from(cli.output_format));
+    // The failure envelope names the command the user invoked; many errors
+    // (config, storage, runtime) do not know it themselves.
+    let command = cli.command.name();
     match dispatch(cli, &mut writer).await {
         Ok(exit) => exit,
         Err(error) => {
@@ -70,7 +73,7 @@ pub async fn run() -> ExitCode {
             // W11-P4-fix2.H2 lint：emit_failure 返 io::Result（写 stderr），
             // 进程即将退出的错误路径，stderr 关闭等故障无救赎；显式 `.ok()`
             // 表达 "尽力 emit + 失败不阻断 exit"，比 `let _ =` 通过 lint。
-            writer.emit_failure(error.command_name(), &error).ok();
+            writer.emit_failure(command, &error).ok();
             exit
         }
     }

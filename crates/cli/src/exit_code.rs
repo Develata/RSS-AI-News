@@ -18,6 +18,17 @@ impl ExitCode {
         })
     }
 
+    /// Inverse of [`Self::as_i32`]; unknown non-zero values map to
+    /// `RuntimeError`.
+    pub fn from_i32(value: i32) -> Self {
+        match value {
+            0 => Self::Success,
+            2 => Self::UserError,
+            78 => Self::ConfigError,
+            _ => Self::RuntimeError,
+        }
+    }
+
     pub fn as_i32(self) -> i32 {
         match self {
             Self::Success => 0,

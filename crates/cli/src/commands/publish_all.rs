@@ -1,12 +1,13 @@
 use rss_ai_news_storage::RuleVersionRepository;
 use std::io::{self, Write};
 
-use rss_ai_news_config::{self as config, CategoryConfig};
+use rss_ai_news_config::{self as config, CategoryConfig, LoadedConfig};
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishInitOptions, PublishInitOutcome,
     PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRenderOptions, RuntimeError,
 };
+use rss_ai_news_storage::StoragePool;
 use serde::Serialize;
 use time::OffsetDateTime;
 
@@ -95,30 +96,45 @@ impl CommandSummary for PublishAllCommandSummary {
 
 pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishAllCommandSummary, CliError> {
     let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
+    preflight(&loaded, args)?;
+    let pool = open_write_storage(&loaded).await?;
+    run_loaded(&loaded, &pool, args).await
+}
+
+/// Config / argument checks for publish-all; run before storage is opened.
+pub(crate) fn preflight(loaded: &LoadedConfig, args: &PublishArgs) -> Result<(), CliError> {
     config::validate::run_command_checks(
-        &loaded,
+        loaded,
         config::validate::CommandKind::Publish,
         &config::validate::CommandFlags {
             local_only: args.local_only,
         },
     )?;
-    let categories = loaded
-        .categories_filtered()
-        .cloned()
-        .collect::<Vec<CategoryConfig>>();
-    if categories.is_empty() {
+    if loaded.categories_filtered().next().is_none() {
         return Err(CliError::Runtime(RuntimeError::Config(
             "no categories selected".to_string(),
         )));
     }
-
-    let date = args.date.clone().unwrap_or_else(today_utc);
     if args.date.is_some() {
         let _ = parse_date_start(args.date.as_deref())?;
     }
-    let pool = open_write_storage(&loaded).await?;
-    let ctx = build_publish_deps(&loaded, &pool, args.local_only)?;
-    let rule_version_repo = rss_ai_news_storage::RuleVersionRepo::new_with_storage(pool);
+    Ok(())
+}
+
+/// Publishes every selected category on an already loaded config and opened
+/// pool; callers run [`preflight`] first.
+pub(crate) async fn run_loaded(
+    loaded: &LoadedConfig,
+    pool: &StoragePool,
+    args: &PublishArgs,
+) -> Result<PublishAllCommandSummary, CliError> {
+    let categories = loaded
+        .categories_filtered()
+        .cloned()
+        .collect::<Vec<CategoryConfig>>();
+    let date = args.date.clone().unwrap_or_else(today_utc);
+    let ctx = build_publish_deps(loaded, pool, args.local_only)?;
+    let rule_version_repo = rss_ai_news_storage::RuleVersionRepo::new_with_storage(pool.clone());
     let flow = PublishFlow::new(ctx.clone());
     let mode = if args.local_only || ctx.publish_target_remote.is_none() {
         "local"

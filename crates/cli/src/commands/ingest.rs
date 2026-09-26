@@ -3,8 +3,9 @@ use std::{
     time::Instant,
 };
 
-use rss_ai_news_config::{self as config, CategoryConfig};
+use rss_ai_news_config::{self as config, CategoryConfig, LoadedConfig};
 use rss_ai_news_runtime::{ExtractFlow, ExtractOptions, ExtractSummary, IngestFlow, IngestOptions};
+use rss_ai_news_storage::StoragePool;
 use serde::Serialize;
 
 use crate::{
@@ -117,15 +118,31 @@ impl CommandSummary for IngestCommandSummary {
 
 pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, CliError> {
     let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
+    preflight(&loaded)?;
+    let pool = open_write_storage(&loaded).await?;
+    run_loaded(&loaded, &pool, args).await
+}
+
+/// Config checks for ingest; run before any storage is opened.
+pub(crate) fn preflight(loaded: &LoadedConfig) -> Result<(), CliError> {
     config::validate::run_command_checks(
-        &loaded,
+        loaded,
         config::validate::CommandKind::Ingest,
         &config::validate::CommandFlags::default(),
     )?;
+    Ok(())
+}
+
+/// Ingest (and extract unless `--skip-fetch`) on an already loaded config and
+/// opened pool; callers run [`preflight`] first.
+pub(crate) async fn run_loaded(
+    loaded: &LoadedConfig,
+    pool: &StoragePool,
+    args: &IngestArgs,
+) -> Result<IngestCommandSummary, CliError> {
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let started = Instant::now();
-    let pool = open_write_storage(&loaded).await?;
-    let ctx = build_ingest_deps(&loaded, &pool)?;
+    let ctx = build_ingest_deps(loaded, pool)?;
 
     let ingest_flow =
         IngestFlow::with_source_secrets(ctx.clone(), categories, loaded.source_secrets.clone());
@@ -134,7 +151,7 @@ pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, C
     let extract_summary = if args.skip_fetch {
         ExtractSummary::default()
     } else {
-        let extract_flow = ExtractFlow::new(build_extract_deps(&loaded, &pool, ctx.run.clone())?);
+        let extract_flow = ExtractFlow::new(build_extract_deps(loaded, pool, ctx.run.clone())?);
         extract_flow
             .run(ExtractOptions {
                 batch_size: args.batch_size,
