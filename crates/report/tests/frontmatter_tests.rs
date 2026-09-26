@@ -40,6 +40,11 @@ fn frontmatter_quotes_values_yaml_would_misread() {
         ("", "\"\""),
         (" padded", "\" padded\""),
         ("{a}", "\"{a}\""),
+        ("1_000", "\"1_000\""),
+        ("0b101", "\"0b101\""),
+        ("-", "\"-\""),
+        ("- item", "\"- item\""),
+        ("nul\u{0}byte", "\"nul\\u0000byte\""),
     ] {
         let out = build_frontmatter("T", "2026-04-28", value);
         assert!(
@@ -54,4 +59,21 @@ fn frontmatter_keeps_already_valid_plain_values_byte_identical() {
     let out = build_frontmatter("AI 日报 2026-04-28", "2026-04-28", "Today - summary 1");
     assert!(out.contains("title: AI 日报 2026-04-28\n"));
     assert!(out.contains("excerpt: Today - summary 1\n"));
+    // Valid plain scalars starting with `-` / `?` / `.` and plain words that
+    // Rust (not YAML) would parse as floats.
+    for value in [
+        "-update",
+        "?help",
+        ".net",
+        "inf",
+        "nan",
+        "2026-04-28",
+        "v1.2",
+    ] {
+        let out = build_frontmatter("T", "2026-04-28", value);
+        assert!(
+            out.contains(&format!("excerpt: {value}\n")),
+            "{value:?} -> {out}"
+        );
+    }
 }

@@ -14,15 +14,21 @@ pub fn build_frontmatter(title: &str, report_date: &str, excerpt: &str) -> Strin
 /// Plain (unquoted) output is kept whenever it is unambiguous, so reports that
 /// were already valid render byte-identically; values a YAML parser would
 /// read as another type or reject (flow collections, aliases, booleans,
-/// numbers, null, …) are double-quoted.
+/// numbers, null, control characters, …) are double-quoted.
 pub(crate) fn yaml_escape(value: &str) -> String {
     if value.contains([':', '#', '\n', '\r', '\t', '\'', '"', '\\']) || !is_plain_safe(value) {
-        let escaped = value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('\t', "\\t");
+        let mut escaped = String::with_capacity(value.len() + 2);
+        for ch in value.chars() {
+            match ch {
+                '\\' => escaped.push_str("\\\\"),
+                '"' => escaped.push_str("\\\""),
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                ch if ch.is_control() => escaped.push_str(&format!("\\u{:04X}", ch as u32)),
+                ch => escaped.push(ch),
+            }
+        }
         format!("\"{escaped}\"")
     } else {
         value.to_string()
@@ -30,17 +36,27 @@ pub(crate) fn yaml_escape(value: &str) -> String {
 }
 
 /// Whether `value` is safe as a YAML plain scalar that resolves to a string
-/// (YAML 1.1 and 1.2 core schemas). Characters `: # ' " \\` and control
-/// characters are handled by the caller.
+/// under YAML 1.1 and the 1.2 core schema. `: # ' " \\ \n \r \t` are
+/// handled by the caller.
+///
+/// Date-like values (`2026-05-18`) are intentionally left plain: the report
+/// date has always been emitted that way (e.g. `{title_yaml}`), and site
+/// generators rely on reading it as a date; quoting it would change every
+/// historical report.
 fn is_plain_safe(value: &str) -> bool {
-    let Some(first) = value.chars().next() else {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
         return false; // empty plain scalar is null
     };
-    if value.trim() != value {
+    if value.trim() != value || value.chars().any(char::is_control) {
         return false;
     }
-    // Indicator characters may not start a plain scalar.
-    if "-?,[]{}&*!|>%@`".contains(first) {
+    // Indicators that can never start a plain scalar.
+    if "[]{},&*!|>%@`".contains(first) {
+        return false;
+    }
+    // `-`, `?`, `:` start a plain scalar only when followed by a non-space.
+    if "-?:".contains(first) && chars.next().is_none_or(char::is_whitespace) {
         return false;
     }
     let lower = value.to_ascii_lowercase();
@@ -50,10 +66,25 @@ fn is_plain_safe(value: &str) -> bool {
     ) {
         return false;
     }
-    // Numbers (int, float, hex/octal, .inf/.nan) would resolve to non-strings.
-    let numeric = lower.trim_start_matches(['+', '-']);
-    !(value.parse::<f64>().is_ok()
-        || numeric.starts_with("0x")
-        || numeric.starts_with("0o")
-        || matches!(numeric, ".inf" | ".nan"))
+    !is_yaml_number(&lower)
+}
+
+/// YAML 1.1 / 1.2 ints and floats, including `_` separators, `0b` / `0o` /
+/// `0x` prefixes and `.inf` / `.nan`.
+fn is_yaml_number(lower: &str) -> bool {
+    let unsigned = lower.trim_start_matches(['+', '-']);
+    if matches!(unsigned, ".inf" | ".nan") {
+        return true;
+    }
+    let digits = unsigned.replace('_', "");
+    for (prefix, radix) in [("0b", 2), ("0o", 8), ("0x", 16)] {
+        if let Some(rest) = digits.strip_prefix(prefix) {
+            return !rest.is_empty() && rest.chars().all(|ch| ch.is_digit(radix));
+        }
+    }
+    // Rust's f64 parser also accepts "inf" / "nan", which YAML reads as
+    // strings; require a leading digit or `.digit`.
+    let numeric_start = digits.starts_with(|ch: char| ch.is_ascii_digit())
+        || (digits.starts_with('.') && digits[1..].starts_with(|ch: char| ch.is_ascii_digit()));
+    numeric_start && digits.parse::<f64>().is_ok()
 }
