@@ -55,7 +55,8 @@ enum Command {
         #[arg(long)]
         low_resource: bool,
 
-        /// Per-step wall-clock limit; the step's process group is killed on expiry.
+        /// Per-step wall-clock limit; on expiry the step's process tree is
+        /// killed (best-effort, Linux) and the step fails.
         #[arg(long, default_value_t = 3600, value_name = "SECONDS")]
         step_timeout_secs: u64,
     },

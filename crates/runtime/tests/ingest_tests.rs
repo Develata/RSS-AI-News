@@ -162,6 +162,35 @@ async fn single_source_304_marks_not_modified_no_entries() {
 }
 
 #[tokio::test]
+async fn source_state_write_failure_after_304_is_a_storage_failure() {
+    let (_dir, pool) = make_test_pool().await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
+    // Fail exactly the success write-back (it is the only update setting it).
+    sqlx::query(
+        "CREATE TRIGGER fail_success_writeback BEFORE UPDATE ON feed_sources \
+         WHEN NEW.last_success_at IS NOT NULL \
+         BEGIN SELECT RAISE(ABORT, 'injected'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let flow = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&["s1"]),
+        responses([(source_id, not_modified(source_id))]),
+    );
+
+    let summary = flow.run(IngestOptions::default()).await;
+
+    assert_eq!(summary.sources_not_modified, 0, "not reported as a success");
+    assert_eq!(summary.sources_failed, 1);
+    assert_eq!(summary.sources_storage_failed, 1);
+}
+
+#[tokio::test]
 async fn existing_source_is_synced_from_current_config_before_fetch() {
     let (_dir, pool) = make_test_pool().await;
     let config_id = insert_config_rule(&pool).await;

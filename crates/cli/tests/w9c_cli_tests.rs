@@ -93,7 +93,8 @@ fn rebuild_report_to_stdout_prints_only_markdown_or_one_envelope() {
 
     let mut buf = Vec::new();
     summary.render_pretty(&mut buf).unwrap();
-    assert_eq!(String::from_utf8(buf).unwrap(), "# Report\n");
+    // Exactly the Markdown bytes, same as `--output` writes.
+    assert_eq!(String::from_utf8(buf).unwrap(), "# Report");
     let envelope = success_envelope("rebuild-report", &summary);
     assert_eq!(envelope["summary"]["markdown"], "# Report");
 }

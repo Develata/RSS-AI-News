@@ -56,6 +56,11 @@ fn frontmatter_quotes_values_yaml_would_misread() {
         // A string for PyYAML (1.1) but the int 9 under the YAML 1.2 core schema.
         ("09", "\"09\""),
         ("a\u{FEFF}b", "\"a\\uFEFFb\""),
+        // PyYAML resolves these to merge / value tags and cannot load them.
+        ("<<", "\"<<\""),
+        ("=", "\"=\""),
+        ("OFF", "\"OFF\""),
+        ("Null", "\"Null\""),
     ] {
         let out = build_frontmatter("T", "2026-04-28", value);
         assert!(
@@ -89,6 +94,15 @@ fn frontmatter_keeps_already_valid_plain_values_byte_identical() {
         "+",
         ".",
         "0X1F",
+        // Not bool/null in either resolver (exact casing, no y/n).
+        "y",
+        "N",
+        "tRuE",
+        "nUlL",
+        "YeS",
+        // PyYAML's float needs a digit right after a leading dot.
+        "._1",
+        "._",
     ] {
         let out = build_frontmatter("T", "2026-04-28", value);
         assert!(

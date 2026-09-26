@@ -2,12 +2,13 @@
 
 ## 功能描述
 
-按 `publish_records.id` 用**当前**模板 + 冻结 snapshot 重新渲染 Markdown，写入本地（可选 GitHub）。
-**不**修改 `publish_records` 行；snapshot 保持冻结。
+按 `--publish-id`（或 `--category` + `--date`）用**当前**模板 + 冻结 snapshot 重新渲染 Markdown；
+`--output` 写入该文件，省略时输出到 stdout（pretty 为原始 Markdown 字节，JSON 为 `summary.markdown`）。
+只读：**不**修改 `publish_records` 行，不推送 GitHub；snapshot 保持冻结。
 
 字节相等保证：
-- 模板未变 + 同 generated_at → 重建结果与原文件 byte-for-byte 一致
-- 模板已变 → 字节差异即模板改动的影响范围，作模板修复的回归依据
+- 模板与渲染器构建未变 → 重建结果与原文件 byte-for-byte 一致（generated_at 取 `publish_records.rendered_at`）
+- 模板或渲染器已变 → 字节差异即改动的影响范围，作修复的回归依据
 
 面向场景：模板修复后重发指定历史报告；本地手动重渲染验证。
 
@@ -16,15 +17,12 @@
 ### 命中条件（success path）
 
 - 模板 + render config 与原 publish 一致时 → 重建结果与原文件字节相等
-- `--generated-at` 未指定 → fallback 到 `publish_records.rendered_at`，仍字节相等
-- summary 输出 publish_record_id + 写入字节数 + 路径
-- `--local-only` 仅写本地
+- generated_at 取自 `publish_records.rendered_at`，仍字节相等
+- `--output` 时 summary 输出 publish_record_id + 字节数 + 路径；省略时 stdout 与 `--output` 文件字节一致
 
 ### 失败条件（failure path）
 
-- `publish_record_id` 不存在 → `CliError::PublishRecordNotFound`，exit 1
-- 远端 422 lost-update 重试达上限 → exit 1，本地文件仍已写
-- 远端 401 → `GithubAuthFailed`，exit 1
+- `publish_record_id` 不存在 → `CliError::PublishRecordNotFound`，exit 1（JSON 模式仍只有一个文档）
 
 ## 测试覆盖
 

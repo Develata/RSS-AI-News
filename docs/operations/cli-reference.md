@@ -15,7 +15,7 @@
 | `--log-file <PATH>` | `""` | 非空 → 同时写 stderr + 日轮转文件 |
 | `--metrics-bind <HOST:PORT>` | `""` | 非空 → 启动 Prometheus `/metrics` HTTP 端点 |
 | `-o, --output-format <pretty\|json>` | `pretty` | 子命令 summary 输出格式 |
-| `-n, --dry-run` | `false` | `reindex` 实装预演；无副作用的只读命令（validate-config / recent-entries / replay / 无 `--output` 的 rebuild-report）视为无操作；其余命令（含会发真实探测请求的 doctor、会以可写连接打开库的 migrate check）以参数错误拒绝（exit 2），且在创建日志文件、启动 metrics 之前拒绝 |
+| `-n, --dry-run` | `false` | `reindex` 实装预演；只读命令（validate-config / recent-entries / replay / 无 `--output` 的 rebuild-report）不写业务数据、不访问外部服务，视为无操作；其余命令（含会发真实探测请求的 doctor、会以可写连接打开库的 migrate check）以参数错误拒绝（exit 2），且在创建日志文件、启动 metrics 之前拒绝。被接受时，显式给出的 `--log-file` / `--metrics-bind` 照常生效 |
 | `-C, --category <KEY>` | `None` | 仅处理该分类（多分类场景隔离） |
 | `--timezone <IANA>` | `app.toml [publish].target_timezone` | 覆盖发布时区 |
 
@@ -53,8 +53,8 @@
 - 未给全局 `--category` 时依次处理所有分类（各用自己的凭证 / 模型 / prompt）；单个分类失败记入
   `summary.category_failures`，其他分类照常执行，退出码取最严重者（凭证缺失 → 78）
 - `--batch-size <N>`（默认 `20`）
+- `--max-batches <N>`：批数上限**按分类分别计**（3 个分类 × `--max-batches 1` 最多 3 批）
 - `--model <ID>`：覆盖 `[ai].model`
-- `--max-batches <N>`
 
 ### `publish` / `publish-all`
 - `--date <YYYY-MM-DD>`：指定 report 日期
@@ -90,7 +90,8 @@
 
 ### `run`
 - 依次执行 ingest → ai-run（全部分类；`ai.enabled=false` 时跳过）→ publish-all；整次运行只加载一次配置、
-  只打开一次数据库连接池，各阶段看到同一份配置
+  只打开一次数据库连接池，各阶段看到同一份配置。启动时只做结构校验；环境 / 凭证检查归各阶段：某分类缺
+  AI 凭证只记为 ai-run 阶段失败（exit 78），ingest 与 publish 照常执行
 - `--ingest-batch-size <N>` / `--ai-batch-size <N>`
 - `--publish-date <YYYY-MM-DD>`
 - `--max-batches <N>`

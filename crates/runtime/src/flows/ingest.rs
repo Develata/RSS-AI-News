@@ -391,6 +391,7 @@ impl IngestFlow {
                         source_id = task.source_id,
                         "failed to update source failure: {storage_error}"
                     );
+                    outcome.storage_failed = true;
                 }
                 outcome.error_kind = Some(error.error_kind().to_string());
                 return outcome;
@@ -409,10 +410,14 @@ impl IngestFlow {
                 )
                 .await
             {
+                // The source state was not recorded: not a success.
                 tracing::warn!(
                     source_id = task.source_id,
                     "failed to update source success: {error}"
                 );
+                outcome.error_kind = Some(error.error_kind().to_string());
+                outcome.storage_failed = true;
+                return outcome;
             }
             outcome.status = IngestSourceStatus::NotModified;
             return outcome;
@@ -439,6 +444,7 @@ impl IngestFlow {
                     source_id = task.source_id,
                     "failed to update source failure: {error}"
                 );
+                outcome.storage_failed = true;
             }
             outcome.error_kind = Some("missing_payload".to_string());
             return outcome;
@@ -484,6 +490,7 @@ impl IngestFlow {
                         source_id = task.source_id,
                         "failed to update source failure: {storage_error}"
                     );
+                    outcome.storage_failed = true;
                 }
                 outcome.error_kind = Some(error.error_kind().to_string());
                 return outcome;
@@ -530,10 +537,15 @@ impl IngestFlow {
             )
             .await
         {
+            // Entries are stored, but the source's fetch state (etag,
+            // last_success_at) is not: report the source as a storage failure.
             tracing::warn!(
                 source_id = task.source_id,
                 "failed to update source success: {error}"
             );
+            outcome.error_kind = Some(error.error_kind().to_string());
+            outcome.storage_failed = true;
+            return outcome;
         }
 
         outcome.status = IngestSourceStatus::Succeeded;

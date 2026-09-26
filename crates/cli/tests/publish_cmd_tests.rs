@@ -5,11 +5,11 @@
 use std::{fs, path::Path};
 
 use rss_ai_news_cli::{
-    args::{AiRunArgs, Cli, Command, LogFormat, OutputFormat, PublishArgs},
+    args::{AiRunArgs, Cli, Command, LogFormat, OutputFormat, PublishArgs, RunArgs},
     commands::{
         ai_run,
         publish::{self, StageVerdict},
-        publish_all,
+        publish_all, run,
     },
     exit_code::ExitCode,
     output::CommandSummary,
@@ -199,6 +199,38 @@ async fn single_category_ai_run_reports_missing_credentials_before_touching_stor
         .await
         .expect_err("missing credentials");
     assert_eq!(error.exit_code(), ExitCode::ConfigError, "{error:?}");
+}
+
+#[tokio::test]
+async fn run_with_missing_ai_credentials_still_ingests_and_publishes() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config_with(temp.path(), &db_path, &temp.path().join("output"), true);
+
+    let mut cli = cli_for(temp.path(), "ai");
+    cli.category = None;
+    cli.command = Command::Run(RunArgs::default());
+    let args = match &cli.command {
+        Command::Run(args) => args,
+        _ => unreachable!(),
+    };
+    // Previously config::load's global credential gate exited 78 before any
+    // stage ran. Now only the AI stage fails, per category.
+    let summary = run::run(&cli, args)
+        .await
+        .expect("run reports stage failures");
+
+    assert!(summary.ingest.is_some(), "ingest ran");
+    assert!(summary.publish.is_some(), "publish ran");
+    assert!(
+        summary
+            .stage_failures
+            .iter()
+            .any(|failure| failure.stage == "ai-run"),
+        "{:?}",
+        summary.stage_failures
+    );
+    assert_eq!(summary.exit_code(), ExitCode::ConfigError);
 }
 
 async fn seed_persisted_article(pool: &sqlx::SqlitePool, category: &str) {

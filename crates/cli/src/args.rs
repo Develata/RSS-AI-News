@@ -64,7 +64,7 @@ pub struct Cli {
     )]
     pub output_format: OutputFormat,
 
-    /// 只预演：reindex 支持；无副作用的只读命令视为无操作；其余命令以参数错误拒绝
+    /// 只预演：reindex 支持；只读命令视为无操作；其余命令以参数错误拒绝（显式的 --log-file / --metrics-bind 照常生效）
     #[arg(short = 'n', long = "dry-run")]
     pub dry_run: bool,
 
@@ -225,7 +225,7 @@ pub struct AiRunArgs {
     /// 本次使用的模型，覆盖分类 / 全局配置
     #[arg(long)]
     pub model: Option<String>,
-    /// 本次最多处理的批数，覆盖 [runtime].max_batches_per_run；0 = 不限
+    /// 每个分类最多处理的批数（多分类时按分类分别计），覆盖 [runtime].max_batches_per_run；0 = 不限
     #[arg(long = "max-batches", value_name = "N")]
     pub max_batches: Option<u32>,
 }
@@ -427,7 +427,7 @@ pub struct RunArgs {
     /// 发布的报告日期 YYYY-MM-DD，默认今天（UTC）
     #[arg(long = "publish-date")]
     pub publish_date: Option<String>,
-    /// ingest 与 ai-run 各自最多处理的批数；0 = 不限（publish 不受影响）
+    /// 最多处理的批数：ingest 计一份，ai-run 每个分类各计一份；0 = 不限（publish 不受影响）
     #[arg(long = "max-batches", value_name = "N")]
     pub max_batches: Option<u32>,
 }

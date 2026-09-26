@@ -46,7 +46,7 @@ CLI 框架：`clap` derive。每个子命令是独立 enum 变体。
 | `--log-level` | enum | `info` | tracing 级别 |
 | `--log-format` | enum | `pretty` | tracing 输出格式（pretty/json） |
 | `--output-format` / `-o` | enum | `pretty` | 命令结果输出格式 |
-| `--dry-run` / `-n` | bool | false | 只规划不执行：`reindex` 实装；无副作用的只读命令为无操作；其余拒绝（exit 2，先于日志文件 / metrics 初始化）|
+| `--dry-run` / `-n` | bool | false | 只规划不执行：`reindex` 实装；只读命令（不写业务数据、不访问外部服务）为无操作；其余拒绝（exit 2，先于日志文件 / metrics 初始化）；显式 `--log-file` / `--metrics-bind` 照常生效|
 | `--category` / `-C` | string | 全部 | 只处理某分类 |
 | `--timezone` | string | `app.toml` 中的值 | 覆盖时区 |
 
@@ -145,12 +145,10 @@ ingest 存活任务数不超过 `http.concurrent_feeds`；extract/AI 使用滚�
 
 | Exit code | 含义 |
 |---|---|
-| 0 | 成功（含部分非致命跳过） |
-| 1 | 通用业务失败 |
-| 64 | CLI 参数错（clap 自动） |
-| 65 | 数据 / 协议错（如 schema drift） |
-| 74 | I/O 错（DB / 文件系统） |
-| 78 | 配置错（schema / 必填缺失 / 非法值） |
+| 0 | 成功（含非致命跳过，如当天暂无内容） |
+| 1 | 运行 / 业务失败（含阶段失败、存储与 I/O 失败） |
+| 2 | CLI 参数错（clap 解析失败、非法组合、写入类命令带 `--dry-run`） |
+| 78 | 配置错（schema / 必填缺失 / 非法值 / 凭证缺失） |
 
 `migrate` / `validate-config` 在配置错误时返 78，而非 1，便于 CI / Docker scheduler 区分。
 

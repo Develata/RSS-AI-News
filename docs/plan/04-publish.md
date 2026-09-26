@@ -208,17 +208,20 @@ items 一次性圈走，避免跨 record 互抢。
 ## 6. rebuild-report
 
 ```bash
-rss-ai-news rebuild-report --publish-record-id <id>
+rss-ai-news rebuild-report --publish-id <id> [--output <PATH>]
+rss-ai-news --category <KEY> rebuild-report --date <YYYY-MM-DD> [--output <PATH>]
 ```
 
-读 `publish_records` + `publish_items` 冷列，重新走 `render_markdown` + `frontmatter_builder`，
-输出与原始 commit 内的 Markdown **byte-equal**。
+读 `publish_records` + `publish_items` 冷列，重新走 `render_markdown` + `frontmatter_builder`；
+`--output` 写文件，省略时 pretty 模式 stdout 为同样的 Markdown 字节（JSON 模式放入 `summary.markdown`）。
+在**同一渲染器构建**下与原始发布的 Markdown **byte-equal**。渲染器修正（例如 YAML 引号、code span
+转义）只会改变此前输出本身有误的值，已正确的值保持字节一致。
 
 测试锁定：[`crates/runtime/tests/rebuild_report_tests.rs`](../../crates/runtime/tests/rebuild_report_tests.rs)
 中的 `rebuild_returns_byte_equal_markdown_to_original_render` 与
 `rebuild_without_generated_at_override_falls_back_to_record_rendered_at_and_matches_original`。
 
-这是发布快照不可变契约的最强验证：只要冷列没动，重渲染产物必字节一致。
+这是发布快照不可变契约的最强验证：冷列与渲染器都不变时，重渲染产物必字节一致。
 
 ## 7. 失败路径速查
 

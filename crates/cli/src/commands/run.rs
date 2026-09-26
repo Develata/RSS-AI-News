@@ -186,8 +186,13 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
     // The config is loaded and the storage pool opened exactly once, so every
     // stage of one run sees the same configuration (no hot reload within a
     // process, docs/plan/13) and migrations / config-version checks run once.
-    let loaded =
-        config::load(&cli.config_dir, None, cli.to_cli_overrides()).map_err(CliError::Config)?;
+    //
+    // Only structural checks run here; environment checks belong to each
+    // stage (ingest / publish preflight, per-category AI credentials), so one
+    // category missing credentials is an ai-run stage failure (exit 78 in the
+    // summary) instead of aborting ingest and publish for every category.
+    let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())
+        .map_err(CliError::Config)?;
     let ai_enabled = loaded.app.ai.enabled;
 
     // `run` 内部 ingest / ai-run 共用同一 --max-batches 生效值（已由

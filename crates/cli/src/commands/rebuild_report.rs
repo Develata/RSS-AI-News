@@ -31,7 +31,8 @@ pub struct RebuildReportCommandSummary {
 impl CommandSummary for RebuildReportCommandSummary {
     fn render_pretty(&self, writer: &mut dyn Write) -> io::Result<()> {
         if let Some(markdown) = &self.markdown {
-            return writeln!(writer, "{markdown}");
+            // Byte-identical to the file `--output` would write.
+            return writer.write_all(markdown.as_bytes());
         }
         writeln!(writer, "Rebuild report completed:")?;
         writeln!(writer, "  Publish record: {}", self.publish_record_id)?;

@@ -66,14 +66,7 @@ fn is_plain_safe(value: &str) -> bool {
     if "-?:".contains(first) && chars.next().is_none_or(char::is_whitespace) {
         return false;
     }
-    let lower = value.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "~" | "null" | "true" | "false" | "yes" | "no" | "on" | "off" | "y" | "n"
-    ) {
-        return false;
-    }
-    !is_yaml_number(value)
+    !is_yaml_reserved(value) && !is_yaml_number(value)
 }
 
 /// Characters that must not appear raw in a YAML scalar: C0/C1 controls and
@@ -88,11 +81,43 @@ fn needs_unicode_escape(ch: char) -> bool {
         )
 }
 
+/// Exact spellings that PyYAML (YAML 1.1) or the YAML 1.2 core schema
+/// resolve to bool, null, merge (`<<`) or value (`=`). Casing is exact: the
+/// resolvers do not accept e.g. `tRuE` or `y`, which therefore stay plain.
+fn is_yaml_reserved(value: &str) -> bool {
+    matches!(
+        value,
+        "~" | "null"
+            | "Null"
+            | "NULL"
+            | "true"
+            | "True"
+            | "TRUE"
+            | "false"
+            | "False"
+            | "FALSE"
+            | "yes"
+            | "Yes"
+            | "YES"
+            | "no"
+            | "No"
+            | "NO"
+            | "on"
+            | "On"
+            | "ON"
+            | "off"
+            | "Off"
+            | "OFF"
+            | "<<"
+            | "="
+    )
+}
+
 /// YAML numbers under the union of the two resolvers readers use:
 /// PyYAML's YAML 1.1 implicit int/float patterns (`_` separators, `0b`,
 /// leading-0 octal, sexagesimal, `.inf`) and the YAML 1.2 core schema
 /// (`0o`, exponent without sign). Matching the reference patterns on the raw
-/// value keeps valid strings such as `_1`, `1e_3` or `09` plain, and quotes
+/// value keeps valid strings such as `_1`, `1e_3` or `._1` plain, and quotes
 /// forms like `0b_` that PyYAML resolves as int but cannot construct.
 fn is_yaml_number(value: &str) -> bool {
     static NUMBER: LazyLock<Regex> = LazyLock::new(|| {
@@ -102,7 +127,7 @@ fn is_yaml_number(value: &str) -> bool {
             r"[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0x[0-9a-fA-F_]+",
             r"|[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+",
             // PyYAML (YAML 1.1) float
-            r"|[-+]?[0-9][0-9_]*\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9_]+(?:[eE][-+][0-9]+)?",
+            r"|[-+]?[0-9][0-9_]*\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?",
             r"|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*",
             r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)",
             // YAML 1.2 core schema int / float
