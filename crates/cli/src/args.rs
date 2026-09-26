@@ -187,7 +187,8 @@ impl Command {
     /// connection, or `doctor`'s real API probes.
     pub fn accepts_dry_run(&self) -> bool {
         match self {
-            // Read-only pools, no network.
+            // Read-only pools (may read a remote PostgreSQL); no feed / AI /
+            // GitHub calls.
             Self::Reindex(_) | Self::ValidateConfig | Self::RecentEntries(_) | Self::Replay(_) => {
                 true
             }

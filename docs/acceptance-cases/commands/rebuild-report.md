@@ -8,7 +8,7 @@
 
 字节相等保证：
 - snapshot、模板、render config（含分类显示名）与渲染器构建均未变 → 重建结果与原文件 byte-for-byte 一致
-  （generated_at 取 `publish_records.rendered_at`）；stdout 输出不补末尾换行
+  （generated_at 取 `publish_records.rendered_at`）；pretty 模式的 stdout 不补末尾换行（JSON envelope 仍以换行结束）
 - 模板或渲染器已变 → 字节差异即改动的影响范围，作修复的回归依据
 
 面向场景：模板修复后重发指定历史报告；本地手动重渲染验证。

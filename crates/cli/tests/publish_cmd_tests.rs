@@ -18,7 +18,10 @@ use rss_ai_news_storage::{StoragePool, build_sqlite_pool, run_migrations};
 use serde_json::json;
 use tempfile::TempDir;
 use time::{Duration, OffsetDateTime};
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
+};
 
 const REPORT_DATE: &str = "2026-05-18";
 
@@ -239,6 +242,7 @@ async fn run_with_missing_ai_credentials_still_ingests_and_publishes() {
 async fn ai_run_processes_the_healthy_category_when_another_lacks_credentials() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
@@ -254,27 +258,34 @@ async fn ai_run_processes_the_healthy_category_when_another_lacks_credentials() 
             }],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
         })))
+        // Exactly one article of the healthy category is analysed.
+        .expect(1)
         .mount(&server)
         .await;
 
     let temp = TempDir::new().expect("temp dir");
     let db_path = temp.path().join("rss.sqlite");
     write_config_with(temp.path(), &db_path, &temp.path().join("output"), true);
-    // `ai` gets working credentials (mock endpoint + a set key); `math`
-    // keeps referencing an unset key. Each is processed independently.
-    let ai_toml = temp.path().join("categories").join("ai.toml");
-    let content = fs::read_to_string(&ai_toml).unwrap().replace(
-        "api_key_env = \"RSS_AI_NEWS_TEST_UNSET_KEY\"",
-        &format!(
-            "api_key_env = \"RSS_AI_NEWS_TEST_GOOD_KEY\"\nbase_url = \"{}\"",
-            server.uri()
-        ),
-    );
-    fs::write(&ai_toml, content).unwrap();
-    // SAFETY: only this test reads or writes this variable name.
-    unsafe { std::env::set_var("RSS_AI_NEWS_TEST_GOOD_KEY", "sk-test") };
+    let categories = temp.path().join("categories");
+    // `ai` (processed first) fails only for its missing key: its endpoint is
+    // valid. `math` (processed after the failure) is healthy: a mock endpoint
+    // and PATH as the key variable — any always-set variable works since the
+    // mock ignores the key, and it avoids mutating the process environment
+    // (set_var is unsound while other test threads may read it).
+    rewrite(&categories.join("ai.toml"), |toml| {
+        toml.replace(
+            "api_key_env = \"RSS_AI_NEWS_TEST_UNSET_KEY\"",
+            "api_key_env = \"RSS_AI_NEWS_TEST_UNSET_KEY\"\nbase_url = \"https://ai.invalid.test/v1\"",
+        )
+    });
+    rewrite(&categories.join("math.toml"), |toml| {
+        toml.replace(
+            "api_key_env = \"RSS_AI_NEWS_TEST_UNSET_KEY\"",
+            &format!("api_key_env = \"PATH\"\nbase_url = \"{}\"", server.uri()),
+        )
+    });
     let pool = migrated_pool(&db_path).await;
-    seed_persisted_article(&pool, "ai").await;
+    seed_persisted_article(&pool, "math").await;
     pool.close().await;
 
     let mut cli = cli_for(temp.path(), "ai");
@@ -291,13 +302,15 @@ async fn ai_run_processes_the_healthy_category_when_another_lacks_credentials() 
         .await
         .expect("ai-run reports per category");
 
-    assert_eq!(summary.categories, ["ai"], "{summary:?}");
-    let failed = summary
-        .category_failures
-        .iter()
-        .map(|failure| failure.category.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(failed, ["math"]);
+    assert_eq!(summary.categories, ["math"], "{summary:?}");
+    assert_eq!(summary.category_failures.len(), 1, "{summary:?}");
+    let failure = &summary.category_failures[0];
+    assert_eq!(failure.category, "ai");
+    assert!(
+        failure.message.contains("RSS_AI_NEWS_TEST_UNSET_KEY"),
+        "fails for the missing key, not the endpoint: {}",
+        failure.message
+    );
     assert_eq!(summary.process_succeeded, 1, "{summary:?}");
     assert_eq!(summary.exit_code(), ExitCode::ConfigError);
 
@@ -308,6 +321,11 @@ async fn ai_run_processes_the_healthy_category_when_another_lacks_credentials() 
             .await
             .expect("count");
     assert_eq!(succeeded, 1, "the healthy category's result is persisted");
+}
+
+fn rewrite(path: &Path, edit: impl FnOnce(String) -> String) {
+    let content = fs::read_to_string(path).expect("read category");
+    fs::write(path, edit(content)).expect("write category");
 }
 
 async fn seed_persisted_article(pool: &sqlx::SqlitePool, category: &str) {
