@@ -93,6 +93,11 @@ pub struct RunOptions {
     pub expected_version: Option<String>,
     pub dry_run: bool,
     pub fail_fast: bool,
+    /// Serial, non-incremental Cargo builds for small volumes (see
+    /// `docs/operations/acceptance-matrix.md`).
+    pub low_resource: bool,
+    /// Per-step wall-clock limit in seconds.
+    pub step_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

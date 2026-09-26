@@ -49,6 +49,15 @@ enum Command {
 
         #[arg(long)]
         fail_fast: bool,
+
+        /// Serial, non-incremental Cargo builds without dev debuginfo, for
+        /// small volumes. Slower, and it invalidates the shared target cache.
+        #[arg(long)]
+        low_resource: bool,
+
+        /// Per-step wall-clock limit; the step's process group is killed on expiry.
+        #[arg(long, default_value_t = 3600, value_name = "SECONDS")]
+        step_timeout_secs: u64,
     },
 }
 
@@ -65,6 +74,8 @@ fn main() -> ExitCode {
             expected_version,
             dry_run,
             fail_fast,
+            low_resource,
+            step_timeout_secs,
         } => match run_matrix(RunOptions {
             repo_root: cli.repo_root,
             target_dir: cli.target_dir,
@@ -73,6 +84,8 @@ fn main() -> ExitCode {
             expected_version,
             dry_run,
             fail_fast,
+            low_resource,
+            step_timeout_secs,
         }) {
             Ok(report) => {
                 print_report(cli.format, &report);

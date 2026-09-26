@@ -28,6 +28,23 @@ pub(crate) fn prepare_smoke_config(
             return Err("could not set database.driver=postgres in smoke config".to_string());
         }
     }
+    // Keep publish smokes inside the disposable workspace, never the repo.
+    let output_dir = smoke_root.join("output").display().to_string();
+    let local_output = format!("local_output_dir = {output_dir:?}");
+    app = app
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("local_output_dir") {
+                local_output.as_str()
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !app.contains(&local_output) {
+        return Err("could not set publish.local_output_dir in smoke config".to_string());
+    }
     fs::write(config_dir.join("app.toml"), app)
         .map_err(|error| format!("cannot write smoke app.toml: {error}"))?;
     fs::copy(
@@ -157,12 +174,19 @@ mod tests {
     use std::path::Path;
 
     use super::prepare_smoke_workspace;
-    use crate::runner::executor::LaneExecutor;
+    use crate::runner::executor::{ExecOptions, LaneExecutor};
 
     #[test]
     fn fail_fast_failure_prevents_smoke_workspace_creation() {
-        let mut executor =
-            LaneExecutor::new(Path::new("."), Path::new("target"), "0.7.1", false, true);
+        let mut executor = LaneExecutor::new(
+            Path::new("."),
+            Path::new("target"),
+            "0.7.1",
+            ExecOptions {
+                fail_fast: true,
+                ..ExecOptions::default()
+            },
+        );
         executor.check("forced-failure", "forced failure", Err("boom".to_string()));
         let workspace = prepare_smoke_workspace(
             &mut executor,

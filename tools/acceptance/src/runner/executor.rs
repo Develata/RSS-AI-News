@@ -1,23 +1,56 @@
-use std::{env, path::Path, process::Command, time::Instant};
+use std::{
+    env,
+    path::Path,
+    process::Command,
+    time::{Duration, Instant},
+};
 
 use crate::{Status, StepReport};
 
 use super::{
+    process::run_bounded,
     redact::{is_sensitive_env_key, redact_output},
     util::{display_command, tail},
 };
 
+/// Run-wide execution policy shared by every lane.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExecOptions {
+    pub(crate) dry_run: bool,
+    pub(crate) fail_fast: bool,
+    /// Apply small-volume Cargo settings (serial jobs, no incremental, no dev
+    /// debuginfo). Off by default: they change Cargo's fingerprint, forcing a
+    /// full rebuild of the shared target dir for acceptance and again for the
+    /// developer's next ordinary build.
+    pub(crate) low_resource: bool,
+    /// Wall-clock limit per step; the step's process tree is killed on expiry.
+    pub(crate) step_timeout: Duration,
+}
+
+impl Default for ExecOptions {
+    fn default() -> Self {
+        Self {
+            dry_run: false,
+            fail_fast: false,
+            low_resource: false,
+            step_timeout: Duration::from_secs(60 * 60),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ProcessOutput {
     pub(crate) stdout: String,
+    /// Earlier stdout bytes were dropped by the capture cap; contract checks
+    /// must not trust a truncated document.
+    pub(crate) stdout_truncated: bool,
 }
 
 pub(crate) struct LaneExecutor<'a> {
     repo_root: &'a Path,
     target_dir: &'a Path,
     expected_version: &'a str,
-    dry_run: bool,
-    fail_fast: bool,
+    options: ExecOptions,
     failed: bool,
     inherited_sensitive_env: Vec<(String, String)>,
     steps: Vec<StepReport>,
@@ -28,15 +61,13 @@ impl<'a> LaneExecutor<'a> {
         repo_root: &'a Path,
         target_dir: &'a Path,
         expected_version: &'a str,
-        dry_run: bool,
-        fail_fast: bool,
+        options: ExecOptions,
     ) -> Self {
         Self {
             repo_root,
             target_dir,
             expected_version,
-            dry_run,
-            fail_fast,
+            options,
             failed: false,
             inherited_sensitive_env: env::vars_os()
                 .filter_map(|(key, value)| {
@@ -61,11 +92,11 @@ impl<'a> LaneExecutor<'a> {
     }
 
     pub(crate) fn dry_run(&self) -> bool {
-        self.dry_run
+        self.options.dry_run
     }
 
     pub(crate) fn status(&self) -> Status {
-        if self.dry_run {
+        if self.options.dry_run {
             Status::Planned
         } else if self.failed {
             Status::Failed
@@ -79,7 +110,7 @@ impl<'a> LaneExecutor<'a> {
     }
 
     pub(crate) fn can_continue(&self) -> bool {
-        !self.failed || !self.fail_fast
+        !self.failed || !self.options.fail_fast
     }
 
     pub(crate) fn command(
@@ -113,7 +144,7 @@ impl<'a> LaneExecutor<'a> {
         always_run: bool,
     ) -> Option<ProcessOutput> {
         let display = display_command(program, args, envs);
-        if self.dry_run {
+        if self.options.dry_run {
             self.steps.push(StepReport {
                 id: id.to_string(),
                 command: display,
@@ -136,35 +167,30 @@ impl<'a> LaneExecutor<'a> {
             .args(args)
             .current_dir(self.repo_root)
             .env("CARGO_TARGET_DIR", self.target_dir);
-        apply_small_volume_cargo_defaults(program, &mut command);
+        if self.options.low_resource {
+            apply_small_volume_cargo_defaults(program, &mut command);
+        }
         for (key, value) in envs {
             command.env(key, value);
         }
 
-        match command.output() {
-            Ok(output) => {
-                let code = output.status.code();
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                let passed = code == Some(expected_exit);
-                let inherited = self
-                    .inherited_sensitive_env
-                    .iter()
-                    .filter(|(key, _)| !envs.iter().any(|(explicit, _)| *explicit == key))
-                    .map(|(_, value)| value.as_str());
-                let safe_stdout = redact_output(
-                    &stdout,
-                    envs.iter()
-                        .map(|(_, value)| *value)
-                        .chain(inherited.clone()),
-                );
-                let safe_stderr = redact_output(
-                    &stderr,
-                    envs.iter().map(|(_, value)| *value).chain(inherited),
-                );
+        match run_bounded(command, self.options.step_timeout) {
+            Ok(finished) => {
+                let code = finished.exit_code;
+                let passed = !finished.timed_out && code == Some(expected_exit);
+                let safe_stdout = self.redact(&finished.stdout.text, envs);
+                let safe_stderr = self.redact(&finished.stderr.text, envs);
                 if !passed {
                     self.failed = true;
                 }
+                let error = if finished.timed_out {
+                    Some(format!(
+                        "timed out after {}s; process group killed",
+                        self.options.step_timeout.as_secs()
+                    ))
+                } else {
+                    (!passed).then(|| format!("expected exit {expected_exit}, observed {:?}", code))
+                };
                 self.steps.push(StepReport {
                     id: id.to_string(),
                     command: display,
@@ -177,10 +203,12 @@ impl<'a> LaneExecutor<'a> {
                     duration_ms: started.elapsed().as_millis(),
                     stdout_tail: (!passed).then(|| tail(&safe_stdout)),
                     stderr_tail: (!passed).then(|| tail(&safe_stderr)),
-                    error: (!passed)
-                        .then(|| format!("expected exit {expected_exit}, observed {:?}", code)),
+                    error,
                 });
-                passed.then_some(ProcessOutput { stdout })
+                passed.then_some(ProcessOutput {
+                    stdout: finished.stdout.text,
+                    stdout_truncated: finished.stdout.truncated,
+                })
             }
             Err(error) => {
                 self.failed = true;
@@ -199,8 +227,19 @@ impl<'a> LaneExecutor<'a> {
         }
     }
 
+    /// Redacts explicit child env secrets and sensitive inherited parent env
+    /// values, plus the generic URL-userinfo / key=value / Bearer patterns.
+    fn redact(&self, text: &str, envs: &[(&str, &str)]) -> String {
+        let inherited = self
+            .inherited_sensitive_env
+            .iter()
+            .filter(|(key, _)| !envs.iter().any(|(explicit, _)| *explicit == key))
+            .map(|(_, value)| value.as_str());
+        redact_output(text, envs.iter().map(|(_, value)| *value).chain(inherited))
+    }
+
     pub(crate) fn check(&mut self, id: &str, description: &str, result: Result<(), String>) {
-        if self.dry_run {
+        if self.options.dry_run {
             self.steps.push(StepReport {
                 id: id.to_string(),
                 command: description.to_string(),
@@ -221,7 +260,8 @@ impl<'a> LaneExecutor<'a> {
             Ok(()) => (Status::Passed, None),
             Err(error) => {
                 self.failed = true;
-                (Status::Failed, Some(error))
+                // Check errors may quote child stdout; redact like step output.
+                (Status::Failed, Some(tail(&self.redact(&error, &[]))))
             }
         };
         self.steps.push(StepReport {
@@ -265,16 +305,21 @@ fn apply_small_volume_cargo_defaults(program: &Path, command: &mut Command) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, time::Duration};
 
-    use super::LaneExecutor;
+    use super::{ExecOptions, LaneExecutor};
+    use crate::Status;
 
     #[cfg(unix)]
     #[test]
     fn failed_command_evidence_redacts_child_environment_secret() {
         let secret = "postgres://alice:hunter2@db.example.test/rss";
-        let mut executor =
-            LaneExecutor::new(Path::new("."), Path::new("target"), "0.7.1", false, false);
+        let mut executor = LaneExecutor::new(
+            Path::new("."),
+            Path::new("target"),
+            "0.7.1",
+            ExecOptions::default(),
+        );
         executor.command(
             "leak-attempt",
             "sh",
@@ -296,8 +341,12 @@ mod tests {
     #[test]
     fn failed_command_evidence_redacts_inherited_environment_secret() {
         let secret = "inherited-aws-access-key-id";
-        let mut executor =
-            LaneExecutor::new(Path::new("."), Path::new("target"), "0.7.1", false, false);
+        let mut executor = LaneExecutor::new(
+            Path::new("."),
+            Path::new("target"),
+            "0.7.1",
+            ExecOptions::default(),
+        );
         executor.inherited_sensitive_env =
             vec![("AWS_ACCESS_KEY_ID".to_string(), secret.to_string())];
         executor.command(
@@ -314,5 +363,48 @@ mod tests {
         let evidence = report.stderr_tail.expect("stderr evidence");
         assert!(!evidence.contains(secret));
         assert!(evidence.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn failed_check_error_is_redacted() {
+        let secret = "inherited-aws-access-key-id";
+        let mut executor = LaneExecutor::new(
+            Path::new("."),
+            Path::new("target"),
+            "0.7.1",
+            ExecOptions::default(),
+        );
+        executor.inherited_sensitive_env =
+            vec![("AWS_ACCESS_KEY_ID".to_string(), secret.to_string())];
+        executor.check("contract", "stdout contract", Err(format!("got {secret}")));
+        let report = executor.into_steps().pop().expect("step report");
+        let error = report.error.expect("check error");
+        assert!(!error.contains(secret));
+        assert!(error.contains("[REDACTED]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn step_timeout_fails_the_step() {
+        let mut executor = LaneExecutor::new(
+            Path::new("."),
+            Path::new("target"),
+            "0.7.1",
+            ExecOptions {
+                step_timeout: Duration::from_millis(200),
+                ..ExecOptions::default()
+            },
+        );
+        let output = executor.command(
+            "hangs",
+            "sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            &[],
+            0,
+        );
+        assert!(output.is_none());
+        let report = executor.into_steps().pop().expect("step report");
+        assert_eq!(report.status, Status::Failed);
+        assert!(report.error.unwrap().contains("timed out"));
     }
 }

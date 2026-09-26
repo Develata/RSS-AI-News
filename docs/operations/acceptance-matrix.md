@@ -54,6 +54,19 @@ cargo acceptance run --lane release --expected-version 0.8.1
 | `docker` |  | ✓ | runtime/debug/scheduler build 与 container smokes |
 | `release` | ✓ | ✓ | workspace/lock/binary/README/version identity 与 Git diff check |
 
+## CLI JSON 输出契约 gate
+
+SQLite lane 用真实 release binary 运行三条无网络命令，断言 stdout **恰好一个 JSON 文档**且
+`status` 与退出码一致（见 [plan/11 §5](../plan/11-error-and-recovery.md)）：
+
+| step | 命令 | 期望退出码 |
+|---|---|---:|
+| `json-contract-publish-empty` | `--category ai publish --local-only`（无候选） | 0 |
+| `json-contract-reindex-abort-missing` | `reindex --abort 999999` | 1 |
+| `json-contract-rebuild-report-missing` | `--category ai rebuild-report --publish-id 999999` | 1 |
+
+smoke 配置的 `local_output_dir` 被改写到一次性工作区内，任何 publish smoke 都不写仓库目录。
+
 ## `recent-entries` opt-in gate
 
 SQLite lane 必须用真实 release binary 验证两种调用：
@@ -73,7 +86,13 @@ SQLite lane 必须用真实 release binary 验证两种调用：
 - CLI 参数错误：Clap exit `2`。
 - `--dry-run` 不执行 Cargo、Docker、product CLI，不创建 smoke workspace 或数据库。
 - `--fail-fast` 在首个失败后不创建后续 smoke config/database；已经创建的 exact-name Docker resources 仍无条件 cleanup。
-- child Cargo 默认使用 `CARGO_BUILD_JOBS=1`、`CARGO_INCREMENTAL=0`、`CARGO_PROFILE_DEV_DEBUG=0`，降低小 volume 上并行 linker 与 incremental artifacts 的资源峰值；调用方已显式设置同名变量时不覆盖。
+- child Cargo 默认沿用 Cargo 自身设置，与日常开发构建共享 target 缓存。`--low-resource` 显式启用
+  `CARGO_BUILD_JOBS=1`、`CARGO_INCREMENTAL=0`、`CARGO_PROFILE_DEV_DEBUG=0`，用于小 volume 降低并行 linker
+  与 incremental artifacts 的资源峰值；它会改变 Cargo 指纹、触发全量重编，调用方已显式设置同名变量时不覆盖。
+  实测（本机、依赖已缓存、仅重编 workspace crates）：`static+sqlite+release` 由强制串行时的 821s 降至 114s。
+- 子进程输出按流只保留末尾 4 MiB（截断时标记，契约检查拒绝截断输出）；每个 step 有墙钟上限
+  `--step-timeout-secs`（默认 3600），超时即杀掉该 step 的整个进程组并判失败。
+- 失败证据（step stdout/stderr 与 check 错误）统一走 redaction。
 
 ## Deterministic boundary
 

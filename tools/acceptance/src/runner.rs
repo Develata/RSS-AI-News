@@ -5,12 +5,13 @@ use crate::{Lane, LaneReport, MatrixReport, Profile, RunOptions, Status};
 mod checks;
 mod executor;
 mod lanes;
+mod process;
 mod redact;
 mod resources;
 mod util;
 
 use checks::{validate_version, workspace_version};
-use executor::LaneExecutor;
+use executor::{ExecOptions, LaneExecutor};
 use util::resolve_target_dir;
 
 const SCHEMA_VERSION: u32 = 1;
@@ -34,6 +35,12 @@ pub fn run_matrix(options: RunOptions) -> Result<MatrixReport, String> {
         None => workspace_version(&repo_root)?,
     };
     let (profile, lanes) = selected_lanes(options.profile, &options.lanes);
+    let exec = ExecOptions {
+        dry_run: options.dry_run,
+        fail_fast: options.fail_fast,
+        low_resource: options.low_resource,
+        step_timeout: std::time::Duration::from_secs(options.step_timeout_secs.max(1)),
+    };
     let mut reports = Vec::with_capacity(lanes.len());
     let mut failed = false;
 
@@ -47,14 +54,7 @@ pub fn run_matrix(options: RunOptions) -> Result<MatrixReport, String> {
             });
             continue;
         }
-        let report = run_lane(
-            lane,
-            &repo_root,
-            &target_dir,
-            &expected_version,
-            options.dry_run,
-            options.fail_fast,
-        );
+        let report = run_lane(lane, &repo_root, &target_dir, &expected_version, exec);
         failed |= report.status == Status::Failed;
         reports.push(report);
     }
@@ -100,12 +100,10 @@ fn run_lane(
     repo_root: &std::path::Path,
     target_dir: &std::path::Path,
     expected_version: &str,
-    dry_run: bool,
-    fail_fast: bool,
+    exec: ExecOptions,
 ) -> LaneReport {
     let started = Instant::now();
-    let mut executor =
-        LaneExecutor::new(repo_root, target_dir, expected_version, dry_run, fail_fast);
+    let mut executor = LaneExecutor::new(repo_root, target_dir, expected_version, exec);
     lanes::run(lane, &mut executor);
     let status = executor.status();
     LaneReport {

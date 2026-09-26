@@ -2,7 +2,7 @@ use std::path::Path;
 
 use super::{
     super::{
-        checks::assert_published_after,
+        checks::{assert_published_after, assert_single_json_document},
         executor::LaneExecutor,
         resources::prepare_smoke_workspace,
         util::{release_binary, strings},
@@ -11,6 +11,34 @@ use super::{
 };
 
 const EXPLICIT_CUTOFF: &str = "2000-01-01T00:00:00Z";
+
+/// Network-free commands whose JSON output contract (docs/plan/11 §5) is
+/// checked on the real release binary: `(step id, args, expected exit)`.
+/// They cover a success summary, a summary-reported failure and an early
+/// `Err`, each of which must print exactly one JSON document.
+const JSON_CONTRACT_SMOKES: [(&str, &[&str], i32); 3] = [
+    (
+        "json-contract-publish-empty",
+        &["--category", "ai", "publish", "--local-only"],
+        0,
+    ),
+    (
+        "json-contract-reindex-abort-missing",
+        &["reindex", "--abort", "999999"],
+        1,
+    ),
+    (
+        "json-contract-rebuild-report-missing",
+        &[
+            "--category",
+            "ai",
+            "rebuild-report",
+            "--publish-id",
+            "999999",
+        ],
+        1,
+    ),
+];
 
 pub(super) fn run(executor: &mut LaneExecutor<'_>) {
     executor.command(
@@ -67,6 +95,17 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
             assert_published_after(&output.stdout, Some(EXPLICIT_CUTOFF)),
         );
     }
+
+    for (id, command, expected_exit) in JSON_CONTRACT_SMOKES {
+        let args = json_contract_args(&base, command);
+        if let Some(output) = executor.command(id, &binary, &args, &[], expected_exit) {
+            executor.check(
+                &format!("{id}-contract"),
+                "stdout is exactly one JSON document whose status matches the exit code",
+                assert_single_json_document(&output.stdout, output.stdout_truncated, expected_exit),
+            );
+        }
+    }
 }
 
 fn plan_commands(executor: &mut LaneExecutor<'_>, smoke: &Path) {
@@ -94,6 +133,27 @@ fn plan_commands(executor: &mut LaneExecutor<'_>, smoke: &Path) {
         "explicit --published-after is reflected in the JSON contract",
         Ok(()),
     );
+    for (id, command, expected_exit) in JSON_CONTRACT_SMOKES {
+        executor.command(
+            id,
+            &binary,
+            &json_contract_args(&base, command),
+            &[],
+            expected_exit,
+        );
+        executor.check(
+            &format!("{id}-contract"),
+            "stdout is exactly one JSON document whose status matches the exit code",
+            Ok(()),
+        );
+    }
+}
+
+fn json_contract_args(base: &[String], command: &[&str]) -> Vec<String> {
+    let mut args = base.to_vec();
+    args.extend(strings(["--output-format", "json"]));
+    args.extend(command.iter().map(|arg| arg.to_string()));
+    args
 }
 
 fn smoke_base(smoke: &Path) -> Vec<String> {

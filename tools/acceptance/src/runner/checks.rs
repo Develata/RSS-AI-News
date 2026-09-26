@@ -24,6 +24,40 @@ pub(crate) fn assert_published_after(stdout: &str, expected: Option<&str>) -> Re
     }
 }
 
+/// CLI output contract (docs/plan/11 §5): stdout is exactly one JSON document
+/// and its `status` agrees with the process exit code.
+pub(crate) fn assert_single_json_document(
+    stdout: &str,
+    truncated: bool,
+    exit_code: i32,
+) -> Result<(), String> {
+    if truncated {
+        return Err("stdout exceeded the capture limit".to_string());
+    }
+    let documents = serde_json::Deserializer::from_str(stdout)
+        .into_iter::<Value>()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("stdout is not a JSON document stream: {error}"))?;
+    let [document] = documents.as_slice() else {
+        return Err(format!(
+            "expected exactly one JSON document on stdout, found {}",
+            documents.len()
+        ));
+    };
+    let status = document.get("status").and_then(Value::as_str);
+    let consistent = match exit_code {
+        0 => matches!(status, Some("success" | "ok" | "warn")),
+        _ => matches!(status, Some("fail" | "error")),
+    };
+    if consistent {
+        Ok(())
+    } else {
+        Err(format!(
+            "status {status:?} contradicts exit code {exit_code}"
+        ))
+    }
+}
+
 pub(crate) fn check_tooling_dependency_boundary(repo_root: &Path) -> Result<(), String> {
     let manifest = fs::read_to_string(repo_root.join("tools/acceptance/Cargo.toml"))
         .map_err(|error| format!("cannot read acceptance manifest: {error}"))?;
@@ -179,6 +213,24 @@ pub(crate) fn validate_version(version: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::assert_single_json_document;
+
+    #[test]
+    fn single_json_document_contract() {
+        assert!(assert_single_json_document(r#"{"status":"success"}"#, false, 0).is_ok());
+        assert!(assert_single_json_document("{\"status\":\"fail\"}\n", false, 1).is_ok());
+        // Two documents (the old doctor behaviour).
+        assert!(
+            assert_single_json_document(r#"{"status":"fail"} {"status":"error"}"#, false, 1)
+                .is_err()
+        );
+        // Markdown before the envelope (the old rebuild-report behaviour).
+        assert!(assert_single_json_document("# Report\n{\"status\":\"ok\"}", false, 0).is_err());
+        // Status contradicts exit code.
+        assert!(assert_single_json_document(r#"{"status":"success"}"#, false, 1).is_err());
+        assert!(assert_single_json_document(r#"{"status":"success"}"#, true, 0).is_err());
+    }
+
     use std::fs;
 
     use super::{assert_published_after, check_lockfile_versions, validate_version};
