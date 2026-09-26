@@ -357,6 +357,9 @@ fn escape_markdown_link_url(input: &str) -> String {
         .replace('\n', "")
 }
 
+/// Content for a single-backtick code span. CommonMark does not honour
+/// backslash escapes inside code spans, so a backtick would end the span;
+/// it is replaced by an apostrophe instead.
 fn escape_code_span(input: &str) -> String {
-    input.replace('`', "\\`").replace('\n', " ")
+    input.replace('`', "'").replace('\n', " ")
 }

@@ -96,6 +96,32 @@ fn render_markdown_escapes_markdown_special_chars_in_title_and_source() {
 }
 
 #[test]
+fn render_markdown_keeps_backticks_from_ending_code_spans() {
+    let item = FrozenPublishItem::try_new(
+        1,
+        10,
+        Some(100),
+        "Title".to_string(),
+        "Summary".to_string(),
+        r#"["a`b"]"#.to_string(),
+        Some(Score0To100::try_new(50).unwrap()),
+        "https://example.com".to_string(),
+        "Source `x` name".to_string(),
+    )
+    .unwrap();
+    let report = render_markdown(1, "ai", "2026-04-28", &[item], &config()).unwrap();
+
+    // CommonMark ignores backslash escapes inside code spans, so "\`" would
+    // close the span early; the backtick is replaced instead.
+    assert!(
+        report.markdown_content.contains("`Source 'x' name`"),
+        "got:\n{}",
+        report.markdown_content
+    );
+    assert!(!report.markdown_content.contains("\\`"));
+}
+
+#[test]
 fn render_markdown_emits_autolink_for_canonical_link_with_parens() {
     let item = FrozenPublishItem::try_new(
         1,
