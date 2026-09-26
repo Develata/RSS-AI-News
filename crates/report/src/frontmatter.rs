@@ -9,12 +9,13 @@ pub fn build_frontmatter(title: &str, report_date: &str, excerpt: &str) -> Strin
     )
 }
 
-/// Emits `value` as a YAML scalar that parses back as the same string.
+/// Emits `value` as a YAML scalar that parses back as the same string — except
+/// date-like values, which are kept plain by policy (see [`is_plain_safe`]).
 ///
 /// Plain (unquoted) output is kept whenever it is unambiguous, so reports that
 /// were already valid render byte-identically; values a YAML parser would
 /// read as another type or reject (flow collections, aliases, booleans,
-/// numbers, null, control characters, …) are double-quoted.
+/// numbers, null, control / non-printable characters, …) are double-quoted.
 pub(crate) fn yaml_escape(value: &str) -> String {
     if value.contains([':', '#', '\n', '\r', '\t', '\'', '"', '\\']) || !is_plain_safe(value) {
         let mut escaped = String::with_capacity(value.len() + 2);
@@ -25,7 +26,9 @@ pub(crate) fn yaml_escape(value: &str) -> String {
                 '\n' => escaped.push_str("\\n"),
                 '\r' => escaped.push_str("\\r"),
                 '\t' => escaped.push_str("\\t"),
-                ch if ch.is_control() => escaped.push_str(&format!("\\u{:04X}", ch as u32)),
+                ch if needs_unicode_escape(ch) => {
+                    escaped.push_str(&format!("\\u{:04X}", ch as u32));
+                }
                 ch => escaped.push(ch),
             }
         }
@@ -48,7 +51,7 @@ fn is_plain_safe(value: &str) -> bool {
     let Some(first) = chars.next() else {
         return false; // empty plain scalar is null
     };
-    if value.trim() != value || value.chars().any(char::is_control) {
+    if value.trim() != value || value.chars().any(needs_unicode_escape) {
         return false;
     }
     // Indicators that can never start a plain scalar.
@@ -69,12 +72,26 @@ fn is_plain_safe(value: &str) -> bool {
     !is_yaml_number(&lower)
 }
 
+/// Characters that must not appear raw in a YAML scalar: C0/C1 controls and
+/// DEL (non-printable), U+FFFE / U+FFFF (outside YAML's character set) and
+/// the YAML 1.1 line separators U+2028 / U+2029.
+fn needs_unicode_escape(ch: char) -> bool {
+    ch.is_control() || matches!(ch, '\u{FFFE}' | '\u{FFFF}' | '\u{2028}' | '\u{2029}')
+}
+
 /// YAML 1.1 / 1.2 ints and floats, including `_` separators, `0b` / `0o` /
-/// `0x` prefixes and `.inf` / `.nan`.
+/// `0x` prefixes and `.inf` / `.nan`. Follows the YAML lexical form: at most
+/// one sign, then a digit or `.digit`; `_` only after the first digit (so
+/// `_1` or `+_1` stay strings).
 fn is_yaml_number(lower: &str) -> bool {
-    let unsigned = lower.trim_start_matches(['+', '-']);
+    let unsigned = lower.strip_prefix(['+', '-']).unwrap_or(lower);
     if matches!(unsigned, ".inf" | ".nan") {
         return true;
+    }
+    let starts_numeric = unsigned.starts_with(|ch: char| ch.is_ascii_digit())
+        || (unsigned.starts_with('.') && unsigned[1..].starts_with(|ch: char| ch.is_ascii_digit()));
+    if !starts_numeric {
+        return false;
     }
     let digits = unsigned.replace('_', "");
     for (prefix, radix) in [("0b", 2), ("0o", 8), ("0x", 16)] {
@@ -82,9 +99,7 @@ fn is_yaml_number(lower: &str) -> bool {
             return !rest.is_empty() && rest.chars().all(|ch| ch.is_digit(radix));
         }
     }
-    // Rust's f64 parser also accepts "inf" / "nan", which YAML reads as
-    // strings; require a leading digit or `.digit`.
-    let numeric_start = digits.starts_with(|ch: char| ch.is_ascii_digit())
-        || (digits.starts_with('.') && digits[1..].starts_with(|ch: char| ch.is_ascii_digit()));
-    numeric_start && digits.parse::<f64>().is_ok()
+    // The leading digit check above also keeps Rust-only float spellings
+    // ("inf", "nan") out.
+    digits.parse::<f64>().is_ok()
 }

@@ -236,6 +236,28 @@ async fn freeze_reports_failed_when_the_empty_snapshot_release_fails() {
 }
 
 #[tokio::test]
+async fn freeze_reports_conflicted_when_the_empty_snapshot_release_loses_the_lease() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flow(pool.clone());
+    let publish_record_id = init_record(&flow, &pool).await;
+    // RAISE(IGNORE) skips the row: the release affects 0 rows, as when the
+    // lease was taken over by another worker.
+    sqlx::query(
+        "CREATE TRIGGER lose_empty_release BEFORE UPDATE ON publish_records \
+         WHEN NEW.last_error_kind = 'snapshot_empty' \
+         BEGIN SELECT RAISE(IGNORE); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let outcome = flow.freeze(freeze_opts(true, false)).await;
+
+    assert_eq!(outcome.status, PublishFreezeStatus::Conflicted);
+    assert_eq!(outcome.publish_record_id, publish_record_id);
+}
+
+#[tokio::test]
 async fn freeze_after_empty_snapshot_publishes_articles_that_arrive_later() {
     let (_dir, pool) = make_test_pool().await;
     let flow = flow(pool.clone());

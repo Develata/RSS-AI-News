@@ -9,17 +9,22 @@
 //!   walking `ps --ppid`), so no orphan `rustc`/`cargo` keeps running.
 //! - Children stay in the runner's process group, so a terminal Ctrl-C (sent
 //!   to the foreground group) stops them together with the runner.
-//! - `run_bounded` always reaps the child before returning, and returns by
-//!   the deadline even when a leftover background process keeps the child's
-//!   output pipes open (the step then fails with `pipes_held`; the reader
-//!   threads are detached and end when that process exits).
-//! - Descendant discovery uses `ps --ppid` (procps, Linux). Elsewhere only the
-//!   direct child is killed.
+//! - `run_bounded` always reaps the child before returning, and returns at
+//!   most ~2 s past the deadline even when a leftover background process keeps
+//!   the child's output pipes open. The step then fails with `pipes_held` and
+//!   keeps the output read so far; that leftover process is *not* killed (it
+//!   was re-parented away from the tree), and its reader thread ends when it
+//!   exits.
+//! - Descendant discovery uses `ps --ppid` (procps, Linux). Elsewhere (macOS,
+//!   Windows) only the direct child is killed on timeout.
 
 use std::{
     io::{self, Read},
     process::{Child, Command, Stdio},
-    sync::mpsc::{self, Receiver, RecvTimeoutError},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, RecvTimeoutError},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -82,50 +87,85 @@ pub(crate) fn run_bounded(mut command: Command, timeout: Duration) -> io::Result
     })
 }
 
-/// Waits for a reader's result until `deadline`; `true` when it did not
-/// finish (pipe still held open).
-fn receive(receiver: Option<Receiver<Captured>>, deadline: Instant) -> (Captured, bool) {
-    let Some(receiver) = receiver else {
-        return (Captured::default(), false);
-    };
-    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(captured) => (captured, false),
-        Err(RecvTimeoutError::Timeout) => (Captured::default(), true),
-        Err(RecvTimeoutError::Disconnected) => (Captured::default(), false),
+/// Bytes read so far from one stream, shared with its reader thread so a
+/// step whose pipe is held open still reports what it printed.
+#[derive(Default)]
+struct Buffer {
+    kept: Vec<u8>,
+    truncated: bool,
+}
+
+impl Buffer {
+    fn push(&mut self, bytes: &[u8]) {
+        self.kept.extend_from_slice(bytes);
+        // Amortised O(n): drain only once the buffer doubles.
+        if self.kept.len() > 2 * CAPTURE_LIMIT_BYTES {
+            self.trim();
+        }
+    }
+
+    fn trim(&mut self) {
+        if self.kept.len() > CAPTURE_LIMIT_BYTES {
+            self.kept.drain(..self.kept.len() - CAPTURE_LIMIT_BYTES);
+            self.truncated = true;
+        }
+    }
+
+    fn snapshot(&mut self) -> Captured {
+        self.trim();
+        Captured {
+            text: String::from_utf8_lossy(&self.kept).into_owned(),
+            truncated: self.truncated,
+        }
     }
 }
 
-fn spawn_reader(mut stream: impl Read + Send + 'static) -> Receiver<Captured> {
-    let (sender, receiver) = mpsc::channel();
+struct Reader {
+    buffer: Arc<Mutex<Buffer>>,
+    done: Receiver<()>,
+}
+
+/// Waits for a reader to reach EOF until `deadline`, then snapshots what it
+/// read; `true` when the pipe was still held open.
+fn receive(reader: Option<Reader>, deadline: Instant) -> (Captured, bool) {
+    let Some(reader) = reader else {
+        return (Captured::default(), false);
+    };
+    let held = matches!(
+        reader
+            .done
+            .recv_timeout(deadline.saturating_duration_since(Instant::now())),
+        Err(RecvTimeoutError::Timeout)
+    );
+    let captured = match reader.buffer.lock() {
+        Ok(mut buffer) => buffer.snapshot(),
+        // A panicked reader still leaves consistent bytes behind.
+        Err(poisoned) => poisoned.into_inner().snapshot(),
+    };
+    (captured, held)
+}
+
+fn spawn_reader(mut stream: impl Read + Send + 'static) -> Reader {
+    let buffer = Arc::new(Mutex::new(Buffer::default()));
+    let (done_tx, done) = mpsc::channel();
+    let shared = Arc::clone(&buffer);
     thread::spawn(move || {
-        let mut kept = Vec::new();
-        let mut truncated = false;
         let mut chunk = [0_u8; 8192];
         loop {
             match stream.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
-                Ok(read) => {
-                    kept.extend_from_slice(&chunk[..read]);
-                    // Amortised O(n): drain only once the buffer doubles.
-                    if kept.len() > 2 * CAPTURE_LIMIT_BYTES {
-                        kept.drain(..kept.len() - CAPTURE_LIMIT_BYTES);
-                        truncated = true;
-                    }
-                }
+                Ok(read) => match shared.lock() {
+                    Ok(mut buffer) => buffer.push(&chunk[..read]),
+                    Err(poisoned) => poisoned.into_inner().push(&chunk[..read]),
+                },
             }
         }
-        if kept.len() > CAPTURE_LIMIT_BYTES {
-            kept.drain(..kept.len() - CAPTURE_LIMIT_BYTES);
-            truncated = true;
+        if done_tx.send(()).is_err() {
+            // The receiver gave up (pipe held past the deadline) and already
+            // took its snapshot; nothing is waiting for this signal.
         }
-        // The receiver may have given up (pipe held past the deadline); the
-        // result is then intentionally discarded.
-        drop(sender.send(Captured {
-            text: String::from_utf8_lossy(&kept).into_owned(),
-            truncated,
-        }));
     });
-    receiver
+    Reader { buffer, done }
 }
 
 fn kill_tree(child: &mut Child) {
@@ -189,10 +229,12 @@ mod tests {
     fn leftover_background_process_cannot_stall_the_step() {
         let mut command = Command::new("sh");
         // The child exits at once but its background `sleep` inherits stdout.
-        command.args(["-c", "sleep 30 & exit 0"]);
+        command.args(["-c", "echo before; sleep 30 & exit 0"]);
         let started = std::time::Instant::now();
         let finished = run_bounded(command, Duration::from_millis(300)).unwrap();
         assert!(finished.pipes_held);
+        // Output printed before the child exited is kept as evidence.
+        assert_eq!(finished.stdout.text, "before\n");
         assert!(started.elapsed() < Duration::from_secs(10));
     }
 

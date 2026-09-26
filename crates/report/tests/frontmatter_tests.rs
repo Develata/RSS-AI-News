@@ -45,6 +45,10 @@ fn frontmatter_quotes_values_yaml_would_misread() {
         ("-", "\"-\""),
         ("- item", "\"- item\""),
         ("nul\u{0}byte", "\"nul\\u0000byte\""),
+        ("a\u{2028}b", "\"a\\u2028b\""),
+        ("x\u{FFFE}", "\"x\\uFFFE\""),
+        ("1e3", "\"1e3\""),
+        ("+.5", "\"+.5\""),
     ] {
         let out = build_frontmatter("T", "2026-04-28", value);
         assert!(
@@ -69,6 +73,10 @@ fn frontmatter_keeps_already_valid_plain_values_byte_identical() {
         "nan",
         "2026-04-28",
         "v1.2",
+        "_1",
+        "+_1",
+        "0x",
+        "1.2.3",
     ] {
         let out = build_frontmatter("T", "2026-04-28", value);
         assert!(

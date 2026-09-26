@@ -91,11 +91,14 @@ SQLite lane 必须用真实 release binary 验证两种调用：
   与 incremental artifacts 的资源峰值；它会改变 Cargo 指纹、触发全量重编，调用方已显式设置同名变量时不覆盖。
   实测（本机、依赖已缓存、仅重编 workspace crates）：`static+sqlite+release` 由强制串行时的 821s 降至 114s。
 - 子进程输出按流只保留末尾 4 MiB（截断时标记，契约检查拒绝截断输出）；每个 step 有墙钟上限
-  `--step-timeout-secs`（默认 3600），超时即沿 `ps --ppid`（procps / Linux）自底向上杀掉该 step 的进程树并判失败；
-  子进程退出后若有遗留后台进程占住输出管道，同样在 deadline 内返回并判失败。子进程与 runner 同一进程组，
+  `--step-timeout-secs`（默认 3600），超时即沿 `ps --ppid` 自底向上杀掉该 step 的进程树并判失败（Linux；
+  macOS / Windows 仅杀直接子进程）。子进程退出后若有遗留后台进程占住输出管道，runner 最多在 deadline 后约
+  2 秒返回，判 `pipes_held` 失败并保留已读输出；该遗留进程已脱离进程树，不会被杀。子进程与 runner 同一进程组，
   终端 Ctrl-C 会一并终止正在运行的构建。
-- 产品 CLI smoke 在一次性工作区内运行（`cwd` 为该目录，不读仓库根 `.env`），并清除产品读取的环境变量
-  （`DATABASE_URL`、`OPENAI_*`、`GITHUB_TOKEN`、`RSSHUB_*`、代理）；postgres lane 只显式传入 `DATABASE_URL`。
+- 产品 CLI smoke 在一次性工作区内运行（`cwd` 为该目录，不读仓库根 `.env`），并清除产品固定读取的环境变量
+  （`DATABASE_URL`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`GITHUB_TOKEN`、`RSSHUB_*`、`HTTP(S)_PROXY`）；
+  分类 `api_key_env` 引用的动态变量不在清除范围内（smoke 配置不启用该覆盖，也不执行 AI）。postgres lane
+  只显式传入 `DATABASE_URL`。
 - 失败证据（step stdout/stderr 与 check 错误）统一走 redaction。
 
 ## Deterministic boundary
