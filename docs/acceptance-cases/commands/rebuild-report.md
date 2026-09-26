@@ -7,7 +7,8 @@
 只读：**不**修改 `publish_records` 行，不推送 GitHub；snapshot 保持冻结。
 
 字节相等保证：
-- 模板与渲染器构建未变 → 重建结果与原文件 byte-for-byte 一致（generated_at 取 `publish_records.rendered_at`）
+- snapshot、模板、render config（含分类显示名）与渲染器构建均未变 → 重建结果与原文件 byte-for-byte 一致
+  （generated_at 取 `publish_records.rendered_at`）；stdout 输出不补末尾换行
 - 模板或渲染器已变 → 字节差异即改动的影响范围，作修复的回归依据
 
 面向场景：模板修复后重发指定历史报告；本地手动重渲染验证。

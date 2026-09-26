@@ -83,13 +83,18 @@ impl OutputWriter {
             OutputFormat::Pretty => {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
-                summary.render_pretty(&mut handle)
+                summary.render_pretty(&mut handle)?;
+                // Surface write errors (closed pipe, full disk) now, while the
+                // exit code can still reflect them; output without a trailing
+                // newline (rebuild-report) may otherwise sit in the buffer.
+                handle.flush()
             }
             OutputFormat::Json => {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
                 serde_json::to_writer(&mut handle, &success_envelope(command, summary))?;
-                writeln!(handle)
+                writeln!(handle)?;
+                handle.flush()
             }
         }
     }

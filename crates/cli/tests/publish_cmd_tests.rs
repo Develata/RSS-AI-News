@@ -15,8 +15,10 @@ use rss_ai_news_cli::{
     output::CommandSummary,
 };
 use rss_ai_news_storage::{StoragePool, build_sqlite_pool, run_migrations};
+use serde_json::json;
 use tempfile::TempDir;
 use time::{Duration, OffsetDateTime};
+use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
 const REPORT_DATE: &str = "2026-05-18";
 
@@ -231,6 +233,81 @@ async fn run_with_missing_ai_credentials_still_ingests_and_publishes() {
         summary.stage_failures
     );
     assert_eq!(summary.exit_code(), ExitCode::ConfigError);
+}
+
+#[tokio::test]
+async fn ai_run_processes_the_healthy_category_when_another_lacks_credentials() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "{\"summary\":\"ok\",\"tags\":[],\"importance_score\":80,\"keep_decision\":true}"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config_with(temp.path(), &db_path, &temp.path().join("output"), true);
+    // `ai` gets working credentials (mock endpoint + a set key); `math`
+    // keeps referencing an unset key. Each is processed independently.
+    let ai_toml = temp.path().join("categories").join("ai.toml");
+    let content = fs::read_to_string(&ai_toml).unwrap().replace(
+        "api_key_env = \"RSS_AI_NEWS_TEST_UNSET_KEY\"",
+        &format!(
+            "api_key_env = \"RSS_AI_NEWS_TEST_GOOD_KEY\"\nbase_url = \"{}\"",
+            server.uri()
+        ),
+    );
+    fs::write(&ai_toml, content).unwrap();
+    // SAFETY: only this test reads or writes this variable name.
+    unsafe { std::env::set_var("RSS_AI_NEWS_TEST_GOOD_KEY", "sk-test") };
+    let pool = migrated_pool(&db_path).await;
+    seed_persisted_article(&pool, "ai").await;
+    pool.close().await;
+
+    let mut cli = cli_for(temp.path(), "ai");
+    cli.category = None;
+    cli.command = Command::AiRun(AiRunArgs {
+        batch_size: 5,
+        ..AiRunArgs::default()
+    });
+    let args = match &cli.command {
+        Command::AiRun(args) => args,
+        _ => unreachable!(),
+    };
+    let summary = ai_run::run(&cli, args)
+        .await
+        .expect("ai-run reports per category");
+
+    assert_eq!(summary.categories, ["ai"], "{summary:?}");
+    let failed = summary
+        .category_failures
+        .iter()
+        .map(|failure| failure.category.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(failed, ["math"]);
+    assert_eq!(summary.process_succeeded, 1, "{summary:?}");
+    assert_eq!(summary.exit_code(), ExitCode::ConfigError);
+
+    let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
+    let succeeded: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM article_ai_results WHERE state = 'succeeded'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(succeeded, 1, "the healthy category's result is persisted");
 }
 
 async fn seed_persisted_article(pool: &sqlx::SqlitePool, category: &str) {

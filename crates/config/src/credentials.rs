@@ -82,6 +82,20 @@ fn resolve_ai_credentials(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
+            // Validated here too, so callers that skip the global env gate
+            // (`run`) still classify a malformed inherited URL as a config
+            // error (exit 78) instead of a runtime failure at request time.
+            Some(global) if url::Url::parse(global).is_err() => {
+                report.push(Diagnostic::new(
+                    ".env",
+                    "OPENAI_BASE_URL",
+                    format!(
+                        "invalid URL (inherited by category {:?})",
+                        category.category.key
+                    ),
+                ));
+                None
+            }
             Some(global) => Some(global.to_string()),
             None => {
                 report.push(Diagnostic::new(
@@ -247,6 +261,22 @@ mod tests {
             err.to_string().contains("OPENAI_API_KEY"),
             "error should name the inherited global variable: {err}"
         );
+    }
+
+    #[test]
+    fn inherited_malformed_global_base_url_is_a_config_error() {
+        let env = env_with(vec![
+            ("OPENAI_BASE_URL", "not-a-url"),
+            ("OPENAI_API_KEY", "sk-global"),
+        ]);
+        let category = category("ai", None, None);
+
+        let err = resolve_ai_credentials(&category, &env).expect_err("malformed URL fails");
+        assert!(
+            matches!(err, ConfigError::ValidationFailed { .. }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("OPENAI_BASE_URL"), "{err}");
     }
 
     #[test]
