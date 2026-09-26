@@ -19,6 +19,18 @@ pub mod replay;
 pub mod run;
 pub mod validate_config;
 
+/// Invocation-level checks that must pass before anything with a side effect
+/// happens (log file, metrics listener, storage): a global --dry-run that a
+/// command silently ignored would perform the effects the user asked to skip.
+pub fn check_invocation(cli: &Cli) -> Result<(), CliError> {
+    if cli.dry_run && !cli.command.accepts_dry_run() {
+        return Err(CliError::DryRunUnsupported {
+            command: cli.command.name(),
+        });
+    }
+    Ok(())
+}
+
 /// Runs the selected command and emits its summary exactly once.
 ///
 /// A command either fails before producing a summary (`Err`, rendered once by
@@ -27,13 +39,7 @@ pub mod validate_config;
 /// carries stage-level failures (e.g. `publish` store-local failed, `doctor`
 /// found a failing check, `run` aggregated a stage failure). Never both.
 pub async fn dispatch(cli: Cli, writer: &mut OutputWriter) -> Result<ExitCode, CliError> {
-    // A global --dry-run that a writing command silently ignored would perform
-    // the writes the user asked to skip.
-    if cli.dry_run && !cli.command.accepts_dry_run() {
-        return Err(CliError::DryRunUnsupported {
-            command: cli.command.name(),
-        });
-    }
+    check_invocation(&cli)?;
     match &cli.command {
         Command::ValidateConfig => {
             writer.emit_summary("validate-config", &validate_config::run(&cli).await?)

@@ -44,29 +44,31 @@ fn spawn_metrics_server(raw_bind: &str) {
 
 pub async fn run() -> ExitCode {
     let cli = Cli::parse();
-    // F15-13 W9-F1: 持有 tracing-appender 的 WorkerGuard 到 run() 结束，
-    // 让 non-blocking writer 在进程退出前 flush 完所有日志。--log-file 为
-    // 空时 init() 返 None（stderr 模式），_guard 是 None 也无副作用。
-    let _guard = rss_ai_news_observability::tracing_init::init(
-        rss_ai_news_observability::tracing_init::InitOptions {
-            log_level: cli.log_level.clone(),
-            log_format: cli.log_format.as_str().to_string(),
-            log_file: cli.log_file.clone(),
-        },
-    );
-
-    // F15-14 W9-F2: --metrics-bind 非空时启动 prometheus `/metrics` 后台
-    // 服务。recorder Arc 移入 spawned task；task 在进程退出时随 tokio
-    // runtime drop 而退出。CLI 自建 recorder 已就绪 + 暴露空 registry；
-    // 业务侧 counter_inc / histogram_observe 接入是独立追踪项（与 task T901
-    // metrics 注册解耦——T901 已勾完，业务 instrumentation 留 v0.2+ follow-up）。
-    spawn_metrics_server(&cli.metrics_bind);
-
     let mut writer = OutputWriter::new(OutputFormat::from(cli.output_format));
     // The failure envelope names the command the user invoked; many errors
     // (config, storage, runtime) do not know it themselves.
     let command = cli.command.name();
-    match dispatch(cli, &mut writer).await {
+    let (_guard, result) = match commands::check_invocation(&cli) {
+        // Rejected before any side effect (log file, metrics listener).
+        Err(error) => (None, Err(error)),
+        Ok(()) => {
+            // F15-13 W9-F1: 持有 tracing-appender 的 WorkerGuard 到 run() 结束，
+            // 让 non-blocking writer 在进程退出前 flush 完所有日志。--log-file 为
+            // 空时 init() 返 None（stderr 模式），_guard 是 None 也无副作用。
+            let guard = rss_ai_news_observability::tracing_init::init(
+                rss_ai_news_observability::tracing_init::InitOptions {
+                    log_level: cli.log_level.clone(),
+                    log_format: cli.log_format.as_str().to_string(),
+                    log_file: cli.log_file.clone(),
+                },
+            );
+            // F15-14 W9-F2: --metrics-bind 非空时启动 prometheus `/metrics`
+            // 后台服务（空 registry；业务 instrumentation 为后续追踪项）。
+            spawn_metrics_server(&cli.metrics_bind);
+            (guard, dispatch(cli, &mut writer).await)
+        }
+    };
+    match result {
         Ok(exit) => exit,
         Err(error) => {
             let exit = error.exit_code();

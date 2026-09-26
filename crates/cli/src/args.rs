@@ -64,7 +64,7 @@ pub struct Cli {
     )]
     pub output_format: OutputFormat,
 
-    /// 只预演不写库：reindex 支持；只读命令视为无操作；会写入的命令以参数错误拒绝
+    /// 只预演：reindex 支持；无副作用的只读命令视为无操作；其余命令以参数错误拒绝
     #[arg(short = 'n', long = "dry-run")]
     pub dry_run: bool,
 
@@ -180,19 +180,21 @@ impl Command {
     }
 
     /// Whether the global `--dry-run` may be combined with this command:
-    /// `reindex` implements it; read-only commands treat it as a no-op.
-    /// Every other command writes, and silently ignoring the flag would
-    /// perform the writes the user asked to skip.
+    /// `reindex` implements it (read-only pool); commands without any side
+    /// effect treat it as a no-op. Everything else is rejected, because
+    /// silently ignoring the flag would perform the side effects the user
+    /// asked to skip: writes, `migrate check`'s writable (file-creating)
+    /// connection, or `doctor`'s real API probes.
     pub fn accepts_dry_run(&self) -> bool {
         match self {
-            Self::Reindex(_)
-            | Self::ValidateConfig
-            | Self::Doctor(_)
-            | Self::RecentEntries(_)
-            | Self::Replay(_) => true,
-            Self::Migrate(args) => matches!(args.action, MigrateAction::Check),
+            // Read-only pools, no network.
+            Self::Reindex(_) | Self::ValidateConfig | Self::RecentEntries(_) | Self::Replay(_) => {
+                true
+            }
             Self::RebuildReport(args) => args.output.is_none(),
-            Self::Ingest(_)
+            Self::Doctor(_)
+            | Self::Migrate(_)
+            | Self::Ingest(_)
             | Self::AiRun(_)
             | Self::Publish(_)
             | Self::PublishAll(_)

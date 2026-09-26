@@ -339,8 +339,10 @@ fn dry_run_is_accepted_only_by_reindex_and_read_only_commands() {
     };
     assert!(accepts(&["reindex", "--target", "all"]));
     assert!(accepts(&["validate-config"]));
-    assert!(accepts(&["doctor"]));
-    assert!(accepts(&["migrate", "check"]));
+    assert!(accepts(&["replay", "--kind", "ai", "--id", "1"]));
+    // Not side-effect free: real API probes / a file-creating writable pool.
+    assert!(!accepts(&["doctor"]));
+    assert!(!accepts(&["migrate", "check"]));
     assert!(accepts(&["rebuild-report", "--publish-id", "1"]));
     assert!(!accepts(&[
         "rebuild-report",

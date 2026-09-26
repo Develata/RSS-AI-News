@@ -46,7 +46,7 @@ CLI 框架：`clap` derive。每个子命令是独立 enum 变体。
 | `--log-level` | enum | `info` | tracing 级别 |
 | `--log-format` | enum | `pretty` | tracing 输出格式（pretty/json） |
 | `--output-format` / `-o` | enum | `pretty` | 命令结果输出格式 |
-| `--dry-run` / `-n` | bool | false | 只规划不执行：`reindex` 实装；只读命令为无操作；写入类命令拒绝（exit 2）|
+| `--dry-run` / `-n` | bool | false | 只规划不执行：`reindex` 实装；无副作用的只读命令为无操作；其余拒绝（exit 2，先于日志文件 / metrics 初始化）|
 | `--category` / `-C` | string | 全部 | 只处理某分类 |
 | `--timezone` | string | `app.toml` 中的值 | 覆盖时区 |
 

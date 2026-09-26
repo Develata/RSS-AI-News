@@ -15,7 +15,7 @@
 | `--log-file <PATH>` | `""` | 非空 → 同时写 stderr + 日轮转文件 |
 | `--metrics-bind <HOST:PORT>` | `""` | 非空 → 启动 Prometheus `/metrics` HTTP 端点 |
 | `-o, --output-format <pretty\|json>` | `pretty` | 子命令 summary 输出格式 |
-| `-n, --dry-run` | `false` | `reindex` 实装预演；只读命令（validate-config / doctor / recent-entries / replay / migrate check / 无 `--output` 的 rebuild-report）视为无操作；其余会写入的命令以参数错误拒绝（exit 2），不会静默执行 |
+| `-n, --dry-run` | `false` | `reindex` 实装预演；无副作用的只读命令（validate-config / recent-entries / replay / 无 `--output` 的 rebuild-report）视为无操作；其余命令（含会发真实探测请求的 doctor、会以可写连接打开库的 migrate check）以参数错误拒绝（exit 2），且在创建日志文件、启动 metrics 之前拒绝 |
 | `-C, --category <KEY>` | `None` | 仅处理该分类（多分类场景隔离） |
 | `--timezone <IANA>` | `app.toml [publish].target_timezone` | 覆盖发布时区 |
 
