@@ -2909,6 +2909,7 @@ name = "rss-ai-news-report"
 version = "0.8.1"
 dependencies = [
  "async-trait",
+ "regex",
  "rss-ai-news-domain",
  "rss-ai-news-storage",
  "serde",

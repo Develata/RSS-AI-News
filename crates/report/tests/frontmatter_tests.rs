@@ -49,6 +49,13 @@ fn frontmatter_quotes_values_yaml_would_misread() {
         ("x\u{FFFE}", "\"x\\uFFFE\""),
         ("1e3", "\"1e3\""),
         ("+.5", "\"+.5\""),
+        ("0b_", "\"0b_\""),
+        ("0o17", "\"0o17\""),
+        (".5", "\".5\""),
+        ("1__0", "\"1__0\""),
+        // A string for PyYAML (1.1) but the int 9 under the YAML 1.2 core schema.
+        ("09", "\"09\""),
+        ("a\u{FEFF}b", "\"a\\uFEFFb\""),
     ] {
         let out = build_frontmatter("T", "2026-04-28", value);
         assert!(
@@ -77,6 +84,11 @@ fn frontmatter_keeps_already_valid_plain_values_byte_identical() {
         "+_1",
         "0x",
         "1.2.3",
+        "1e_3",
+        "0_b1",
+        "+",
+        ".",
+        "0X1F",
     ] {
         let out = build_frontmatter("T", "2026-04-28", value);
         assert!(

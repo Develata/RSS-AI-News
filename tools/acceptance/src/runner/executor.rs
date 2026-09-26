@@ -219,7 +219,7 @@ impl<'a> LaneExecutor<'a> {
                 }
                 let error = if finished.timed_out {
                     Some(format!(
-                        "timed out after {}s; process tree killed",
+                        "timed out after {}s; process tree killed (best-effort)",
                         self.options.step_timeout.as_secs()
                     ))
                 } else if finished.pipes_held {

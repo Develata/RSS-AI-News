@@ -1,3 +1,7 @@
+use std::sync::LazyLock;
+
+use regex::Regex;
+
 /// 极简 YAML frontmatter（手写，不引 yaml crate）。
 /// 字段：title / date / excerpt。
 pub fn build_frontmatter(title: &str, report_date: &str, excerpt: &str) -> String {
@@ -69,37 +73,44 @@ fn is_plain_safe(value: &str) -> bool {
     ) {
         return false;
     }
-    !is_yaml_number(&lower)
+    !is_yaml_number(value)
 }
 
 /// Characters that must not appear raw in a YAML scalar: C0/C1 controls and
-/// DEL (non-printable), U+FFFE / U+FFFF (outside YAML's character set) and
-/// the YAML 1.1 line separators U+2028 / U+2029.
+/// DEL (non-printable), U+FFFE / U+FFFF (outside YAML's character set), the
+/// byte order mark U+FEFF (excluded from plain content) and the YAML 1.1 line
+/// separators U+2028 / U+2029.
 fn needs_unicode_escape(ch: char) -> bool {
-    ch.is_control() || matches!(ch, '\u{FFFE}' | '\u{FFFF}' | '\u{2028}' | '\u{2029}')
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{FEFF}' | '\u{FFFE}' | '\u{FFFF}' | '\u{2028}' | '\u{2029}'
+        )
 }
 
-/// YAML 1.1 / 1.2 ints and floats, including `_` separators, `0b` / `0o` /
-/// `0x` prefixes and `.inf` / `.nan`. Follows the YAML lexical form: at most
-/// one sign, then a digit or `.digit`; `_` only after the first digit (so
-/// `_1` or `+_1` stay strings).
-fn is_yaml_number(lower: &str) -> bool {
-    let unsigned = lower.strip_prefix(['+', '-']).unwrap_or(lower);
-    if matches!(unsigned, ".inf" | ".nan") {
-        return true;
-    }
-    let starts_numeric = unsigned.starts_with(|ch: char| ch.is_ascii_digit())
-        || (unsigned.starts_with('.') && unsigned[1..].starts_with(|ch: char| ch.is_ascii_digit()));
-    if !starts_numeric {
-        return false;
-    }
-    let digits = unsigned.replace('_', "");
-    for (prefix, radix) in [("0b", 2), ("0o", 8), ("0x", 16)] {
-        if let Some(rest) = digits.strip_prefix(prefix) {
-            return !rest.is_empty() && rest.chars().all(|ch| ch.is_digit(radix));
-        }
-    }
-    // The leading digit check above also keeps Rust-only float spellings
-    // ("inf", "nan") out.
-    digits.parse::<f64>().is_ok()
+/// YAML numbers under the union of the two resolvers readers use:
+/// PyYAML's YAML 1.1 implicit int/float patterns (`_` separators, `0b`,
+/// leading-0 octal, sexagesimal, `.inf`) and the YAML 1.2 core schema
+/// (`0o`, exponent without sign). Matching the reference patterns on the raw
+/// value keeps valid strings such as `_1`, `1e_3` or `09` plain, and quotes
+/// forms like `0b_` that PyYAML resolves as int but cannot construct.
+fn is_yaml_number(value: &str) -> bool {
+    static NUMBER: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            "^(?:",
+            // PyYAML (YAML 1.1) int
+            r"[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0x[0-9a-fA-F_]+",
+            r"|[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+",
+            // PyYAML (YAML 1.1) float
+            r"|[-+]?[0-9][0-9_]*\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9_]+(?:[eE][-+][0-9]+)?",
+            r"|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*",
+            r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)",
+            // YAML 1.2 core schema int / float
+            r"|[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+",
+            r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?",
+            ")$"
+        ))
+        .expect("static YAML number pattern")
+    });
+    NUMBER.is_match(value)
 }

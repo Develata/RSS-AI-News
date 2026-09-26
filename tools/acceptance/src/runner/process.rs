@@ -5,12 +5,14 @@
 //! - Memory per step is O(`CAPTURE_LIMIT_BYTES`) per stream regardless of how
 //!   much the child writes; the *last* bytes are kept, since failures are
 //!   reported at the end of the output.
-//! - A timed-out step is killed together with its descendants (Unix: found by
-//!   walking `ps --ppid`), so no orphan `rustc`/`cargo` keeps running.
+//! - A timed-out step is killed together with its descendants, best-effort
+//!   (Linux: found by walking `ps --ppid`), so no orphan `rustc`/`cargo`
+//!   keeps running.
 //! - Children stay in the runner's process group, so a terminal Ctrl-C (sent
 //!   to the foreground group) stops them together with the runner.
-//! - `run_bounded` always reaps the child before returning, and returns at
-//!   most ~2 s past the deadline even when a leftover background process keeps
+//! - `run_bounded` always reaps the child before returning. The pipe wait gets
+//!   ~2 s of grace past the deadline (cleanup itself is not separately
+//!   bounded), so the step returns even when a leftover background process keeps
 //!   the child's output pipes open. The step then fails with `pipes_held` and
 //!   keeps the output read so far; that leftover process is *not* killed (it
 //!   was re-parented away from the tree), and its reader thread ends when it
@@ -153,6 +155,7 @@ fn spawn_reader(mut stream: impl Read + Send + 'static) -> Reader {
         let mut chunk = [0_u8; 8192];
         loop {
             match stream.read(&mut chunk) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Ok(0) | Err(_) => break,
                 Ok(read) => match shared.lock() {
                     Ok(mut buffer) => buffer.push(&chunk[..read]),
