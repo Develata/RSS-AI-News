@@ -5,37 +5,57 @@ use rss_ai_news_config::CliOverrides;
 use rss_ai_news_domain::state::ReindexTarget as DomainReindexTarget;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+/// Help text (`///`) is user-facing; implementation notes stay in `//`.
 #[derive(Parser, Debug, Clone)]
-#[command(name = "rss-ai-news", version, about = "Rust 版 RSS-AI-News CLI")]
+#[command(
+    name = "rss-ai-news",
+    version,
+    about = "抓取 RSS/Atom/JSON Feed，AI 摘要筛选，生成 Markdown 日报并发布到本地或 GitHub",
+    long_about = "抓取 RSS/Atom/JSON Feed → 抓正文 → AI 摘要与筛选 → Markdown 日报 → 本地或 GitHub 发布。\n\
+                  一次性运行后退出，由 cron / systemd timer / 容器调度器定时触发。\n\n\
+                  首次使用：validate-config → migrate run → run；排障：doctor。",
+    after_help = "退出码：0 成功（含“当天暂无内容”）· 1 运行失败 · 2 参数错误 · 78 配置错误"
+)]
 pub struct Cli {
+    /// 配置目录（含 app.toml 与 categories/*.toml）
     #[arg(short = 'c', long = "config-dir", default_value = "configs")]
     pub config_dir: PathBuf,
 
-    #[arg(long = "db-path")]
+    /// SQLite 数据库文件路径，覆盖 [database].sqlite_path
+    #[arg(long = "db-path", value_name = "PATH")]
     pub db_path: Option<PathBuf>,
 
-    #[arg(long = "log-level", default_value = "info")]
+    /// 日志级别：trace / debug / info / warn / error
+    #[arg(long = "log-level", default_value = "info", value_name = "LEVEL")]
     pub log_level: String,
 
+    /// 日志格式（写 stderr）
     #[arg(long = "log-format", default_value = "pretty", value_enum)]
     pub log_format: LogFormat,
 
-    /// 日志落盘路径（F15-13 W9-F1）。空串 → 仅 stderr；非空 → 用
-    /// `tracing_appender::rolling::daily` 按 `<prefix>.YYYY-MM-DD` 日轮转。
-    /// 解析规则见 `rss_ai_news_observability::tracing_init::InitOptions::log_file`。
-    /// startup init 在 config.toml 读取之前发生，所以 `[observability].log_file`
-    /// 当前仅能通过本标志生效（与 `--log-level` / `--log-format` 行为对齐）。
-    #[arg(long = "log-file", default_value = "")]
+    // Tracing is initialised before config.toml is read, so
+    // `[observability].log_file` only takes effect through this flag.
+    /// 同时把日志写入按天轮转的文件（<PATH>.YYYY-MM-DD）；留空只写 stderr
+    #[arg(
+        long = "log-file",
+        default_value = "",
+        value_name = "PATH",
+        hide_default_value = true
+    )]
     pub log_file: String,
 
-    /// Prometheus `/metrics` HTTP 端点绑定地址（F15-14 W9-F2）。
-    /// 空串 → 不启动 metrics server；非空（如 `127.0.0.1:9090`）→
-    /// 启动后台 tokio task，挂在该 `SocketAddr` 上提供 `/metrics`。
-    /// 与 `--log-file` 同源限制：CLI startup 早于 config.toml 加载，
-    /// `[observability].metrics_bind` 当前仅能通过本标志生效。
-    #[arg(long = "metrics-bind", default_value = "")]
+    // Same startup-order limitation as --log-file for
+    // `[observability].metrics_bind`.
+    /// 在该地址提供 Prometheus /metrics（如 127.0.0.1:9090）；留空不启动
+    #[arg(
+        long = "metrics-bind",
+        default_value = "",
+        value_name = "ADDR",
+        hide_default_value = true
+    )]
     pub metrics_bind: String,
 
+    /// 结果输出格式；json 时 stdout 恰好一个 JSON 文档，status 与退出码一致
     #[arg(
         short = 'o',
         long = "output-format",
@@ -44,13 +64,16 @@ pub struct Cli {
     )]
     pub output_format: OutputFormat,
 
+    /// 只预演不写库：reindex 支持；只读命令视为无操作；会写入的命令以参数错误拒绝
     #[arg(short = 'n', long = "dry-run")]
     pub dry_run: bool,
 
-    #[arg(short = 'C', long = "category")]
+    /// 只处理该分类（categories/*.toml 中的 [category].key）
+    #[arg(short = 'C', long = "category", value_name = "KEY")]
     pub category: Option<String>,
 
-    #[arg(long = "timezone")]
+    /// 报告日期所用时区（IANA 名称），覆盖 [publish].target_timezone
+    #[arg(long = "timezone", value_name = "TZ")]
     pub timezone: Option<String>,
 
     #[command(subcommand)]
@@ -61,10 +84,7 @@ impl Cli {
     /// 把 CLI 参数折叠为 `CliOverrides`。
     ///
     /// `--max-batches` 仅在 [`IngestArgs`] / [`AiRunArgs`] / [`RunArgs`] 三个
-    /// 子命令暴露（cli-semantics.md §4.1 / §4.2 / §4.11；config-schema.md
-    /// §8 line 405），其余子命令的 overrides 该字段固定为 `None`。F7-1
-    /// 修复：此前以 `global = true` 形式挂在 [`Cli`] 上，导致 `publish`、
-    /// `doctor` 等子命令 `--help` 也显示该标志（W3-2 surface drift）。
+    /// 子命令暴露，其余子命令的 overrides 该字段固定为 `None`。
     pub fn to_cli_overrides(&self) -> CliOverrides {
         let max_batches = match &self.command {
             Command::Ingest(args) => args.max_batches,
@@ -86,7 +106,9 @@ impl Cli {
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
+    /// 便于人读
     Pretty,
+    /// 结构化，便于 jq / 日志系统
     Json,
 }
 
@@ -101,148 +123,215 @@ impl LogFormat {
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
+    /// 便于人读的摘要
     Pretty,
+    /// 单个 JSON 文档，便于脚本 / 调度器判断
     Json,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// 抓取 feed 并提取正文（不需要 AI 凭据）
     Ingest(IngestArgs),
+    /// 对待分析文章做 AI 摘要、打分与筛选
     AiRun(AiRunArgs),
+    /// 生成并发布单个分类的日报（需 --category 或仅有一个分类）
     Publish(PublishArgs),
+    /// 生成并发布所有分类的日报；远端发布合并为一次 commit
     PublishAll(PublishArgs),
+    /// 健康检查：配置、数据库、外部依赖；--deep 额外校验数据不变量
     Doctor(DoctorArgs),
+    /// 离线重放已留档的 feed / HTML / AI 原始输入
     Replay(ReplayArgs),
+    /// 按日期范围重新提取正文或重跑 AI（新版本并存，不覆盖旧结果）
     Backfill(BackfillArgs),
+    /// 从已冻结的快照重新渲染历史日报（不抓取、不调 AI）
     RebuildReport(RebuildReportArgs),
+    /// 规则升级后重算去重 hash / 分类归属
     Reindex(ReindexArgs),
+    /// 只读导出近期候选条目与订阅源健康度（供下游使用）
     RecentEntries(RecentEntriesArgs),
+    /// 初始化或检查数据库结构
     Migrate(MigrateArgs),
+    /// 只校验配置与 .env，不连库、不访问网络
     ValidateConfig,
+    /// 完整流程：ingest → ai-run（AI 关闭时跳过）→ publish-all
     Run(RunArgs),
+}
+
+impl Command {
+    /// Subcommand name as typed on the command line.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Ingest(_) => "ingest",
+            Self::AiRun(_) => "ai-run",
+            Self::Publish(_) => "publish",
+            Self::PublishAll(_) => "publish-all",
+            Self::Doctor(_) => "doctor",
+            Self::Replay(_) => "replay",
+            Self::Backfill(_) => "backfill",
+            Self::RebuildReport(_) => "rebuild-report",
+            Self::Reindex(_) => "reindex",
+            Self::RecentEntries(_) => "recent-entries",
+            Self::Migrate(_) => "migrate",
+            Self::ValidateConfig => "validate-config",
+            Self::Run(_) => "run",
+        }
+    }
+
+    /// Whether the global `--dry-run` may be combined with this command:
+    /// `reindex` implements it; read-only commands treat it as a no-op.
+    /// Every other command writes, and silently ignoring the flag would
+    /// perform the writes the user asked to skip.
+    pub fn accepts_dry_run(&self) -> bool {
+        match self {
+            Self::Reindex(_)
+            | Self::ValidateConfig
+            | Self::Doctor(_)
+            | Self::RecentEntries(_)
+            | Self::Replay(_) => true,
+            Self::Migrate(args) => matches!(args.action, MigrateAction::Check),
+            Self::RebuildReport(args) => args.output.is_none(),
+            Self::Ingest(_)
+            | Self::AiRun(_)
+            | Self::Publish(_)
+            | Self::PublishAll(_)
+            | Self::Backfill(_)
+            | Self::Run(_) => false,
+        }
+    }
 }
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct IngestArgs {
-    #[arg(long)]
-    pub source: Option<String>,
+    /// 只抓取 feed 条目，不抓正文
     #[arg(long = "skip-fetch")]
     pub skip_fetch: bool,
+    /// 每批领取的正文抓取任务数
     #[arg(long = "batch-size", default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=10_000))]
     pub batch_size: u32,
-    /// 覆盖 `runtime.max_batches_per_run`。`0` = 不限（仅由 lease + 宿主
-    /// 超时兜底）。F7-1 修复：从 [`Cli`] 全局 flag 改为子命令本地
-    /// （cli-semantics.md §4.1 line 62 + config-schema.md §8 line 405 早已
-    /// 规定"仅 ingest/ai-run/run"，clap `global = true` 与该约束相悖）。
-    #[arg(long = "max-batches")]
+    /// 本次最多处理的批数，覆盖 [runtime].max_batches_per_run；0 = 不限
+    #[arg(long = "max-batches", value_name = "N")]
     pub max_batches: Option<u32>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct AiRunArgs {
+    /// 每批领取的 AI 任务数
     #[arg(long = "batch-size", default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=10_000))]
     pub batch_size: u32,
+    /// 本次使用的模型，覆盖分类 / 全局配置
     #[arg(long)]
     pub model: Option<String>,
-    /// 覆盖 `runtime.max_batches_per_run`。语义与 [`IngestArgs::max_batches`]
-    /// 一致；cli-semantics.md §4.2 line 97。
-    #[arg(long = "max-batches")]
+    /// 本次最多处理的批数，覆盖 [runtime].max_batches_per_run；0 = 不限
+    #[arg(long = "max-batches", value_name = "N")]
     pub max_batches: Option<u32>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct PublishArgs {
+    /// 报告日期 YYYY-MM-DD，默认今天（UTC）
     #[arg(long)]
     pub date: Option<String>,
+    /// 只写本地目录，不推 GitHub
     #[arg(long = "local-only")]
     pub local_only: bool,
+    /// 为同一天再生成一份新的发布批次（旧记录保留）
     #[arg(long)]
     pub force: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct DoctorArgs {
+    /// 额外扫描数据库不变量（大库可能需要数秒以上）
     #[arg(long)]
     pub deep: bool,
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct ReplayArgs {
+    /// 要重放的留档类型
     #[arg(long, value_enum)]
     pub kind: ReplayKind,
+    /// 按留档 key 选择
     #[arg(long, conflicts_with = "id")]
     pub key: Option<String>,
+    /// 按留档 id 选择
     #[arg(long, conflicts_with = "key")]
     pub id: Option<i64>,
+    /// 与入库结果对比（目前仅 html：内容 hash 与字数）
     #[arg(long)]
     pub diff: bool,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayKind {
+    /// feed 原文
     Feed,
+    /// 详情页 HTML
     Html,
+    /// AI 原始响应
     Ai,
 }
 
-/// 参数语义见 docs/design/cli-semantics.md §4.6 + state-machine.md §4.4。
-///
-/// `--target ai` 分支会创建新一行 `article_ai_results`（带新版本元数据），
-/// 不覆盖旧行。下列 3 个 override 字段让"多 model / 多版本并存"
-/// （state-machine §4.4 line 262）可被 CLI 明确控制：
-///   - `--prompt-version-tag` 让用户命名版本（用于实验对照、idempotent
-///     重跑）；缺省时回落到 `backfill-<unix-ts>`，非确定性
-///   - `--prompt-version-description` 让审计/事后追溯能看到这次重跑的动机
-///   - `--model` 允许在 backfill 时切换模型（A/B 对照、新模型重跑历史）
-///
-/// 三者均不适用于 `--target extract`，相应分支忽略（不报错，保持
-/// CLI 表面对齐 §4.6 文档表格的"参数与 target 解耦"风格）。
+// `--target ai` inserts new `article_ai_results` rows carrying new version
+// metadata and never overwrites old ones; the three override flags below only
+// apply to `--target ai` and are ignored for `--target extract`.
 #[derive(Args, Debug, Clone)]
 pub struct BackfillArgs {
+    /// 重跑正文提取还是 AI 分析
     #[arg(long, value_enum)]
     pub target: BackfillTarget,
+    /// 起始日期 YYYY-MM-DD（含）
     #[arg(long = "date-from")]
     pub date_from: Option<String>,
+    /// 结束日期 YYYY-MM-DD（含）
     #[arg(long = "date-to")]
     pub date_to: Option<String>,
+    /// 每批处理条数
     #[arg(long = "batch-size", default_value_t = 50)]
     pub batch_size: u32,
-    /// 显式指定 backfill 创建的新 prompt_version tag。缺省时回落为
-    /// `backfill-<unix-ts>`（非确定性）。仅 `--target ai` 生效。
+    /// 新 prompt 版本的标签（仅 --target ai；默认 backfill-<时间戳>）
     #[arg(long = "prompt-version-tag")]
     pub prompt_version_tag: Option<String>,
-    /// 该 prompt_version 行的描述。缺省 `"manual backfill via CLI"`。
-    /// 仅 `--target ai` 生效。
+    /// 新 prompt 版本的说明（仅 --target ai）
     #[arg(long = "prompt-version-description")]
     pub prompt_version_description: Option<String>,
-    /// 覆盖 backfill 使用的 model id。缺省读 `app.toml [ai] model`。
-    /// 仅 `--target ai` 生效。
+    /// 本次使用的模型（仅 --target ai；默认 [ai].model）
     #[arg(long = "model")]
     pub model: Option<String>,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackfillTarget {
+    /// 重新提取正文
     Extract,
+    /// 重跑 AI 分析
     Ai,
 }
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct RebuildReportArgs {
+    /// 发布记录 id
     #[arg(long = "publish-id", conflicts_with_all = ["date"])]
     pub publish_id: Option<i64>,
+    /// 报告日期 YYYY-MM-DD（配合 --category）
     #[arg(long, conflicts_with = "publish_id")]
     pub date: Option<String>,
+    /// 写入该文件；省略时 Markdown 输出到 stdout
     #[arg(long)]
     pub output: Option<PathBuf>,
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct RecentEntriesArgs {
+    /// 只导出此时间之后发现的条目（RFC3339，如 2026-07-01T00:00:00Z）
     #[arg(long = "discovered-after", value_parser = parse_rfc3339)]
     pub discovered_after: OffsetDateTime,
+    /// 可选：再按文章发布时间过滤（RFC3339）；默认不过滤
     #[arg(long = "published-after", value_parser = parse_rfc3339)]
     pub published_after: Option<OffsetDateTime>,
+    /// 最多导出条数
     #[arg(
         long,
         default_value_t = rss_ai_news_runtime::DEFAULT_RECENT_ENTRIES_LIMIT,
@@ -256,16 +345,11 @@ fn parse_rfc3339(value: &str) -> Result<OffsetDateTime, String> {
         .map_err(|error| format!("invalid RFC3339 timestamp {value:?}: {error}"))
 }
 
-/// cli-semantics §4.8 lines 285-290:
-///   `--target` 必填（除非 `--abort`），值 ∈ {link_hash, content_hash, categories, all}
-///   `--abort <job_id>`：取消指定 job；与 `--target` 互斥
-///
-/// clap 表达：
-///   - `target` 与 `abort` 通过 `conflicts_with` 互斥
-///   - 用户必须二选一：clap `required_unless_present` 在二者间形成 XOR
+// `--target` and `--abort` are mutually exclusive and exactly one is
+// required (`conflicts_with` + `required_unless_present`).
 #[derive(Args, Debug, Clone)]
 pub struct ReindexArgs {
-    /// 重算目标（`--abort` 模式下省略）。
+    /// 重算目标（与 --abort 二选一）
     #[arg(
         long,
         value_enum,
@@ -273,33 +357,35 @@ pub struct ReindexArgs {
         conflicts_with = "abort"
     )]
     pub target: Option<ReindexTarget>,
+    /// 每批处理条数
     #[arg(long = "batch-size", default_value_t = 100)]
     pub batch_size: u32,
-    /// 取消指定 `reindex_jobs.id`，状态推进到 `aborted`。详见
-    /// cli-semantics §4.8 line 290。
-    #[arg(long = "abort", conflicts_with = "target")]
+    /// 取消指定 id 的 reindex 任务（与 --target 二选一）
+    #[arg(long = "abort", conflicts_with = "target", value_name = "JOB_ID")]
     pub abort: Option<String>,
-    /// 仅统计将更新行数与待写入 rule_versions 元数据；不写任何表。
-    /// 详见 cli-semantics §4.8 line 289。
+    /// 只统计将要更新的行数，不写任何表
     #[arg(long = "dry-run")]
     pub dry_run: bool,
 }
 
-/// CLI 层 reindex 目标。`All` 触发顺序执行 link_hash / content_hash /
-/// categories 三个独立 job（cli-semantics §4.8 line 297）。
-/// 其余三个值对应 [`DomainReindexTarget`] 一一映射。
+// `All` runs link_hash → content_hash → categories as three separate jobs;
+// the other values map 1:1 to [`DomainReindexTarget`].
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 #[value(rename_all = "snake_case")]
 pub enum ReindexTarget {
+    /// 按当前链接规范化规则重算链接 hash
     LinkHash,
+    /// 重算正文内容 hash
     ContentHash,
+    /// 按当前配置重新归属分类（下线源归档）
     Categories,
+    /// 依次执行以上三项
     All,
 }
 
 impl ReindexTarget {
     /// 把 CLI 选项展开为底层 domain target 序列。`All` 展开为
-    /// `[LinkHash, ContentHash, Categories]`（顺序由 §4.8 line 297 规定）。
+    /// `[LinkHash, ContentHash, Categories]`。
     pub fn expand(self) -> Vec<DomainReindexTarget> {
         match self {
             Self::LinkHash => vec![DomainReindexTarget::LinkHash],
@@ -322,21 +408,24 @@ pub struct MigrateArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum MigrateAction {
+    /// 应用尚未执行的迁移（幂等）
     Run,
+    /// 只检查迁移是否已全部应用，不写库
     Check,
 }
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct RunArgs {
+    /// ingest 阶段每批任务数（默认 50）
     #[arg(long = "ingest-batch-size", value_parser = clap::value_parser!(u32).range(1..=10_000))]
     pub ingest_batch_size: Option<u32>,
+    /// ai-run 阶段每批任务数（默认 20）
     #[arg(long = "ai-batch-size", value_parser = clap::value_parser!(u32).range(1..=10_000))]
     pub ai_batch_size: Option<u32>,
+    /// 发布的报告日期 YYYY-MM-DD，默认今天（UTC）
     #[arg(long = "publish-date")]
     pub publish_date: Option<String>,
-    /// 覆盖 `runtime.max_batches_per_run`，内部 ingest / ai-run 阶段
-    /// 沿用同一生效值；cli-semantics.md §4.11 line 358。
-    /// publish 阶段不消费该值。
-    #[arg(long = "max-batches")]
+    /// ingest 与 ai-run 各自最多处理的批数；0 = 不限（publish 不受影响）
+    #[arg(long = "max-batches", value_name = "N")]
     pub max_batches: Option<u32>,
 }

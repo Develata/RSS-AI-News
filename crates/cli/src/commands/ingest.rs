@@ -116,13 +116,6 @@ impl CommandSummary for IngestCommandSummary {
 }
 
 pub async fn run(cli: &Cli, args: &IngestArgs) -> Result<IngestCommandSummary, CliError> {
-    if cli.dry_run {
-        return Err(CliError::DryRunNotImplemented);
-    }
-    if args.source.is_some() {
-        return Err(CliError::IngestSourceFilterNotImplemented);
-    }
-
     let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
     config::validate::run_command_checks(
         &loaded,

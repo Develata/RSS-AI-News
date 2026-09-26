@@ -27,6 +27,13 @@ pub mod validate_config;
 /// carries stage-level failures (e.g. `publish` store-local failed, `doctor`
 /// found a failing check, `run` aggregated a stage failure). Never both.
 pub async fn dispatch(cli: Cli, writer: &mut OutputWriter) -> Result<ExitCode, CliError> {
+    // A global --dry-run that a writing command silently ignored would perform
+    // the writes the user asked to skip.
+    if cli.dry_run && !cli.command.accepts_dry_run() {
+        return Err(CliError::DryRunUnsupported {
+            command: cli.command.name(),
+        });
+    }
     match &cli.command {
         Command::ValidateConfig => {
             writer.emit_summary("validate-config", &validate_config::run(&cli).await?)

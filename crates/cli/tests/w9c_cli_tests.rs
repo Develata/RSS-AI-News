@@ -298,15 +298,69 @@ fn publish_conflict_error_kind_is_specific() {
 }
 
 #[test]
-fn ingest_specific_not_implemented_errors_are_split() {
-    assert_eq!(
-        CliError::DryRunNotImplemented.error_kind(),
-        "dry_run_not_implemented"
-    );
-    assert_eq!(
-        CliError::IngestSourceFilterNotImplemented.error_kind(),
-        "ingest_source_not_implemented"
-    );
+fn dry_run_on_a_writing_command_is_a_user_error() {
+    let error = CliError::DryRunUnsupported { command: "publish" };
+    assert_eq!(error.error_kind(), "dry_run_unsupported");
+    assert_eq!(error.exit_code(), ExitCode::UserError);
+    assert_eq!(error.command_name(), "publish");
+    assert!(error.display_user().contains("reindex"));
+}
+
+#[tokio::test]
+async fn dispatch_rejects_global_dry_run_before_running_publish() {
+    let cli = Cli::try_parse_from([
+        "rss-ai-news",
+        "--config-dir",
+        "/nonexistent-config-dir",
+        "-n",
+        "publish",
+        "--local-only",
+    ])
+    .expect("parses");
+    let mut writer =
+        rss_ai_news_cli::output::OutputWriter::new(rss_ai_news_cli::output::OutputFormat::Json);
+    // The guard fires before config loading, so a missing config dir is never
+    // reached and nothing is written.
+    let error = rss_ai_news_cli::commands::dispatch(cli, &mut writer)
+        .await
+        .expect_err("dry-run publish is rejected");
+    assert!(matches!(
+        error,
+        CliError::DryRunUnsupported { command: "publish" }
+    ));
+}
+
+#[test]
+fn dry_run_is_accepted_only_by_reindex_and_read_only_commands() {
+    let accepts = |args: &[&str]| {
+        let mut full = vec!["rss-ai-news"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command.accepts_dry_run()
+    };
+    assert!(accepts(&["reindex", "--target", "all"]));
+    assert!(accepts(&["validate-config"]));
+    assert!(accepts(&["doctor"]));
+    assert!(accepts(&["migrate", "check"]));
+    assert!(accepts(&["rebuild-report", "--publish-id", "1"]));
+    assert!(!accepts(&[
+        "rebuild-report",
+        "--publish-id",
+        "1",
+        "--output",
+        "r.md"
+    ]));
+    assert!(!accepts(&["migrate", "run"]));
+    assert!(!accepts(&["publish"]));
+    assert!(!accepts(&["publish-all"]));
+    assert!(!accepts(&["run"]));
+    assert!(!accepts(&["ingest"]));
+    assert!(!accepts(&["ai-run"]));
+    assert!(!accepts(&["backfill", "--target", "ai"]));
+}
+
+#[test]
+fn ingest_source_flag_no_longer_exists() {
+    assert!(Cli::try_parse_from(["rss-ai-news", "ingest", "--source", "x"]).is_err());
 }
 
 fn ai_summary() -> AiRunCommandSummary {

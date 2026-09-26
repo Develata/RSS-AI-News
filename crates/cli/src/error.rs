@@ -23,10 +23,8 @@ pub enum CliError {
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Storage(#[from] StorageError),
-    #[error("dry-run is not implemented for ingest yet")]
-    DryRunNotImplemented,
-    #[error("ingest --source is not implemented yet")]
-    IngestSourceFilterNotImplemented,
+    #[error("--dry-run is not supported by {command}, which writes")]
+    DryRunUnsupported { command: &'static str },
     /// cli-semantics §4.8 line 290 + §6（参数错误 → exit 2）。`--abort
     /// <job_id>` 需要可解析的整数；非法输入归为 UserError。
     #[error("reindex --abort expects a positive integer job id, got: {raw}")]
@@ -88,8 +86,7 @@ impl CliError {
             Self::Runtime(_) => "runtime",
             Self::Io(_) => "io",
             Self::Storage(_) => "storage",
-            Self::DryRunNotImplemented => "dry_run_not_implemented",
-            Self::IngestSourceFilterNotImplemented => "ingest_source_not_implemented",
+            Self::DryRunUnsupported { .. } => "dry_run_unsupported",
             Self::ReindexAbortInvalidJobId { .. } => "reindex_abort_invalid_job_id",
             Self::ReindexTargetRequired => "reindex_target_required",
             Self::ReindexCategoryFilterUnsupported => "reindex_category_filter_unsupported",
@@ -114,12 +111,11 @@ impl CliError {
             Self::ReindexTargetRequired
             | Self::ReindexCategoryFilterUnsupported
             | Self::ReindexAbortInvalidJobId { .. }
-            | Self::RecentEntriesCategoryRequired => ExitCode::UserError,
+            | Self::RecentEntriesCategoryRequired
+            | Self::DryRunUnsupported { .. } => ExitCode::UserError,
             Self::Runtime(_)
             | Self::Io(_)
             | Self::Storage(_)
-            | Self::DryRunNotImplemented
-            | Self::IngestSourceFilterNotImplemented
             | Self::MigrateBlockedByRunningReindex { .. }
             | Self::MigrateCheckPending { .. }
             | Self::RecentEntriesMigrationPending { .. }
@@ -140,10 +136,9 @@ impl CliError {
             Self::Runtime(error) => error.display_user(),
             Self::Io(error) => format!("I/O error: {error}"),
             Self::Storage(error) => error.display_user(),
-            Self::DryRunNotImplemented => "ingest --dry-run is not implemented yet".to_string(),
-            Self::IngestSourceFilterNotImplemented => {
-                "ingest --source is not implemented yet".to_string()
-            }
+            Self::DryRunUnsupported { command } => format!(
+                "--dry-run is not supported by `{command}` (it writes; only `reindex` and read-only commands accept it), so nothing was run"
+            ),
             Self::ReindexAbortInvalidJobId { raw } => {
                 format!("reindex --abort expects a positive integer job id, got: {raw}")
             }
@@ -196,7 +191,7 @@ impl CliError {
     pub fn command_name(&self) -> &str {
         match self {
             Self::CommandContext { command, .. } => command,
-            Self::DryRunNotImplemented | Self::IngestSourceFilterNotImplemented => "ingest",
+            Self::DryRunUnsupported { command } => command,
             Self::ReindexAbortInvalidJobId { .. }
             | Self::ReindexTargetRequired
             | Self::ReindexCategoryFilterUnsupported => "reindex",

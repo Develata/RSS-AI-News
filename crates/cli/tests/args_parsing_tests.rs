@@ -16,7 +16,6 @@ async fn args_parsing_parses_ingest_with_defaults() {
         Command::Ingest(args) => {
             assert_eq!(args.batch_size, 50);
             assert!(!args.skip_fetch);
-            assert_eq!(args.source, None);
         }
         other => panic!("unexpected command: {other:?}"),
     }
