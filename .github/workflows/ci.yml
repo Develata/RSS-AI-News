@@ -20,9 +20,12 @@ env:
   RUST_TOOLCHAIN: "1.97.0"
 
 # All five jobs are independent on purpose: each prepares its own toolchain /
-# cache and validates a different surface (style, behavior, migration, image).
-# Removing the previous needs: chains lets a slow stage (docker-build) start
-# at t=0 instead of waiting on lint / test.
+# cache and validates a different surface, so the slowest job (test-pg or a
+# docker cache miss) bounds wall-clock time. The first four delegate to the
+# Rust acceptance matrix (`cargo acceptance`, tools/acceptance/) so CI and the
+# local pre-tag matrix run the same checks from one source of truth; see
+# docs/operations/acceptance-matrix.md. docker-build keeps build-push-action
+# because release.yml reuses its GHA buildx cache.
 jobs:
   lint:
     name: fmt + clippy
@@ -36,17 +39,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # error-and-observability §3.3 Enforcement 第 2 层（codex P1：脚本声称由
-      # CI 消费但此前从未接线 → 门形同虚设、allowlist 行号漂移）。接入 lint job
-      # 强校验；ubuntu runner 自带 ripgrep，加 install 兜底防镜像变更。
-      - name: swallowed-error gate
-        run: |
-          command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
-          bash .ci/check_swallowed_errors.sh
-      - name: dependency security policy
-        run: bash .ci/check_dependency_security_policy.sh
+      # The swallowed-error gate needs ripgrep; ubuntu runners ship it, the
+      # install is a fallback against image changes.
+      - run: command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
+      # fmt, clippy -D warnings, swallowed-error gate, dependency policy,
+      # tooling boundary, acceptance-case status.
+      - run: cargo acceptance run --lane static
 
   test:
     name: cargo test
@@ -59,8 +57,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - run: cargo build --workspace --locked
-      - run: cargo test --workspace --locked
+      - run: cargo acceptance run --lane workspace
 
   migration-smoke:
     name: migration smoke (sqlite)
@@ -73,40 +70,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: migration-smoke
-      - name: build binary
-        run: cargo build --release --bin rss-ai-news --locked
-      - name: prepare workspace
-        run: |
-          mkdir -p smoke/configs/categories smoke/data
-          cp configs/app.toml.example smoke/configs/app.toml
-          cp configs/categories/ai.toml.example smoke/configs/categories/ai.toml
-      - name: migrate run
-        run: |
-          ./target/release/rss-ai-news \
-            --config-dir smoke/configs \
-            --db-path smoke/data/smoke.db \
-            migrate run
-      - name: migrate check
-        run: |
-          ./target/release/rss-ai-news \
-            --config-dir smoke/configs \
-            --db-path smoke/data/smoke.db \
-            migrate check
+      # Both lanes share one release build: sqlite runs migrate run/check,
+      # recent-entries and the JSON output contract on the real binary;
+      # release checks version / lockfile / README / binary identity.
+      - run: cargo acceptance run --lane sqlite --lane release
 
-  # W11-P4-A：postgres 路径 CI 覆盖。
-  #
-  # services.postgres 给所有步骤暴露一个 :5432 的 PG 16-alpine 实例，与
-  # storage 内 testcontainers fixture 共用同一镜像版本（保证 schema 翻译
-  # 测试与 CI 跑的是同一 PG 服务器版本）。
-  #
-  # 三层覆盖：
-  #   1. storage --include-ignored 跑所有 PG-only / 双轨 smoke 测试（~50 条）
-  #   2. cli `migrate run/check` 在 DATABASE_URL=postgres://... 下 smoke 跑
-  #      端到端 apply 路径（与 SQLite migration-smoke job 对称）
-  #   3. testcontainers 测试沿用 docker.sock；GitHub runner 内置 docker
-  #
-  # 不跑 lint / 整 workspace test —— 那两条已由 `lint` / `test` job 覆盖。
-  # 这里专注 PG-only 增量，避免重复 ~3-5 min 编译。
+  # PostgreSQL: storage tests with --include-ignored plus CLI migrate
+  # run/check against the service below. The lane requires DATABASE_URL and
+  # the docker CLI (storage fixtures use the runner's docker daemon).
   test-pg:
     name: test (postgres)
     runs-on: ubuntu-latest
@@ -118,15 +89,12 @@ jobs:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres
         ports: ["5432:5432"]
-        # GH Actions services 标准 health-check 模式：让后续步骤等 PG ready。
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
     env:
-      # storage testcontainers fixture 自己拉容器；本 env 仅给 cli migrate
-      # smoke 用，明确 DATABASE_URL 指向 service postgres。
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v6
@@ -136,38 +104,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test-pg
-      # P3-C-0 testcontainers fixture + P3-A 直接 build_pg_pool 测试默认 #[ignore]，
-      # CI 用 --include-ignored 强制跑。串行执行避免 ~50 个测试同时打 PG 容器
-      # 上限连接（fixture pool max=4 + admin pool max=8 + ~10 个 test bin 并发 =
-      # 远超 PG 默认 max_connections=100，但保守起见 --test-threads=1 串行）。
-      - name: cargo test storage PG include-ignored
-        run: cargo test -p rss-ai-news-storage --locked -- --include-ignored --test-threads=1
-      # cli migrate smoke：DATABASE_URL=postgres:// 触发 PG 路径，apply 0001+0002，
-      # check 在已 apply 的库上 idempotent。
-      - name: build binary
-        run: cargo build --release --bin rss-ai-news --locked
-      - name: prepare smoke configs (driver=postgres)
-        run: |
-          mkdir -p smoke/configs/categories
-          cp configs/app.toml.example smoke/configs/app.toml
-          # 覆盖 app.toml：database.driver=postgres + 留 sqlite_path 占位（被 driver 路由忽略）
-          # 详见 docs-backup/design/storage-multi-dialect.md §5.4
-          sed -i 's/^driver = .*/driver = "postgres"/' smoke/configs/app.toml
-          cp configs/categories/ai.toml.example smoke/configs/categories/ai.toml
-      - name: migrate run (postgres)
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: |
-          ./target/release/rss-ai-news \
-            --config-dir smoke/configs \
-            migrate run
-      - name: migrate check (postgres)
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: |
-          ./target/release/rss-ai-news \
-            --config-dir smoke/configs \
-            migrate check
+      # Storage PG tests stay --test-threads=1: measured 108s vs 99s at 4
+      # threads (per-binary container/schema setup dominates, and Cargo runs
+      # test binaries serially), not worth the extra contention risk.
+      - run: cargo acceptance run --lane postgres
 
   docker-build:
     name: docker build smoke

@@ -10,15 +10,20 @@
 concurrency: ci-${{ workflow }}-${{ ref }}   # 同分支后续 push 自动取消前一次
 ```
 
-五个并行 job（无 `needs:` 依赖链，独立 toolchain + cache）：
+五个并行 job（无 `needs:` 依赖链，独立 toolchain + cache）。前四个直接调用 Rust 验收矩阵的 lane，
+CI 与本地 pre-tag 矩阵执行同一份检查（见 [./acceptance-matrix.md](./acceptance-matrix.md)）：
 
-| Job | 验证项 | 失败处理 |
+| Job | 命令 / 验证项 | 本地复现 |
 |---|---|---|
-| `lint` | `cargo fmt --check` + Clippy + swallowed-error + dependency-security policy gates | 本地跑 `cargo fmt --all`、Clippy 与 `.ci/check_*` scripts |
-| `test` | `cargo test --workspace --locked`（SQLite） | 本地 `cargo test -p <crate>` 复现 |
-| `migration-smoke` | SQLite / PostgreSQL migrate run + check | 核对双方言 migration pair 与 schema apply 路径 |
-| `test-pg` | PostgreSQL service + PG-only integration / migration checks | 本地启 PG 复现（见 [./postgres-deployment.md](./postgres-deployment.md)） |
-| `docker-build` | `docker buildx build` 多 stage 构建（不 push） | 本地 `docker build -f docker/Dockerfile .` 复现 |
+| `lint` | `cargo acceptance run --lane static`：fmt、Clippy `-D warnings`、swallowed-error、dependency policy、tooling boundary、acceptance-case 状态 | 同命令 |
+| `test` | `cargo acceptance run --lane workspace`：`cargo build/test --workspace --locked`（SQLite） | 同命令，或 `cargo test -p <crate>` |
+| `migration-smoke` | `cargo acceptance run --lane sqlite --lane release`：共用一次 release build；SQLite migrate run/check、recent-entries 与 CLI JSON 输出契约；版本 / lockfile / README / binary identity | 同命令 |
+| `test-pg` | `cargo acceptance run --lane postgres`（PG service + `DATABASE_URL`）：storage `--include-ignored` + CLI migrate run/check | `DATABASE_URL=… cargo acceptance run --lane postgres`（见 [./postgres-deployment.md](./postgres-deployment.md)） |
+| `docker-build` | `docker/build-push-action` 多 stage 构建（不 push）+ 容器 smoke；保留该形式以维护 release 复用的 GHA buildx cache（`scope=runtime`） | 本地 `docker build -f docker/Dockerfile .` |
+
+基线（2026-09-11 前 5 次运行中位数）：整次 CI 326s，关键路径为 `test-pg`（≈282s，其中 storage PG 测试
+181s、release build 52s）或 docker cache miss（≈300s）。PG 测试保持 `--test-threads=1`：本地实测
+1 线程 108s、4 线程 99s，收益不足以承担连接争用风险。
 
 CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks 触发 `cargo fmt`）。
 
@@ -37,7 +42,11 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}   # 自动 lowercase
 ```
 
-Job：`publish-image` —— 同时构建发布 runtime + scheduler 两套镜像。
+Jobs：
+
+- `verify` —— `cargo acceptance run --profile local --expected-version "${GITHUB_REF_NAME#v}"`：tag 版本必须与
+  workspace / lockfile / README / binary 一致，且 credential-free 矩阵在 tag commit 上通过。
+- `publish-image`（`needs: verify`）—— 同时构建发布 runtime + scheduler 两套镜像；`verify` 失败则不推镜像。
 
 ## 镜像 tag 规则
 
@@ -74,7 +83,7 @@ git push origin main
 # 4. 打 annotated tag（带说明）
 git tag -a v0.7.0 -m "Release v0.7.0: <一句话>"
 
-# 5. push tag（tag workflow 会立即写 GHCR，不等待 branch CI）
+# 5. push tag（release workflow 先跑 verify；通过后才写 GHCR，不等待 branch CI）
 git push origin v0.7.0
 
 # 6. 等 release workflow 完成

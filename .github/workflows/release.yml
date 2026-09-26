@@ -22,8 +22,30 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
 
 jobs:
+  # Gate: the tag must name the version the workspace, lockfile, README and
+  # binary declare, and the credential-free matrix must pass on the tagged
+  # commit. Images are only pushed after this succeeds.
+  verify:
+    name: acceptance (tag version)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-verify
+      - run: command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
+      - name: acceptance matrix (local profile)
+        run: cargo acceptance run --profile local --expected-version "${GITHUB_REF_NAME#v}"
+
   publish-image:
     name: publish runtime + scheduler images to GHCR
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
