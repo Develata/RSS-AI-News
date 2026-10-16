@@ -11,13 +11,29 @@ permissions:
 jobs:
   security:
     runs-on: ubuntu-latest
+    env:
+      CARGO_AUDIT_VERSION: 0.22.2
+      # SHA-256 of cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz, matching
+      # the release asset digest.
+      # https://github.com/rustsec/rustsec/releases/tag/cargo-audit%2Fv0.22.2
+      CARGO_AUDIT_SHA256: 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.97.0'
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-audit --version 0.22.2 --locked
+      # Prebuilt release binary instead of `cargo install` (a ~3 min compile
+      # whenever the weekly run missed its cache). Nothing here compiles the
+      # workspace, so the job carries no rust-cache.
+      - name: install cargo-audit
+        run: |
+          archive="cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}"
+          curl -sSfL -o "$RUNNER_TEMP/$archive.tgz" \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${CARGO_AUDIT_VERSION}/$archive.tgz"
+          echo "${CARGO_AUDIT_SHA256}  $RUNNER_TEMP/$archive.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive.tgz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/$archive/cargo-audit" "$HOME/.cargo/bin/cargo-audit"
+          cargo audit --version
       # rsa remains only in the lockfile's inactive optional dependency graph.
       # The separate policy fails if a feature change activates it.
       - run: bash .ci/check_dependency_security_policy.sh
