@@ -18,7 +18,7 @@
 - 各 stage 的内部状态机 → [./08-state-machines.md](./08-state-machines.md)
 - `reindex`（版本化规则升级，不属"重做线上"范畴）→ [./05-storage.md](./05-storage.md) §8
 - raw_artifacts 表 schema → [./05-storage.md](./05-storage.md) §9
-- prompt_versions 设计 → [./03-ai.md](./03-ai.md)
+- prompt_version / output_schema_version 语义 → [./03-ai.md](./03-ai.md) §3.2
 
 ## 2. 三机制的分工
 
@@ -37,15 +37,20 @@
 
 入口：[`crates/runtime/src/artifact.rs::ArtifactWriter`](../../crates/runtime/src/artifact.rs)。
 
-留档由 `[artifact].retention_policy` 决定，五档：
+`[artifact].retention_policy` 有五档，但当前只有 ingest / extract 的写入点受它控制
+（`ArtifactWriter::should_write(false)`），AI 路径不检查策略：
 
-| policy | 写入时机 |
-|---|---|
-| `always` | 每次抓取/调用都留档 |
-| `on_failure` | 仅当下游解析失败时回写 |
-| `sampled` | 按 `sample_rate` 随机留档（用于线上抽样诊断） |
-| `debug_only` | 保留兼容值，尚未实现；当前不留档，validate-config 会告警 |
-| `off` | 完全不留档 |
+| policy | `feed_payload`（ingest）/ `html_payload`（extract） | `ai_raw_response`（ai-run） |
+|---|---|---|
+| `always` | 每次抓取都写 | 每次模型尝试都写 |
+| `on_failure` | **当前不写**：设计意图"下游解析失败时回写"未实现，写入点固定传 `on_failure=false` | 同上（始终写） |
+| `sampled` | 按 `sample_rate` 随机写 | 始终写 |
+| `debug_only` | 保留兼容值，尚未实现；不写，validate-config 会告警 | 始终写 |
+| `off` | 不写 | 始终写 |
+
+AI 原始响应无条件留档是 replay 与 `article_ai_results.raw_response_artifact_id` 的现状依赖；
+与策略语义的偏差登记为 [../map/architecture-diff.md](../map/architecture-diff.md) D-007（open），
+是否改实现待定。
 
 写入位置：当前全部存入 `raw_artifacts.inline_body`（SQLite BLOB / PostgreSQL BYTEA）。
 `inline_threshold_bytes` / `file_storage_dir` 是保留字段，没有 threshold 分流或文件写入实现。
@@ -100,9 +105,9 @@ rss-ai-news replay --kind feed   --id 678
 
 ### 4.1 diff 字段
 
-当 artifact 行已关联到下游业务记录（如 ai_raw_response 对应已 succeeded 的 `article_ai_results`），
-replay 会同时取出当时的解析结果与本次解析结果做 diff，输出在 `ReplayCommandSummary.diff`。
-这是"线上结果跟当下代码是否一致"的诊断点。
+`--diff` 目前只对 `html` 实现：对比入库文章的 content hash 与字数，输出在
+`ReplayCommandSummary.diff`，是"线上结果跟当下代码是否一致"的诊断点。`feed` / `ai` 返回
+`{"supported": false, ...}`，不读取业务表。
 
 ## 5. `backfill` 子命令
 
@@ -111,16 +116,16 @@ replay 会同时取出当时的解析结果与本次解析结果做 diff，输�
 
 ```bash
 rss-ai-news backfill --target extract --date-from 2026-05-01 --date-to 2026-05-10
-rss-ai-news backfill --target ai      --date-from 2026-05-01 \
-    --prompt-version-tag exp-v2 --prompt-template-path prompts/exp.md \
-    --model gpt-4o --batch-size 50
+rss-ai-news --category ai backfill --target ai --date-from 2026-05-01 \
+    --prompt-version-tag exp-v2 --model gpt-4o --batch-size 50
 ```
 
 ### 5.1 `--target extract`
 
 调用 `feed_entry_repo.reset_failed_in_window(...)`：
 
-- 范围：`created_at ∈ [date_from, date_to]` 且当前 state ∈ `{Failed, FallbackPersisted}`
+- 范围：`created_at >= date_from` 且 `< date_to`（两者均为该日 00:00 UTC，左闭右开，**不含**
+  `date_to` 当天；CLI help 写"含"，登记为 D-008）且当前 state = `failed`（`fallback_persisted` 不重置）
 - 动作：state 重置回 `PendingFetch`，清理 `lease_*` 与 `attempt_count`
 - 不动 `Persisted` 行（已成功的不重做）
 - 不写新 `articles`/`raw_artifacts`
@@ -130,19 +135,31 @@ rss-ai-news backfill --target ai      --date-from 2026-05-01 \
 
 ### 5.2 `--target ai`
 
-步骤：
+步骤（`flows/backfill.rs::ai`）：
 
-1. **新建 prompt_version 行**：根据 `--prompt-version-tag` / `--prompt-template-path` /
-   `--model` 算 SHA-256，写入 `prompt_versions`（state=`active`，旧版本保留 `superseded`）
-2. **扫描候选 articles**：时间窗内、当前无 ai_result 或 ai_result 不属于新 prompt_version 的行
-3. **批量插入 `article_ai_results` 行**：state=`Pending`、关联新 prompt_version_id
-4. **ON CONFLICT 不重复**：通过 `(article_id, prompt_version_id)` 唯一键避免重复入队
+1. **选分类**：全局 `--category`；只配置一个分类时可省略，多个分类时必须给出。
+2. **prompt 版本行**：`rule_versions.get_or_create(kind='prompt', tag, description, sha)`。tag 默认
+   `backfill-<unix-ts>`；sha 由所选分类的生效模板（省略 / 空串 = 内置默认模板）派生，不含 model。
+   已有 active 的 `prompt` 行时新行为 `pending`，backfill 不激活它；同 tag 已存在则复用。
+3. **扫描**：窗内（`created_at`，与 §5.1 相同的左闭右开 UTC 窗口）全部非 `retired` article，
+   按 id 分页；**不按分类过滤**。
+4. **插入**：每篇插入 `pending` 的 `article_ai_results`（新 prompt_version、当前 v1 schema、
+   `model_id = --model` 或全局 `[ai].model`）；`(article_id, prompt_version, output_schema_version, model_id)`
+   冲突跳过并计数。不改 article 状态。
 
 返回 `BackfillAiSummary { new_prompt_version_id, articles_scanned, ai_tasks_inserted, ai_tasks_conflict }`。
 
-后续 `ai-run` 会消费这些 Pending 任务。这是 prompt 实验的标准入口：**不**直接覆盖已有
-`article_ai_results`，而是新建 prompt_version 并产生平行结果，发布侧由 active rule resolver
-决定使用哪个版本。
+后续各分类的 `ai-run` 按 `feed_sources.category_key` claim 这些行，使用该分类**当前**的模板
+与凭证，链首模型为行内 `model_id`。不覆盖已有结果；成功后只推进处于 `ai_pending` / `ai_done`
+的 article，已发布文章不回退。
+
+**已知限制（2026-10-16 登记，生产未使用，暂不修复）**：
+- 扫描不按分类过滤：`--category` 只决定版本行的 sha，其它分类的文章同样入队。
+- `model_id` 取全局模型而非分类有效模型：自带 `base_url` / 模型的分类会用全局模型名调用
+  自己的 endpoint，可能触发 `ModelUnavailable` 后走该分类的 fallback 链。
+- 版本行描述的模板（sha）未必等于 ai-run 实际使用的模板。
+
+需要用于生产前，先补分类过滤、模型来源与版本语义的设计说明再改实现。
 
 ### 5.3 与 reindex 的边界
 
@@ -161,14 +178,16 @@ reindex 完成（`--dry-run` 先报 `archived: N`）。该生命周期约定见
 `RebuildReportFlow`（[`crates/runtime/src/flows/rebuild_report.rs`](../../crates/runtime/src/flows/rebuild_report.rs)）。
 
 ```bash
-rss-ai-news rebuild-report --publish-record-id 42
-rss-ai-news rebuild-report --publish-record-id 42 --local-only
+rss-ai-news rebuild-report --publish-id 42
+rss-ai-news rebuild-report --publish-id 42 --output /tmp/report.md
+rss-ai-news --category ai rebuild-report --date 2026-05-01
 ```
 
 行为：
 1. 读 `publish_records` 行（含冻结的 `snapshot_*` 字段）
 2. 用当前模板（`[publish.template]` + 分类 override）+ snapshot 重新渲染 Markdown
-3. 写入 `local_output_dir/<path>` + 可选 GitHub
+3. 无 `--output` 时 Markdown 原样输出到 stdout（JSON 模式放入 `summary.markdown`）；有 `--output`
+   时写该文件。不写 `local_output_dir`，不推 GitHub
 4. **不**修改 `publish_records` 行本身（snapshot 仍冻结）
 
 字节相等保证：

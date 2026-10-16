@@ -71,7 +71,7 @@ pub struct EnvConfig {
 | `[ai]` | `enabled` / 模型 / token / 温度 / `[ai.rate_limit]` | 是 |
 | `[publish]` | GitHub 目标 / `local_output_dir` / `include_unscored` / `max_items_per_report`（`NonZeroU32`）/ `min_importance_score`（`Score0To100`）/ `candidate_window_hours` | 是 |
 | `[publish.template]` | `path_template` / `frontmatter_template` / `report_template` / `item_template` | 是 |
-| `[dedup]` | 三层去重开关 + `link_normalizer_version` | 是 |
+| `[dedup]` | `enable_link_dedup` / `enable_content_dedup` / `link_normalizer_version`（均为保留字段，见下文 warning 表） | 是 |
 | `[extractor]` | `strategy_order` / `max_body_bytes`（HTML 抓取上限）/ `feed_max_body_bytes`（feed 抓取上限，可缺省→回退 `max_body_bytes`）/ `min_body_chars` | 是（`feed_max_body_bytes` 可缺省） |
 | `[lease]` | fetch / ai / publish 三个 lease 时长 + 回收间隔 | 是 |
 | `[retry]` | feed / ai / publish 各自 `max_attempts` | 是 |
@@ -98,7 +98,8 @@ display_name = "AI"
 priority = 10
 
 [category.ai_override]   # 可选：覆盖 [ai] 的子集
-prompt_template = "..."
+prompt_template = "...{title}...{body_text}..."  # 占位符 {title} / {body_text} / {category_key}；
+                         # 省略或空串 = 内置默认模板。见 ./03-ai.md §3
 max_input_chars = 12000
 model = "gpt-4o"         # 空串 "" = 继承全局 [ai].model（trim 后为空即继承）
 fallback_models = ["gpt-4o-mini", "deepseek-chat"]  # 可选：覆盖全局 fallback 链。
@@ -294,11 +295,25 @@ JSON 增加非空 `summary.warnings`；空列表不序列化，既有 aggregate 
 | `ai.rate_limit.requests_per_minute` / `tokens_per_minute` | `60` / `0` | 无 RPM/TPM limiter；并发上限不等价于时间窗口限流 |
 | `http.max_retries` / `retry_backoff_base_ms` | `3` / `1000` | 不驱动 HTTP 内层重试；task 重试走 `[retry]` 和后续 run，AI 模型 fallback 仍按独立预算执行 |
 | `dedup.enable_link_dedup` / `enable_content_dedup` | `true` / `true` | 数据库去重始终启用，false 无效 |
+| `dedup.link_normalizer_version` | `"1"` | 只有一个内置链接规范化实现，该值不选择任何版本（仍参与 config sha） |
 | `artifact.inline_threshold_bytes` / `file_storage_dir` | `65536` / `data/artifacts` | 全部 inline；没有文件分流，doctor 也不使用该目录参数 |
-| `artifact.retention_policy=debug_only` | 非默认值 | 尚未实现，当前不留档；使用该值即 warn |
+| `artifact.retention_policy=debug_only` | 非默认值 | 尚未实现：feed/html 不留档（AI 原始响应不受策略控制，见 plan/10 §3）；使用该值即 warn |
 | `lease.reclaim_interval_seconds` | `120` | 无间隔计时器，目标 flow 启动时执行 lease maintenance |
 | `observability.log_level` / `log_format` / `log_file` | `info` / `pretty` / 空字符串 | CLI 初始化不读 TOML；使用 `--log-level`（或 RUST_LOG）、`--log-format`、`--log-file` |
 | `observability.enable_metrics` / `metrics_bind` | `false` / `127.0.0.1:9090` | CLI 初始化不读 TOML；使用 `--metrics-bind` 启动并指定端点 |
 
 本轮不移除字段、不新增 governor 或 HTTP 重试层。删除兼容字段需后续独立的配置迁移说明。
+
+**分类 prompt warning（2026-10-16）**：`[ai].enabled=true` 时，`validate-config` 对每个分类的生效模板
+（§5 `prompt_template`，省略 / 空串 = 内置默认模板）检查，并在 ai-run 每次运行时以日志 warn 输出：
+
+| 条件 | message 要点 |
+|---|---|
+| 不含 `{body_text}` | 正文不会发送给模型 |
+| 不含 `{title}` | 标题不会发送给模型 |
+| 含 `{标识符}` 但不是三个支持的占位符 | 原样发送 |
+
+warning 为 `code=prompt_template`、`field=category.ai_override.prompt_template`，并带 `category`
+字段（app 级 warning 无此字段）；message 固定，不回显模板内容。"标识符"指 ASCII
+`[A-Za-z_][A-Za-z0-9_]*` 紧接 `}`；JSON 示例、`{ title }`、`{摘要}` 等不触发。不阻断运行（exit 0）。
 Artifact 的存储、TTL 与引用处理以 [10-replay-and-backfill.md §3](./10-replay-and-backfill.md#3-raw_artifacts-留档策略) 为准。

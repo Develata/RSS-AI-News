@@ -138,12 +138,13 @@ Azure OpenAI）都可通过 `OPENAI_BASE_URL` 切换。
 
 ### 5.3 不内置 prompt 工程工具
 
-prompt 写在 `categories/*.toml` 的 `[prompt]` 段，由用户维护。**不**提供：
+prompt 写在 `categories/*.toml` 的 `[category.ai_override].prompt_template`，由用户维护；省略时
+使用内置默认模板。**不**提供：
 - prompt 模板系统
 - prompt A/B testing
 - prompt 优化建议
 
-prompt 变更通过 reindex + `rule_versions` 升级路径（见 [./03-ai.md](./03-ai.md)）。
+prompt 版本语义与对历史文章重跑的路径见 [./03-ai.md](./03-ai.md) §3.2 / §8。
 
 ## 6. 发布方面
 

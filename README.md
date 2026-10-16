@@ -557,12 +557,15 @@ include_unscored = true
 | 字段 | 默认 | 何时调 |
 |---|---|---|
 | `runtime.max_batches_per_run` | `10` | 单次 run 处理批次上限；积压多想一次清空时用 `--max-batches=0` 临时覆盖（仅 ingest/ai-run/run 三个子命令支持），不要直接改默认 |
-| `artifact.retention_policy` | `"on_failure"` | 排错期改 `"always"`，让所有 raw artifact 都进 `raw_artifacts` 表供 `replay` 取；恢复后改回 `"on_failure"` 控成本 |
+| `artifact.retention_policy` | `"on_failure"` | 排错期改 `"always"`，让 feed / HTML 原文也进 `raw_artifacts` 表供 `replay` 取；恢复后改回 `"on_failure"` 控成本。注意：`on_failure` 当前不写 feed / HTML，AI 原始响应不受该策略控制、始终写入（见 [plan/10 §3](docs/plan/10-replay-and-backfill.md#3-raw_artifacts-留档策略)） |
 
 `validate-config` 对偏离随附示例基线的无效字段输出 `inert_config` warning（JSON 位于
-`summary.warnings`），仍返回 exit 0。`ai.rate_limit`、HTTP 内层 retry/backoff、dedup 两个开关、
-artifact 文件参数、lease 回收间隔和 TOML observability 启动参数均有明确说明；
+`summary.warnings`），仍返回 exit 0。`ai.rate_limit`、HTTP 内层 retry/backoff、dedup 两个开关与
+`link_normalizer_version`、artifact 文件参数、lease 回收间隔和 TOML observability 启动参数均有明确说明；
 `debug_only` 当前不留档，也会告警。完整语义以 [配置保留字段表](docs/plan/06-config.md#独立能力与保留字段2026-09-10) 为准。
+AI 开启时，分类 `prompt_template` 缺 `{body_text}` / `{title}` 或含未支持的 `{name}` 会得到带 `category`
+字段的 `prompt_template` warning（ai-run 日志同样提示）；占位符为单花括号，省略模板时使用内置默认模板，
+见 [docs/plan/03-ai.md](docs/plan/03-ai.md) §3。
 
 v0.8.1 的 artifact TTL：ingest 和 AI process 启动各清理一批，最多 500 条过期 inline artifact，
 `ttl_days=0` 写入永久保留记录。清理仅移除原始诊断 payload，并清空业务行的 artifact 外键；

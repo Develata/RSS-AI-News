@@ -3,10 +3,11 @@
 ## 功能描述
 
 按时间窗 + 目标段重做线上业务：
-- `--target extract`：把窗内 `Failed` / `FallbackPersisted` 的 `FeedEntry` 重置回 `PendingFetch`，
+- `--target extract`：把窗内（UTC，左闭右开，不含 `--date-to` 当天）`Failed` 的 `FeedEntry` 重置回 `PendingFetch`（`FallbackPersisted` 不重置），
   等待下一次 ingest / extract 重做
-- `--target ai`：新建 `prompt_versions` 行（active 升级），对窗内 article 批量插入新 prompt_version
-  的 `Pending` ai_result（不动旧 ai_result）
+- `--target ai`：`get_or_create` 一行 `rule_versions(kind='prompt')`（已有 active 时为 `pending`，不激活），
+  对窗内全部非 retired article 批量插入新 prompt_version 的 `Pending` ai_result（不动旧 ai_result）；
+  不按分类过滤、模型取全局，见 [plan/10 §5.2](../../plan/10-replay-and-backfill.md) 已知限制
 
 与 `reindex` 的边界：`backfill` 重做业务，**不**算法升级；`reindex` 升级算法 → 重算字段。
 
@@ -16,11 +17,11 @@
 
 ### 命中条件（success path）
 
-- `--target extract` + 时间窗 → 重置窗内 Failed/FallbackPersisted entry；不动 Persisted 行
+- `--target extract` + 时间窗 → 重置窗内 Failed entry；不动 Persisted / FallbackPersisted 行
 - `--target extract` + 无时间窗 → 重置全部 Failed
 - examined 计数与窗内实际命中数一致
-- `--target ai` → 写入新 `prompt_versions` 行；窗内 `Persisted` / `AiDone` article 各自插入新 prompt_version 的 Pending ai_result，**不改 article 状态**
-- `(article_id, prompt_version_id)` 唯一冲突 → 不重复插入，conflict 计数累计
+- `--target ai` → 写入 / 复用 `kind='prompt'` 的 `rule_versions` 行；窗内非 retired article 各自插入新 prompt_version 的 Pending ai_result，**不改 article 状态**
+- `(article_id, prompt_version, output_schema_version, model_id)` 唯一冲突 → 不重复插入，conflict 计数累计
 - 分页（按 article id）覆盖所有窗内 article
 - `--prompt-version-tag` 未指定时 fallback 为 `backfill-<unix-ts>`
 - summary（pretty/JSON）输出 prompt_version_id / tag / model_id / inserted / conflict 计数
@@ -29,7 +30,7 @@
 
 - DB 写失败透传为 `RuntimeError::Storage`，exit 1
 - 无候选时仍返回成功（examined=reset=0），exit 0
-- 与 `--target ai` 同时使用错的 `--model` 不被 args 阻拦（args 仅解析，业务由 prompt_versions 写入校验）
+- 与 `--target ai` 同时使用错的 `--model` 不被 args 阻拦（args 仅解析；模型名不做校验，错误在后续 ai-run 调用时暴露）
 
 ## 测试覆盖
 
@@ -38,7 +39,7 @@
 | `args_parsing_parses_backfill_with_target_extract` | `crates/cli/tests/args_parsing_tests.rs` | flag 解析 |
 | `args_parsing_backfill_accepts_version_override_fields` | 同上 | prompt 覆盖字段 |
 | `args_parsing_backfill_version_override_fields_default_to_none` | 同上 | 默认值 |
-| `backfill_extract_resets_failed_entries_in_window` | `crates/runtime/tests/w9c_runtime_tests.rs` | extract 窗内重置 |
+| `backfill_extract_resets_failed_entries_in_window` | `crates/runtime/tests/backfill_tests.rs` | extract 窗内重置 |
 | `backfill_extract_does_not_touch_persisted_entries` | 同上 | persisted 不动 |
 | `backfill_extract_with_no_window_resets_all_failed` | 同上 | 无窗口 |
 | `backfill_extract_examined_counts_window_intersection` | 同上 | 计数正确 |

@@ -230,7 +230,9 @@ pub async fn check(pool: &StoragePool) -> Result<MigrationStatus, StorageError>;
 
 reindex作用于全局规则与数据，CLI拒绝 `--category`（exit 2）；特别是categories归档判断必须使用完整配置。
 
-版本化规则升级（prompt / link_hash 算法 / categories）通过 reindex 流程：
+版本化规则升级（link_hash / content_hash 算法 / categories）通过 reindex 流程。reindex 不处理
+prompt：`prompt_version` 语义见 [./03-ai.md](./03-ai.md) §3.2，历史文章用新 prompt 重跑走
+`backfill --target ai`（[./10-replay-and-backfill.md](./10-replay-and-backfill.md) §5.2）。
 
 ```text
 1. INSERT rule_versions (status='pending')

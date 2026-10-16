@@ -132,8 +132,9 @@ fallback_models = ["gpt-4o-mini"]                # 省略(None)=继承全局 / [
 ## B. 第二期：板块凭证自治（W14-B）
 
 板块可独立配 `base_url` + `api_key_env`（env 变量名引用，**绝不**明文入 toml / 库）+ model + fallback，
-留空继承全局。因一次 ai-run 严格单 category（task_gen + claim 均按 `category_key` 过滤），凭证在
-composition root 按 selected category **静态解析**为单 client，**无需运行时路由**。
+留空继承全局。ai-run 逐分类执行（v0.9.0 起未给 `--category` 时处理全部分类），每个分类内
+task_gen + claim 均按 `category_key` 过滤，凭证在 composition root 按该分类**静态解析**为单 client，
+**无需运行时路由**。
 
 ### B.1 配置面
 
@@ -183,8 +184,8 @@ api_key_env = "DEEPSEEK_API_KEY"           # 省略或空串(trim) = 继承全�
 
 - `build_run_context` 增加可选板块凭证参数：`None` = 按全局装配（现行为，其余调用点零语义变化）；
   `Some(creds)` = 用板块凭证构造 `OpenAiCompatClient`。
-- **ai-run**：`select_category` 后调 `ai_credentials_for_category(key)?` 传入——单 category、
-  单 client、静态解析。
+- **ai-run**：对每个待处理分类调 `ai_credentials_for_category(key)?` 传入——每分类单 client、
+  静态解析（`run_category`）。
 - **backfill**：只播种 pending AI 行（model 取全局 `[ai].model` 做行身份，A 期决议），
   **不调用 AI client**——凭证由后续 ai-run 按板块解析，backfill 无凭证需求。
 - **doctor** `OpenAiPingCheck`：全局 key 缺失时已有行为即 `Info: skipped (OPENAI_API_KEY
@@ -195,7 +196,7 @@ api_key_env = "DEEPSEEK_API_KEY"           # 省略或空串(trim) = 继承全�
 
 - key 绝不明文入 toml / 库 / 日志 / run_event（`SecretString` 全链路，错误消息只含 env 变量名）。
 - `model_id` 幂等键不可变（同 A 期）。
-- 单次执行单 client：fallback 链上所有模型走**同一板块凭证**，不做跨 provider 运行时路由
+- 每个分类执行单 client：fallback 链上所有模型走**同一板块凭证**，不做跨 provider 运行时路由
   （[./13-non-goals.md](./13-non-goals.md) §5.2 仍排除）。
 - crate 边界不动：`AiClientConfig` 已凭证参数化，ai crate 零改动。
 

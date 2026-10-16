@@ -12,6 +12,7 @@
 ### 命中条件（success path）
 
 - 偏离示例基线的 inert 字段输出 `inert_config` warning，exit 0；JSON `summary.warnings` 与 pretty 均可见，不回显用户值
+- AI 启用时，分类生效 prompt 缺 `{body_text}` / `{title}` 或含未支持的 `{name}` → `prompt_template` warning（带 `category`），exit 0，不回显模板
 - v0.7.1 原始配置字节可直接加载，不创建数据库或改写配置
 - example 配置（`configs/app.toml.example` + `configs/categories/*.toml.example`）通过
 - `[ai].enabled=true` + `OPENAI_API_KEY` 存在 → 通过
@@ -47,6 +48,9 @@
 | `v0_7_1_config_fixture_loads_without_conversion_or_database_writes` | 同上 | 固定旧版配置与 SHA-256 |
 | `warns_for_all_inert_fields_without_echoing_values` | `crates/config/src/validate/warnings.rs` | 完整 inert 字段与值不回显 |
 | `load_example_configs_end_to_end` | `crates/config/tests/load_examples.rs` | example 端到端 |
+| `validate_config_warns_when_category_prompt_omits_article_placeholders` | `crates/cli/tests/validate_config_cmd_tests.rs` | prompt warning / pretty / JSON / 不回显 |
+| `shipped_category_example_prompt_is_quiet` 等 prompt 用例 | `crates/config/src/validate/warnings.rs` | 示例与默认模板静默、`{{body}}`、JSON 花括号、AI 关闭 |
+| `ai_run_without_category_prompt_sends_article_title_and_body` | `crates/cli/tests/publish_cmd_tests.rs` | 默认模板实际把标题与正文发给模型 |
 
 （其余字段级校验项见 [../pipelines/06-config-loading.md](../pipelines/06-config-loading.md) 的完整测试矩阵，本 case 仅覆盖 CLI 入口。）
 
