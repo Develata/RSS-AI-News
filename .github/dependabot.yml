@@ -5,6 +5,11 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 2
+    # No automatic rebase: every main push that touched Cargo.lock rebased the
+    # open group PR and re-ran its full CI (4 of PR #1's 5 runs). Merges to main
+    # are still tested by the push CI; comment `@dependabot rebase` when a fresh
+    # PR result is wanted.
+    rebase-strategy: disabled
     groups:
       cargo-compatible:
         patterns: ['*']
