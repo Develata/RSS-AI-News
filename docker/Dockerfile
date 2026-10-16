@@ -1,14 +1,55 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.97.0-slim-bookworm AS builder
+############################
+# Builder (cargo-chef dependency layer)
+############################
+# CI and release persist BuildKit layers through `cache-to: type=gha`, which
+# does not export `RUN --mount=type=cache` contents. cargo-chef turns the
+# dependency build into an ordinary layer keyed by a manifest-only recipe
+# (Cargo.lock + manifests, workspace member versions masked), so a source edit
+# rebuilds only the workspace crates instead of every dependency.
+FROM rust:1.97.0-slim-bookworm AS chef
+
+ARG CARGO_CHEF_VERSION=0.1.78
+# SHA-256 verified against the release's .sha256 assets for v0.1.78.
+# https://github.com/LukeMathWalker/cargo-chef/releases/tag/v0.1.78
+ARG CARGO_CHEF_SHA256_AMD64=aca691abfbfbbe00d482e0ed2249eec3091b65e96a0ce92947fb5b254d48b16d
+ARG CARGO_CHEF_SHA256_ARM64=cd59b90fce5fa84c4189648fec33404ec5491791eebdb812df5e7fca8336408d
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates wget xz-utils; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+        amd64) chef_target=x86_64-unknown-linux-musl; chef_sha=$CARGO_CHEF_SHA256_AMD64;; \
+        arm64) chef_target=aarch64-unknown-linux-musl; chef_sha=$CARGO_CHEF_SHA256_ARM64;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1;; \
+    esac; \
+    wget -q -O /tmp/cargo-chef.tar.xz \
+        "https://github.com/LukeMathWalker/cargo-chef/releases/download/v${CARGO_CHEF_VERSION}/cargo-chef-${chef_target}.tar.xz"; \
+    echo "${chef_sha}  /tmp/cargo-chef.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/cargo-chef.tar.xz -C /tmp; \
+    install -m 0755 "/tmp/cargo-chef-${chef_target}/cargo-chef" /usr/local/cargo/bin/cargo-chef; \
+    rm -rf /tmp/cargo-chef* /var/lib/apt/lists/*
+
 WORKDIR /app
+# Install what rust-toolchain.toml pins (toolchain + components) once, in a
+# cached layer; otherwise rustup re-downloads the components in every later
+# stage that copies the file in.
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install --no-self-update
+
+FROM chef AS planner
 COPY . .
-# Cache mounts accelerate repeated builds on the same BuildKit builder.
-# Export the executable outside the target mount for later stages.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
-    cargo build --release --locked --bin rss-ai-news && \
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+# Same profile, flags and binary as the final build, so the cooked dependency
+# artifacts are reused rather than rebuilt.
+RUN cargo chef cook --release --locked --bin rss-ai-news --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --locked --bin rss-ai-news && \
     cp target/release/rss-ai-news /app/rss-ai-news && \
     strip /app/rss-ai-news
 
