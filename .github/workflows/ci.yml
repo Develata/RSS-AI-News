@@ -15,20 +15,29 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Pin once. Bumping is a deliberate single-line change; keeps Dockerfile and
-  # all five jobs in lockstep.
+  # Pin once. Bumping is a deliberate single-line change; keeps Dockerfile,
+  # every job here and release.yml in lockstep.
   RUST_TOOLCHAIN: "1.97.0"
 
-# All five jobs are independent on purpose: each prepares its own toolchain /
-# cache and validates a different surface, so the slowest job (test-pg or a
-# docker cache miss) bounds wall-clock time. The first four delegate to the
-# Rust acceptance matrix (`cargo acceptance`, tools/acceptance/) so CI and the
-# local pre-tag matrix run the same checks from one source of truth; see
-# docs/operations/acceptance-matrix.md. docker-build keeps build-push-action
-# because release.yml reuses its GHA buildx cache.
+# Three independent jobs, grouped by what they compile: `test` runs the static
+# and workspace lanes (dev / clippy artifacts), `test-pg` runs the postgres,
+# sqlite and release lanes (one shared release build), and docker-build builds
+# the images. The lanes come from the Rust acceptance matrix (`cargo
+# acceptance`, tools/acceptance/), so CI and the local pre-tag matrix run the
+# same checks from one source of truth; see docs/operations/acceptance-matrix.md.
+# The runner does not fail fast: every lane in a job reports even after an
+# earlier lane fails. docker-build keeps build-push-action because release.yml
+# reuses its GHA buildx cache.
+#
+# rust-cache keys: the toolchain is part of shared-key and the environment hash
+# is off, so a runner-image update of its preinstalled stable Rust (unused:
+# rust-toolchain.toml pins ours) no longer invalidates every cache; Cargo
+# fingerprints still rebuild whatever a rustc / flag change affects.
+# release.yml restores these same keys from main. Only main saves: caches saved
+# under a PR ref are unreachable from main and would only crowd the quota.
 jobs:
-  lint:
-    name: fmt + clippy
+  test:
+    name: fmt + clippy + cargo test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -38,48 +47,26 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: lint
-      # The swallowed-error gate needs ripgrep; ubuntu runners ship it, the
-      # install is a fallback against image changes.
+          shared-key: test-${{ env.RUST_TOOLCHAIN }}
+          add-rust-environment-hash-key: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The swallowed-error gate needs ripgrep, which the current ubuntu
+      # runner image does not ship.
       - run: command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
-      # fmt, clippy -D warnings, swallowed-error gate, dependency policy,
-      # tooling boundary, acceptance-case status.
-      - run: cargo acceptance run --lane static
+      # static first, so fmt / clippy findings lead the log: fmt, clippy
+      # -D warnings, swallowed-error gate, dependency policy, tooling boundary,
+      # acceptance-case status; then the locked workspace build and tests.
+      - run: cargo acceptance run --lane static --lane workspace
 
-  test:
-    name: cargo test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: test
-      - run: cargo acceptance run --lane workspace
-
-  migration-smoke:
-    name: migration smoke (sqlite)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: migration-smoke
-      # Both lanes share one release build: sqlite runs migrate run/check,
-      # recent-entries and the JSON output contract on the real binary;
-      # release checks version / lockfile / README / binary identity.
-      - run: cargo acceptance run --lane sqlite --lane release
-
-  # PostgreSQL: storage tests with --include-ignored plus CLI migrate
-  # run/check against the service below. The lane requires DATABASE_URL and
-  # the docker CLI (storage fixtures use the runner's docker daemon).
+  # postgres: storage tests with --include-ignored plus CLI migrate run/check
+  # against the service below (the lane requires DATABASE_URL and the docker
+  # CLI; storage fixtures use the runner's docker daemon). sqlite and release
+  # reuse its release build: SQLite migrate run/check, recent-entries and the
+  # JSON output contract on the real binary, then version / lockfile / README /
+  # binary identity. Product smokes strip the inherited DATABASE_URL, so the
+  # sqlite lane stays on SQLite.
   test-pg:
-    name: test (postgres)
+    name: postgres + sqlite + release lanes
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -103,11 +90,13 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-pg
+          shared-key: test-pg-${{ env.RUST_TOOLCHAIN }}
+          add-rust-environment-hash-key: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Storage PG tests stay --test-threads=1: measured 108s vs 99s at 4
       # threads (per-binary container/schema setup dominates, and Cargo runs
       # test binaries serially), not worth the extra contention risk.
-      - run: cargo acceptance run --lane postgres
+      - run: cargo acceptance run --lane postgres --lane sqlite --lane release
 
   docker-build:
     name: docker build smoke

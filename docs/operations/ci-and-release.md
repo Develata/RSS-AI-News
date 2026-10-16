@@ -10,20 +10,30 @@
 concurrency: ci-${{ workflow }}-${{ ref }}   # 同分支后续 push 自动取消前一次
 ```
 
-五个并行 job（无 `needs:` 依赖链，独立 toolchain + cache）。前四个直接调用 Rust 验收矩阵的 lane，
-CI 与本地 pre-tag 矩阵执行同一份检查（见 [./acceptance-matrix.md](./acceptance-matrix.md)）：
+三个并行 job（无 `needs:` 依赖链）。job 按共享的编译产物分组：前两个调用 Rust 验收矩阵的 lane，
+CI 与本地 pre-tag 矩阵执行同一份检查（见 [./acceptance-matrix.md](./acceptance-matrix.md)）。runner 不 fail-fast，
+同一 job 内前一个 lane 失败后后续 lane 仍执行并报告：
 
 | Job | 命令 / 验证项 | 本地复现 |
 |---|---|---|
-| `lint` | `cargo acceptance run --lane static`：fmt、Clippy `-D warnings`、swallowed-error、dependency policy、tooling boundary、acceptance-case 状态 | 同命令 |
-| `test` | `cargo acceptance run --lane workspace`：`cargo build/test --workspace --locked`（SQLite） | 同命令，或 `cargo test -p <crate>` |
-| `migration-smoke` | `cargo acceptance run --lane sqlite --lane release`：共用一次 release build；SQLite migrate run/check、recent-entries 与 CLI JSON 输出契约；版本 / lockfile / README / binary identity | 同命令 |
-| `test-pg` | `cargo acceptance run --lane postgres`（PG service + `DATABASE_URL`）：storage `--include-ignored` + CLI migrate run/check | `DATABASE_URL=… cargo acceptance run --lane postgres`（见 [./postgres-deployment.md](./postgres-deployment.md)） |
-| `docker-build` | `docker/build-push-action` 多 stage 构建（不 push）+ 容器 smoke；保留该形式以维护 release 复用的 GHA buildx cache（`scope=runtime`） | 本地 `docker build -f docker/Dockerfile .` |
+| `test` | `cargo acceptance run --lane static --lane workspace`：fmt、Clippy `-D warnings`、swallowed-error、dependency policy、tooling boundary、acceptance-case 状态；`cargo build/test --workspace --locked`（SQLite） | 同命令，或 `cargo test -p <crate>` |
+| `test-pg` | `cargo acceptance run --lane postgres --lane sqlite --lane release`（PG service + `DATABASE_URL`）：storage `--include-ignored` + CLI migrate run/check；三条 lane 共用一次 release build：SQLite migrate run/check、recent-entries 与 CLI JSON 输出契约（product smoke 会剥离继承的 `DATABASE_URL`，仍走 SQLite）；版本 / lockfile / README / binary identity | `DATABASE_URL=… cargo acceptance run --lane postgres --lane sqlite --lane release`（见 [./postgres-deployment.md](./postgres-deployment.md)） |
+| `docker-build` | `docker/build-push-action` 多 stage 构建（不 push）+ 容器 smoke；保留该形式以维护 release 复用的 GHA buildx cache（`scope=runtime`） | `cargo acceptance run --lane docker`，或 `docker build -f docker/Dockerfile .` |
 
-基线（2026-09-11 前 5 次运行中位数）：整次 CI 326s，关键路径为 `test-pg`（≈282s，其中 storage PG 测试
-181s、release build 52s）或 docker cache miss（≈300s）。PG 测试保持 `--test-threads=1`：本地实测
-1 线程 108s、4 线程 99s，收益不足以承担连接争用风险。
+缓存：
+
+- Rust job 用 `Swatinem/rust-cache`，`shared-key` = `<job>-<RUST_TOOLCHAIN>`，关闭 environment hash：runner 镜像升级其
+  预装 stable Rust（本仓库经 `rust-toolchain.toml` 不使用它）不再让全部缓存失效；rustc / flags 变化由 Cargo fingerprint
+  负责重编。只有 `main` 保存缓存（PR ref 下的缓存 `main` 读不到）。release `verify-*` 只读这些 key。
+- Docker builder 用 cargo-chef：依赖编译是按 manifest-only recipe（Cargo.lock + manifests，workspace 成员版本被屏蔽）
+  缓存的普通 layer，经 `cache-to: type=gha` 持久化；源码改动只重编 workspace crates。`RUN --mount=type=cache`
+  的内容不会被 `type=gha` 导出，所以不用它承载依赖缓存。
+- GitHub 会驱逐 7 天未访问的缓存；停更超过一周后的首个 run 必然冷启动（约多 10–15 runner-min），这是预期行为。
+
+历史（2026-05-03 → 2026-10-16，109 runs / 1006 runner-min）：`test-pg` 在 55/70 次 CI 中是关键路径；2026-09-10
+Dockerfile 改用 cache mount 后，改代码的 docker job 中位数由 2.2 min 升到 5.3 min（依赖全量重编）；改用上述 cargo-chef layer 即为此。
+旧基线（2026-09-11 前 5 次运行中位数，五 job 布局）：整次 CI 326s，`test-pg` ≈282s，其中 storage PG 测试 181s、
+release build 52s。PG 测试保持 `--test-threads=1`：本地实测 1 线程 108s、4 线程 99s，收益不足以承担连接争用风险。
 
 CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks 触发 `cargo fmt`）。
 
@@ -44,9 +54,11 @@ env:
 
 Jobs：
 
-- `verify` —— `cargo acceptance run --profile local --expected-version "${GITHUB_REF_NAME#v}"`：tag 版本必须与
-  workspace / lockfile / README / binary 一致，且 credential-free 矩阵在 tag commit 上通过。
-- `publish-image`（`needs: verify`）—— 同时构建发布 runtime + scheduler 两套镜像；`verify` 失败则不推镜像。
+- `verify-test` —— `cargo acceptance run --lane static --lane workspace`；
+- `verify-release` —— `cargo acceptance run --lane sqlite --lane release --expected-version "${GITHUB_REF_NAME#v}"`：tag 版本必须与
+  workspace / lockfile / README / binary 一致。两者合起来即 `local` profile 的四条 lane，在 tag commit 上通过；
+  它们只读 ci.yml 在 `main` 上为同一 commit 保存的缓存（`test-*` / `test-pg-*`），未命中只是变慢。
+- `publish-image`（`needs: [verify-test, verify-release]`）—— 同时构建发布 runtime + scheduler 两套镜像；任一 verify 失败则不推镜像。
 
 ## 镜像 tag 规则
 
@@ -66,7 +78,7 @@ major-only alias（如 `0` / `1`）。
 
 ```bash
 # 1. 完成 feature/fix、将 workspace package version 对齐候选 tag、跑完 security scan/review
-#    并确认 main exact SHA 的五个 CI jobs 全绿
+#    并确认 main exact SHA 的三个 CI jobs 全绿
 
 git checkout main && git pull
 
@@ -84,7 +96,8 @@ git push origin main
 # 4. 打 annotated tag（带说明）
 git tag -a v0.7.0 -m "Release v0.7.0: <一句话>"
 
-# 5. push tag（release workflow 先跑 verify；通过后才写 GHCR，不等待 branch CI）
+# 5. push tag（release workflow 先跑 verify-*；通过后才写 GHCR。在 exact-SHA CI 完成后再推，
+#    verify 才能复用 CI 刚保存的缓存）
 git push origin v0.7.0
 
 # 6. 等 release workflow 完成

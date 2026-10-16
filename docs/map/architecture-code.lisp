@@ -594,7 +594,7 @@
       :path ".github/workflows/ci.yml"
       :kind module
       :state active
-      :notes "5 个并行 job：lint / test / migration-smoke / test-pg / docker-build。")
+      :notes "3 个并行 job：test（static + workspace）/ test-pg（postgres + sqlite + release）/ docker-build。")
 
 (node :id acceptance-matrix-cli
       :label "Rust acceptance matrix CLI"

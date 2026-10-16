@@ -875,8 +875,8 @@ rss-ai-news --config-dir configs validate-config
 - production graph：11 个 library crates + 1 个 single-shot binary；SQLite / PostgreSQL 双方言。
 - CLI：13 个顶层子命令；阶段失败经 summary 反映到退出码（JSON 恰好一个文档）；`run` / `ai-run` 逐分类执行 AI。
 - development tooling：独立 Rust acceptance matrix，覆盖 6 lanes、local/full profiles 与 JSON evidence；step 有界输出与超时。
-- CI：lint / workspace test / SQLite migration smoke / PostgreSQL 四个 job 调用对应 acceptance lanes，另有 Docker job；5 个并行。
-- release：`verify` job（local profile + tag 版本）通过后才推 runtime + scheduler GHCR images。
+- CI：`test`（static + workspace lanes）、`test-pg`（postgres + sqlite + release lanes，共用一次 release build）与 Docker job；3 个并行。
+- release：`verify-test` / `verify-release` 两个 job（合起来即 local profile + tag 版本）通过后才推 runtime + scheduler GHCR images。
 
 完整发布快照见 [`docs/reports/releases/v0.9.0.md`](docs/reports/releases/v0.9.0.md)。
 

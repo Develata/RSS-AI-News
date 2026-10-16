@@ -136,11 +136,9 @@ scheduler 容器不会在启动时自动 migrate（避免脏数据 / 误升级�
 
 | Job | 验证项 |
 |---|---|
-| `lint` | `cargo fmt --check` + `cargo clippy --workspace -- -D warnings` + swallowed-error / dependency-security gates |
-| `test` | `cargo test --workspace`（SQLite path） |
-| `migration-smoke` | SQLite migrate run + `doctor` / `validate-config` smoke |
-| `test-pg` | PostgreSQL service + PG-only integration / migration checks |
-| `docker-build` | `docker buildx build` 构建（不 push）验证 Dockerfile 不烂 |
+| `test` | acceptance `static` + `workspace` lanes：fmt / clippy / swallowed-error / dependency-security gates + `cargo test --workspace`（SQLite path） |
+| `test-pg` | acceptance `postgres` + `sqlite` + `release` lanes：PostgreSQL service + PG-only integration / migration checks；SQLite migrate / CLI contract smoke；version identity |
+| `docker-build` | `docker buildx build` 构建（不 push）+ 容器 smoke，验证 Dockerfile 不烂 |
 
 并发取消（`concurrency.cancel-in-progress: true`）：同分支后续 push 自动取消前一次 run。
 

@@ -108,9 +108,9 @@ SQLite lane 必须用真实 release binary 验证两种调用：
 
 ## CI 与 release
 
-CI 仍以 `.github/workflows/ci.yml` 的五个隔离 jobs 为并行执行真相源；每个 job 与上述 lane 一一对应或覆盖其超集。Tag 前必须：
+CI 仍以 `.github/workflows/ci.yml` 的三个并行 jobs 为执行真相源：`test`（static + workspace）、`test-pg`（postgres + sqlite + release）与 `docker-build`（覆盖 docker lane）。Tag 前必须：
 
 1. 在 candidate commit 运行 `local` profile；
-2. push candidate commit，确认 exact-SHA 五个 CI jobs 全绿（由 CI 执行 PG/Docker lanes）；
+2. push candidate commit，确认 exact-SHA 三个 CI jobs 全绿（由 CI 执行 PG/Docker lanes）；
 3. 运行 `release` lane，确认 `--version`、workspace version、Cargo.lock 与 README 均为候选版本；
 4. 再创建 annotated stable tag。

@@ -23,10 +23,16 @@ env:
 
 jobs:
   # Gate: the tag must name the version the workspace, lockfile, README and
-  # binary declare, and the credential-free matrix must pass on the tagged
-  # commit. Images are only pushed after this succeeds.
-  verify:
-    name: acceptance (tag version)
+  # binary declare, and the credential-free matrix (the `local` profile:
+  # static, workspace, sqlite, release lanes) must pass on the tagged commit.
+  # Images are only pushed after both verify jobs succeed.
+  #
+  # The lanes are split like ci.yml's `test` / `test-pg` jobs and restore the
+  # caches those jobs saved on main (same shared-key, environment hash off;
+  # tag runs may read default-branch caches). save-if is off: a tag-scoped
+  # cache is unreachable from later tags. A cache miss only costs time.
+  verify-test:
+    name: acceptance static + workspace
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -38,14 +44,32 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-verify
+          shared-key: test-${{ env.RUST_TOOLCHAIN }}
+          add-rust-environment-hash-key: false
+          save-if: false
       - run: command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
-      - name: acceptance matrix (local profile)
-        run: cargo acceptance run --profile local --expected-version "${GITHUB_REF_NAME#v}"
+      - run: cargo acceptance run --lane static --lane workspace
+
+  verify-release:
+    name: acceptance sqlite + release (tag version)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-pg-${{ env.RUST_TOOLCHAIN }}
+          add-rust-environment-hash-key: false
+          save-if: false
+      - run: cargo acceptance run --lane sqlite --lane release --expected-version "${GITHUB_REF_NAME#v}"
 
   publish-image:
     name: publish runtime + scheduler images to GHCR
-    needs: verify
+    needs: [verify-test, verify-release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
