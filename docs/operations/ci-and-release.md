@@ -31,7 +31,7 @@ CI 与本地 pre-tag 矩阵执行同一份检查（见 [./acceptance-matrix.md](
 - GitHub 会驱逐 7 天未访问的缓存；停更超过一周后的首个 run 必然冷启动（约多 10–15 runner-min），这是预期行为。
 
 历史（2026-05-03 → 2026-10-16，109 runs / 1006 runner-min）：`test-pg` 在 55/70 次 CI 中是关键路径；2026-09-10
-Dockerfile 改用 cache mount 后，改代码的 docker job 中位数由 2.2 min 升到 5.3 min（依赖全量重编）；改用上述 cargo-chef layer 即为此。
+Dockerfile 改用 cache mount 后，改代码的 docker job 中位数由 2.2 min 升到 5.3 min（依赖全量重编）；上述 cargo-chef layer 用于消除这一回退（本地已验证，CI 实测待首次 warm run 确认）。
 旧基线（2026-09-11 前 5 次运行中位数，五 job 布局）：整次 CI 326s，`test-pg` ≈282s，其中 storage PG 测试 181s、
 release build 52s。PG 测试保持 `--test-threads=1`：本地实测 1 线程 108s、4 线程 99s，收益不足以承担连接争用风险。
 
