@@ -102,11 +102,16 @@ pub async fn run(cli: &Cli, args: &BackfillArgs) -> Result<BackfillCommandSummar
         }
         BackfillTarget::Ai => {
             let category = super::ai_run::select_category(cli, &categories)?;
-            let prompt_template = category
-                .ai_override
-                .as_ref()
-                .and_then(|override_| override_.prompt_template.clone())
-                .unwrap_or_else(|| "Summarize the following article.".to_string());
+            // 与 ai-run 同源：省略 / 空串 = 内置默认模板，sha 由生效模板派生。
+            let prompt_template = loaded
+                .effective_for_category(category.key())
+                .map(|effective| effective.prompt_template)
+                .ok_or_else(|| {
+                    CliError::Runtime(RuntimeError::Config(format!(
+                        "category {} not found in loaded config",
+                        category.key()
+                    )))
+                })?;
             // F15-3: 同 ai_run，走 active_rule_or_register 读路径
             let output_schema_version = ctx
                 .rule_version_repo

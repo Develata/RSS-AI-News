@@ -276,11 +276,6 @@ async fn run_category(
     let output_schema_version = rule_version_repo
         .active_rule_or_register("ai_output_schema", "v1", "AI v1 schema", "v1")
         .await?;
-    let prompt_template = category
-        .ai_override
-        .as_ref()
-        .and_then(|override_| override_.prompt_template.clone())
-        .unwrap_or_else(|| "Summarize the following article.".to_string());
     // Threshold inheritance must match the publish stage exactly: F4 audit
     // found that an ad-hoc `unwrap_or(50)` here diverged from the global
     // default (30) used by `effective_for_category`. Routing through a single
@@ -294,6 +289,17 @@ async fn run_category(
                 category.category.key
             )))
         })?;
+    // prompt 模板与 max_input_chars 同样只从 effective 取（省略 / 空串 = 内置默认模板）。
+    // 缺 {body_text} 等不阻断运行，但每次 run 都留下 warning，避免静默空跑。
+    for warning in config::validate::prompt_template_warnings(&effective) {
+        tracing::warn!(
+            category_key = %category.category.key,
+            code = warning.code,
+            field = warning.field,
+            "{}",
+            warning.message
+        );
+    }
     // F6-1: `Score0To100` 直接传给 `AiRunOptions`，与 publish 路径
     // (`PublishFreezeOptions.min_importance_score`) 类型契约对齐；
     // 不在 CLI 层提前 `.get() as i32` 失去 newtype 不变量。
@@ -325,21 +331,16 @@ async fn run_category(
             loaded.app.lease.ai_duration_seconds,
         ))));
     }
-    let max_input_chars = category
-        .ai_override
-        .as_ref()
-        .and_then(|override_| override_.max_input_chars)
-        .unwrap_or(loaded.app.ai.max_input_chars);
 
     let summary = AiRunFlow::new(ctx)
         .run(AiRunOptions {
             task_gen_batch_size: args.batch_size,
             process_batch_size: args.batch_size,
             max_attempts: loaded.app.retry.ai_max_attempts,
-            prompt_template: prompt_template.into(),
+            prompt_template: effective.prompt_template.as_str().into(),
             model_id,
             fallback_models,
-            max_input_chars,
+            max_input_chars: effective.max_input_chars,
             max_tokens: loaded.app.ai.max_tokens,
             temperature: loaded.app.ai.temperature,
             min_importance_score,

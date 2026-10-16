@@ -23,11 +23,18 @@ impl CommandSummary for ValidateConfigSummary {
         writeln!(writer, "  Sources:        {}", self.source_count)?;
         writeln!(writer, "  Config SHA-256: {}", self.config_sha256)?;
         for warning in &self.warnings {
-            writeln!(
-                writer,
-                "  Warning [{}] {}: {}",
-                warning.code, warning.field, warning.message
-            )?;
+            match &warning.category {
+                Some(category) => writeln!(
+                    writer,
+                    "  Warning [{}] {} (category {}): {}",
+                    warning.code, warning.field, category, warning.message
+                )?,
+                None => writeln!(
+                    writer,
+                    "  Warning [{}] {}: {}",
+                    warning.code, warning.field, warning.message
+                )?,
+            }
         }
         Ok(())
     }
@@ -51,7 +58,7 @@ pub async fn run(cli: &Cli) -> Result<ValidateConfigSummary, CliError> {
             .iter()
             .map(|category| category.sources.len() as u32)
             .sum(),
-        warnings: config::validate::inert_config_warnings(&loaded.app),
+        warnings: config::validate::config_warnings(&loaded),
         config_sha256: loaded.config_sha256,
     })
 }

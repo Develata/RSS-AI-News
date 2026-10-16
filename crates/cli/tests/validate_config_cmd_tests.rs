@@ -86,6 +86,54 @@ async fn validate_config_warns_for_inert_fields_without_rejecting_old_config() {
     assert!(!temp.path().join("rss.sqlite").exists());
 }
 
+#[tokio::test]
+async fn validate_config_warns_when_category_prompt_omits_article_placeholders() {
+    let temp = TempDir::new().unwrap();
+    write_config(temp.path(), true, false);
+    let app_path = temp.path().join("app.toml");
+    let app = fs::read_to_string(&app_path)
+        .unwrap()
+        .replace("enabled = false", "enabled = true");
+    fs::write(app_path, app).unwrap();
+    // Category-owned credentials keep the run independent of the process env;
+    // `{{body}}` mirrors the double-brace syntax once shown in docs/plan/03-ai.md.
+    let category_path = temp.path().join("categories").join("ai.toml");
+    let category = fs::read_to_string(&category_path).unwrap().replace(
+        "priority = 10\n\n[[sources]]",
+        "priority = 10\n\n[category.ai_override]\n\
+         prompt_template = \"secret-ish prompt: {{body}}\"\n\
+         api_key_env = \"PATH\"\n\
+         base_url = \"https://ai.example.test/v1\"\n\n[[sources]]",
+    );
+    fs::write(&category_path, category).unwrap();
+
+    let summary = validate_config::run(&cli_for(temp.path())).await.unwrap();
+    let mut pretty = Vec::new();
+    rss_ai_news_cli::output::CommandSummary::render_pretty(&summary, &mut pretty).unwrap();
+    let pretty = String::from_utf8(pretty).unwrap();
+    assert!(
+        pretty.contains(
+            "Warning [prompt_template] category.ai_override.prompt_template (category ai): \
+             Missing {body_text}"
+        ),
+        "{pretty}"
+    );
+    let value = serde_json::to_value(&summary).unwrap();
+    let prompt_warnings: Vec<_> = value["warnings"]
+        .as_array()
+        .expect("structured warnings")
+        .iter()
+        .filter(|warning| warning["code"] == "prompt_template")
+        .collect();
+    assert_eq!(prompt_warnings.len(), 3, "{prompt_warnings:?}");
+    assert!(
+        prompt_warnings
+            .iter()
+            .all(|warning| warning["category"] == "ai")
+    );
+    assert!(!value.to_string().contains("secret-ish prompt"));
+}
+
 fn cli_for(config_dir: &Path) -> Cli {
     Cli {
         config_dir: config_dir.to_path_buf(),

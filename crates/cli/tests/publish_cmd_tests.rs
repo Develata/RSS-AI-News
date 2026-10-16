@@ -323,6 +323,77 @@ async fn ai_run_processes_the_healthy_category_when_another_lacks_credentials() 
     assert_eq!(succeeded, 1, "the healthy category's result is persisted");
 }
 
+#[tokio::test]
+async fn ai_run_without_category_prompt_sends_article_title_and_body() {
+    // A category without `prompt_template` falls back to the built-in default
+    // prompt, which must carry the article; the old default sent neither.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "{\"summary\":\"ok\",\"tags\":[],\"importance_score\":80,\"keep_decision\":true}"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config_with(temp.path(), &db_path, &temp.path().join("output"), true);
+    rewrite(&temp.path().join("categories/math.toml"), |toml| {
+        toml.replace(
+            "api_key_env = \"RSS_AI_NEWS_TEST_UNSET_KEY\"",
+            &format!("api_key_env = \"PATH\"\nbase_url = \"{}\"", server.uri()),
+        )
+    });
+    let pool = migrated_pool(&db_path).await;
+    seed_persisted_article(&pool, "math").await;
+    pool.close().await;
+
+    let mut cli = cli_for(temp.path(), "math");
+    cli.command = Command::AiRun(AiRunArgs {
+        batch_size: 5,
+        ..AiRunArgs::default()
+    });
+    let args = match &cli.command {
+        Command::AiRun(args) => args,
+        _ => unreachable!(),
+    };
+    let summary = ai_run::run(&cli, args).await.expect("ai-run");
+    assert_eq!(summary.process_succeeded, 1, "{summary:?}");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("json body");
+    let prompt = body["messages"][1]["content"]
+        .as_str()
+        .expect("user message");
+    assert!(
+        prompt.contains("Title"),
+        "title missing from prompt: {prompt}"
+    );
+    assert!(
+        prompt.contains("body"),
+        "body missing from prompt: {prompt}"
+    );
+    assert!(prompt.contains("keep_decision"), "{prompt}");
+    // The config-side placeholder list must match what `render_prompt` replaces.
+    for name in rss_ai_news_config::effective::AI_PROMPT_PLACEHOLDERS {
+        assert!(
+            !prompt.contains(&format!("{{{name}}}")),
+            "placeholder {name} left unrendered: {prompt}"
+        );
+    }
+    assert!(prompt.contains("math"), "category key missing: {prompt}");
+}
+
 fn rewrite(path: &Path, edit: impl FnOnce(String) -> String) {
     let content = fs::read_to_string(path).expect("read category");
     fs::write(path, edit(content)).expect("write category");

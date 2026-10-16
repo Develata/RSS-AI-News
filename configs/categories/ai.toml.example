@@ -6,8 +6,20 @@ display_name = "AI & Machine Learning"
 priority = 10
 
 [category.ai_override]
+# 占位符：{title} / {body_text} / {category_key}（单花括号，逐字替换；其它花括号原样发送）。
+# 缺 {body_text} 时正文不会发给模型，validate-config 与 ai-run 会给出 warning。
+# 省略或空串 = 使用内置默认模板（同样要求下面这组 JSON 字段）。
 prompt_template = """
-你是一个 AI/ML 领域的新闻分析师。请提炼文章要点，判断其技术重要性，并输出符合当前 AI 输出 schema 的 JSON。
+你是 AI/ML 领域的新闻分析师。阅读下面的文章，只输出一个 JSON 对象，字段如下：
+- keep_decision：布尔值，是否值得收录
+- summary：中文摘要；keep_decision 为 true 时必填
+- tags：字符串数组
+- importance_score：0 到 100 的整数，衡量技术重要性；keep_decision 为 true 时必填
+- filter_reason：不收录的原因；keep_decision 为 false 时必填
+
+标题：{title}
+正文：
+{body_text}
 """
 max_input_chars = 10000
 model = ""

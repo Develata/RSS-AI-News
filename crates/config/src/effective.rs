@@ -4,6 +4,25 @@ use rss_ai_news_domain::Score0To100;
 
 use crate::{CategoryConfig, LoadedConfig};
 
+/// Placeholders substituted by `rss_ai_news_ai::render_prompt`; everything else
+/// in a prompt template, including other `{name}` tokens, is sent verbatim.
+pub const AI_PROMPT_PLACEHOLDERS: [&str; 3] = ["title", "body_text", "category_key"];
+
+/// Prompt used when a category sets no non-blank `prompt_template`. It names the
+/// v1 output fields that `rss_ai_news_ai::parse_response` validates.
+pub const DEFAULT_PROMPT_TEMPLATE: &str = "阅读下面的文章，只输出一个 JSON 对象，字段如下：
+- keep_decision：布尔值，是否值得收录
+- summary：中文摘要；keep_decision 为 true 时必填
+- tags：字符串数组
+- importance_score：0 到 100 的整数；keep_decision 为 true 时必填
+- filter_reason：不收录的原因；keep_decision 为 false 时必填
+
+分类：{category_key}
+标题：{title}
+正文：
+{body_text}
+";
+
 pub struct EffectiveConfig<'a> {
     pub category: &'a CategoryConfig,
     pub ai_enabled: bool,
@@ -16,7 +35,8 @@ pub struct EffectiveConfig<'a> {
     /// 折叠规则见 [`resolve_fallback_models`]，契约见 docs/plan/14-ai-fallback.md。
     pub fallback_models: Vec<String>,
     pub max_input_chars: u32,
-    /// Empty when the category does not provide a prompt; runtime decides fallback behavior.
+    /// Category `prompt_template`; omitted or blank (trim) inherits
+    /// [`DEFAULT_PROMPT_TEMPLATE`], like `model` and `path_template`.
     pub prompt_template: String,
 }
 
@@ -75,8 +95,10 @@ impl LoadedConfig {
                 .and_then(|override_| override_.max_input_chars)
                 .unwrap_or(self.app.ai.max_input_chars),
             prompt_template: ai_override
-                .and_then(|override_| override_.prompt_template.clone())
-                .unwrap_or_default(),
+                .and_then(|override_| override_.prompt_template.as_ref())
+                .filter(|template| !template.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| DEFAULT_PROMPT_TEMPLATE.to_string()),
         })
     }
 }
@@ -464,5 +486,45 @@ mod tests {
 
         let effective = config.effective_for_category("ai").unwrap();
         assert_eq!(effective.path_template, "custom/ai/{YYYYMMDD}.md");
+    }
+
+    #[test]
+    fn absent_prompt_template_uses_builtin_default_with_article_placeholders() {
+        let config = loaded(false, None, None);
+        let effective = config.effective_for_category("ai").unwrap();
+        assert!(effective.prompt_template.contains("{title}"));
+        assert!(effective.prompt_template.contains("{body_text}"));
+    }
+
+    #[test]
+    fn blank_prompt_template_override_inherits_builtin_default() {
+        let mut config = loaded(false, None, None);
+        config.categories[0]
+            .ai_override
+            .as_mut()
+            .unwrap()
+            .prompt_template = Some(" \n\t".to_string());
+        let blank = config
+            .effective_for_category("ai")
+            .unwrap()
+            .prompt_template
+            .clone();
+        config.categories[0].ai_override = None;
+        let absent = config.effective_for_category("ai").unwrap().prompt_template;
+        assert_eq!(blank, absent);
+        assert!(blank.contains("{body_text}"));
+    }
+
+    #[test]
+    fn prompt_template_override_is_used_verbatim() {
+        let mut config = loaded(false, None, None);
+        let template = "\n标题={title}\n正文={body_text}\n";
+        config.categories[0]
+            .ai_override
+            .as_mut()
+            .unwrap()
+            .prompt_template = Some(template.to_string());
+        let effective = config.effective_for_category("ai").unwrap();
+        assert_eq!(effective.prompt_template, template);
     }
 }

@@ -86,3 +86,21 @@ fn parse_returns_invalid_json_for_garbage_input() {
     let err = parse_response(7, "not json").expect_err("garbage is invalid");
     assert!(matches!(err, AiError::InvalidJson(_)));
 }
+
+#[test]
+fn parse_keep_false_still_type_checks_unused_fields() {
+    // Filtered responses ignore summary / tags / score values, but every
+    // present field is deserialized first, so a wrong type fails the parse.
+    for raw in [
+        r#"{"keep_decision": false, "filter_reason": "skip", "importance_score": "n/a"}"#,
+        r#"{"keep_decision": false, "filter_reason": "skip", "tags": 42}"#,
+    ] {
+        let error = parse_response(7, raw).expect_err("wrong-typed field");
+        assert!(matches!(error, AiError::InvalidJson(_)), "{raw}: {error:?}");
+    }
+    let raw = r#"{"keep_decision": false, "filter_reason": "skip", "summary": null, "tags": null}"#;
+    assert!(matches!(
+        parse_response(7, raw).expect("null fields are allowed"),
+        ParsedResponse::Filtered(_)
+    ));
+}
