@@ -22,9 +22,10 @@ CI 与本地 pre-tag 矩阵执行同一份检查（见 [./acceptance-matrix.md](
 
 缓存：
 
-- Rust job 用 `Swatinem/rust-cache`，`shared-key` = `<job>-<RUST_TOOLCHAIN>`，关闭 environment hash：runner 镜像升级其
-  预装 stable Rust（本仓库经 `rust-toolchain.toml` 不使用它）不再让全部缓存失效；rustc / flags 变化由 Cargo fingerprint
-  负责重编。只有 `main` 保存缓存（PR ref 下的缓存 `main` 读不到）。release `verify-*` 只读这些 key。
+- Rust job 用 `Swatinem/rust-cache`（`shared-key` = `test` / `test-pg`），只有 `main` 保存缓存（PR ref 下的缓存 `main`
+  读不到）。release `verify-*` 只读这些 key，因此 release.yml 的 `CARGO_*` / `RUST_*` env 必须与 ci.yml 一致（它们进 key 的
+  environment hash）。environment hash 保持开启：rust-cache v2 关闭它会连 Cargo.lock hash 一起去掉，key 永不变化、缓存
+  永不刷新。代价是 runner 镜像升级其预装 stable Rust 时（如 1.98.1 → 1.99.0），全部 Rust 缓存失效一次。
 - Docker builder 用 cargo-chef：依赖编译是按 manifest-only recipe（Cargo.lock + manifests，workspace 成员版本被屏蔽）
   缓存的普通 layer，经 `cache-to: type=gha` 持久化；源码改动只重编 workspace crates。`RUN --mount=type=cache`
   的内容不会被 `type=gha` 导出，所以不用它承载依赖缓存。

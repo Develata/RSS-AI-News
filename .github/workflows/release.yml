@@ -14,7 +14,10 @@ permissions:
   packages: write
 
 env:
+  # CARGO_* / RUST_* values are hashed into the rust-cache key: keep them equal
+  # to ci.yml so the verify jobs can restore its caches.
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
   # 与 ci.yml 保持一致；bump 时同步两处。
   RUST_TOOLCHAIN: "1.97.0"
   # GHCR 镜像名：ghcr.io/<owner>/<repo>。docker/metadata-action 会自动 lowercase
@@ -28,8 +31,8 @@ jobs:
   # Images are only pushed after both verify jobs succeed.
   #
   # The lanes are split like ci.yml's `test` / `test-pg` jobs and restore the
-  # caches those jobs saved on main (same shared-key, environment hash off;
-  # tag runs may read default-branch caches). save-if is off: a tag-scoped
+  # caches those jobs saved on main (same shared-key and env; tag runs may
+  # read default-branch caches). save-if is off: a tag-scoped
   # cache is unreachable from later tags. A cache miss only costs time.
   verify-test:
     name: acceptance static + workspace
@@ -44,8 +47,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-${{ env.RUST_TOOLCHAIN }}
-          add-rust-environment-hash-key: false
+          shared-key: test
           save-if: false
       - run: command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
       - run: cargo acceptance run --lane static --lane workspace
@@ -62,8 +64,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-pg-${{ env.RUST_TOOLCHAIN }}
-          add-rust-environment-hash-key: false
+          shared-key: test-pg
           save-if: false
       - run: cargo acceptance run --lane sqlite --lane release --expected-version "${GITHUB_REF_NAME#v}"
 

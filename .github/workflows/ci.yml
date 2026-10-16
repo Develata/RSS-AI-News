@@ -29,12 +29,12 @@ env:
 # earlier lane fails. docker-build keeps build-push-action because release.yml
 # reuses its GHA buildx cache.
 #
-# rust-cache keys: the toolchain is part of shared-key and the environment hash
-# is off, so a runner-image update of its preinstalled stable Rust (unused:
-# rust-toolchain.toml pins ours) no longer invalidates every cache; Cargo
-# fingerprints still rebuild whatever a rustc / flag change affects.
-# release.yml restores these same keys from main. Only main saves: caches saved
-# under a PR ref are unreachable from main and would only crowd the quota.
+# rust-cache: release.yml restores these keys from main, so the shared-keys and
+# the CARGO_* / RUST_* env (hashed into the key) must match there. The
+# environment hash stays on: turning it off also drops the Cargo.lock hash, so
+# the key would never change and the cache would never refresh. Only main
+# saves: caches saved under a PR ref are unreachable from main and would only
+# crowd the quota.
 jobs:
   test:
     name: fmt + clippy + cargo test
@@ -47,8 +47,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-${{ env.RUST_TOOLCHAIN }}
-          add-rust-environment-hash-key: false
+          shared-key: test
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # The swallowed-error gate needs ripgrep, which the current ubuntu
       # runner image does not ship.
@@ -90,8 +89,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-pg-${{ env.RUST_TOOLCHAIN }}
-          add-rust-environment-hash-key: false
+          shared-key: test-pg
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Storage PG tests stay --test-threads=1: measured 108s vs 99s at 4
       # threads (per-binary container/schema setup dominates, and Cargo runs
