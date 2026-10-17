@@ -40,7 +40,7 @@ pub struct ReplayResult {
 /// `--prompt-version-tag` / `--prompt-version-description` / `--model`
 /// 命名该新版本。AI 版本元数据（tag / sha256 / description / model）由
 /// `runtime::flows::backfill::BackfillAiOptions` 承载，不在本 DTO 上重复
-/// 声明 —— 见 `docs/design/internal-dto-contracts.md` §6.3。
+/// 声明 —— 见 `docs-backup/design/internal-dto-contracts.md` §6.3。
 ///
 /// 4 个 `*_version_id` 字段（prompt / output_schema / model / extractor）
 /// 已删除，因为：

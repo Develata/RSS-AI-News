@@ -1,7 +1,7 @@
 //! Configuration loading and validation.
 //!
 //! Three-layer: env (secrets) / app.toml (global) / categories/*.toml (per-category).
-//! See docs/design/config-schema.md.
+//! See docs-backup/design/config-schema.md.
 
 pub mod app;
 pub mod category;

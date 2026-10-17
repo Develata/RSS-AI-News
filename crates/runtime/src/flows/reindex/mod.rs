@@ -130,7 +130,7 @@ impl ReindexFlow {
         // 终止并把责任明确移交给 admin。
         // F15-fix5/fix8：先把 finalize 与失败事件持久化跑完，再决定向上传播
         // 的错误。Err / finalize-lease-lost 两条失败路径都按
-        // `docs/design/error-and-observability.md` §4.3 line 317 的契约 emit
+        // `docs-backup/design/error-and-observability.md` §4.3 line 317 的契约 emit
         // `run_failed`；只有真正成功（inner Ok + finalize 持有 lease）才发
         // `run_completed`。`mark_failed` 自身写入失败把 `persist_err` 折进
         // `run_failed.context_json` 而不是吞为日志（避免观测黑洞），但仍以

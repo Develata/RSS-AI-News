@@ -1,7 +1,7 @@
 //! State enums for all state machines.
 //!
 //! These are the single source of truth for valid states.
-//! See docs/design/state-machine.md for transition rules.
+//! See docs-backup/design/state-machine.md for transition rules.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -120,7 +120,7 @@ pub enum BackfillTarget {
     Ai,
 }
 
-/// Rule version lifecycle status. See `docs/design/storage-schema.md` §4.8 +
+/// Rule version lifecycle status. See `docs-backup/design/storage-schema.md` §4.8 +
 /// `state-machine.md` §6 (reindex_job state machine).
 ///
 /// - `Active`: currently effective; at most one row per `kind` may be `Active`.
@@ -136,7 +136,7 @@ pub enum RuleVersionStatus {
     Superseded,
 }
 
-/// Reindex job state machine. See `docs/design/state-machine.md` §6.2
+/// Reindex job state machine. See `docs-backup/design/state-machine.md` §6.2
 /// (reindex_job state set) + `storage-schema.md` §4.10 (`reindex_jobs.state`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

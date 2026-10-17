@@ -100,7 +100,7 @@ pub fn init(opts: InitOptions) -> Option<WorkerGuard> {
 /// 装上（init 抢跑失败）、要么是同一进程的下一轮调用——任一情况下
 /// `tracing::*` 都可能丢失消息，stderr 是当下最稳的兜底。
 ///
-/// 该 helper 也是 docs/design/error-and-observability.md §3.3 末段
+/// 该 helper 也是 docs-backup/design/error-and-observability.md §3.3 末段
 /// "唯一允许豁免来源：日志写入失败" 的规范化体现：调用点不再走
 /// `let _ = try_init();`，而是显式把失败外显为 stderr 一行。
 fn warn_on_try_init_err<E: std::fmt::Display>(mode: &str, result: Result<(), E>) -> bool {

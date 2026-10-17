@@ -59,8 +59,7 @@ CI 同步校验，本地跳过 = 远端必炸。
 
 ## 测试纪律
 
-按 [`~/.claude/rules/common/testing.md`](file:///C:/Users/QQ/.claude/rules/common/testing.md)
-分级。对本仓库：
+测试分级，对本仓库：
 - **修 bug**：先写复现测试（红 → 绿）
 - **加能力**：覆盖正常路径 + 至少一条失败路径
 - **重构**：必须有等价回归测试锁定行为
@@ -71,7 +70,6 @@ CI 同步校验，本地跳过 = 远端必炸。
 
 ## 子代理使用
 
-参考 [`~/.claude/rules/common/agents.md`](file:///C:/Users/QQ/.claude/rules/common/agents.md)：
 **默认不 spawn**。本项目可直接用 codegraph + Read + Grep 完成绝大多数探索。
 
 明确该用 sub-agent 的场景：

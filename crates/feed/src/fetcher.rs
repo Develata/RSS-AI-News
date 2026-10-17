@@ -16,7 +16,7 @@ const ACCEPT_VALUE: &str = "application/rss+xml, application/atom+xml, applicati
 /// Raw HTTP fetch result — bytes only, no parsing.
 ///
 /// Use this when you need to persist `raw_payload_bytes` to `raw_artifacts`
-/// **before** parsing, per `docs/design/replay-and-artifacts.md` §5.1: if
+/// **before** parsing, per `docs-backup/design/replay-and-artifacts.md` §5.1: if
 /// parsing later panics or fails, the artifact is already on disk and can
 /// be replayed.
 #[derive(Debug, Clone)]

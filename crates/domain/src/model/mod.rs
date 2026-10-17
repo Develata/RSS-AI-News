@@ -1,7 +1,7 @@
 //! Domain model types — persistent object representations.
 //!
 //! These types map 1:1 to database truth-source tables.
-//! See docs/design/storage-schema.md for field-level details.
+//! See docs-backup/design/storage-schema.md for field-level details.
 
 pub mod article;
 pub mod article_ai_result;

@@ -12,7 +12,7 @@
 //!
 //! 该 grep 只能拦截一种最常见的 pattern（同行内同时出现宏调用与
 //! `expose_secret`）。"先 `let k = x.expose_secret()` 再 trace `{k}`"
-//! 这类跨行场景需要靠 docs/design/error-and-observability.md §4.2
+//! 这类跨行场景需要靠 docs-backup/design/error-and-observability.md §4.2
 //! "日志/artifact 不变量" 的代码规范 + code review 把关。
 //!
 //! 详见 W3 audit findings W3-4 与 F7-2 commit message。
@@ -115,7 +115,7 @@ fn no_secret_exposed_to_tracing_or_println_in_production_code() {
         "W3-4 invariant violation: secret exposure via tracing/println/eprintln \
          macros detected in production source.\n\
          必须改用 SecretString 类型穿透或在 SDK boundary 单独构造原值。\n\
-         详见 docs/design/error-and-observability.md §4.2 \"日志/artifact 不变量\"。\n\
+         详见 docs-backup/design/error-and-observability.md §4.2 \"日志/artifact 不变量\"。\n\
          Offending lines:\n{}",
         violations.join("\n"),
     );

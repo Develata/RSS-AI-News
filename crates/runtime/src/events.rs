@@ -1,6 +1,6 @@
 //! Run-event emission, with mandatory secret redaction on every payload.
 //!
-//! Per `docs/design/error-and-observability.md` §4.2, anything that ends
+//! Per `docs-backup/design/error-and-observability.md` §4.2, anything that ends
 //! up in the `run_events.context_json` column must pass through the same
 //! redaction filter so that callers cannot accidentally persist a raw
 //! API key, GitHub token, Authorization header, or URL userinfo simply

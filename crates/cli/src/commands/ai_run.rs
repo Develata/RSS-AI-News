@@ -280,7 +280,7 @@ async fn run_category(
     // found that an ad-hoc `unwrap_or(50)` here diverged from the global
     // default (30) used by `effective_for_category`. Routing through a single
     // truth source guarantees AI filtering and publish selection see the
-    // same `min_importance_score`. See docs/design/config-schema.md §4.5.
+    // same `min_importance_score`. See docs-backup/design/config-schema.md §4.5.
     let effective = loaded
         .effective_for_category(&category.category.key)
         .ok_or_else(|| {

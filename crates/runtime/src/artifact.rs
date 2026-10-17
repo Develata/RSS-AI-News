@@ -6,7 +6,7 @@ use time::{Duration, OffsetDateTime};
 /// Artifact writer：把已经 sanitize 的字节负载落到 `raw_artifact` 表
 /// （inline 路径）。
 ///
-/// **W3-4 / F7-2 不变量**（详见 docs/design/error-and-observability.md §4.2
+/// **W3-4 / F7-2 不变量**（详见 docs-backup/design/error-and-observability.md §4.2
 /// "日志/artifact 不变量"）：
 ///
 /// - `write_inline` 的 `body` 参数**只能是响应体或已 sanitize 的内容**，

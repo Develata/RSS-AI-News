@@ -6,7 +6,7 @@
 //! at the use site (HTTP `Authorization` headers, etc.).
 //!
 //! See `docs/handoffs/2026-05-07-w0-doc-freeze-e2-decisions.md` Issue 4 for
-//! the freeze contract and `docs/design/config-schema.md` for env wiring.
+//! the freeze contract and `docs-backup/design/config-schema.md` for env wiring.
 
 use std::fmt;
 

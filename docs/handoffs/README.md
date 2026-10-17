@@ -7,9 +7,9 @@
 | 位置 | 角色 | 更新节奏 |
 |---|---|---|
 | [`docs/constitution.md`](../constitution.md) | 工程宪法，长期不变的最高原则 | 极少修改 |
-| [`docs/design/`](../design/) | 终局设计契约（schema、状态机、DTO、CLI 等） | 设计决策变更时同步更新 |
+| [`docs-backup/design/`](../../docs-backup/design/) | 终局设计契约（schema、状态机、DTO、CLI 等；已归档，现行契约见 [`docs/plan/`](../plan/)） | 设计决策变更时同步更新 |
 | [`docs/plan/`](../plan/) | 工程蓝图，里程碑级别的实施路径 | Phase 切换时更新 |
-| [`docs/task/`](../task/) | 任务分解，Workstream 颗粒度的勾选列表 | 任务推进时勾选 |
+| [`docs-backup/task/`](../../docs-backup/task/) | 任务分解，Workstream 颗粒度的勾选列表（已归档） | 任务推进时勾选 |
 | **`docs/handoffs/`** | **append-only 工作日志**，按日期滚动 | 每次交接 |
 
 设计、计划、任务表是"应当如此"，handoffs 是"实际发生了什么"。两套文档相互校验：handoffs 不应改写设计文档的真相源；设计文档不应记录某次具体工作的过程细节。

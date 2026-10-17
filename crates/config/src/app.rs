@@ -15,7 +15,7 @@ pub struct AppConfig {
     pub lease: LeaseConfig,
     pub retry: RetryConfig,
     /// 单次 run 工作量边界。`#[serde(default)]` 使旧 `app.toml`
-    /// （无 `[runtime]` 段）仍可解析；缺省值见 [config-schema §4.4](docs/design/config-schema.md#44-runtime-字段语义)。
+    /// （无 `[runtime]` 段）仍可解析；缺省值见 [config-schema §4.4](docs-backup/design/config-schema.md#44-runtime-字段语义)。
     #[serde(default)]
     pub runtime: RuntimeConfig,
     pub artifact: ArtifactConfig,
@@ -90,12 +90,12 @@ pub struct PublishConfig {
     /// Global default for `[publish] max_items_per_report`. Categories may
     /// override per-field via `[category.publish_override]`. NonZeroU32 makes
     /// `0` (which would silently mean SQL `LIMIT 0`) a toml deserialization
-    /// error. See `docs/design/config-schema.md` §4.5 / §234.
+    /// error. See `docs-backup/design/config-schema.md` §4.5 / §234.
     pub max_items_per_report: NonZeroU32,
     /// Global default for `[publish] min_importance_score`. AI path: articles
     /// with score < this are filtered before report selection. AI-off direct
     /// path: not applied (see §4.5). Score0To100 enforces the 0-100 invariant
-    /// at toml deserialization. See `docs/design/config-schema.md` §357-358.
+    /// at toml deserialization. See `docs-backup/design/config-schema.md` §357-358.
     pub min_importance_score: Score0To100,
     /// Sliding candidate window for publish selection, in hours. `0` disables
     /// the window for manual backfills.
@@ -202,7 +202,7 @@ pub struct RetryConfig {
 /// `max_batches_per_run` 在 ingest / ai-run 内部生效（每批 `--batch-size`
 /// 行 × 上限批次 = 单次 run 处理上限）；`0` 表示不限，由 lease + 宿主超时兜底。
 /// CLI `--max-batches` 覆盖此值。详见
-/// [config-schema §4.4](docs/design/config-schema.md#44-runtime-字段语义)。
+/// [config-schema §4.4](docs-backup/design/config-schema.md#44-runtime-字段语义)。
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct RuntimeConfig {
     /// 单次 run 内部批次循环上限。默认 10；`0` = 不限。

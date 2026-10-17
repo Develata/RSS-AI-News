@@ -97,7 +97,7 @@ feed_entry_max_attempts = 5
 ai_max_attempts = 3
 publish_max_attempts = 5
 
-# 单次 run 工作量边界。详见 docs/design/config-schema.md §4.4
+# 单次 run 工作量边界。详见 docs-backup/design/config-schema.md §4.4
 [runtime]
 max_batches_per_run = 10  # ingest / ai-run 内部批次循环上限；0 = 不限
 

@@ -49,7 +49,7 @@ impl LoadedConfig {
         let ai_override = category.ai_override.as_ref();
         let publish_override = category.publish_override.as_ref();
 
-        // Per docs/design/config-schema.md §4.5 (lines 221-225), effective values are
+        // Per docs-backup/design/config-schema.md §4.5 (lines 221-225), effective values are
         // computed as `category.publish_override.X.unwrap_or(app.publish.X)`. The
         // global defaults live in [publish] section of app.toml; per-category overrides
         // are field-level (a missing override field inherits the global value).
@@ -76,7 +76,7 @@ impl LoadedConfig {
                 .unwrap_or(self.app.publish.max_items_per_report),
             // W2-B-1: PublishOverride.min_importance_score is now
             // Option<Score0To100> (see crates/config/src/category.rs +
-            // docs/design/config-schema.md §8 line 378). Out-of-range TOML
+            // docs-backup/design/config-schema.md §8 line 378). Out-of-range TOML
             // values are rejected at deserialization, so this fold is a
             // straight `unwrap_or(global_default)` — the previous
             // `Score0To100::try_new(...).ok()` step (which silently masked
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn max_items_inherits_global_when_override_absent() {
-        // Per docs/design/config-schema.md §4.5 (lines 221-222):
+        // Per docs-backup/design/config-schema.md §4.5 (lines 221-222):
         // effective.max_items_per_report =
         //   category.publish_override.max_items_per_report.unwrap_or(publish.max_items_per_report)
         let config = loaded_with_publish_globals(false, None, None, 30, 30, None, None);

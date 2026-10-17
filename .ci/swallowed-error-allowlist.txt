@@ -9,7 +9,7 @@
 #
 # `#` 注释 / 空行允许。
 #
-# 设计契约（docs/design/error-and-observability.md §3.3 末段）：
+# 设计契约（docs-backup/design/error-and-observability.md §3.3 末段）：
 # "唯一允许豁免来源：日志写入失败（tracing / log crate 的 sink 自身错误）"，
 # 实务上扩展到三类 best-effort：error-reporting sink / 脱敏近似 / 测试 teardown。
 

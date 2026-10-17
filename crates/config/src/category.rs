@@ -38,7 +38,7 @@ pub struct AiOverride {
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct PublishOverride {
     pub max_items_per_report: Option<NonZeroU32>,
-    /// Per docs/design/config-schema.md §8 line 378:
+    /// Per docs-backup/design/config-schema.md §8 line 378:
     /// `Option<Score0To100>` — `None` 继承全局，`Some(0)` 显式无下限。
     /// 使用 `Score0To100` 而非裸 `u8`，让 TOML 反序列化阶段直接拒绝越界
     /// 值（W2-B-1：旧实现把 `try_new` 失败折叠为继承默认，掩盖配置错误）。
@@ -159,7 +159,7 @@ mod tests {
         // W2-B-1 regression guard: out-of-range `min_importance_score` must
         // fail at TOML deserialization (Score0To100 contract), not be
         // silently folded into the global default by `effective_for_category`.
-        // See docs/design/config-schema.md §8 line 378.
+        // See docs-backup/design/config-schema.md §8 line 378.
         let content = r#"
 schema_version = "1"
 
@@ -213,7 +213,7 @@ min_importance_score = 0
     #[test]
     fn rejects_zero_max_items_per_report() {
         // max_items_per_report = 0 must fail at toml deserialization (NonZeroU32 contract).
-        // See docs/design/config-schema.md §234.
+        // See docs-backup/design/config-schema.md §234.
         let content = r#"
 schema_version = "1"
 

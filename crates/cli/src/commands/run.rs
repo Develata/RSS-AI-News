@@ -1,6 +1,6 @@
 //! `run` command — orchestrates ingest → ai-run → publish in one invocation.
 //!
-//! Per `docs/design/cli-semantics.md` §4.11: any single stage failing must
+//! Per `docs-backup/design/cli-semantics.md` §4.11: any single stage failing must
 //! NOT block downstream stages (with the explicit exception that an
 //! "ingest 全量失败" — `ingest::run` returning `Err` — short-circuits
 //! because there are no new articles to process). The overall exit code

@@ -1,7 +1,7 @@
 //! reindex_job 持久化层（F15-5 W9-F3）。
 //!
-//! 物理表：见 [storage-schema §4.10 `reindex_jobs`](../../../../docs/design/storage-schema.md#410-reindex_jobs)。
-//! 状态轮：见 [state-machine §6](../../../../docs/design/state-machine.md#6-reindex_job-独立状态轮)。
+//! 物理表：见 [storage-schema §4.10 `reindex_jobs`](../../../../docs-backup/design/storage-schema.md#410-reindex_jobs)。
+//! 状态轮：见 [state-machine §6](../../../../docs-backup/design/state-machine.md#6-reindex_job-独立状态轮)。
 //!
 //! 本模块提供 reindex_job 的原子原语：
 //!   - `start_reindex_tx` —— **单事务**两 INSERT：rule_versions(status='pending') +

@@ -24,7 +24,7 @@ pub struct ExtractOptions {
     pub max_attempts: u32,
     /// 单次 run 内部 claim 循环上限。`0` = 不限（仅由 lease + 宿主超时兜底）。
     /// 由 CLI 从 `app.runtime.max_batches_per_run` 传入（F6-3）。
-    /// 详见 docs/design/config-schema.md §4.4。
+    /// 详见 docs-backup/design/config-schema.md §4.4。
     pub max_batches: u32,
 }
 

@@ -5,7 +5,7 @@
 ///
 /// **In scope** — required to impl `ClassifiedError`:
 /// - The capability-layer error enums enumerated in
-///   `docs/design/error-and-observability.md` §2.3: `FeedError`,
+///   `docs-backup/design/error-and-observability.md` §2.3: `FeedError`,
 ///   `ExtractorError`, `AiError`, `StorageError`, `PublishError`.
 /// - Domain-layer errors that surface during a capability operation and are
 ///   classified by `runtime` for retry / failure-state transition. Today this

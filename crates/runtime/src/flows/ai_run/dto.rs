@@ -27,7 +27,7 @@ pub struct AiRunOptions {
     /// 单次 run 内部 claim 循环上限。`0` = 不限。由 CLI 从
     /// `app.runtime.max_batches_per_run` 传入（F6-3）。仅约束 process 阶段
     /// 的 claim 循环；task_gen 阶段是 one-shot insert-pending sweep，不受
-    /// 此上限控制。详见 docs/design/config-schema.md §4.4。
+    /// 此上限控制。详见 docs-backup/design/config-schema.md §4.4。
     pub max_batches: u32,
     pub category_key: String,
     /// CLI 调用前通过 `rule_version_repo.get_or_create("prompt", version_tag, ...)`

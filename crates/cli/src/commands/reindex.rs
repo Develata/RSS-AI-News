@@ -1,6 +1,6 @@
 //! `reindex` command — 规则升级触发的批量重算。
 //!
-//! 参数语义见 docs/design/cli-semantics.md §4.8：
+//! 参数语义见 docs-backup/design/cli-semantics.md §4.8：
 //! - `--target` ∈ {link_hash, content_hash, categories, all}
 //!   `all` 顺序执行三类，每类提交独立 job（§4.8 line 287, 297）
 //! - `--abort <job_id>`：取消指定 job，与 `--target` 互斥（line 290）。

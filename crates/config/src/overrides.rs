@@ -12,8 +12,8 @@ pub struct CliOverrides {
     pub dry_run: bool,
     /// Global `--max-batches` override. `Some(n)` 落到
     /// `app.runtime.max_batches_per_run`; `None` 走 toml / 默认。
-    /// 详见 [config-schema §8](docs/design/config-schema.md#8-cli-overrides-与覆盖优先级)
-    /// 与 [cli-semantics §4.1/§4.2/§4.11](docs/design/cli-semantics.md)。
+    /// 详见 [config-schema §8](docs-backup/design/config-schema.md#8-cli-overrides-与覆盖优先级)
+    /// 与 [cli-semantics §4.1/§4.2/§4.11](docs-backup/design/cli-semantics.md)。
     pub max_batches: Option<u32>,
 }
 

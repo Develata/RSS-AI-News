@@ -7,7 +7,7 @@
 #
 # 仅扫描 production / test 源码（crates/ + src/）。`.ci/swallowed-error-allowlist.txt`
 # 维护已审核豁免清单；该 allowlist 唯一允许来源是"日志/可观测性写入失败"
-# 类的兜底（详见 docs/design/error-and-observability.md §3.3 末段）。
+# 类的兜底（详见 docs-backup/design/error-and-observability.md §3.3 末段）。
 #
 # 调用：
 #   bash .ci/check_swallowed_errors.sh        — 静默通过 / 失败列出未豁免命中
@@ -79,7 +79,7 @@ if [[ -n "$matches" ]]; then
 fi
 
 if [[ -n "$unallowed" ]]; then
-    echo "ERROR: 检测到非允许的 swallowed-error 写法（详见 docs/design/error-and-observability.md §3.3）:" >&2
+    echo "ERROR: 检测到非允许的 swallowed-error 写法（详见 docs-backup/design/error-and-observability.md §3.3）:" >&2
     echo "" >&2
     printf '%s' "$unallowed" >&2
     echo "" >&2
