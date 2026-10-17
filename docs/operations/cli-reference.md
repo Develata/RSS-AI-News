@@ -71,7 +71,7 @@
 
 ### `backfill`
 - `--target <extract\|ai>`：必填
-- `--date-from <YYYY-MM-DD>` / `--date-to <YYYY-MM-DD>`
+- `--date-from <YYYY-MM-DD>` / `--date-to <YYYY-MM-DD>`（UTC 日历日，两端都含）
 - `--batch-size <N>`（默认 `50`）
 - 仅 `--target ai`：`--prompt-version-tag` / `--prompt-version-description` / `--model`
 

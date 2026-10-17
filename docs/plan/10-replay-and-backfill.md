@@ -124,8 +124,8 @@ rss-ai-news --category ai backfill --target ai --date-from 2026-05-01 \
 
 调用 `feed_entry_repo.reset_failed_in_window(...)`：
 
-- 范围：`created_at >= date_from` 且 `< date_to`（两者均为该日 00:00 UTC，左闭右开，**不含**
-  `date_to` 当天；CLI help 写"含"，登记为 D-008）且当前 state = `failed`（`fallback_persisted` 不重置）
+- 范围：`created_at >= date_from 00:00 UTC` 且 `< date_to 次日 00:00 UTC`（两端日期都**含**，按 UTC 日历日）
+  且当前 state = `failed`（`fallback_persisted` 不重置）
 - 动作：state 重置回 `PendingFetch`，清理 `lease_*` 与 `attempt_count`
 - 不动 `Persisted` 行（已成功的不重做）
 - 不写新 `articles`/`raw_artifacts`
@@ -141,7 +141,7 @@ rss-ai-news --category ai backfill --target ai --date-from 2026-05-01 \
 2. **prompt 版本行**：`rule_versions.get_or_create(kind='prompt', tag, description, sha)`。tag 默认
    `backfill-<unix-ts>`；sha 由所选分类的生效模板（省略 / 空串 = 内置默认模板）派生，不含 model。
    已有 active 的 `prompt` 行时新行为 `pending`，backfill 不激活它；同 tag 已存在则复用。
-3. **扫描**：窗内（`created_at`，与 §5.1 相同的左闭右开 UTC 窗口）全部非 `retired` article，
+3. **扫描**：窗内（`created_at`，与 §5.1 相同的 UTC 日历日窗口，两端日期都含）全部非 `retired` article，
    按 id 分页；**不按分类过滤**。
 4. **插入**：每篇插入 `pending` 的 `article_ai_results`（新 prompt_version、当前 v1 schema、
    `model_id = --model` 或全局 `[ai].model`）；`(article_id, prompt_version, output_schema_version, model_id)`

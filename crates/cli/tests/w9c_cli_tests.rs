@@ -3,7 +3,7 @@ use rss_ai_news_cli::{
     args::{Cli, Command},
     commands::{
         ai_run::AiRunCommandSummary,
-        backfill::{BackfillCommandSummary, parse_date_start, sha256_hex},
+        backfill::{BackfillCommandSummary, parse_date_start, parse_date_to, sha256_hex},
         migrate::MigrateCommandSummary,
         publish::{PublishCommandSummary, PublishStageOutcome, StageVerdict},
         publish_all::{PublishAllCategorySummary, PublishAllCommandSummary},
@@ -253,6 +253,19 @@ fn run_summary_serializes_nested_publish() {
 #[test]
 fn parse_date_start_accepts_yyyy_mm_dd() {
     assert!(parse_date_start(Some("2026-05-01")).unwrap().is_some());
+}
+
+#[test]
+fn parse_date_to_is_the_next_midnight_so_the_named_day_is_included() {
+    // The window is `created_at >= date_from AND created_at < date_to`; the
+    // upper bound must therefore be the day after `--date-to` (D-008).
+    let next = |day| parse_date_start(Some(day)).unwrap();
+    assert_eq!(parse_date_to(Some("2026-05-01")).unwrap(), next("2026-05-02"));
+    assert_eq!(parse_date_to(Some("2026-02-28")).unwrap(), next("2026-03-01"));
+    assert_eq!(parse_date_to(Some("2026-12-31")).unwrap(), next("2027-01-01"));
+    assert!(parse_date_to(None).unwrap().is_none());
+    assert!(parse_date_to(Some("2026-13-01")).is_err());
+    assert!(parse_date_to(Some("9999-12-31")).is_err());
 }
 
 #[test]

@@ -74,7 +74,7 @@ pub async fn run(cli: &Cli, args: &BackfillArgs) -> Result<BackfillCommandSummar
     let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let date_from = parse_date_start(args.date_from.as_deref())?;
-    let date_to = parse_date_start(args.date_to.as_deref())?;
+    let date_to = parse_date_to(args.date_to.as_deref())?;
     // W14-B：backfill 只播种 pending AI 行（model 取全局 [ai].model 做行身份），
     // 不调用 AI client——凭证由后续 ai-run 按板块解析，此处无需传入。
     let pool = open_write_storage(&loaded).await?;
@@ -207,6 +207,20 @@ pub fn parse_date_start(value: Option<&str>) -> Result<Option<OffsetDateTime>, C
     let date = Date::from_calendar_date(year, month, day).map_err(|_| invalid_date(value))?;
     Ok(Some(
         PrimitiveDateTime::new(date, Time::MIDNIGHT).assume_utc(),
+    ))
+}
+
+/// `--date-to` is inclusive: the window's exclusive upper bound is 00:00 UTC
+/// of the following day, so the whole named day is covered.
+pub fn parse_date_to(value: Option<&str>) -> Result<Option<OffsetDateTime>, CliError> {
+    let Some(start) = parse_date_start(value)? else {
+        return Ok(None);
+    };
+    let next_day = start.date().next_day().ok_or_else(|| {
+        invalid_date(value.expect("parse_date_start returned Some only for Some input"))
+    })?;
+    Ok(Some(
+        PrimitiveDateTime::new(next_day, Time::MIDNIGHT).assume_utc(),
     ))
 }
 

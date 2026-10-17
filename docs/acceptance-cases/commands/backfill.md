@@ -3,7 +3,7 @@
 ## 功能描述
 
 按时间窗 + 目标段重做线上业务：
-- `--target extract`：把窗内（UTC，左闭右开，不含 `--date-to` 当天）`Failed` 的 `FeedEntry` 重置回 `PendingFetch`（`FallbackPersisted` 不重置），
+- `--target extract`：把窗内（UTC 日历日，`--date-from` 与 `--date-to` 当天都含）`Failed` 的 `FeedEntry` 重置回 `PendingFetch`（`FallbackPersisted` 不重置），
   等待下一次 ingest / extract 重做
 - `--target ai`：`get_or_create` 一行 `rule_versions(kind='prompt')`（已有 active 时为 `pending`，不激活），
   对窗内全部非 retired article 批量插入新 prompt_version 的 `Pending` ai_result（不动旧 ai_result）；
@@ -36,6 +36,7 @@
 
 | 测试名 | 路径 | 覆盖标准 |
 |---|---|---|
+| `parse_date_to_is_the_next_midnight_so_the_named_day_is_included` | `crates/cli/tests/w9c_cli_tests.rs` | `--date-to` 含当天（上界为次日 00:00 UTC） |
 | `args_parsing_parses_backfill_with_target_extract` | `crates/cli/tests/args_parsing_tests.rs` | flag 解析 |
 | `args_parsing_backfill_accepts_version_override_fields` | 同上 | prompt 覆盖字段 |
 | `args_parsing_backfill_version_override_fields_default_to_none` | 同上 | 默认值 |
