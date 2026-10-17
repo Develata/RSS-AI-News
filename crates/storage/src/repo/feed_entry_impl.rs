@@ -451,15 +451,15 @@ async fn sqlite_reset_failed_in_window(
     filter: &ResetFailedFilter,
 ) -> Result<ResetFailedOutcome, StorageError> {
     let examined = sqlx::query_scalar::<_, i64>(COUNT_FEED_ENTRIES_IN_WINDOW_SQLITE_SQL)
-        .bind(filter.date_from)
-        .bind(filter.date_to)
+        .bind(filter.date_from.map(super::sqlite_utc_seconds))
+        .bind(filter.date_to.map(super::sqlite_utc_seconds))
         .fetch_one(pool)
         .await
         .map_err(StorageError::from)?;
 
     let result = sqlx::query(RESET_FAILED_IN_WINDOW_SQLITE_SQL)
-        .bind(filter.date_from)
-        .bind(filter.date_to)
+        .bind(filter.date_from.map(super::sqlite_utc_seconds))
+        .bind(filter.date_to.map(super::sqlite_utc_seconds))
         .bind(OffsetDateTime::now_utc())
         .execute(pool)
         .await

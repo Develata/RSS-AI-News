@@ -180,15 +180,15 @@ ORDER BY id ASC
 LIMIT $4
 "#;
 
-// SQLite TEXT `created_at` (CURRENT_TIMESTAMP) vs RFC3339 bounds: compare via
-// `datetime()`, see `feed_entry_sql.rs`. PostgreSQL keeps the shared SQL.
+// SQLite TEXT `created_at`: compare normalised UTC text, see `feed_entry_sql.rs`
+// and `super::sqlite_utc_seconds`. PostgreSQL keeps the shared SQL.
 const LIST_ARTICLES_IN_WINDOW_FOR_BACKFILL_SQLITE_SQL: &str = r#"
 SELECT id AS article_id, state
 FROM articles
 WHERE state <> 'retired'
   AND id > $1
-  AND ($2 IS NULL OR datetime(created_at) >= datetime($2))
-  AND ($3 IS NULL OR datetime(created_at) < datetime($3))
+  AND ($2 IS NULL OR replace(substr(created_at, 1, 19), 'T', ' ') >= $2)
+  AND ($3 IS NULL OR replace(substr(created_at, 1, 19), 'T', ' ') < $3)
 ORDER BY id ASC
 LIMIT $4
 "#;
@@ -415,8 +415,8 @@ async fn sqlite_list_in_window_for_backfill(
         LIST_ARTICLES_IN_WINDOW_FOR_BACKFILL_SQLITE_SQL,
     )
     .bind(after_id)
-    .bind(date_from)
-    .bind(date_to)
+    .bind(date_from.map(super::sqlite_utc_seconds))
+    .bind(date_to.map(super::sqlite_utc_seconds))
     .bind(i64::from(batch_size))
     .fetch_all(pool)
     .await

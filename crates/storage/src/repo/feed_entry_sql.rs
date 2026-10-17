@@ -277,14 +277,14 @@ WHERE state = 'failed'
 "#;
 
 // SQLite stores `created_at` as TEXT: rows get `CURRENT_TIMESTAMP`
-// (`YYYY-MM-DD HH:MM:SS`) while bound `OffsetDateTime` bounds are RFC3339, so a
-// plain comparison is textual (`' ' < 'T'`) and shifts the window by a day.
-// `datetime()` normalises both sides to the same UTC text first. PostgreSQL's
-// TIMESTAMPTZ compares instants and keeps the shared SQL.
+// (`YYYY-MM-DD HH:MM:SS`) while sqlx writes RFC3339, so a plain comparison is
+// textual (`' ' < 'T'`) and shifts the window by a day. Both sides are mapped to
+// UTC whole-second `YYYY-MM-DD HH:MM:SS` text (bounds via
+// `super::sqlite_utc_seconds`). PostgreSQL's TIMESTAMPTZ keeps the shared SQL.
 pub(super) const COUNT_FEED_ENTRIES_IN_WINDOW_SQLITE_SQL: &str = r#"
 SELECT COUNT(*) FROM feed_entries
-WHERE ($1 IS NULL OR datetime(created_at) >= datetime($1))
-  AND ($2 IS NULL OR datetime(created_at) < datetime($2))
+WHERE ($1 IS NULL OR replace(substr(created_at, 1, 19), 'T', ' ') >= $1)
+  AND ($2 IS NULL OR replace(substr(created_at, 1, 19), 'T', ' ') < $2)
 "#;
 
 pub(super) const RESET_FAILED_IN_WINDOW_SQLITE_SQL: &str = r#"
@@ -297,8 +297,8 @@ SET state = 'pending_fetch',
     lease_expires_at = NULL,
     updated_at = $3
 WHERE state = 'failed'
-  AND ($1 IS NULL OR datetime(created_at) >= datetime($1))
-  AND ($2 IS NULL OR datetime(created_at) < datetime($2))
+  AND ($1 IS NULL OR replace(substr(created_at, 1, 19), 'T', ' ') >= $1)
+  AND ($2 IS NULL OR replace(substr(created_at, 1, 19), 'T', ' ') < $2)
 "#;
 
 pub(super) const LIST_FOR_LINK_HASH_REINDEX_SQL: &str = r#"

@@ -110,15 +110,22 @@ async fn reset_failed_honors_window() {
 }
 
 /// Production rows never set `created_at`: SQLite fills it with
-/// `CURRENT_TIMESTAMP` (`YYYY-MM-DD HH:MM:SS`, UTC), while bound
-/// `OffsetDateTime` bounds use RFC3339. The window must compare the instants,
-/// not the text (D-008: `--date-from 2026-05-01 --date-to 2026-05-01`).
-const WINDOW_CASES: [(&str, bool); 6] = [
+/// `CURRENT_TIMESTAMP` (`YYYY-MM-DD HH:MM:SS`, UTC), while sqlx writes
+/// `OffsetDateTime` as RFC3339 with nanoseconds. The window must compare the
+/// instants, not the text (D-008: `--date-from 2026-05-01 --date-to 2026-05-01`),
+/// and must not use SQLite 3.46 `datetime()`, which turns
+/// `2026-04-30T23:59:59.999999+00:00` into `2026-05-01 23:59:59`.
+const WINDOW_CASES: [(&str, bool); 11] = [
     ("2026-04-30 23:59:59", false),
+    ("2026-04-30T23:59:59.999999+00:00", false),
+    ("2026-04-30T23:59:59.999999999Z", false),
     ("2026-05-01 00:00:00", true),
+    ("2026-05-01T00:00:00.000000001Z", true),
     ("2026-05-01 12:00:00", true),
     ("2026-05-01 23:59:59", true),
+    ("2026-05-01T23:59:59.999999999Z", true),
     ("2026-05-02 00:00:00", false),
+    ("2026-05-02T00:00:00Z", false),
     ("2026-05-02 12:00:00", false),
 ];
 
