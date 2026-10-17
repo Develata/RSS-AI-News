@@ -9,9 +9,7 @@ pub mod pool;
 pub mod repo;
 
 pub use error::{StorageError, classify_db_error};
-pub use lease::{
-    ClaimRequest, ReleaseFailureOutcome, ReleaseOutcome, build_owner_id, lease_expires_at,
-};
+pub use lease::{ClaimRequest, ReleaseFailureOutcome, build_owner_id, lease_expires_at};
 pub use migrate::{
     applied_migration_versions, embedded_migration_versions, ensure_migration_state_exact,
     pending_migration_versions, run_migrations,

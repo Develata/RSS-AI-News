@@ -33,13 +33,6 @@ pub struct ClaimRequest {
     pub max_attempts: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReleaseOutcome {
-    Success,
-    RetryableFailure { error: String, kind: String },
-    PermanentFailure { error: String, kind: String },
-}
-
 /// W15 §3：retryable 失败 release 的折叠结果。
 ///
 /// release SQL 内按 `attempt_count >= max_attempts` 折叠（CASE）：耗尽 → 终态，

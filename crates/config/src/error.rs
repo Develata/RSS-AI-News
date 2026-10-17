@@ -14,14 +14,8 @@ pub enum ConfigError {
     #[error("config validation failed:\n{report}")]
     ValidationFailed { report: DiagnosticReport },
 
-    #[error("config version mismatch: expected {expected}, got {got}")]
-    VersionMismatch { expected: String, got: String },
-
     #[error("ai-run cannot be used when app.ai.enabled=false")]
     AiRunWhileDisabled,
-
-    #[error("missing GitHub credentials for remote publish")]
-    MissingGithubCredentials,
 }
 
 impl ConfigError {

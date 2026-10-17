@@ -2810,7 +2810,6 @@ dependencies = [
 name = "rss-ai-news-config"
 version = "0.9.1"
 dependencies = [
- "async-trait",
  "dotenvy",
  "rss-ai-news-domain",
  "serde",
@@ -2818,7 +2817,6 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "toml",
- "tracing",
  "url",
 ]
 
@@ -2907,17 +2905,14 @@ dependencies = [
 name = "rss-ai-news-report"
 version = "0.9.1"
 dependencies = [
- "async-trait",
  "regex",
  "rss-ai-news-domain",
  "rss-ai-news-storage",
- "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.21",
  "time",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2962,7 +2957,6 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "tokio",
- "tracing",
  "ulid",
 ]
 
