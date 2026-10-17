@@ -3,7 +3,8 @@
 - 日期：2026-10-17
 - 状态：`proposed`
 - 决策者：Develata（方向已定：两个 provider、问题按板块配置、shadow 走独立 `decision-run`）；细节待本 ADR 批准
-- 评审：Codex（gpt-6-astra，medium）对首稿提出 3 项 BLOCKER、9 项 SHOULD_FIX，均已对照源码核实并在本稿处理
+- 评审：Codex（gpt-6-astra，medium）两轮。首稿 3 项 BLOCKER、9 项 SHOULD_FIX；二稿 1 项 BLOCKER（置信度复算与 Jev 官方示例不兼容）、
+  5 项 SHOULD_FIX。均已对照源码与官方示例核实，并在本稿处理
 
 ## Context
 
@@ -26,7 +27,7 @@
 - laya-server `434e9b3` 的 `backend/server/{schemas,main,laya_adapter}.py`；
 - 上游 Laya `6d942c9` 的 `laya/{agent,common,confidence,router}.py`。
 
-| 维度 | Jev（托管） | laya-server v0.1.2（自部署） |
+| 维度 | Jev（托管，文档 2026-10-17） | laya-server `434e9b3` + Laya `6d942c9`（用户所称 v0.1.2；实际部署镜像与权重未核实） |
 |---|---|---|
 | 鉴权 | `Authorization: Bearer` | `Authorization: Bearer`（服务端签发 key） |
 | `model` | 必填；版本号 `jev-1.13.0` / `jev-1.14.0`，别名 `jev-latest` / `jev-preview` 会移动 | 服务端接受 `auto` / `english` / `multilingual` / `typed-decisions`；multilingual-only 镜像只接受 `auto` / `multilingual`（否则 422 `MODEL_NOT_AVAILABLE`）；`auto` 在非 multilingual-only 部署中**按输入语言选检查点** |
@@ -37,7 +38,7 @@
 | 问题数 | 无独立数量上限（受 token 预算约束） | 1..=50 |
 | 长度 | 默认 64k token / 请求，**且** 32k token / 单题（state + 该题）；超出 400 `max_tokens_exceeded`；`TypeSafe-Danger-Zone-Long-Context` 头可提至 262k（本项目不用） | `max_len` 是**每道题**的编码序列预算（512..=8192）；不传时取检查点配置（代码兜底 512）；state 超出部分被截断（`usage.truncated`、`state_tokens_dropped`）；选项超出 head 预算时塌缩为不可区分（`usage.options`）；选项标记完全放不下时抛异常，服务端返回 503 |
 | noul 答案 | `noul`（是的概率），**无** `confidence` | `noul`、`confidence` = max(p,1−p)、`answer_confidence` |
-| choice / score 的 `confidence` | choice：`(n·p_max−1)/(n−1)`；score：`max(0, 1 − Σpᵢ·\|i−m\| / MAD_unif)`（相对众数的加权绝对距离，按均匀分布基准归一化） | 1 − 归一化熵 |
+| choice / score 的 `confidence` | choice：`(n·p_max−1)/(n−1)`；score：`max(0, 1 − Σpᵢ·\|i−m\| / D_n)`，m 为首个最大概率档位，`D_n = (1/n)·Σ\|i−(n−1)/2\|`；返回值精度未写明（官方示例与公式复算相差 0.005） | 1 − 归一化熵（由舍入前概率计算后再四舍五入到 4 位） |
 | `answer_confidence` | 无 | `max(p)`；上游注明出厂检查点过度自信，multilingual **未拟合温度**，**不是**已校准概率 |
 | 顶层 `model` | 实际回答的版本号，如 `jev-1.13.0` | 恒为 `laya-rl-agent`；实际检查点名在 `routing.model`（检查点名不是权重 revision） |
 | 错误 | 400 / 401 / 413 / 415 / 422 / 429 / 529；错误体为"描述原因的 JSON"，结构未写明 | 401 / 422（`{"detail":{"code":…}}`，校验失败固定 `VALIDATION_ERROR`）/ 503（推理异常——含输入导致的确定性失败——以及用量写库失败均为 503）；其它异常可能为 500 |
@@ -93,14 +94,15 @@ pub trait DecisionClient: Send + Sync {
 - **公共**：
   - 问题 id 唯一、非空、只含 `[a-z0-9_]`，用中性命名（如 `q_marketing`）；
   - instructions trim 后非空；
-  - choice 至少 2 个选项：这是本项目的限制，Jev 允许 1 个；
+  - choice 2..=20 个选项：项目限制。Jev 允许 1..=255；Laya 约 20 个选项后会超出 head 预算而塌缩，
+    上限 20 同时让概率容差保持有意义；
   - label 与 level 都 trim 后判空、判重。
 - **Jev**：
   - `model` 必填；使用别名时 validate-config 给 warning（答案会随别名移动）；
   - choice ≤ 255；score 档位 2..=10；不发 `max_len`。
 - **Laya**：
   - `model` 只允许**显式检查点名**（`multilingual` / `english` / `typed-decisions`），**不允许 `auto`**。
-    `auto` 在非 multilingual-only 部署中按输入语言选检查点，违反 non-goals §5.2。Phase A 默认 `multilingual`。
+    `auto` 在非 multilingual-only 部署中按输入语言选检查点，违反 non-goals §5.2。示例配置用 `multilingual`。
   - instructions trim 后 ≤ 2000 个 Unicode 字符（与 Python `str` 长度一致，不是字节）；
   - choice / score 2..=50；问题数 1..=50；
   - **总是显式发送** `max_len`（512..=8192，不依赖服务端缺省）；请求体只含允许的四个字段。
@@ -116,18 +118,24 @@ pub trait DecisionClient: Send + Sync {
   - JSON 对象的**重复键直接拒绝**：自定义反序列化，不先装进普通 map；
   - 键集合与问题 id 完全相等；
   - 每个答案的 `type` 与问题类型一致。
-- **分布**：
-  - 所有概率为有限值且在 [0,1] 内；键集合精确匹配（choice 为选项 label；score 为 `"0"..="n-1"`），同样拒绝重复键；
-  - 概率和在 1 ± (n·5e-5 + 1e-6) 以内：容差覆盖 4 位小数舍入（Laya 源码确认四舍五入到 4 位）；Jev 的精度未见文档，
-    该界对更细的精度同样成立，不写死"4 位"。
-- **一致性**（在同一容差内）：
-  - choice 的 `label` 必须是概率 argmax 之一，并列时任一最大项都合法；
-  - score 的 `expected` 必须满足 |expected − Σi·pᵢ| ≤ (n−1)·n·5e-5 + 1e-6；
-  - noul 的 `p_yes` ∈ [0,1]。
-- **置信度**：
-  - 能由分布算出的都复算并比对，容差 1e-3 + 舍入界：Jev 的 choice / score 公式，Laya 的 noul `confidence` = max(p,1−p)、
-    choice / score 的熵公式、`answer_confidence` = max(p)；
-  - 不一致即拒绝。
+- **取值域（独立于一致性检查，类型不变量）**：
+  - 所有概率、`p_yes`、置信度均为有限值且 ∈ [0,1]；score 的 `expected` 为有限值且 ∈ [0, n−1]。
+  - 必需字段：Jev 的 choice / score 必须有 `confidence`；Laya 三种题型必须有 `confidence` 与 `answer_confidence`。
+    归一化 DTO 中的 `Option` 只表示"该 provider 不适用"，不放宽线格式必填。
+- **分布**：键集合精确匹配（choice 为选项 label；score 为 `"0"..="n-1"`），拒绝重复键。
+- **一致性**（容差取决于 provider 的返回精度 ε，即半个末位单位）：
+  - ε_Laya = 5e-5（源码确认四舍五入到 4 位）。
+  - ε_Jev 暂取 5e-3，与官方示例的 2 位小数一致；Phase A 的真机探针会记录实测精度，再据此收紧并写回本节。
+    确认之前不会用更严的界拒绝 Jev 响应。
+  - 概率和：|Σpᵢ − 1| ≤ n·ε + 1e-6。
+  - choice：`label` 必须是概率 argmax 之一（并列时任一最大项都合法）。舍入单调不减，真实 argmax 舍入后仍是最大项之一，
+    所以这条与精度无关。
+  - score：|expected − Σi·pᵢ| ≤ ε·(n(n−1)/2 + 1) + 1e-6。
+- **置信度复算**：只对可由返回分布精确推导、且误差界已证明的量做：
+  - Laya noul：|confidence − max(p_yes, 1−p_yes)| ≤ 2ε；
+  - Laya 三种题型：|answer_confidence − max(p)| ≤ 2ε（max 为 1-Lipschitz）。
+  - Jev 的 choice / score `confidence`（精度未知，score 的众数在并列附近会跳变）与 Laya 的熵 `confidence`
+    （非线性，50 个选项时合法响应的复算偏差可达约 0.007）**不复算**，只做取值域与必填检查，原值保存为 provider 统计量。
 - **Laya 输入保真**：
   - `usage.options` 中任一问题 `distinct < total`（选项塌缩为不可区分）→ 拒绝该响应，`InvalidResponse { reason: option_collapse }`；
   - state 截断不拒绝，但必须如实记录。
@@ -165,10 +173,10 @@ enabled = false
 provider = "laya"                      # 有此段即必填："laya" | "jev"
 base_url = "http://laya.internal:8080" # enabled = true 时必填；Jev: https://api.typesafe.ai
 api_key_env = "LAYA_API_KEY"           # enabled = true 时必填；只存 env 变量名，key 不进 toml
-model = "multilingual"                 # enabled = true 时必填；Laya: multilingual|english|typed-decisions；Jev: jev-1.13.0
-request_timeout_seconds = 10           # 1..=60
-max_state_chars = 6000                 # 1..=200000
-laya_max_len = 2048                    # 仅 Laya，512..=8192；provider = "jev" 时设置即 warning（不生效）
+model = "multilingual"                 # enabled = true 时必填，无内置缺省；Laya: multilingual|english|typed-decisions；Jev: jev-1.13.0
+request_timeout_seconds = 10           # 缺省 10，1..=60
+max_state_chars = 6000                 # 缺省 6000，1..=200000
+laya_max_len = 2048                    # 仅 Laya；缺省 2048，512..=8192；provider = "jev" 时设置即 warning（不生效）
 
 # categories/<key>.toml —— 可省略；省略或空列表 = 该板块不做 typed-decision
 [[category.decision.questions]]
@@ -195,14 +203,20 @@ options = [{ label = "release", description = "新模型或新版本发布" },
   与手写的 `Deserialize` 转换，并为旧配置、缺段、空段、关闭、有问题无全局段分别写测试。
 - 不含 `concurrency`：并发属于 Phase B，届时需说明与 non-goals §1.2 的关系（单实例内的有界并发，同 extract / ai-run）。
 - **validate-config 规则**：
-  - 有 `[decision]` 段：按 `provider` 对应的 profile 校验每个板块的问题，enabled = false 也校验，不碰网络；
+  - 空问题列表表示该板块不调用，跳过问题数下限检查；
+  - 有 `[decision]` 段：按 `provider` 对应的 profile 校验每个非空板块的问题，enabled = false 也校验，不碰网络；
   - 无 `[decision]` 段：只做公共校验；
   - 板块写了问题、但 `[decision]` 缺失或 enabled = false：非致命 warning（code `decision_inert`，带 `category`）；
   - Jev 用别名、或 provider = jev 却设了 `laya_max_len`：warning。
 - **"关闭时不访问新凭据"的精确定义**：
-  - 现有 loader 启动时会把整个 `.env` 读入内存，这对所有键一直如此，不是本特性引入的。
-  - 本特性保证：`enabled = false` 时 `api_key_env` 指向的变量**不被解析、不被检查、不被使用**，不构造 client，也不建立任何连接。
-  - `enabled = true` 时只检查该变量是否存在且非空，解析顺序沿用现有规则（进程环境优先，`.env` 后备，空白视为缺失），不回显其值。
+  - 现有 loader 在读 `app.toml` 之前就会用 `dotenvy::from_path_iter` 逐项解析整个 `.env`，任一条目语法错误都会使加载失败。
+    这对所有键一直如此，本特性不改变它。
+  - 本特性保证：`enabled = false` 时，不会因 decision 额外调用 `resolve_secret`、检查凭据是否存在或使用凭据；
+    不构造 client，也不建立任何连接。
+  - `enabled = true` 时，凭据检查受现有的 `enforce_env_checks` 控制（`load_skip_env_checks` 路径照旧跳过）。
+    Phase A 中只有 validate-config 会触发该检查。
+  - 检查沿用 `resolve_secret` 的现有语义：进程环境里有这个变量就用它，即使值为空白也不再回退到 `.env`；
+    最终值为空白视为缺失。只报变量名，不回显其值。
 - **`policy_version`**：对规范化 JSON 的 UTF-8 字节取 SHA-256，输出 64 位小写 hex。规范化规则：
   - 先对所有字符串 trim；
   - 对象键按字典序排列，数组保持配置顺序，无空白；转义用 serde_json 的紧凑输出；
