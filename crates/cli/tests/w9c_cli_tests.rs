@@ -283,6 +283,23 @@ fn parse_date_start_accepts_none() {
 }
 
 #[test]
+fn parse_date_start_rejects_non_canonical_formats() {
+    for value in [
+        "2026-5-1",
+        "2026-05-1",
+        "2026-+5-01",
+        "+026-05-01",
+        " 2026-05-01",
+        "2026-05-01 ",
+        "2026/05/01",
+        "2026-05-01T00:00",
+    ] {
+        assert!(parse_date_start(Some(value)).is_err(), "{value}");
+        assert!(parse_date_to(Some(value)).is_err(), "{value}");
+    }
+}
+
+#[test]
 fn parse_date_start_rejects_bad_month() {
     assert!(parse_date_start(Some("2026-99-01")).is_err());
 }

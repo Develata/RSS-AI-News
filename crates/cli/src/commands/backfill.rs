@@ -193,6 +193,17 @@ pub fn parse_date_start(value: Option<&str>) -> Result<Option<OffsetDateTime>, C
     let Some(value) = value else {
         return Ok(None);
     };
+    // Exactly `YYYY-MM-DD`: integer parsing alone would also take `2026-5-1`
+    // or `2026-+05-01`.
+    let bytes = value.as_bytes();
+    let well_formed = bytes.len() == 10
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            4 | 7 => *byte == b'-',
+            _ => byte.is_ascii_digit(),
+        });
+    if !well_formed {
+        return Err(invalid_date(value));
+    }
     let mut parts = value.split('-');
     let year = parts.next().and_then(|v| v.parse::<i32>().ok());
     let month = parts.next().and_then(|v| v.parse::<u8>().ok());
