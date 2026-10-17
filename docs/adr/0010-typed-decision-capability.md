@@ -1,8 +1,9 @@
 # ADR 0010: typed-decision 能力（Jev / Laya）—— 独立能力层与分阶段接入
 
 - 日期：2026-10-17
-- 状态：`proposed`
-- 决策者：Develata（方向已定：两个 provider、问题按板块配置、shadow 走独立 `decision-run`）；细节待本 ADR 批准
+- 状态：`accepted`（Phase A 范围，2026-10-17）
+- 决策者：Develata。已定：两个 provider、问题按板块配置、shadow 走独立 `decision-run`、Jev 固定 `jev-1.13.0`、
+  `laya_max_len` 缺省 2048；附加要求：**整个功能要可干净移除**（见 §1）
 - 评审：Codex（gpt-6-astra，medium）两轮。首稿 3 项 BLOCKER、9 项 SHOULD_FIX；二稿 1 项 BLOCKER（置信度复算与 Jev 官方示例不兼容）、
   5 项 SHOULD_FIX。均已对照源码与官方示例核实，并在本稿处理
 
@@ -47,15 +48,32 @@
 
 ## Decision
 
-### 1. 骨架位置
+### 1. 骨架位置与可移除性
 
-- 新增**能力层** crate `crates/decision`（`rss-ai-news-decision`），与 `crates/ai` 平级，只依赖 domain。
-- 归一化类型与**纯数据校验**放进 domain（`dto::decision`）：问题规格、provider 限制
-  （`ProviderLimits::validate_questions`）、规范化与 `policy_version`。
-  config 与 decision 都调用 domain 的同一份实现，config 不依赖 decision crate。
-- provider 线格式 DTO、HTTP、响应校验留在 decision crate 内部，不外泄。
-- `read_limited_body` 与 key 脱敏两个小函数在 decision crate 内复制一份，并注明出处
-  `crates/ai/src/client.rs`；不为约 40 行代码耦合 ai crate。
+用户要求：这部分以后若不再需要，应能整体删除，不在其它 crate 留下语义残留。因此：
+
+- **全部实现放在一个能力层 crate `crates/decision`**（`rss-ai-news-decision`），与 `crates/ai` 平级，
+  只依赖 domain 已有的 `SecretString` / `ClassifiedError`，**不修改 domain**。
+  crate 内包含：
+  - 归一化类型；
+  - 配置段的解析与校验；
+  - provider 限制与 `policy_version`；
+  - HTTP client、响应校验、错误。
+- **每个 provider 单独一个子模块**（`provider/jev.rs`、`provider/laya.rs`），负责各自的线格式编解码、限制、精度
+  与必填字段。删掉一个 provider，就是删掉它的模块和 `Provider` 枚举的一个变体。
+- **其它 crate 只有两处入口**：
+  - config：`AppConfig.decision` 与板块的 `decision` 为 `Option<toml::Value>`，原样透传、不解析语义。
+    config 现在本就不拒绝未知字段，旧配置不受影响。
+  - cli：validate-config 在出现这些段时，调用 decision crate 的校验，把结果并入现有的 warning / diagnostic 输出。
+    凭据检查只向 decision 传一个"变量是否存在"的闭包，密钥值不进入 decision 的校验。
+- **整体移除**：
+  1. 删 `crates/decision` 与 workspace 成员；
+  2. 删两个透传字段（不删也无害，只是不再被读取）；
+  3. 删 validate-config 中的调用；
+  4. 删本 ADR 对应的 plan/18 与配置文档段。
+
+  没有数据库表与迁移。Phase B 的表须同样可经新增迁移删除，并在 Phase B ADR 中给出删除步骤。
+- `read_limited_body` 与 key 脱敏两个小函数在 decision crate 内复制一份，并注明出处 `crates/ai/src/client.rs`。
 - 不改 `crates/ai`、不改 ai-run / publish 流程、不改现有表、不加 CLI 子命令。
 
 ### 2. 接口与归一化类型
@@ -89,7 +107,7 @@ pub trait DecisionClient: Send + Sync {
   - `spread_confidence: Option<{ kind: JevChoice | JevScore | LayaEntropy, value }>`：只用于 choice / score；noul 两家都取 None，可由 `p_yes` 推出。
   - `top_probability: Option<f64>`：取 Laya 的 `answer_confidence`，即 `max(p)`。**命名刻意不叫 calibrated**：它未经本项目数据校准，阈值必须在 Phase C 用留出数据重新拟合。
 
-### 3. provider profile（请求前校验，在 domain 内实现）
+### 3. provider profile（请求前校验，在 decision crate 内实现）
 
 - **公共**：
   - 问题 id 唯一、非空、只含 `[a-z0-9_]`，用中性命名（如 `q_marketing`）；
@@ -199,8 +217,10 @@ options = [{ label = "release", description = "新模型或新版本发布" },
            { label = "other" }]
 ```
 
-- `[decision]` 用 `Option<DecisionConfig>` 表示，以区分"缺段"与"有段但关闭"；板块问题同时加入 `RawCategorySection`
-  与手写的 `Deserialize` 转换，并为旧配置、缺段、空段、关闭、有问题无全局段分别写测试。
+- config 侧只透传：`[decision]` 与 `[category.decision]` 各为 `Option<toml::Value>`。
+  - 板块的透传字段同时加入 `RawCategorySection` 与手写的 `Deserialize` 转换。
+  - decision crate 把 `None` 与"有段但关闭"区分开，并负责全部语义。
+  - 为旧配置、缺段、空段、关闭、有问题无全局段分别写测试。
 - 不含 `concurrency`：并发属于 Phase B，届时需说明与 non-goals §1.2 的关系（单实例内的有界并发，同 extract / ai-run）。
 - **validate-config 规则**：
   - 空问题列表表示该板块不调用，跳过问题数下限检查；
@@ -215,6 +235,7 @@ options = [{ label = "release", description = "新模型或新版本发布" },
     不构造 client，也不建立任何连接。
   - `enabled = true` 时，凭据检查受现有的 `enforce_env_checks` 控制（`load_skip_env_checks` 路径照旧跳过）。
     Phase A 中只有 validate-config 会触发该检查。
+    Jev 固定版本 `jev-1.13.0`（用户决定）。
   - 检查沿用 `resolve_secret` 的现有语义：进程环境里有这个变量就用它，即使值为空白也不再回退到 `.env`；
     最终值为空白视为缺失。只报变量名，不回显其值。
 - **`policy_version`**：对规范化 JSON 的 UTF-8 字节取 SHA-256，输出 64 位小写 hex。规范化规则：
@@ -233,7 +254,7 @@ options = [{ label = "release", description = "新模型或新版本发布" },
 ### 7. 分阶段
 
 - **Phase A（本 ADR 批准后实施）**：
-  - 交付：decision crate（trait、SystemOne HTTP 实现、两个 profile、§4 全部响应校验、§5 错误）、domain DTO 与纯校验、
+  - 交付：decision crate（trait、SystemOne HTTP 实现、两个 profile、§4 全部响应校验、§5 错误）（含归一化类型、纯校验与配置段解析）、
     config 解析 / 校验 / warning；
   - 离线契约测试（wiremock），覆盖：
     - 请求体的确切形状：Laya 只有四个字段，且总带 `max_len`；
@@ -254,7 +275,8 @@ options = [{ label = "release", description = "新模型或新版本发布" },
 ## Consequences
 
 ### 正面后果
-- provider 差异集中在 domain 的纯校验与 decision crate 的适配中，核心层只见到通过一致性校验的类型化结果；
+- 功能整体收在 `crates/decision`，其它 crate 只有透传字段与 validate-config 调用两处入口，可整体移除；
+  provider 差异集中在各自子模块，调用方只见到通过一致性校验的类型化结果；
   新增或替换 provider 不改核心。
 - 默认关闭、Phase A 不接入流程：生产行为零变化。
 - 置信度带来源标签且不冒充"已校准"，避免把 Jev 的阈值套到 Laya 上。
