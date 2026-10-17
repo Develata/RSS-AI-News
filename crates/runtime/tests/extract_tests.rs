@@ -624,7 +624,10 @@ async fn on_failure_retention_keeps_html_when_a_strategy_is_retryable() {
             .expect("entry should be readable");
 
     assert_eq!(summary.retryable_failed, 1);
-    assert_eq!(state, "pending_fetch", "the retryable entry is queued again");
+    assert_eq!(
+        state, "pending_fetch",
+        "the retryable entry is queued again"
+    );
     assert_eq!(lease_owner, None);
     assert_eq!(artifact_count, 1);
 }
