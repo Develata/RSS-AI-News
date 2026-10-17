@@ -27,13 +27,15 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         &[],
         0,
     );
-    // Intra-doc links and HTML in docs must stay valid; RUSTDOCFLAGS only
-    // affects rustdoc, so build and Clippy caches are untouched.
+    // Intra-doc links and HTML in docs must stay valid. Cargo prefers
+    // CARGO_ENCODED_RUSTDOCFLAGS over RUSTDOCFLAGS, so set the former: an
+    // inherited value such as `-Awarnings` cannot weaken the gate. Rustdoc
+    // flags only affect rustdoc, so build and Clippy caches are untouched.
     executor.command(
         "rustdoc",
         "cargo",
         &strings(["doc", "--workspace", "--no-deps", "--locked"]),
-        &[("RUSTDOCFLAGS", "-D warnings")],
+        &[("CARGO_ENCODED_RUSTDOCFLAGS", "-Dwarnings")],
         0,
     );
     executor.command(
