@@ -42,13 +42,22 @@ fi
 
 # rg 输出格式: <file>:<line>:<content>。`--no-heading` 强制启用 file 前缀，
 # `-P` 启用 PCRE 让 \s / \( 等转义生效。
+# rg 退出码 0 = 有命中、1 = 无命中；其它（如 2：PCRE2 不可用、读文件失败）是扫描失败，
+# 必须让门禁以 2 失败，不能当作"无命中"放行。
+scan() {
+    local output status=0
+    output=$(rg -nP --no-heading "$1" crates/ src/) || status=$?
+    if (( status > 1 )); then
+        echo "ERROR: rg 扫描失败（exit ${status}）：$1" >&2
+        return 2
+    fi
+    printf '%s\n' "$output"
+}
+pattern_a=$(scan 'if\s+let\s+Ok\([^)]*\)\s*=') || exit 2
+pattern_b=$(scan '\.ok\(\)\s*;\s*$') || exit 2
+
 # Windows 上 rg 用反斜杠输出路径；统一替成正斜杠让 allowlist 跨平台一致。
-matches=$(
-    {
-        rg -nP --no-heading 'if\s+let\s+Ok\([^)]*\)\s*=' crates/ src/ 2>/dev/null || true
-        rg -nP --no-heading '\.ok\(\)\s*;\s*$' crates/ src/ 2>/dev/null || true
-    } | tr '\\' '/' | sort -u
-)
+matches=$(printf '%s\n%s\n' "$pattern_a" "$pattern_b" | sed '/^$/d' | tr '\\' '/' | sort -u)
 
 # allowlist 每条格式 `<file>:<line>:<reason>`；空行 / `#` 注释跳过。
 # `cut -d: -f1,2` 提取 `file:line` 作为匹配 key。

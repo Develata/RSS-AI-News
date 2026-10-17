@@ -112,7 +112,9 @@ jobs:
           load: true
           tags: rss-ai-news:runtime
           cache-from: type=gha,scope=runtime
-          cache-to: type=gha,mode=max,scope=runtime
+          # Only main writes caches (as with rust-cache): PR / other-ref entries are
+          # unreachable from main and only consume the cache quota.
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=runtime' || '' }}
       - name: build debug image
         uses: docker/build-push-action@v7
         with:
@@ -123,7 +125,7 @@ jobs:
           load: true
           tags: rss-ai-news:debug
           cache-from: type=gha,scope=debug
-          cache-to: type=gha,mode=max,scope=debug
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=debug' || '' }}
       - name: build scheduler image
         uses: docker/build-push-action@v7
         with:
@@ -134,7 +136,7 @@ jobs:
           load: true
           tags: rss-ai-news:scheduler
           cache-from: type=gha,scope=runtime
-          cache-to: type=gha,mode=max,scope=scheduler
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=scheduler' || '' }}
       - name: smoke run --help (runtime)
         run: docker run --rm rss-ai-news:runtime --help
       - name: smoke run --help (debug)

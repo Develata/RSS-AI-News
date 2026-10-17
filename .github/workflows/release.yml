@@ -112,8 +112,9 @@ jobs:
           push: true
           tags: ${{ steps.meta-runtime.outputs.tags }}
           labels: ${{ steps.meta-runtime.outputs.labels }}
+          # Read main's cache only: a tag-scoped cache is unreachable from later
+          # tags and main, so exporting one would only cost time and quota.
           cache-from: type=gha,scope=runtime
-          cache-to: type=gha,mode=max,scope=runtime
 
       # scheduler image tag 集（runtime 镜像之上叠一层 supercronic +
       # entrypoint，用于「常驻容器内置 cron 周期触发 single-shot CLI」
@@ -141,4 +142,3 @@ jobs:
           tags: ${{ steps.meta-scheduler.outputs.tags }}
           labels: ${{ steps.meta-scheduler.outputs.labels }}
           cache-from: type=gha,scope=runtime
-          cache-to: type=gha,mode=max,scope=scheduler
