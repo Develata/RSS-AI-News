@@ -616,7 +616,16 @@ async fn on_failure_retention_keeps_html_when_a_strategy_is_retryable() {
             .await
             .expect("artifact count should be readable");
 
+    let (state, lease_owner): (String, Option<String>) =
+        sqlx::query_as("SELECT state, lease_owner FROM feed_entries WHERE id = ?")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .expect("entry should be readable");
+
     assert_eq!(summary.retryable_failed, 1);
+    assert_eq!(state, "pending_fetch", "the retryable entry is queued again");
+    assert_eq!(lease_owner, None);
     assert_eq!(artifact_count, 1);
 }
 
