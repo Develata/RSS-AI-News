@@ -38,6 +38,13 @@ impl<'a> ArtifactWriter<'a> {
         }
     }
 
+    /// `on_failure` can only be decided once the parse / extraction outcome is
+    /// known. Every other policy is decided before parsing, so the payload is
+    /// still kept if a parser panics on untrusted input.
+    pub fn waits_for_outcome(&self) -> bool {
+        self.config.retention_policy == RetentionPolicy::OnFailure
+    }
+
     /// 写入 inline artifact。详见 [`ArtifactWriter`] 文档中关于 W3-4 / F7-2
     /// 不变量的说明：`body` 必须是已 sanitize 的内容。
     pub async fn write_inline(

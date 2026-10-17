@@ -166,8 +166,10 @@ INSERT 直接写入 `feed_entries`：数据库以 `(source_id, feed_entry_uid)` 
 | policy | feed payload 行为 |
 |---|---|
 | `off` | 不写 |
-| `on_failure` | 解析前写入；解析成功后同事务清理；失败时保留 |
-| `always` | 始终写入并保留 |
+| `on_failure` | 解析后决定：仅解析失败时写入 |
+| `always` | 解析前写入并保留 |
+| `sampled` | 解析前按 `sample_rate` 抽样写入 |
+| `debug_only` | 未实现，不写（validate-config 告警） |
 
 写入路径：`crates/runtime/src/artifact.rs::ArtifactWriter`。详见 [./10-replay-and-backfill.md](./10-replay-and-backfill.md)。
 

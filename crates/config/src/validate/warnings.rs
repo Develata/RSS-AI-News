@@ -78,7 +78,7 @@ pub fn inert_config_warnings(app: &AppConfig) -> Vec<ConfigWarning> {
         (
             app.artifact.retention_policy == RetentionPolicy::DebugOnly,
             "artifact.retention_policy",
-            "debug_only is not implemented and currently writes no artifacts; use always or on_failure.",
+            "debug_only is not implemented: feed and HTML payloads are not stored (AI raw responses always are); use always or on_failure.",
         ),
         (
             app.lease.reclaim_interval_seconds != 120,

@@ -454,20 +454,16 @@ impl IngestFlow {
             config: &ctx.artifact,
             repo: ctx.artifact_repo.as_ref(),
         };
-        if artifact_writer.should_write(false) {
-            let artifact_key = task.source_id.to_string();
-            if let Err(error) = artifact_writer
-                .write_inline("feed_payload", &artifact_key, &raw_payload_bytes)
-                .await
-            {
-                tracing::warn!(
-                    source_id = task.source_id,
-                    "failed to persist feed artifact: {error}"
-                );
-            }
+        if !artifact_writer.waits_for_outcome() && artifact_writer.should_write(false) {
+            write_feed_artifact(&artifact_writer, task.source_id, &raw_payload_bytes).await;
+        }
+        let parsed = parse_feed(&raw_payload_bytes, task.feed_kind);
+        // `on_failure` keeps the payload only when it does not parse.
+        if artifact_writer.waits_for_outcome() && parsed.is_err() {
+            write_feed_artifact(&artifact_writer, task.source_id, &raw_payload_bytes).await;
         }
 
-        let entries = match parse_feed(&raw_payload_bytes, task.feed_kind) {
+        let entries = match parsed {
             Ok(entries) => entries,
             Err(error) => {
                 let message = error.display_user();
@@ -550,6 +546,15 @@ impl IngestFlow {
 
         outcome.status = IngestSourceStatus::Succeeded;
         outcome
+    }
+}
+
+async fn write_feed_artifact(writer: &ArtifactWriter<'_>, source_id: i64, payload: &[u8]) {
+    if let Err(error) = writer
+        .write_inline("feed_payload", &source_id.to_string(), payload)
+        .await
+    {
+        tracing::warn!(source_id, "failed to persist feed artifact: {error}");
     }
 }
 

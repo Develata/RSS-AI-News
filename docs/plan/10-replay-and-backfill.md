@@ -37,20 +37,21 @@
 
 入口：[`crates/runtime/src/artifact.rs::ArtifactWriter`](../../crates/runtime/src/artifact.rs)。
 
-`[artifact].retention_policy` 有五档，但当前只有 ingest / extract 的写入点受它控制
-（`ArtifactWriter::should_write(false)`），AI 路径不检查策略：
+`[artifact].retention_policy` 有五档，作用于 ingest / extract 的原文；AI 原始响应是有意的例外：
 
 | policy | `feed_payload`（ingest）/ `html_payload`（extract） | `ai_raw_response`（ai-run） |
 |---|---|---|
 | `always` | 每次抓取都写 | 每次模型尝试都写 |
-| `on_failure` | **当前不写**：设计意图"下游解析失败时回写"未实现，写入点固定传 `on_failure=false` | 同上（始终写） |
+| `on_failure` | 仅失败时写：feed 解析失败；正文无策略提取成功（retryable 错误、summary fallback 或永久失败） | 同上（始终写） |
 | `sampled` | 按 `sample_rate` 随机写 | 始终写 |
 | `debug_only` | 保留兼容值，尚未实现；不写，validate-config 会告警 | 始终写 |
 | `off` | 不写 | 始终写 |
 
-AI 原始响应无条件留档是 replay 与 `article_ai_results.raw_response_artifact_id` 的现状依赖；
-与策略语义的偏差登记为 [../map/architecture-diff.md](../map/architecture-diff.md) D-007（open），
-是否改实现待定。
+`always` / `sampled` 在解析前（ingest）或策略链前（extract）就决定并写入，解析器在不可信输入上 panic
+时原文仍在；只有 `on_failure` 等到结果出来再写（`ArtifactWriter::waits_for_outcome`）。正文提取成功
+或 fallback 时，写入的 html artifact id 记入 `articles.body_html_artifact_id`。AI 原始响应不受策略控制：replay 与
+`article_ai_results.raw_response_artifact_id` 依赖它，体积由 `ttl_days` 清理约束
+（见 [../map/architecture-diff.md](../map/architecture-diff.md) D-007）。
 
 写入位置：当前全部存入 `raw_artifacts.inline_body`（SQLite BLOB / PostgreSQL BYTEA）。
 `inline_threshold_bytes` / `file_storage_dir` 是保留字段，没有 threshold 分流或文件写入实现。

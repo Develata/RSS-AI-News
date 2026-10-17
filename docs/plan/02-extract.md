@@ -93,8 +93,8 @@ loop:
   2. 对每行：
      a. HTTP GET → raw HTML（超时/大小边界）
      b. 永久抓取失败才懒读摘要并尝试 fallback
-     c. 写入 raw_artifact（按 retention_policy）
-     d. 执行配置的提取策略
+     c. `always` / `sampled`：写入 raw_artifact
+     d. 执行配置的提取策略；`on_failure` 且无策略成功时才写 raw_artifact
      e. 策略链尝试 → ExtractedArticle 或 fallback
      f. 计算 content_hash，原子 insert-or-get
      g. 命中 → feed_entries='dedup_skipped'，关联 article_id
@@ -121,10 +121,10 @@ lease 字段约束见 [./08-state-machines.md](./08-state-machines.md) §2.3 + [
 
 依据 `config.artifact.retention_policy` 写入 `raw_artifacts` 表：
 
-- 写入时机：`fetching → extracting` transition 之前（HTML 已抓到，未解析）
-- 独立事务 commit（确保即使后续 extract 崩溃，artifact 仍在）
+- 写入时机：`always` / `sampled` 在策略链之前（HTML 已抓到，未解析），独立 commit，策略 panic 时
+  artifact 仍在；`on_failure` 在策略链结束后、仅当无策略提取成功（retryable、fallback、永久失败）时写入
 - `kind = 'html_payload'`
-- `target_id = feed_entries.id`
+- `artifact_key = feed_entries.id`（十进制字符串）
 
 详见 [./10-replay-and-backfill.md](./10-replay-and-backfill.md)。
 
@@ -133,11 +133,11 @@ lease 字段约束见 [./08-state-machines.md](./08-state-machines.md) §2.3 + [
 从 raw_artifact 重新跑策略链，对比与现有 article 的差异：
 
 ```bash
-rss-ai-news replay --kind html --target-id <feed_entry_id> --diff
+rss-ai-news replay --kind html --key <feed_entry_id> --diff
 ```
 
 流程：
-1. SELECT raw_artifacts WHERE kind='html_payload' AND target_id=?
+1. SELECT raw_artifacts WHERE kind='html_payload' AND artifact_key=?
 2. 调用 `ReadabilityStrategy.extract(payload, meta)`
 3. 与 `articles` 中现有正文 diff（按 normalized whitespace）
 4. 输出差异 + 状态报告

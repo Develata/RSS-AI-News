@@ -504,6 +504,41 @@ async fn extract_writes_html_artifact_before_strategy() {
     assert_eq!(artifact_count, 1);
 }
 
+#[tokio::test]
+async fn on_failure_retention_keeps_html_only_when_extraction_fails() {
+    // D-007: `on_failure` stores the HTML exactly when no strategy extracts the
+    // article (permanent failure or summary fallback); a success stores nothing.
+    for (strategy, expected_artifacts) in [
+        (success_strategy("content-hash-on-failure"), 0_i64),
+        (parse_failed_strategy(), 1),
+    ] {
+        let (_dir, pool) = make_test_pool().await;
+        let (_rule_id, source_id) = setup_base(&pool).await;
+        let entry_id =
+            seed_pending_fetch_entry(&pool, source_id, "uid-on-failure", "hash-on-failure", None)
+                .await;
+        let flow = flow_with_policy(
+            pool.clone(),
+            RetentionPolicy::OnFailure,
+            responses([(entry_id, Ok(raw(entry_id, b"<html>on failure</html>")))]),
+            vec![strategy],
+        );
+
+        flow.run(ExtractOptions {
+            batch_size: 1,
+            max_attempts: 5,
+            max_batches: 0,
+        })
+        .await;
+        let artifact_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM raw_artifacts WHERE kind = 'html_payload'")
+                .fetch_one(&pool)
+                .await
+                .expect("artifact count should be readable");
+        assert_eq!(artifact_count, expected_artifacts);
+    }
+}
+
 async fn setup_base(pool: &SqlitePool) -> (i64, i64) {
     let extractor_rule_id = seed_extractor_rule_version(pool).await;
     let config_id = insert_config_rule(pool).await;
@@ -522,7 +557,16 @@ fn flow(
     responses: HashMap<i64, Result<RawHtmlFetch, ExtractorError>>,
     strategies: Vec<Arc<dyn ContentStrategy>>,
 ) -> ExtractFlow {
-    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    flow_with_policy(pool, RetentionPolicy::Always, responses, strategies)
+}
+
+fn flow_with_policy(
+    pool: SqlitePool,
+    retention_policy: RetentionPolicy,
+    responses: HashMap<i64, Result<RawHtmlFetch, ExtractorError>>,
+    strategies: Vec<Arc<dyn ContentStrategy>>,
+) -> ExtractFlow {
+    let app = Arc::new(app_config(retention_policy, 1));
     let ctx = Arc::new(common::extract_deps(
         pool,
         app,

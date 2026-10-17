@@ -421,6 +421,32 @@ async fn parse_failure_keeps_artifact_marks_failed() {
 }
 
 #[tokio::test]
+async fn on_failure_retention_keeps_feed_payload_only_when_parsing_fails() {
+    // D-007: `on_failure` stores the payload exactly when the feed fails to
+    // parse; a successful parse stores nothing.
+    for (body, expected_artifacts) in [(RSS_BODY, 0_i64), (b"<<not xml>>".as_slice(), 1)] {
+        let (_dir, pool) = make_test_pool().await;
+        let config_id = insert_config_rule(&pool).await;
+        let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
+        let flow = flow(
+            pool.clone(),
+            RetentionPolicy::OnFailure,
+            1,
+            category_with_sources(&["s1"]),
+            responses([(source_id, ok_payload(source_id, body))]),
+        );
+
+        flow.run(IngestOptions::default()).await;
+        let artifact_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM raw_artifacts WHERE kind = 'feed_payload'")
+                .fetch_one(&pool)
+                .await
+                .expect("artifact count should be readable");
+        assert_eq!(artifact_count, expected_artifacts);
+    }
+}
+
+#[tokio::test]
 async fn multi_source_concurrent_within_limit() {
     let (_dir, pool) = make_test_pool_with_connections(8).await;
     let config_id = insert_config_rule(&pool).await;

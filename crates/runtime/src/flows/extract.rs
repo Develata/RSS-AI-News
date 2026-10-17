@@ -306,8 +306,21 @@ impl ExtractFlow {
         };
 
         let now = OffsetDateTime::now_utc();
-        let html_artifact_id = write_html_artifact(&ctx, claimed.id, &raw).await;
-        match run_strategy_chain(&ctx, &fetch_task, &raw) {
+        let artifact_writer = ArtifactWriter {
+            config: &ctx.artifact,
+            repo: ctx.artifact_repo.as_ref(),
+        };
+        let mut html_artifact_id = None;
+        if !artifact_writer.waits_for_outcome() && artifact_writer.should_write(false) {
+            html_artifact_id = write_html_artifact(&artifact_writer, claimed.id, &raw).await;
+        }
+        let chain = run_strategy_chain(&ctx, &fetch_task, &raw);
+        // `on_failure` keeps the HTML only when no strategy extracts the article
+        // (retryable error, summary fallback or permanent failure).
+        if artifact_writer.waits_for_outcome() && !matches!(chain, ChainResult::Extracted(_)) {
+            html_artifact_id = write_html_artifact(&artifact_writer, claimed.id, &raw).await;
+        }
+        match chain {
             ChainResult::Extracted(article) => {
                 persist_extracted(
                     &ctx,
@@ -404,27 +417,17 @@ fn run_strategy_chain(
 }
 
 async fn write_html_artifact(
-    ctx: &ExtractDeps,
+    artifact_writer: &ArtifactWriter<'_>,
     feed_entry_id: i64,
     raw: &RawHtmlFetch,
 ) -> Option<i64> {
-    let artifact_writer = ArtifactWriter {
-        config: &ctx.artifact,
-        repo: ctx.artifact_repo.as_ref(),
-    };
-    if !artifact_writer.should_write(false) {
-        return None;
-    }
     match artifact_writer
         .write_inline("html_payload", &feed_entry_id.to_string(), &raw.body_bytes)
         .await
     {
         Ok(id) => Some(id),
         Err(error) => {
-            tracing::warn!(
-                feed_entry_id,
-                "failed to persist html artifact before extract: {error}"
-            );
+            tracing::warn!(feed_entry_id, "failed to persist html artifact: {error}");
             None
         }
     }
