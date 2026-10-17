@@ -539,6 +539,123 @@ async fn on_failure_retention_keeps_html_only_when_extraction_fails() {
     }
 }
 
+#[tokio::test]
+async fn on_failure_retention_links_html_to_the_summary_fallback_article() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry_id = seed_pending_fetch_entry(
+        &pool,
+        source_id,
+        "uid-on-failure-fallback",
+        "hash-on-failure-fallback",
+        Some("<p>summary fallback body for on_failure</p>"),
+    )
+    .await;
+    let flow = flow_with_policy(
+        pool.clone(),
+        RetentionPolicy::OnFailure,
+        responses([(entry_id, Ok(raw(entry_id, b"<html>fallback</html>")))]),
+        vec![parse_failed_strategy()],
+    );
+
+    let summary = flow
+        .run(ExtractOptions {
+            batch_size: 1,
+            max_attempts: 5,
+            max_batches: 0,
+        })
+        .await;
+    let artifact_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM raw_artifacts WHERE kind = 'html_payload' AND artifact_key = ?",
+    )
+    .bind(entry_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("the failed extraction keeps its HTML");
+    let linked: Option<i64> = sqlx::query_scalar(
+        "SELECT a.body_html_artifact_id FROM articles a \
+         JOIN feed_entries e ON e.article_id = a.id WHERE e.id = ?",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fallback article");
+
+    assert_eq!(summary.fallback_persisted, 1);
+    assert_eq!(linked, Some(artifact_id));
+}
+
+#[tokio::test]
+async fn on_failure_retention_keeps_html_when_a_strategy_is_retryable() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry_id =
+        seed_pending_fetch_entry(&pool, source_id, "uid-on-failure-retry", "hash-retry", None)
+            .await;
+    let retryable: Arc<dyn ContentStrategy> = Arc::new(MockStrategy {
+        strategy: ExtractorStrategy::Readability,
+        extract_fn: Box::new(|_task, _bytes, _final_url| Err(ExtractorError::HttpTimeout)),
+    });
+    let flow = flow_with_policy(
+        pool.clone(),
+        RetentionPolicy::OnFailure,
+        responses([(entry_id, Ok(raw(entry_id, b"<html>retry</html>")))]),
+        vec![retryable],
+    );
+
+    let summary = flow
+        .run(ExtractOptions {
+            batch_size: 1,
+            max_attempts: 5,
+            max_batches: 0,
+        })
+        .await;
+    let artifact_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM raw_artifacts WHERE kind = 'html_payload'")
+            .fetch_one(&pool)
+            .await
+            .expect("artifact count should be readable");
+
+    assert_eq!(summary.retryable_failed, 1);
+    assert_eq!(artifact_count, 1);
+}
+
+#[tokio::test]
+async fn always_retention_keeps_html_even_when_a_strategy_panics() {
+    // `always` decides before the strategy chain, so a parser panic on
+    // untrusted HTML still leaves the payload for replay.
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry_id =
+        seed_pending_fetch_entry(&pool, source_id, "uid-panic", "hash-panic", None).await;
+    let panicking: Arc<dyn ContentStrategy> = Arc::new(MockStrategy {
+        strategy: ExtractorStrategy::Readability,
+        extract_fn: Box::new(|_task, _bytes, _final_url| panic!("mock strategy panic")),
+    });
+    let flow = flow_with_policy(
+        pool.clone(),
+        RetentionPolicy::Always,
+        responses([(entry_id, Ok(raw(entry_id, b"<html>panic</html>")))]),
+        vec![panicking],
+    );
+
+    let summary = flow
+        .run(ExtractOptions {
+            batch_size: 1,
+            max_attempts: 5,
+            max_batches: 0,
+        })
+        .await;
+    let artifact_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM raw_artifacts WHERE kind = 'html_payload'")
+            .fetch_one(&pool)
+            .await
+            .expect("artifact count should be readable");
+
+    assert_eq!(summary.tasks_panicked, 1);
+    assert_eq!(artifact_count, 1);
+}
+
 async fn setup_base(pool: &SqlitePool) -> (i64, i64) {
     let extractor_rule_id = seed_extractor_rule_version(pool).await;
     let config_id = insert_config_rule(pool).await;
