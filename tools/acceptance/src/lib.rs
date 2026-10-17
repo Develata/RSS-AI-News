@@ -39,7 +39,7 @@ impl Lane {
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::Static => "rustfmt, Clippy, swallowed-error and dependency policy gates",
+            Self::Static => "rustfmt, Clippy, rustdoc, swallowed-error and dependency policy gates",
             Self::Workspace => "locked workspace build and tests",
             Self::Sqlite => "release binary, SQLite migrations and CLI contract smokes",
             Self::Postgres => "PostgreSQL ignored tests and CLI migration parity",

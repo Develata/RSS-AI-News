@@ -49,8 +49,8 @@ pub trait RuleVersionRepository: Send + Sync {
     ) -> Result<i64, StorageError>;
 
     /// 生产代码读取"当前生效规则版本"的统一入口（F15-3）：先用
-    /// [`active_rule`] 查 `status='active'` 的行，若不存在则用
-    /// [`get_or_create`] 以 `default_*` 参数 seed 一个首版（因当前 kind
+    /// [`Self::active_rule`] 查 `status='active'` 的行，若不存在则用
+    /// [`Self::get_or_create`] 以 `default_*` 参数 seed 一个首版（因当前 kind
     /// 无 active 行，`get_or_create` 的 CASE/EXISTS 自动写 'active'）。
     ///
     /// 该方法是 ingest / extract / ai_run / publish / rebuild_report 等

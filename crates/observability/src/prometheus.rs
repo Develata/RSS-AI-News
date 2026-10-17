@@ -1,6 +1,6 @@
 //! Prometheus exporter（F15-14 W9-F2）。
 //!
-//! 通过 [`prometheus`] crate 把 [`MetricsRecorder`](crate::MetricsRecorder)
+//! 通过 [`prometheus`] crate 把 [`MetricsRecorder`]
 //! 的 counter / histogram / gauge 调用转译成 prometheus 标准格式，再用
 //! 最小 tokio TcpListener HTTP/1.1 服务挂到 `metrics_bind`，被
 //! prometheus / Grafana Agent / VictoriaMetrics 拉取。

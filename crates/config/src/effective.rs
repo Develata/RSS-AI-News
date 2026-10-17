@@ -32,7 +32,7 @@ pub struct EffectiveConfig<'a> {
     pub path_template: String,
     pub model: String,
     /// 失败回退模型链（W14-A）。已 trim / 去空白 / 与 `model` 去重；空 = 不回退。
-    /// 折叠规则见 [`resolve_fallback_models`]，契约见 docs/plan/14-ai-fallback.md。
+    /// 折叠规则见 `resolve_fallback_models`，契约见 docs/plan/14-ai-fallback.md。
     pub fallback_models: Vec<String>,
     pub max_input_chars: u32,
     /// Category `prompt_template`; omitted or blank (trim) inherits

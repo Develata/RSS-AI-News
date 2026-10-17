@@ -4,8 +4,8 @@
 //!
 //! 按 `docs-backup/design/storage-multi-dialect.md` §6.2 模式：trait method `match`
 //! 分发到 sqlite_*/pg_* 私有 helper + 共享 SQL const + new_with_storage 入口。
-//! SQL const 见 [`super::article_ai_result_sql`]，方言分发实装见
-//! [`super::article_ai_result_impl`]。
+//! SQL const 见 `super::article_ai_result_sql`，方言分发实装见
+//! `super::article_ai_result_impl`。
 //!
 //! **§6.4 PG 契约**：`claim_pending` 子查询必须 `FOR UPDATE SKIP LOCKED`，
 //! 让 ai-run 多 worker 并发 claim 同一 pending 池时各自拿到不同候选。

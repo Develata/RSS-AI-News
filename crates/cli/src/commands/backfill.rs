@@ -150,7 +150,7 @@ pub async fn run(cli: &Cli, args: &BackfillArgs) -> Result<BackfillCommandSummar
 /// 回落路径（避免在 cargo test 里启 DB / runtime）。
 ///
 /// 回落规则（参考 W2-A-6 audit）：
-///   - tag    : args.prompt_version_tag.unwrap_or("backfill-<unix-ts>")
+///   - tag    : `args.prompt_version_tag.unwrap_or("backfill-<unix-ts>")`
 ///   - desc   : args.prompt_version_description.unwrap_or("manual backfill via CLI")
 ///   - model  : args.model.unwrap_or(loaded_model)
 ///   - sha256 : 永远从 prompt_template 派生（同一 prompt 内容 → 同一 sha；

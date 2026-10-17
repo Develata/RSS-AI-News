@@ -2,7 +2,7 @@
 //! 多阶段编排落地。
 //!
 //! 按阶段拆分为子模块，各自 `impl PublishFlow`：
-//! [`freeze`] / [`render`] / [`store_local`] / [`remote`]；DTO 见 [`dto`]，
+//! `freeze` / `render` / `store_local` / `remote`；DTO 见 `dto`，
 //! 经 `pub use dto::*` 保持对外 API 路径不变。本文件保留入口
 //! （`new` / `build_idempotency_key` / `init`）、`PublishFlow` 本体，以及跨阶段
 //! 共享的 `fail_claimed`（失败回收）与 `render_templates_from_ctx`（模板装配）

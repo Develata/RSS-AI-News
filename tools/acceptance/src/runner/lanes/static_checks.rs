@@ -27,6 +27,15 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         &[],
         0,
     );
+    // Intra-doc links and HTML in docs must stay valid; RUSTDOCFLAGS only
+    // affects rustdoc, so build and Clippy caches are untouched.
+    executor.command(
+        "rustdoc",
+        "cargo",
+        &strings(["doc", "--workspace", "--no-deps", "--locked"]),
+        &[("RUSTDOCFLAGS", "-D warnings")],
+        0,
+    );
     executor.command(
         "swallowed-errors",
         "bash",

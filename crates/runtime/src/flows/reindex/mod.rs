@@ -1,8 +1,8 @@
 //! reindex flow：rebuild link_hash / content_hash / feed_sources（categories）。
 //!
 //! 本文件持 lease 生命周期编排（start/claim/run_inner/finalize）+ checkpoint +
-//! sha256 工具；abort 见 [`abort`]，dry-run 见 [`dry_run`]，真实写入循环见
-//! [`execute`]，DTO 见 [`dto`]。
+//! sha256 工具；abort 见 `abort`，dry-run 见 `dry_run`，真实写入循环见
+//! `execute`，DTO 见 `dto`。
 
 use std::sync::Arc;
 

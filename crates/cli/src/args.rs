@@ -1,3 +1,8 @@
+// Field docs are clap help text: `[database]`, `[runtime]` etc. name TOML
+// sections and `<PATH>` placeholders for users, not rustdoc markup, so those
+// rustdoc lints are off here.
+#![allow(rustdoc::broken_intra_doc_links, rustdoc::invalid_html_tags)]
+
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};

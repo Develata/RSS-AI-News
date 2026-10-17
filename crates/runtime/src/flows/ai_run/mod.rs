@@ -1,6 +1,6 @@
 //! ai_run flow：task_gen（建 pending AI 任务）+ process（claim → 调 AI → 回写）。
 //!
-//! 单条任务的执行机制见 [`process`]，结果回写见 [`release`]，DTO 见 [`dto`]。
+//! 单条任务的执行机制见 `process`，结果回写见 `release`，DTO 见 `dto`。
 
 use std::sync::Arc;
 

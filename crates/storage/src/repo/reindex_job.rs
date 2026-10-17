@@ -25,8 +25,8 @@
 //! ## W11-P3-C-2：PG 分支落地
 //!
 //! 按 `docs-backup/design/storage-multi-dialect.md` §6.2 模式：trait method `match`
-//! 分发到 sqlite_*/pg_* 私有 helper（实装见 [`super::reindex_job_impl`]，SQL
-//! const 见 [`super::reindex_job_sql`]）。除两条 claim 路径外，SQL 跨方言完全等价。
+//! 分发到 sqlite_*/pg_* 私有 helper（实装见 `super::reindex_job_impl`，SQL
+//! const 见 `super::reindex_job_sql`）。除两条 claim 路径外，SQL 跨方言完全等价。
 //!
 //! **claim 路径的 §6.4 契约**：PG 必须 `FOR UPDATE SKIP LOCKED`，否则多 worker
 //! 并发 claim 同一 pending 池时会串行化等待 row lock，等价单 worker。SQLite 整库

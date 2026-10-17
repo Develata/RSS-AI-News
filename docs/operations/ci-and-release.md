@@ -16,7 +16,7 @@ CI 与本地 pre-tag 矩阵执行同一份检查（见 [./acceptance-matrix.md](
 
 | Job | 命令 / 验证项 | 本地复现 |
 |---|---|---|
-| `test` | `cargo acceptance run --lane static --lane workspace`：fmt、Clippy `-D warnings`、swallowed-error、dependency policy、tooling boundary、acceptance-case 状态；`cargo build/test --workspace --locked`（SQLite） | 同命令，或 `cargo test -p <crate>` |
+| `test` | `cargo acceptance run --lane static --lane workspace`：fmt、Clippy `-D warnings`、rustdoc `-D warnings`、swallowed-error、dependency policy、tooling boundary、acceptance-case 状态；`cargo build/test --workspace --locked`（SQLite） | 同命令，或 `cargo test -p <crate>` |
 | `test-pg` | `cargo acceptance run --lane postgres --lane sqlite --lane release`（PG service + `DATABASE_URL`）：storage `--include-ignored` + CLI migrate run/check；三条 lane 共用一次 release build：SQLite migrate run/check、recent-entries 与 CLI JSON 输出契约（product smoke 会剥离继承的 `DATABASE_URL`，仍走 SQLite）；版本 / lockfile / README / binary identity | `DATABASE_URL=… cargo acceptance run --lane postgres --lane sqlite --lane release`（见 [./postgres-deployment.md](./postgres-deployment.md)） |
 | `docker-build` | `docker/build-push-action` 多 stage 构建（不 push）+ 容器 smoke；保留该形式以维护 release 复用的 GHA buildx cache（`scope=runtime`） | `cargo acceptance run --lane docker`，或 `docker build -f docker/Dockerfile .` |
 
