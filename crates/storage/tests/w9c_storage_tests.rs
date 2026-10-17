@@ -109,6 +109,74 @@ async fn reset_failed_honors_window() {
     assert_eq!(outcome.reset, 1);
 }
 
+/// Production rows never set `created_at`: SQLite fills it with
+/// `CURRENT_TIMESTAMP` (`YYYY-MM-DD HH:MM:SS`, UTC), while bound
+/// `OffsetDateTime` bounds use RFC3339. The window must compare the instants,
+/// not the text (D-008: `--date-from 2026-05-01 --date-to 2026-05-01`).
+const WINDOW_CASES: [(&str, bool); 6] = [
+    ("2026-04-30 23:59:59", false),
+    ("2026-05-01 00:00:00", true),
+    ("2026-05-01 12:00:00", true),
+    ("2026-05-01 23:59:59", true),
+    ("2026-05-02 00:00:00", false),
+    ("2026-05-02 12:00:00", false),
+];
+
+fn may_first_day() -> ResetFailedFilter {
+    let day = time::Date::from_calendar_date(2026, time::Month::May, 1).unwrap();
+    ResetFailedFilter {
+        date_from: Some(day.midnight().assume_utc()),
+        date_to: Some(day.next_day().unwrap().midnight().assume_utc()),
+    }
+}
+
+#[tokio::test]
+async fn reset_failed_window_compares_current_timestamp_rows_by_instant() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let source_id = common::seed_source(&pool).await;
+    let entry_id = insert_entry_state(
+        &pool,
+        source_id,
+        "window",
+        "failed",
+        OffsetDateTime::now_utc(),
+    )
+    .await;
+    let repo = FeedEntryRepo::new(pool.clone());
+    for (created_at, in_window) in WINDOW_CASES {
+        sqlx::query("UPDATE feed_entries SET created_at = ?, state = 'failed' WHERE id = ?")
+            .bind(created_at)
+            .bind(entry_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let outcome = repo.reset_failed_in_window(&may_first_day()).await.unwrap();
+        assert_eq!(outcome.reset == 1, in_window, "{created_at}");
+        assert_eq!(outcome.examined == 1, in_window, "{created_at}");
+    }
+}
+
+#[tokio::test]
+async fn article_backfill_window_compares_current_timestamp_rows_by_instant() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let (_rule, _entry, article_id) = common::seed_article(&pool).await;
+    let repo = ArticleRepo::new(pool.clone());
+    let window = may_first_day();
+    for (created_at, in_window) in WINDOW_CASES {
+        sqlx::query("UPDATE articles SET created_at = ? WHERE id = ?")
+            .bind(created_at)
+            .bind(article_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rows = repo
+            .list_in_window_for_backfill(window.date_from, window.date_to, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len() == 1, in_window, "{created_at}");
+    }
+}
+
 #[tokio::test]
 async fn reset_failed_ignores_non_failed() {
     let (_dir, pool) = common::make_test_pool().await;

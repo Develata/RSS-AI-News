@@ -276,6 +276,31 @@ WHERE state = 'failed'
   AND ($2 IS NULL OR created_at < $2)
 "#;
 
+// SQLite stores `created_at` as TEXT: rows get `CURRENT_TIMESTAMP`
+// (`YYYY-MM-DD HH:MM:SS`) while bound `OffsetDateTime` bounds are RFC3339, so a
+// plain comparison is textual (`' ' < 'T'`) and shifts the window by a day.
+// `datetime()` normalises both sides to the same UTC text first. PostgreSQL's
+// TIMESTAMPTZ compares instants and keeps the shared SQL.
+pub(super) const COUNT_FEED_ENTRIES_IN_WINDOW_SQLITE_SQL: &str = r#"
+SELECT COUNT(*) FROM feed_entries
+WHERE ($1 IS NULL OR datetime(created_at) >= datetime($1))
+  AND ($2 IS NULL OR datetime(created_at) < datetime($2))
+"#;
+
+pub(super) const RESET_FAILED_IN_WINDOW_SQLITE_SQL: &str = r#"
+UPDATE feed_entries
+SET state = 'pending_fetch',
+    attempt_count = 0,
+    last_error = NULL,
+    last_error_kind = NULL,
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = $3
+WHERE state = 'failed'
+  AND ($1 IS NULL OR datetime(created_at) >= datetime($1))
+  AND ($2 IS NULL OR datetime(created_at) < datetime($2))
+"#;
+
 pub(super) const LIST_FOR_LINK_HASH_REINDEX_SQL: &str = r#"
 SELECT id, normalized_link, link_hash
 FROM feed_entries

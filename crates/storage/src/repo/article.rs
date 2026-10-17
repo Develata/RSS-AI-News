@@ -180,6 +180,19 @@ ORDER BY id ASC
 LIMIT $4
 "#;
 
+// SQLite TEXT `created_at` (CURRENT_TIMESTAMP) vs RFC3339 bounds: compare via
+// `datetime()`, see `feed_entry_sql.rs`. PostgreSQL keeps the shared SQL.
+const LIST_ARTICLES_IN_WINDOW_FOR_BACKFILL_SQLITE_SQL: &str = r#"
+SELECT id AS article_id, state
+FROM articles
+WHERE state <> 'retired'
+  AND id > $1
+  AND ($2 IS NULL OR datetime(created_at) >= datetime($2))
+  AND ($3 IS NULL OR datetime(created_at) < datetime($3))
+ORDER BY id ASC
+LIMIT $4
+"#;
+
 const LIST_ARTICLES_FOR_CONTENT_HASH_REINDEX_SQL: &str = r#"
 SELECT id, body_text, content_hash
 FROM articles
@@ -398,19 +411,21 @@ async fn sqlite_list_in_window_for_backfill(
     batch_size: u32,
     after_id: i64,
 ) -> Result<Vec<BackfillArticleCandidate>, StorageError> {
-    sqlx::query_as::<_, BackfillArticleCandidateRow>(LIST_ARTICLES_IN_WINDOW_FOR_BACKFILL_SQL)
-        .bind(after_id)
-        .bind(date_from)
-        .bind(date_to)
-        .bind(i64::from(batch_size))
-        .fetch_all(pool)
-        .await
-        .map(|rows| {
-            rows.into_iter()
-                .map(BackfillArticleCandidate::from)
-                .collect()
-        })
-        .map_err(StorageError::from)
+    sqlx::query_as::<_, BackfillArticleCandidateRow>(
+        LIST_ARTICLES_IN_WINDOW_FOR_BACKFILL_SQLITE_SQL,
+    )
+    .bind(after_id)
+    .bind(date_from)
+    .bind(date_to)
+    .bind(i64::from(batch_size))
+    .fetch_all(pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(BackfillArticleCandidate::from)
+            .collect()
+    })
+    .map_err(StorageError::from)
 }
 
 async fn sqlite_list_for_content_hash_reindex(
