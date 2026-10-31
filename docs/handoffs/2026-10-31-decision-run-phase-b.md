@@ -65,3 +65,13 @@
 
 - 入口：ADR 0011、plan/18 §8、`crates/runtime/src/flows/decision_run/mod.rs`。
 - 卸载按 ADR 0011 §13：先停调度并确认进程退出，再发布带删表迁移的版本；0006 与删表迁移文件永久保留。
+
+## 2026-10-31 追加：两轮代码审查与修复
+
+- Codex（gpt-6-astra，high）第一轮：1 BLOCKER（字符串字面量无法解码时凭据扫描放行，默认 `on_failure` 可把 key 落库）、
+  5 SHOULD_FIX（限流后释放失败仍退出 0；调用额度依赖返回值，漏计未发出 / panic / 取消；行截止时间在 claim 后重算且释放多放宽一个 D；
+  PostgreSQL 的读文章与写事件没有服务端超时；读文章故障漏计且超时被退还）。修复见 `7224589`；BLOCKER 先以测试复现。
+- 第二轮：无 BLOCKER；2 SHOULD_FIX（服务端 / 连接池报告的超时仍按普通错误退还；调用计数器跨 `run()` 累积）。修复见 `5fe08e6`。
+- `5fe08e6` 上的验证：`cargo fmt --all --check` 通过；`cargo test --workspace --no-fail-fast --locked` 1030 passed / 0 failed / 73 ignored；
+  `cargo acceptance run --lane static` 通过（clippy、rustdoc、swallowed-errors、acceptance-docs 等 7 项）。
+- PostgreSQL 测试（含新增的表锁 → `StorageError::Timeout` 用例）仍未在本地执行，交给 PR 上的 CI postgres lane。
