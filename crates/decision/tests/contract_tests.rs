@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpSocket},
 };
 
 use rss_ai_news_decision::{
@@ -180,20 +180,21 @@ async fn laya_request_has_exactly_four_fields_and_an_explicit_max_len() {
     assert_eq!(body["max_len"], 2048);
     assert_eq!(body["model"], "multilingual");
     assert_eq!(body["state"], json!({"title": "标题", "body": "正文"}));
-    let questions = &body["questions"];
-    assert_eq!(
-        questions["q_marketing"]["criteria"],
-        json!({"true": "营销", "false": "报道"})
-    );
     // laya-server encodes an empty description as the bare label.
-    assert_eq!(
-        questions["q_kind"]["criteria"],
-        json!({"paper": "论文", "other": ""})
-    );
-    assert_eq!(
-        questions["q_importance"]["criteria"],
-        json!(["琐碎", "一般", "重大"])
-    );
+    assert_eq!(body["questions"], expected_questions(json!("")));
+}
+
+/// The full `questions` object both providers receive for `questions()`;
+/// only the absent choice description differs.
+fn expected_questions(absent_description: Value) -> Value {
+    json!({
+        "q_marketing": {"type": "noul", "instructions": "这篇是否主要是营销稿？",
+                        "criteria": {"true": "营销", "false": "报道"}},
+        "q_kind": {"type": "choice", "instructions": "哪一类？",
+                   "criteria": {"paper": "论文", "other": absent_description}},
+        "q_importance": {"type": "score", "instructions": "重要性？",
+                         "criteria": ["琐碎", "一般", "重大"]}
+    })
 }
 
 #[tokio::test]
@@ -207,10 +208,9 @@ async fn jev_request_has_no_max_len_and_null_descriptions() {
     result.unwrap();
     let body = sent_body(&server).await;
     assert_eq!(keys(&body), ["model", "questions", "state"]);
-    assert_eq!(
-        body["questions"]["q_kind"]["criteria"],
-        json!({"paper": "论文", "other": null})
-    );
+    assert_eq!(body["model"], "jev-1.13.0");
+    assert_eq!(body["state"], json!({"title": "标题", "body": "正文"}));
+    assert_eq!(body["questions"], expected_questions(Value::Null));
 }
 
 #[tokio::test]
@@ -409,13 +409,15 @@ async fn laya_rejects_answers_inconsistent_with_their_distribution() {
         laya_with(|b| b["answers"]["q_importance"]["score"] = json!(0.2)).await,
         "does not match its level probabilities",
     );
-    assert_invalid(
-        laya_with(|b| b["answers"]["q_kind"]["answer_confidence"] = json!(0.9)).await,
-        "answer_confidence does not match",
-    );
+    for (id, wrong) in [("q_marketing", 0.5), ("q_kind", 0.9), ("q_importance", 0.9)] {
+        assert_invalid(
+            laya_with(|b| b["answers"][id]["answer_confidence"] = json!(wrong)).await,
+            &format!("question {id}: answer_confidence does not match"),
+        );
+    }
     assert_invalid(
         laya_with(|b| b["answers"]["q_marketing"]["confidence"] = json!(0.5)).await,
-        "confidence does not match",
+        "question q_marketing: confidence does not match",
     );
     assert_invalid(
         laya_with(|b| b["answers"]["q_kind"]["probabilities"]["other"] = json!(0.2)).await,
@@ -425,16 +427,59 @@ async fn laya_rejects_answers_inconsistent_with_their_distribution() {
         laya_with(|b| b["answers"]["q_marketing"]["noul"] = json!(1.5)).await,
         "[0, 1]",
     );
-    assert_invalid(
-        laya_with(|b| {
-            b["answers"]["q_kind"]
-                .as_object_mut()
-                .unwrap()
-                .remove("confidence");
-        })
-        .await,
-        "confidence is missing",
-    );
+}
+
+const LAYA_CONFIDENCES: [(&str, &str); 6] = [
+    ("q_marketing", "confidence"),
+    ("q_marketing", "answer_confidence"),
+    ("q_kind", "confidence"),
+    ("q_kind", "answer_confidence"),
+    ("q_importance", "confidence"),
+    ("q_importance", "answer_confidence"),
+];
+
+#[tokio::test]
+async fn laya_requires_both_confidences_on_every_answer_type() {
+    for (id, field) in LAYA_CONFIDENCES {
+        assert_invalid(
+            laya_with(|b| {
+                b["answers"][id].as_object_mut().unwrap().remove(field);
+            })
+            .await,
+            &format!("question {id}: {field} is missing"),
+        );
+    }
+}
+
+#[tokio::test]
+async fn confidences_outside_the_unit_interval_are_rejected() {
+    for (id, field) in LAYA_CONFIDENCES {
+        for wrong in [1.5, -0.1] {
+            assert_invalid(
+                laya_with(|b| b["answers"][id][field] = json!(wrong)).await,
+                &format!("question {id}: {field} must be a finite number in [0, 1]"),
+            );
+        }
+    }
+    // Jev documents no noul confidence; one that is present must still be sane.
+    for (id, wrong) in [
+        ("q_marketing", 2.0),
+        ("q_kind", -0.1),
+        ("q_importance", 1.5),
+    ] {
+        let mut body = jev_ok();
+        body["answers"][id]["confidence"] = json!(wrong);
+        let (_server, result) = ask(
+            Provider::Jev,
+            "jev-1.13.0",
+            ResponseTemplate::new(200).set_body_json(body),
+        )
+        .await;
+        assert_invalid(
+            result,
+            &format!("question {id}: confidence must be a finite number in [0, 1]"),
+        );
+    }
 }
 
 #[tokio::test]
@@ -545,16 +590,6 @@ async fn laya_requires_every_provenance_field() {
     assert_invalid(
         laya_with(|b| b["routing"]["model"] = Value::Null).await,
         "routing.model is missing",
-    );
-    assert_invalid(
-        laya_with(|b| {
-            b["answers"]["q_importance"]
-                .as_object_mut()
-                .unwrap()
-                .remove("answer_confidence");
-        })
-        .await,
-        "answer_confidence is missing",
     );
     assert_invalid(
         laya_with(|b| {
@@ -688,39 +723,38 @@ async fn redirects_are_not_followed() {
 
 #[tokio::test]
 async fn padded_specs_and_one_sided_noul_criteria_are_sent_normalised() {
-    let server = serve(ResponseTemplate::new(200).set_body_json(laya_ok())).await;
-    let mut qs = questions();
-    qs[0].id = " q_marketing ".to_string();
-    qs[0].instructions = " 这篇是否主要是营销稿？\n".to_string();
-    qs[0].kind = QuestionKind::Noul {
-        yes: Some(" 营销 ".to_string()),
-        no: Some("  ".to_string()),
-    };
-    if let QuestionKind::Choice { options } = &mut qs[1].kind {
-        options[0].label = "paper ".to_string();
+    for (provider, model, ok, absent) in [
+        (Provider::Laya, "multilingual", laya_ok(), json!("")),
+        (Provider::Jev, "jev-1.13.0", jev_ok(), Value::Null),
+    ] {
+        let server = serve(ResponseTemplate::new(200).set_body_json(ok)).await;
+        let mut qs = questions();
+        qs[0].id = " q_marketing ".to_string();
+        qs[0].instructions = " 这篇是否主要是营销稿？\n".to_string();
+        qs[0].kind = QuestionKind::Noul {
+            yes: Some(" 营销 ".to_string()),
+            no: Some("  ".to_string()),
+        };
+        if let QuestionKind::Choice { options } = &mut qs[1].kind {
+            options[0].label = "paper ".to_string();
+        }
+        let response = client(provider, &server.uri(), model, Duration::from_secs(5))
+            .decide(&DecisionRequest {
+                title: "t",
+                body: "b",
+                questions: &qs,
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.answers[0].id, "q_marketing");
+        let mut expected = expected_questions(absent);
+        expected["q_marketing"]["criteria"] = json!({"true": "营销"});
+        assert_eq!(
+            sent_body(&server).await["questions"],
+            expected,
+            "{provider:?}"
+        );
     }
-    let response = client(
-        Provider::Laya,
-        &server.uri(),
-        "multilingual",
-        Duration::from_secs(5),
-    )
-    .decide(&DecisionRequest {
-        title: "t",
-        body: "b",
-        questions: &qs,
-    })
-    .await
-    .unwrap();
-    assert_eq!(response.answers[0].id, "q_marketing");
-    let body = sent_body(&server).await;
-    let marketing = &body["questions"]["q_marketing"];
-    assert_eq!(marketing["instructions"], "这篇是否主要是营销稿？");
-    assert_eq!(marketing["criteria"], json!({"true": "营销"}));
-    assert_eq!(
-        body["questions"]["q_kind"]["criteria"],
-        json!({"paper": "论文", "other": ""})
-    );
 }
 
 /// A loopback server that sends `head` and then either holds the connection
@@ -735,6 +769,10 @@ async fn raw_server(head: &'static str, hold: bool) -> String {
         let mut buffer = [0_u8; 4096];
         loop {
             let read = socket.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                // The client gave up; the test's own assertion reports why.
+                return;
+            }
             request.extend_from_slice(&buffer[..read]);
             let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
             if let Some(end) = text.find("\r\n\r\n") {
@@ -743,7 +781,7 @@ async fn raw_server(head: &'static str, hold: bool) -> String {
                     .find_map(|line| line.strip_prefix("content-length:"))
                     .and_then(|value| value.trim().parse::<usize>().ok())
                     .unwrap_or(0);
-                if request.len() >= end + 4 + length || read == 0 {
+                if request.len() >= end + 4 + length {
                     break;
                 }
             }
@@ -939,12 +977,11 @@ async fn construction_rejects_bad_settings() {
 
 #[tokio::test]
 async fn unreachable_endpoint_is_a_connection_error() {
-    // A port that was just free: nothing listens, so the connect is refused.
-    let address = TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    // Bound but never listening: Linux refuses the connect, and holding the
+    // socket keeps any other process from taking the port meanwhile.
+    let reserved = TcpSocket::new_v4().unwrap();
+    reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = reserved.local_addr().unwrap();
     let qs = questions();
     let error = client(
         Provider::Laya,
@@ -960,4 +997,5 @@ async fn unreachable_endpoint_is_a_connection_error() {
     .await
     .unwrap_err();
     assert_eq!(error, DecisionError::Connection);
+    drop(reserved);
 }

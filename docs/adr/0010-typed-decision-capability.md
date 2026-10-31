@@ -62,13 +62,14 @@
 - **每个 provider 单独一个子模块**（`provider/jev.rs`、`provider/laya.rs`），负责各自的线格式编解码、限制、精度
   与必填字段。删掉一个 provider，就是删掉它的模块和 `Provider` 枚举的一个变体。
 - **其它 crate 只有两处入口**：
-  - config：`AppConfig.decision` 与板块的 `decision` 为 `Option<toml::Value>`，原样透传、不解析语义。
+  - config：`LoadedConfig.decision`（`crates/config/src/decision.rs`）把 `[decision]` 与各板块的 `[category.decision]`
+    作为 `toml::Value` 原样透传、不解析语义；`AppConfig` / `CategoryConfig` 不变。
     config 现在本就不拒绝未知字段，旧配置不受影响。
   - cli：validate-config 在出现这些段时，调用 decision crate 的校验，把结果并入现有的 warning / diagnostic 输出。
     凭据检查只向 decision 传一个"变量是否存在"的闭包，密钥值不进入 decision 的校验。
 - **整体移除**：
-  1. 删 `crates/decision` 与 workspace 成员；
-  2. 删两个透传字段（不删也无害，只是不再被读取）；
+  1. 删 `crates/decision`、workspace 成员与 `crates/cli/Cargo.toml` 中的依赖；
+  2. 删透传模块与 `LoadedConfig.decision`（不删也无害，只是不再被读取）；
   3. 删 validate-config 中的调用；
   4. 删本 ADR 对应的 plan/18 与配置文档段。
 

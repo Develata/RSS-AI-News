@@ -78,12 +78,21 @@ pub struct ValidationReport {
     pub warnings: Vec<Warning>,
 }
 
-/// One category's raw `[category.decision]` section.
-#[derive(Debug, Clone, Copy)]
+/// One category's raw `[category.decision]` section. Debug omits the value.
+#[derive(Clone, Copy)]
 pub struct CategorySection<'a> {
     pub source: &'a str,
     pub category_key: &'a str,
     pub value: &'a toml::Value,
+}
+
+impl fmt::Debug for CategorySection<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CategorySection")
+            .field("source", &self.source)
+            .field("category_key", &self.category_key)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Deserialize)]
@@ -127,6 +136,21 @@ struct RawOption {
     description: Option<String>,
 }
 
+/// serde messages for a wrong type or value quote the input (`invalid type:
+/// string "…"`), and a mistyped field can hold a pasted key. Pass through only
+/// the messages that name fields alone.
+fn schema_message(error: &toml::de::Error) -> String {
+    let message = error.message();
+    if ["unknown field `", "missing field `", "duplicate field `"]
+        .iter()
+        .any(|prefix| message.starts_with(prefix))
+    {
+        message.to_string()
+    } else {
+        "a field has the wrong type or shape".to_string()
+    }
+}
+
 fn non_blank(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
@@ -137,10 +161,9 @@ impl DecisionSettings {
     /// Parse the raw `[decision]` table. Structural problems are issues;
     /// value-free advisories are warnings.
     pub fn from_section(value: &toml::Value) -> Result<(Self, Vec<Warning>), Vec<Issue>> {
-        let raw: RawSettings = value
-            .clone()
-            .try_into()
-            .map_err(|error: toml::de::Error| vec![Issue::new("decision", error.message())])?;
+        let raw: RawSettings = value.clone().try_into().map_err(|error: toml::de::Error| {
+            vec![Issue::new("decision", schema_message(&error))]
+        })?;
         let mut issues = Vec::new();
         let mut warnings = Vec::new();
         let provider = Provider::parse(raw.provider.trim()).unwrap_or_else(|| {
@@ -284,10 +307,9 @@ impl DecisionSettings {
 /// ignored.
 pub fn questions_from_section(value: &toml::Value) -> Result<Vec<QuestionSpec>, Vec<Issue>> {
     let prefix = "category.decision.questions";
-    let raw: RawCategory = value
-        .clone()
-        .try_into()
-        .map_err(|error: toml::de::Error| vec![Issue::new("category.decision", error.message())])?;
+    let raw: RawCategory = value.clone().try_into().map_err(|error: toml::de::Error| {
+        vec![Issue::new("category.decision", schema_message(&error))]
+    })?;
     let mut issues = Vec::new();
     let mut questions = Vec::with_capacity(raw.questions.len());
     for (index, question) in raw.questions.into_iter().enumerate() {
@@ -513,6 +535,29 @@ options = [{ label = "paper", description = "论文" }, { label = "other", descr
         let debug = format!("{settings:?}");
         assert!(debug.contains("http://laya.internal:8080"));
         assert!(!debug.contains("private"));
+    }
+
+    #[test]
+    fn schema_errors_never_echo_values() {
+        let issues = DecisionSettings::from_section(&table(
+            "provider = \"laya\"\nrequest_timeout_seconds = \"sk-canary\"",
+        ))
+        .unwrap_err();
+        assert!(!issues[0].message.contains("sk-canary"), "{issues:?}");
+        let issues = questions_from_section(&table(
+            "[[questions]]\nid = \"q\"\ntype = \"noul\"\ninstructions = [\"sk-canary\"]",
+        ))
+        .unwrap_err();
+        assert!(!issues[0].message.contains("sk-canary"), "{issues:?}");
+        let issues =
+            DecisionSettings::from_section(&table("provider = \"laya\"\ntypo = 1")).unwrap_err();
+        assert!(
+            issues[0].message.contains("unknown field `typo`"),
+            "{issues:?}"
+        );
+        let value = table("questions = [] \nsecret = \"sk-canary\"");
+        let debug = format!("{:?}", sections(&value));
+        assert!(debug.contains("categories/ai.toml") && !debug.contains("sk-canary"));
     }
 
     #[test]

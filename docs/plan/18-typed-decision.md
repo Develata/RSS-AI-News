@@ -12,7 +12,7 @@
     `[decision]` 与 `[category.decision]` 为 `toml::Value`；
   - cli：validate-config 调用 `rss_ai_news_decision::validate_sections`。
 - 整体移除：
-  1. 删 `crates/decision` 与 workspace 条目；
+  1. 删 `crates/decision`、workspace 条目与 `crates/cli/Cargo.toml` 中的依赖；
   2. 删上述透传模块、`LoadedConfig.decision` 及 5 处 `LoadedConfig` 字面量中的该字段；
   3. 删 validate-config 中的 `decision_warnings`；
   4. 删本章、ADR 0010 链接与配置文档段。
@@ -134,8 +134,10 @@
 
 | 内容 | 位置 |
 |---|---|
-| 公共校验与规范化、两组 hash 向量、分布 / argmax / 期望值、重复键、错误分类与白名单码、Retry-After 解析、`base_url` 规则与 Debug 脱敏、配置解析与 warning、关闭时不解析凭据 | `crates/decision/src/*` 单元测试（35 个） |
-| 两家请求体的确切形状（含规范化与单侧 noul 释义）；正常响应的归一化（Jev 两位小数的官方示例可通过）；拒绝：顶层元数据（Laya `routing.model` / `usage.truncated` / `usage.state_tokens_dropped` 缺失或不符、选项塌缩、缺 `model`）、Jev pin 不符、答案缺失 / 多余 / 类型不符、重复键、取值域、概率和、argmax、期望值、Laya 置信度复算、两家必填置信度、线格式数字（负数、指数 / 小数 token、超出 u64、NaN、字符串）；全部 status 类别、408、Retry-After、3xx 不跟随；错误体不回显；响应体上限；错误体停滞或中断时保留 status；超时；本地拒绝不发请求；连接被拒 | `crates/decision/tests/contract_tests.rs`（wiremock 与原始 TCP，23 个；client 关闭环境代理，在设置了失效代理时同样通过） |
+| 公共校验与规范化、两组 hash 向量、分布 / argmax（含并列）/ 期望值、概率重复键、错误分类与白名单码、Retry-After 解析、`base_url` 规则与 Debug 脱敏、配置解析与 warning、配置的类型错误不回显输入值、关闭时不解析凭据 | `crates/decision/src/*` 单元测试（36 个） |
+| 两家请求体的完整 JSON（含规范化与单侧 noul 释义）；正常响应的归一化（Jev 两位小数的官方示例可通过）；拒绝：顶层元数据（Laya `routing.model` / `usage.truncated` / `usage.state_tokens_dropped` 缺失或不符、选项塌缩、缺 `model`）、Jev pin 不符、答案缺失 / 多余 / 类型不符、答案重复键、概率越界、置信度越界（Laya 六处、Jev 三处）、概率和、argmax、期望值、Laya 复算（三种题型的 `answer_confidence`、noul 的 `confidence`）、必填置信度（Jev choice / score，Laya 六处）、线格式数字（负数、指数 / 小数 token、超出 u64、NaN、字符串）；全部 status 类别、408、Retry-After、3xx 不跟随；错误体不回显；响应体上限（Content-Length 预检；无 Content-Length 时的流式上限未单独构造用例）；错误体停滞或中断时保留 status；超时；本地拒绝不发请求；连接被拒 | `crates/decision/tests/contract_tests.rs`（wiremock 与原始 TCP，25 个；client 关闭环境代理，在设置了失效代理时同样通过） |
 | validate-config：未启用时的 warning、启用时才检查密钥变量、拒绝 Laya `auto` | `crates/cli/tests/validate_config_cmd_tests.rs` |
-| 透传：缺段时不出现、有段时原样保留 | `crates/config/src/decision.rs` |
+| 透传：缺段时不出现、有段时原样保留、Debug 不打印原始值 | `crates/config/src/decision.rs` |
+
+覆盖口径是"每条拒绝规则至少一个反例"，不是每个分支组合都有用例。
 | 真机探针（`#[ignore]`）：连通性、契约、Jev 实际返回的精度 | `crates/decision/tests/live_probe.rs` |
