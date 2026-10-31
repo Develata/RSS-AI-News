@@ -4,9 +4,12 @@
 - 状态：`proposed`
 - 决策者：Develata（待批准）。沿用 ADR 0010 已定：两个 provider、问题按板块配置、shadow 走独立 `decision-run`、
   整个功能可移除
-- 前置：[ADR 0010](./0010-typed-decision-capability.md)（Phase A 已合入 main `e0ffdd0`，两家真机探针通过）
-- 评审：Codex（gpt-6-astra，high）一轮。初稿 4 项 BLOCKER（claim 未绑定策略与执行身份、回放材料不足、lease 不覆盖整段工作、
-  响应元数据可写入反射的凭据）、8 项 SHOULD_FIX；均已对照源码核实，本稿处理
+- 前置：[ADR 0010](./0010-typed-decision-capability.md)（Phase A 已合入 main `e0ffdd0`；两家真机探针的通过记录见
+  [handoff](../handoffs/2026-10-31-typed-decision-phase-a.md)）
+- 评审：Codex（gpt-6-astra，high）两轮。初稿 4 项 BLOCKER（claim 未绑定策略与执行身份、回放材料不足、lease 不覆盖整段工作、
+  响应元数据可写入反射的凭据）、8 项 SHOULD_FIX；二稿 1 项 BLOCKER（数据库与本地处理不在期限内）、5 项 SHOULD_FIX
+  （小预算下的板块饥饿、策略表主键与 Laya CHECK 的 NULL、旧策略留档不清理、非 JSON 响应的回放例外、请求构造错误的分类）。
+  均已对照源码核实，本稿处理
 
 ## Context
 
@@ -28,7 +31,7 @@ ADR 0010 §7 已给出的约束：
 - ADR 0005：`StoragePool` 枚举，每个 repo 方法按方言分派 SQL；
 - non-goals §1.2：不自建 worker pool / 队列；并行靠多实例各自 claim；
 - plan/00 §5 不变量 7：所有外部输入能力上可回放，由留档策略控制是否捕获；违反须审批。
-  plan/00 §6 的回放驱动：关键外部输入可在脱离外网时重放，现由 `replay --kind={html,ai}` 承担。
+  plan/00 §6 的回放驱动：关键外部输入可在脱离外网时重放，现由 `replay --kind={feed,html,ai}` 承担。
 
 现有 `ai-run` 的做法（本 ADR 的参照）：
 
@@ -83,7 +86,7 @@ ADR 0010 §7 已给出的约束：
 
 | 列 | 约束 |
 |---|---|
-| `policy_version` | 主键，TEXT，`CHECK (length(policy_version) = 64)` |
+| `policy_version` | `TEXT NOT NULL PRIMARY KEY`，`CHECK (length(policy_version) = 64)`（SQLite 的 TEXT 主键不隐含 NOT NULL，须显式写） |
 | `canonical_json` | TEXT NOT NULL：ADR 0010 §6 的规范化策略 JSON 原文 |
 | `created_at` | NOT NULL |
 
@@ -101,7 +104,7 @@ ADR 0010 §7 已给出的约束：
 | `execution_key` | TEXT NOT NULL，见 §4 |
 | `provider` | TEXT NOT NULL，`CHECK (provider IN ('jev', 'laya'))` |
 | `requested_model` | TEXT NOT NULL |
-| `laya_max_len` | INTEGER；`CHECK ((provider = 'laya' AND laya_max_len BETWEEN 512 AND 8192) OR (provider = 'jev' AND laya_max_len IS NULL))` |
+| `laya_max_len` | INTEGER；`CHECK ((provider = 'laya' AND laya_max_len IS NOT NULL AND laya_max_len BETWEEN 512 AND 8192) OR (provider = 'jev' AND laya_max_len IS NULL))`（显式 `IS NOT NULL`，否则 Laya + NULL 使表达式为 NULL 而通过） |
 | `state` | TEXT NOT NULL DEFAULT `'pending'`，`CHECK (state IN ('pending', 'running', 'succeeded', 'failed'))` |
 | `attempt_count` | INTEGER NOT NULL DEFAULT 0，`CHECK (attempt_count >= 0)` |
 | `lease_owner` / `lease_expires_at` | 可空；`running` 时由 claim 写入 |
@@ -112,6 +115,7 @@ ADR 0010 §7 已给出的约束：
 | `provider_truncated` / `state_tokens_dropped` | Laya 的 `usage.truncated` / `state_tokens_dropped`；Jev 为 NULL |
 | `input_tokens` / `latency_ms` | 用量与耗时 |
 | `raw_response` / `raw_response_expires_at` | 留档的原始 2xx 响应（§8），可空 |
+| `raw_response_bytes` / `raw_response_sha256` | 2xx 响应体的长度与 SHA-256；原文未保存时（§8）也记录，可空 |
 | `last_error_kind` / `last_error` | `DecisionError::error_kind()` 与固定文本消息（不含 provider 内容） |
 | `started_at` / `completed_at` / `created_at` / `updated_at` | 时间戳；SQLite 为 TEXT、PostgreSQL 为 TIMESTAMPTZ，均由应用绑定 UTC 值；`created_at` / `updated_at` NOT NULL |
 
@@ -147,7 +151,7 @@ ADR 0010 §7 已给出的约束：
   ORDER BY a.id ASC LIMIT $6
   ```
 
-- 窗口语义：
+- 时间窗口语义：
   - 运行开始时冻结一次 `now`（UTC），`cutoff = floor_to_second(now − window_hours)`，整次运行不变；
   - 下界含等号，不设上界（时钟偏差导致的"未来"文章也算最近）；
   - SQLite 侧按 R3 的约定把列值规整为 UTC 整秒文本（`replace(substr(created_at,1,19),'T',' ')`）再与
@@ -155,7 +159,7 @@ ADR 0010 §7 已给出的约束：
 - 按需生成：只有当板块没有可领取的当前身份 pending 行时才生成，每次最多生成一个窗口的量（§6），`ON CONFLICT DO NOTHING`。
   keyset 游标按本页最后**扫描到**的 id 前进（不是最后插入的 id），整页都冲突时也能前进。
   这样故障运行不会预先堆积大量 pending。
-- 不依赖文章的 AI / 发布阶段，只排除 `retired`。窗口的作用是首次启用时不把历史文章整批发给付费 API；
+- 不依赖文章的 AI / 发布阶段，只排除 `retired`。时间窗口的作用是首次启用时不把历史文章整批发给付费 API；
   需要补跑时用 `--window-hours` 显式放宽。
 
 ### 6. 调度、并发与请求预算
@@ -178,36 +182,51 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
   一批里不存在"已领取但长时间排队"的行，lease 只需覆盖单行的工作（§7）。
   这是"单实例内对已领取任务的在途请求上限"，不是 worker pool 或队列，不违反 non-goals §1.2；跨实例并行仍靠各自 claim。
   用独立的 `concurrency` 而不是 `[http].concurrent_fetches`：自部署 Laya 的吞吐与通用抓取无关。
-- **板块轮转**：参与的板块按配置顺序轮流，每轮每个板块最多走一步；某板块无事可做或被暂停（§10）后跳过它。
-  预算属于整次命令调用，因此持续积压的板块不会让后面的板块饿死。只跑一个板块时用 `--category`。
+- **板块轮转**：每轮每个板块最多走一步；某板块无事可做或被暂停（§7、§10）后跳过它。
+  轮转的起点按"最久未被服务"排序：取各板块当前身份行中最近的 `updated_at`（SQLite 侧按 §5 的 UTC 整秒规整后比较），
+  没有行的板块最先，并列时按配置顺序。
+  预算属于整次命令调用；起点由已落库的数据决定，跨运行持续轮换，因此即使预算小于板块数（如 `max_requests_per_run = 1`），
+  持续积压的各板块也会在连续几次运行中轮流得到请求。只跑一个板块时用 `--category`。
 - **claim**：与 ai-run 同形——单条 `UPDATE … WHERE id IN (SELECT … WHERE category_key = ? AND policy_version = ?
   AND execution_key = ? AND state = 'pending' AND (lease_expires_at IS NULL OR lease_expires_at < now)
   AND attempt_count < max ORDER BY id LIMIT n)`，PostgreSQL 加 `FOR UPDATE SKIP LOCKED`；`attempt_count` 在 claim 时自增；
   所有释放都带 `WHERE id = ? AND lease_owner = ?`。
 - **维护**：运行开始时，对每个当前身份 reclaim 过期 lease、把预算耗尽的 pending 行终态化为 `failed`
-  （kind `retry_budget_exhausted`），并清理过期留档（§8）。
-- **请求计数**：一个"请求"是一次 `DecisionClient` 调用。预算账本在派发前扣减，任何退还都不恢复已用额度。
+  （kind `retry_budget_exhausted`）。留档清理不按身份过滤，单独执行（§8）。
+- **请求计数**：一个"请求"是一次 `DecisionClient` 调用。额度在调用客户端前一刻扣减（§7 的步骤顺序），任何退还都不恢复已用额度；
+  因最后一次 lease 检查而未调用的行不扣额度。摘要分别报告领取数与调用数。
   每行每次领取至多调用一次客户端，客户端显式关闭 reqwest 的自动重试（§9），因此一次调用至多一次物理发送，
   单次命令的物理发送数 ≤ `max_requests_per_run`。
 - **这不是费用上限**：计费按整次评估的输入 token，取决于标题、正文与问题长度；`max_state_chars` 只截正文。
-  `input_tokens` 逐行记录并在摘要中合计。参考：2026-10-31 的 Jev 探针（3 道题、约 200 字正文）为 466 token；
+  `input_tokens` 逐行记录并在摘要中合计。参考：handoff 记录的 2026-10-31 Jev 探针（3 道题、约 200 字正文）为 466 token；
   这只是单一样本，不能外推为上限。需要费用硬上限时另行设计。
 - 没有进程内 sleep 或退避：重试发生在下一次运行，间隔由外部调度决定。`Retry-After` 只记入事件。
 
 ### 7. lease 覆盖与时间边界
 
-一行从 claim 到释放的工作：读文章（1 条语句）→ HTTP 请求 → 释放（1 条语句），事件写入在释放之后、不占 lease。
+一行从 claim 到释放的步骤固定为：claim → 读文章并准备请求 → 最后一次 lease 检查 → 扣减调用额度 → 调用客户端 → 释放。
+事件写入在释放之后，不占 lease。
 
-- HTTP：reqwest 的 `timeout` 覆盖从开始连接到响应体读完，上限 `request_timeout_seconds`（T）。
-- 数据库：本命令的每条语句都有上限 D。PostgreSQL 在短事务内 `SET LOCAL statement_timeout = '5s'` 与
-  `lock_timeout = '1s'`（与 `raw_artifacts` 清理相同的做法）；SQLite 的锁等待受 `[database].busy_timeout_ms` 限制。
-  取 `D = max(5 s, busy_timeout_ms)`，不对 `[database]` 段另加要求。
-- **启动检查**：`lease_seconds ≥ T + 3·D + 10`（claim、读、释放各一个 D，10 s 调度余量）；不满足即以配置错误（78）退出，
-  在打开存储之前完成。缺省 T = 10、D = 5 时下界为 35 s，缺省 lease 120 s。
-- **派发前检查**：每行派发前确认 `lease_expires_at − now ≥ T + D + 5`；不满足的行不发送，直接退还。
-- **失去 lease**：释放语句影响 0 行，说明 lease 已过期并可能被他人领取。记为 `lease_lost`，本次运行停止派发，退出码 1。
-- **语义**：正常路径上每行至多被一个实例执行一次。崩溃、数据库超出上述上限或网络中断导致 lease 过期时，
-  另一实例可能重新领取并再次发送——外部调用是"至少一次"，结果行由唯一键与 owner 条件保证只落一次。
+- **数据库操作期限 D = 5 s**：本命令对存储的每次调用（含连接池 acquire、事务与结果返回）都包在客户端侧的
+  `tokio::time::timeout(D)` 里。PostgreSQL 另在短事务内设 `SET LOCAL statement_timeout` / `lock_timeout`，让服务器也尽早放弃；
+  期限以客户端侧为准。
+- **客户端调用期限 C = T + 2 s**：`decide()` 整体（规范化、编码、HTTP、解码）包在 `timeout(C)` 里；reqwest 的 `timeout`（T）
+  只覆盖从开始连接到响应体读完的网络部分。
+- **启动检查**：`lease_seconds ≥ 3·D + C + 5`（claim、读、释放各一个 D，5 s 调度余量）；缺省 T = 10 时下界为 32 s，
+  缺省 lease 120 s。不满足即以配置错误（78）退出，在打开存储之前完成。
+- **最后一次 lease 检查**：调用客户端前一刻确认 `lease_expires_at − now ≥ C + D + 2`；不满足则不调用、不扣额度，退还该行，
+  并把该板块暂停到本次运行结束（原因 `lease_insufficient`，记事件）。暂停保证不会对同一行反复"领取—退还"而没有进展。
+- **期限触发后的语义**：
+  - 客户端调用超时：取消调用，按 `Timeout` 处理（请求可能已发出，计次）。
+  - 数据库操作超时：该操作的结果**未知**（可能已提交）。不推断已回滚或已退还；计入 `storage_timeouts`，本次运行停止；
+    该行若仍为 `running`，由 lease 过期后的回收处理。
+- **owner 条件未命中**：释放影响 0 行，只说明持有权或状态无法确认（lease 已过期并被他人领取、或行已变化），
+  不等于检测到了 lease 过期。记为 `owner_mismatch`，不覆盖他人状态，本次运行停止派发，退出码 1。
+- **上界**：每行从 claim 到释放耗时 ≤ 3·D + C 加调度延迟，由启动检查保证在 lease 之内；窗口内任务并行，
+  中止时的排空时间同样 ≤ 2·D + C。事件写入也受 D 约束，失败只记日志。
+- 连接池争用（PostgreSQL 的 `max_connections` 小于并发数，或 SQLite 的单连接池）只会让操作排队；期限仍成立，最坏是提早停止。
+- **语义**：正常路径上每行至多被一个实例执行一次。lease 过期（崩溃、超出期限）时另一实例可能再次领取并发送——
+  外部调用是"至少一次"，结果行由唯一键与 owner 条件保证只落一次。
 
 ### 8. 结果、原始响应与回放（不变量 7）
 
@@ -221,19 +240,24 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
   代价是仓库里出现第二条原始载荷存储路径，清理规则单独定义（见下）。
 - 策略 `[decision].raw_response`：
   - `on_failure`（缺省）：只在响应为 2xx 但未通过校验（`InvalidResponse`）时保存——这正是需要排查契约漂移的情况；
-  - `always`：每次 2xx 都保存，供完全回放；
+  - `always`：每次可安全捕获的 2xx 都保存，供回放；
   - `never`：不保存。
-  - 只保存是合法 JSON 且通过 §9 凭据检查的响应体，因此列类型为 TEXT；非 JSON 或含凭据的响应只记错误类别。
+  - "可安全捕获"= 合法 JSON 且通过 §9 的凭据检查，因此列类型为 TEXT。非 JSON 的 2xx（HTML、截断体等）与含凭据的响应
+    在任何策略下都不保存原文，只记错误类别、`raw_response_bytes` 与 `raw_response_sha256`，并记 `raw_response_withheld` 事件
+    说明原因：非 JSON 内容可能以任意编码（HTML 实体、百分号编码、base64 等）夹带凭据，无法可靠检查。
   - 非 2xx 的错误体一律不保存、不回显（与 ADR 0010 §5 一致）。
 - **体量与清理**：响应体上限 1 MiB，单次运行最多新增 `max_requests_per_run × 1 MiB`（缺省 100 MiB）。
-  保存时写 `raw_response_expires_at = now + raw_response_ttl_days`；每次运行开始时以有界批次（每次 500 行）把过期行的
-  `raw_response` 置 NULL，结果与唯一键保留。`ttl_days = 0` 表示永久保存，须显式配置。
+  - 保存时写 `raw_response_expires_at = now + raw_response_ttl_days`；`ttl_days = 0` 表示永久保存，此时 expires_at 为 NULL，须显式配置。
+  - 每次运行开始时清理，**不按执行身份过滤**（旧策略的留档同样到期清理）：选取 `raw_response IS NOT NULL AND
+    raw_response_expires_at < now` 的行，按 expires_at 排序，每批 500 行、每次运行最多 10 批，把 `raw_response` 与
+    `raw_response_expires_at` 一并置 NULL，因此已清理的行不会被再次选中；结果与唯一键保留。
 - **回放**：decision crate 提供纯离线入口 `revalidate(provider, requested_model, laya_max_len, canonical_policy_json, raw_body)`，
   用冻结的执行参数与策略快照重新执行 Phase A 的全部响应校验，返回与在线调用相同的结果类型；
   并提供 `canonical_json → QuestionSpec` 的解析，与 `canonical_policy` 互为往返（测试锁定）。
-  - **本 ADR 申请的限定**：回放以库入口加测试的形式提供，不扩展 `replay` 命令（扩展会让该命令依赖这个可移除的功能）。
-    数据与入口齐备，即"能力上可回放"；脱离外网的命令行重放留待 Phase C 需要时再定。
-    批准本 ADR 即视为批准这一限定。
+  - **本 ADR 申请的两项例外**（不变量 7），批准本 ADR 即视为批准：
+    1. 回放以库入口加测试的形式提供，不扩展 `replay` 命令（扩展会让该命令依赖这个可移除的功能）；
+       脱离外网的命令行重放留待 Phase C 需要时再定。
+    2. 只有可安全捕获的响应能回放；非 JSON 与含凭据的 2xx 只留长度与 SHA-256，原文不可回放。
 
 ### 9. 对 decision crate 的扩展
 
@@ -246,10 +270,14 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
   - raw 体先按字节查找 key，再对 JSON 中**每一个**字符串字面量（含对象键；按词法扫描，重复键不会被合并掉）解码转义后查找；
     任一命中即不交出 raw，并记一条 warn 事件；
   - choice label 必须等于问题定义里的选项，score / 概率是数值，二者不构成自由文本。
-- 区分连接失败的阶段：新增 `DecisionError::Transport`（请求可能已发出：发送中或读响应体时断开），retryable；
-  `Connection` 只保留给连接阶段失败（`reqwest::Error::is_connect()`，请求未发出）。
+- 区分错误发生的阶段（错误映射显式按 reqwest 的分类判断，不再"非 timeout 即 Connection"）：
+  - `is_builder()`：请求在本地就构造失败、未发出，映射为 `InvalidConfig`（不带原值）。典型是 key 含换行等非法 header 字符；
+    为此 `SystemOneClient::new` 先把 `Bearer {key}` 验证为合法 `HeaderValue`，不合法即以 `InvalidConfig` 失败；
+  - `is_timeout()` → `Timeout`；`is_connect()` → `Connection`（连接阶段失败，请求未发出）；
+  - 其余（发送中或读响应体时断开）→ 新增的 `DecisionError::Transport`（请求可能已发出），retryable。
 - 显式 `ClientBuilder::retry(reqwest::retry::never())`：reqwest 0.12.28 默认会对它认为安全的协议级失败自动重发，
-  关闭后一次调用至多一次物理发送（§6）。
+  关闭后一次调用至多一次物理发送（§6）。底层 hyper-util 仍会重试尚未写出、因复用已失效连接而取消的请求，
+  这不构成重复发送。
 
 ### 10. 失败分类、中止与退出码
 
@@ -261,7 +289,8 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
 | 全局、与文章无关 | `Unauthorized`、`Connection`（未发出）、`RateLimited`、`InvalidConfig`、`InvalidRequest` | 该行回 `pending` 并**退还**本次计次；整个运行停止 |
 | 全局、疑似配置 | 其它 `Rejected`、`UnsupportedEncoding`、`HttpStatus`（含 3xx、404） | 该行回 `pending` 并计次；整个运行停止 |
 | 基础设施 | claim / 生成 / 维护 / 读文章的存储错误 | 已领取未发送的行退还；整个运行停止 |
-| 基础设施 | 释放失败、`lease_lost`、任务 panic | 该行留在 `running` 由 lease 过期回收；整个运行停止 |
+| 基础设施 | 释放失败、数据库操作超时（结果未知）、`owner_mismatch`、任务 panic | 不推断该行状态；若仍为 `running`，由 lease 过期回收；整个运行停止 |
+| 时间 | 最后一次 lease 检查不通过（§7） | 不调用、不扣额度，退还；该板块暂停到本次运行结束 |
 | 防御 | claim 返回的行身份与当前身份不符 | 退还；整个运行停止 |
 
 - 退还：在同一条受 owner 约束的释放语句里清 lease、回 `pending` 并 `attempt_count = attempt_count − 1`（claim 时已加一）。
@@ -270,7 +299,8 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
 - "疑似配置"让触发行计次，是为了避免某篇文章确实触发 400 时每次运行都卡在它身上：它最多卡 `max_attempts` 次运行。
 - Laya 的 503 可能由输入确定性触发（ADR 0010 §5），因此归入"单篇、可重试"，由尝试上限兜底。
 - **中止流程**：停止派发新窗口 → 当前窗口的所有在途任务照常完成并释放（`JoinSet` 必须排空，不得提前 drop；
-  每个任务受 §7 的时间上限约束）→ 汇总。窗口内的行在派发时已全部发出或已因派发前检查退还，因此中止时没有"已领取未派发"的行。
+  每个任务受 §7 的期限约束，排空 ≤ 2·D + C）→ 汇总。窗口内的行要么已调用客户端，要么已因最后一次 lease 检查退还，
+  因此中止时没有"已领取未处理"的行。
 - **退出码**按优先级取最高：配置 / 凭据类（`Unauthorized`、`InvalidConfig`、`InvalidRequest`、启动检查失败）→ 78；
   其它全局错误与基础设施错误 → 1；仅有单篇失败或 `RateLimited` → 0（摘要标记 `rate_limited`）。同 ai-run，单篇失败不影响退出码。
 - 任何失败都只表示"没有判断"，不得推断为文章不重要（ADR 0010 §5）。
@@ -282,11 +312,11 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
   启用时先解析凭据、校验问题与 lease 下界，全部通过后才打开存储（写命令会自动执行迁移）。
   这比 ai-run 先开库再检查更早失败。
 - run_events：stage `decision_run`；事件 `run_started`、`run_completed`、`decision_completed`、`decision_failed`
-  （带 `error_kind`、§10 类别、是否计次）、`decision_run_aborted`、`lease_lost`、`leases_reclaimed`、`retry_budget_swept`、
+  （带 `error_kind`、§10 类别、是否计次）、`decision_run_aborted`、`owner_mismatch`、`lease_insufficient`、`leases_reclaimed`、`retry_budget_swept`、
   `raw_responses_expired`、`raw_response_withheld`；target 为 `("decision_result", id)`。事件里不放文章内容、答案与响应体。
 - 摘要（文本与 JSON）：每板块的 generated / claimed / succeeded / failed / retried / refunded / 其它身份 pending 数；
   全局的请求数、input_tokens 合计、`aborted`（类别与 kind）、`budget_exhausted`、`rate_limited`、
-  基础设施计数（`storage_errors`、`release_failed`、`lease_lost`、`tasks_panicked`）、耗时。
+  基础设施计数（`storage_errors`、`storage_timeouts`、`release_failed`、`owner_mismatch`、`tasks_panicked`）、领取数与调用数、耗时。
 - **doctor 不纳入**：健康检查与 deep_scan 不认识这两张表；加进去会让 doctor 依赖可移除的功能。
   lease 回收、预算终态化与留档清理由 `decision-run` 自己在运行开始时完成，状态通过摘要与 run_events 可见。
   这是有意保留的观测缺口；Phase C 若决定让判断参与流程，再连同 doctor 一起设计。
@@ -296,14 +326,18 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
 - storage（SQLite 进程内；PostgreSQL 走现有 postgres lane）：
   - 候选：窗口边界（亚秒、整秒、混合 SQLite 时间文本）、板块、`retired`、反连接、整页冲突时游标前进；
   - 生成幂等；并行 claim 不相交；claim 只领当前身份（两种身份并存）；错 owner 释放无效；
-  - 过期回收、预算终态化与退还交错；退还后计数；留档过期清理；全部 CHECK 与 NOT NULL 拒绝非法行。
+  - 过期回收、预算终态化与退还交错；退还后计数；留档清理跨身份生效、不重复选中、每次运行有上限；
+  - 全部 CHECK 与 NOT NULL 拒绝非法行，含 Laya + NULL `laya_max_len` 与 NULL 策略主键。
 - flow（假 `DecisionClient`）：
   - §10 每一行的状态变化、计次与退出码，含多个全局错误同时出现时的优先级；
   - 请求预算：多板块、末窗口不足、中止时不超额、退还不恢复额度；两个持续积压板块都能拿到请求；
-  - 派发前 lease 检查、`lease_lost`、释放失败、panic、存储错误；中止时在途任务被排空而非取消；
+  - 最后一次 lease 检查不通过（整窗口未发送即退还、板块暂停、不扣额度）、`owner_mismatch`、释放失败、数据库操作超时、panic、
+    存储错误；中止时在途任务被排空而非取消；
+  - 板块轮转：预算小于板块数时，连续多次运行中各积压板块轮流得到请求；
   - 配置切换后不执行旧身份行、切回后继续；`raw_response` 三种策略与 TTL；事件不含正文、答案与响应体。
 - decision crate：`answers_json` 固定形状；`Exchange` 只在 2xx 且无凭据时带原始体、Debug 不含字节；
-  凭据反射（`reported_model`、`routing_model`、raw 中的转义写法与重复键）；`Transport` 与 `Connection` 的区分；
+  凭据反射（`reported_model`、`routing_model`、raw 中的转义写法与重复键）；非 JSON 2xx 只留长度与 SHA-256；
+  `Transport` / `Connection` / builder 错误的区分，含 key 带换行时零发送并以 78 退出；
   `revalidate` 对在线结果的一致性与 `canonical_json` 往返；客户端不自动重试（传输层计数测试）。
 - CLI：参数、关闭时退出码 78 且不打开存储、启动检查、摘要 JSON 形状。
 - 迁移：pin 与双方言配对测试；新库全链与从 0005 升级。
@@ -313,7 +347,7 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
 
 源码删除不会改变已部署的数据库，迁移只在新二进制执行写命令时应用，因此卸载按以下顺序：
 
-1. 停用外部调度中的 `decision-run`，等待已在运行的实例结束（至少一个 `lease_seconds`）。
+1. 停用外部调度中的 `decision-run`，并确认所有 `decision-run` 进程都已退出（以进程确认为准，不能用等待一个 lease 时长代替）。
 2. 发布一个"移除版本"，同时包含：
    - 新增前向迁移 `NNNN_drop_decision_results`（取当时下一个可用编号，两方言）：up 为 `DROP TABLE decision_results`、
      `DROP TABLE decision_policies`；down 重建 0006 的空表结构（数据不可恢复，不得在 down 里再次 DROP），并登记 pin；
@@ -323,7 +357,8 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
      `crates/storage/src/repo/decision_result*.rs` 与 `repo/mod.rs`、`lib.rs` 的登记行；
    - 再按 plan/18 §1 删除 Phase A，并补上其遗漏项：`crates/config/src/loader.rs` 中调用 `decision::extract` 的一行、
      `crates/cli/tests/validate_config_cmd_tests.rs` 中的 decision 用例。
-3. 部署后显式执行 `migrate`，并用只读命令确认迁移状态与二进制一致。
+3. 部署后显式执行 `migrate`，再用会做完整迁移状态检查的只读命令（`ensure_migration_state_exact`：版本、校验和、无多余版本）
+   确认状态与二进制一致，并确认两张表已不存在。`migrate check` 主要检查 pending 版本，不能单独作为卸载证据。
 4. `0006` 与新的删除迁移文件、以及它们的 pin 必须永久保留：已执行过的数据库记录了它们的校验和。
 5. 卸载验收：新库全链迁移；带 Phase B 数据的库升级；重复执行 `migrate` 幂等；其余命令回归通过。
 6. 文档：本 ADR 改为 `deprecated`；删 plan/18 的 Phase B 章节、plan/08 的状态机登记、cli-reference 与验收用例、地图条目。
@@ -334,7 +369,7 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
 
 - 有了可追溯、可离线复核的判断数据：每条结果都能对回策略快照、执行身份、部署标识与实际发送的文本。
 - 主流程、现有表与状态机零改动；关闭时零连接。
-- 请求数有硬上限且退还不恢复额度；凭据或连接故障不消耗文章的尝试次数；反射的凭据不会落库。
+- 请求数有硬上限且退还不恢复额度；凭据或连接故障不消耗文章的尝试次数；反射的凭据不会落库；每行的处理时间有可证明的上界。
 
 ### 负面后果 / 代价
 
@@ -342,7 +377,7 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
 - 状态机不在 domain，偏离 ADR 0002 的集中惯例（plan/08 登记弥补）。
 - 第二条原始载荷存储路径（`raw_response` 列），有独立的 TTL 清理。
 - 按窗口领取在窗口之间有一次同步等待，吞吐低于整批领取；对影子运行可以接受。
-- 回放只有库入口，没有命令行（§8 的限定）。
+- 回放只有库入口，没有命令行；非 JSON 与含凭据的 2xx 不可回放（§8 的两项例外）。
 - doctor 看不到这两张表。
 - 启用后 `decision-run` 是第一个真正向 Jev / Laya 发送文章内容的命令；数据外发见 ADR 0010 Consequences，
   费用没有调用前的硬上限（§6）。
