@@ -169,7 +169,7 @@ pub trait DecisionClient: Send + Sync {
 | 400 / 422 | `Rejected { status, code: Option }`：宽松解析 Laya 的 `detail.code` 或 Jev 的 `code` / `error` | 否 |
 | 413 | `PayloadTooLarge` | 否 |
 | 415 | `UnsupportedEncoding`（本项目不压缩请求，出现即实现缺陷） | 否 |
-| 408 / 超时 | `Timeout` | 是 |
+| 本地超时 / HTTP 408 | `Timeout { seconds }` / `RequestTimeout` | 是 |
 | 429 | `RateLimited { retry_after }` | 是 |
 | 503 / 529 | `Unavailable { status, code }`（Laya 的 503 也可能来自输入导致的确定性失败） | 是（仅提示） |
 | 其它 5xx | `Server { status }` | 是（仅提示） |
@@ -178,7 +178,8 @@ pub trait DecisionClient: Send + Sync {
 | 响应体超限 / 非 JSON / 校验失败 | `ResponseTooLarge` / `InvalidResponse { reason }` | 否 |
 | 配置错误 | `InvalidConfig` | 否 |
 
-- 错误体超限或不是 JSON 时，status 语义照常保留。
+- 错误体超限、读取中断或超时、不是 JSON 时，status 语义照常保留。
+- 不跟随重定向（3xx 即 `HttpStatus`），避免把 bearer key 转发到 `Location`。
 - `retryable` 只是提示。Phase A 不做任何自动重试；重试上限与退避由 Phase B 的 `decision-run` 决定。
 - 任何错误都只表示"没有判断"，调用方不得据此推断文章价值。
 
@@ -254,8 +255,8 @@ options = [{ label = "release", description = "新模型或新版本发布" },
 ### 7. 分阶段
 
 - **Phase A（本 ADR 批准后实施）**：
-  - 交付：decision crate（trait、SystemOne HTTP 实现、两个 profile、§4 全部响应校验、§5 错误）（含归一化类型、纯校验与配置段解析）、
-    config 解析 / 校验 / warning；
+  - 交付：decision crate（trait、SystemOne HTTP 实现、两个 profile、§4 全部响应校验、§5 错误）（含归一化类型、纯校验与配置段解析）；
+    config 只透传两段原始 TOML，validate-config 调用 decision 的校验；
   - 离线契约测试（wiremock），覆盖：
     - 请求体的确切形状：Laya 只有四个字段，且总带 `max_len`；
     - 两家正常响应的 fixture；

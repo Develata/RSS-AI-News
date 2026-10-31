@@ -134,6 +134,88 @@ async fn validate_config_warns_when_category_prompt_omits_article_placeholders()
     assert!(!value.to_string().contains("secret-ish prompt"));
 }
 
+const DECISION_QUESTIONS: &str = r#"
+[[category.decision.questions]]
+id = "q_marketing"
+type = "noul"
+instructions = "这篇是否主要是营销稿？"
+"#;
+
+fn append(path: &Path, text: &str) {
+    let mut content = fs::read_to_string(path).unwrap();
+    content.push_str(text);
+    fs::write(path, content).unwrap();
+}
+
+fn decision_config(app_section: &str) -> TempDir {
+    let temp = TempDir::new().unwrap();
+    write_config(temp.path(), true, false);
+    append(
+        &temp.path().join("categories").join("ai.toml"),
+        DECISION_QUESTIONS,
+    );
+    append(&temp.path().join("app.toml"), app_section);
+    temp
+}
+
+#[tokio::test]
+async fn validate_config_warns_for_decision_questions_without_an_enabled_section() {
+    let temp = decision_config("");
+    let summary = validate_config::run(&cli_for(temp.path())).await.unwrap();
+    let value = serde_json::to_value(&summary).unwrap();
+    let inert: Vec<_> = value["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|warning| warning["code"] == "decision_inert")
+        .collect();
+    assert_eq!(inert.len(), 1, "{value}");
+    assert_eq!(inert[0]["category"], "ai");
+}
+
+#[tokio::test]
+async fn validate_config_checks_the_decision_key_only_when_enabled() {
+    let enabled = r#"
+[decision]
+enabled = true
+provider = "laya"
+base_url = "http://laya.internal:8080"
+api_key_env = "RSS_AI_NEWS_TEST_UNSET_DECISION_KEY"
+model = "multilingual"
+"#;
+    let error = validate_config::run(&cli_for(decision_config(enabled).path()))
+        .await
+        .expect_err("missing decision key");
+    assert_eq!(error.exit_code(), ExitCode::ConfigError);
+    assert!(
+        error
+            .to_string()
+            .contains("RSS_AI_NEWS_TEST_UNSET_DECISION_KEY")
+    );
+    // PATH is always set; no decision warning remains once enabled.
+    let present = enabled.replace("RSS_AI_NEWS_TEST_UNSET_DECISION_KEY", "PATH");
+    let summary = validate_config::run(&cli_for(decision_config(&present).path()))
+        .await
+        .unwrap();
+    let value = serde_json::to_value(&summary).unwrap();
+    assert!(!value.to_string().contains("decision_"), "{value}");
+    // Disabled: the unset variable is never looked up.
+    let disabled = enabled.replace("enabled = true", "enabled = false");
+    validate_config::run(&cli_for(decision_config(&disabled).path()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn validate_config_rejects_laya_auto_routing() {
+    let auto = "\n[decision]\nprovider = \"laya\"\nmodel = \"auto\"\n";
+    let error = validate_config::run(&cli_for(decision_config(auto).path()))
+        .await
+        .expect_err("auto is per-input routing");
+    assert_eq!(error.exit_code(), ExitCode::ConfigError);
+    assert!(error.to_string().contains("decision.model"));
+}
+
 fn cli_for(config_dir: &Path) -> Cli {
     Cli {
         config_dir: config_dir.to_path_buf(),

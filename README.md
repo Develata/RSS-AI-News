@@ -875,7 +875,8 @@ rss-ai-news --config-dir configs validate-config
 
 ## 当前版本状态（v0.9.1）
 
-- production graph：11 个 library crates + 1 个 single-shot binary；SQLite / PostgreSQL 双方言。
+- production graph：12 个 library crates + 1 个 single-shot binary；SQLite / PostgreSQL 双方言。
+- typed-decision（Jev / Laya，ADR 0010 Phase A）：默认关闭，仅 validate-config 校验其配置，不接入任何流程。
 - CLI：13 个顶层子命令；阶段失败经 summary 反映到退出码（JSON 恰好一个文档）；`run` / `ai-run` 逐分类执行 AI。
 - config：`validate-config` 对保留字段、缺 `{body_text}` / `{title}` 的分类 prompt 输出非致命 warning；分类未写 prompt 时使用含占位符的内置默认模板。
 - development tooling：独立 Rust acceptance matrix，覆盖 6 lanes、local/full profiles 与 JSON evidence；step 有界输出与超时。

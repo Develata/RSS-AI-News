@@ -133,7 +133,10 @@ Azure OpenAI）都可通过 `OPENAI_BASE_URL` 切换。
 - 智能选择模型（成本 / 质量自适应、A/B、加权）
 - 运行时跨 provider 动态路由
 
-即：fallback 是"失败后的静态顺序降级"，不是"按输入挑模型"。板块（category）独立凭证
+即：fallback 是"失败后的静态顺序降级"，不是"按输入挑模型"。
+
+typed-decision（[./18-typed-decision.md](./18-typed-decision.md)，ADR 0010）是对生成式摘要的**辅助判断**，
+不是摘要模型的路由；为同一约束，Laya 的 `model = "auto"`（按输入语言选检查点）被拒绝，只允许显式检查点。板块（category）独立凭证
 （key / base_url 自治）属第二期，见 [./14-ai-fallback.md](./14-ai-fallback.md) §B。
 
 ### 5.3 不内置 prompt 工程工具

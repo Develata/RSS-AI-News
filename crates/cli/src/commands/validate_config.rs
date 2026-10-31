@@ -50,6 +50,8 @@ pub async fn run(cli: &Cli) -> Result<ValidateConfigSummary, CliError> {
     // W14-B：诊断命令全量审计每个板块的 AI 凭证可解析性（普通 load 只按
     // filtered 范围做全局 gate + ai-run 选定板块后 fail-fast，不查未选板块）。
     config::audit_ai_credentials(&loaded)?;
+    let mut warnings = config::validate::config_warnings(&loaded);
+    warnings.extend(decision_warnings(&loaded)?);
     Ok(ValidateConfigSummary {
         config_dir: cli.config_dir.display().to_string(),
         category_count: loaded.categories.len() as u32,
@@ -58,7 +60,51 @@ pub async fn run(cli: &Cli) -> Result<ValidateConfigSummary, CliError> {
             .iter()
             .map(|category| category.sources.len() as u32)
             .sum(),
-        warnings: config::validate::config_warnings(&loaded),
+        warnings,
         config_sha256: loaded.config_sha256,
     })
+}
+
+/// Typed-decision sections (ADR 0010): only validate-config reads them in
+/// Phase A. Issues fail like config errors; warnings join the config ones.
+/// The env check only learns whether the key variable is set, never its value.
+fn decision_warnings(
+    loaded: &config::LoadedConfig,
+) -> Result<Vec<config::validate::ConfigWarning>, CliError> {
+    let sections = &loaded.decision;
+    if sections.app.is_none() && sections.categories.is_empty() {
+        return Ok(Vec::new());
+    }
+    let categories: Vec<_> = sections
+        .categories
+        .iter()
+        .map(|section| rss_ai_news_decision::CategorySection {
+            source: &section.source,
+            category_key: &section.category_key,
+            value: &section.value,
+        })
+        .collect();
+    let has_env = |name: &str| loaded.env.resolve_secret(name).is_some();
+    let report =
+        rss_ai_news_decision::validate_sections(sections.app.as_ref(), &categories, Some(&has_env));
+    if !report.issues.is_empty() {
+        let diagnostics = report
+            .issues
+            .into_iter()
+            .map(|issue| config::Diagnostic::new(issue.source, issue.field, issue.message))
+            .collect();
+        return Err(CliError::Config(config::ConfigError::ValidationFailed {
+            report: config::DiagnosticReport::new(diagnostics),
+        }));
+    }
+    Ok(report
+        .warnings
+        .into_iter()
+        .map(|warning| config::validate::ConfigWarning {
+            code: warning.code,
+            field: warning.field,
+            message: warning.message,
+            category: warning.category,
+        })
+        .collect())
 }

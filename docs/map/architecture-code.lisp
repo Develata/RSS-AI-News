@@ -308,6 +308,15 @@
       :kind trait
       :state active)
 
+(node :id decision-crate
+      :label "decision crate"
+      :layer capability
+      :crate decision
+      :path "crates/decision/src/lib.rs"
+      :kind module
+      :state active
+      :notes "DecisionClient / SystemOneClient + provider::{jev, laya} + validate_sections；Phase A 仅 validate-config 调用。")
+
 (node :id ai-crate
       :label "ai crate"
       :layer capability

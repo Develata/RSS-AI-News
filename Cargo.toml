@@ -12,6 +12,7 @@ members = [
     "crates/report",
     "crates/publish",
     "crates/observability",
+    "crates/decision",
     "tools/acceptance",
 ]
 resolver = "3"
@@ -117,6 +118,7 @@ rss-ai-news-ai = { path = "crates/ai" }
 rss-ai-news-report = { path = "crates/report" }
 rss-ai-news-publish = { path = "crates/publish" }
 rss-ai-news-observability = { path = "crates/observability" }
+rss-ai-news-decision = { path = "crates/decision" }
 
 [package]
 name = "rss-ai-news"

@@ -289,6 +289,7 @@ mod tests {
             source_secrets: crate::SourceSecrets::default(),
             config_sha256: String::new(),
             cli_overrides: CliOverrides::default(),
+            decision: Default::default(),
         }
     }
 

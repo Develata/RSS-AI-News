@@ -303,6 +303,7 @@ fn loaded_config() -> LoadedConfig {
         source_secrets: rss_ai_news_config::SourceSecrets::default(),
         config_sha256: "sha".to_string(),
         cli_overrides: Default::default(),
+        decision: Default::default(),
     }
 }
 

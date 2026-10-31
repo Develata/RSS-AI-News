@@ -278,6 +278,34 @@ diagnostic 列表渲染到 stderr。
 
 代码路径过时时在 [../map/architecture-diff.md](../map/architecture-diff.md) 登记漂移。
 
+## typed-decision（可选，ADR 0010）
+
+`[decision]`（app.toml）与 `[category.decision]`（categories/*.toml）由 config 原样透传，语义在
+`rss-ai-news-decision` 中（见 [./18-typed-decision.md](./18-typed-decision.md)）。两段都可省略；旧配置不受影响。
+段内拒绝未知字段。
+
+```toml
+[decision]
+enabled = false                        # 缺省 false
+provider = "laya"                      # 有此段即必填："laya" | "jev"
+base_url = "http://laya.internal:8080" # enabled 时必填；不得含用户信息、query、fragment；Jev: https://api.typesafe.ai
+api_key_env = "LAYA_API_KEY"           # enabled 时必填；只写 env 变量名
+model = "multilingual"                 # enabled 时必填；Laya: multilingual|english|typed-decisions（不允许 auto）；Jev: jev-1.13.0
+request_timeout_seconds = 10           # 缺省 10，1..=60
+max_state_chars = 6000                 # 缺省 6000，1..=200000
+laya_max_len = 2048                    # 仅 Laya；缺省 2048，512..=8192
+
+[[category.decision.questions]]        # 省略或空列表 = 该板块不调用
+id = "q_marketing"                     # [a-z0-9_]，板块内唯一
+type = "noul"                          # noul | choice | score
+instructions = "这篇是否主要是厂商营销或公关稿？"
+# noul 可选 yes / no（各自可省）；choice 用 options = [{ label, description? }]（2..=20）；
+# score 用 levels = [...]（从低到高，Jev ≤ 10，Laya ≤ 50）
+```
+
+validate-config 规则与 warning（`decision_inert`、`decision_model_alias`、`decision_unused_field`）见 plan/18 §6。
+启用时只检查 `api_key_env` 所指变量是否存在（进程环境优先，`.env` 后备，空白视为缺失），不读取、不回显其值。
+
 ## 独立能力与保留字段（2026-09-10）
 
 单阶段命令的凭据 gate 只针对该命令实际调用的能力；结构/schema 错误仍统一 fail-fast。

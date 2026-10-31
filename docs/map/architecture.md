@@ -6,7 +6,7 @@
 ## 整体形态
 
 - 一只 **single-shot CLI**（`rss-ai-news`），每次 run 完成一段流水线后退出
-- production graph 为 11 个 library crate + 1 个根 binary；workspace 另含 1 个零 product-crate 依赖的 acceptance tooling crate
+- production graph 为 12 个 library crate + 1 个根 binary（`decision` 为可选的 typed-decision 能力，Phase A 仅由 validate-config 使用）；workspace 另含 1 个零 product-crate 依赖的 acceptance tooling crate
 - 主链路 5 段：`ingest → extract → ai-run → publish → publish-remote`
 - 调度外挂（外挂 cron / supercronic 镜像），见 [../plan/13-non-goals.md](../plan/13-non-goals.md)
 
@@ -66,11 +66,11 @@ FeedSource ──ingest──▶ FeedEntry ──extract──▶ Article ──
 
 ```text
 rss-ai-news → cli
-cli         → domain, config, runtime, storage, feed, extractor, ai, publish, observability
+cli         → domain, config, runtime, storage, feed, extractor, ai, decision, publish, observability
 runtime     → domain, config, storage, feed, extractor, ai, report, publish, observability
 report      → domain, storage
 storage     → domain
-config, feed, extractor, ai, publish → domain
+config, feed, extractor, ai, decision, publish → domain
 domain, observability → 无 workspace product-crate 下游
 ```
 

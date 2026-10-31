@@ -22,6 +22,8 @@ pub struct LoadedConfig {
     pub source_secrets: SourceSecrets,
     pub config_sha256: String,
     pub cli_overrides: CliOverrides,
+    /// Raw typed-decision sections, interpreted only by `rss-ai-news-decision`.
+    pub decision: crate::DecisionSections,
 }
 
 impl LoadedConfig {
@@ -112,6 +114,13 @@ fn load_inner(
     }
 
     let config_sha256 = compute_config_sha256(&app_content, &category_contents);
+    let decision =
+        crate::decision::extract(&app_content, &category_contents).map_err(|(path, error)| {
+            ConfigError::ParseFailed {
+                path,
+                reason: error.to_string(),
+            }
+        })?;
     let source_secrets = expand_env_placeholders(&mut categories, &env);
 
     Ok(LoadedConfig {
@@ -121,6 +130,7 @@ fn load_inner(
         source_secrets,
         config_sha256,
         cli_overrides,
+        decision,
     })
 }
 

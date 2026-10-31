@@ -50,6 +50,9 @@
 | `load_example_configs_end_to_end` | `crates/config/tests/load_examples.rs` | example 端到端 |
 | `validate_config_warns_when_category_prompt_omits_article_placeholders` | `crates/cli/tests/validate_config_cmd_tests.rs` | prompt warning / pretty / JSON / 不回显 |
 | `shipped_category_example_prompt_is_quiet` 等 prompt 用例 | `crates/config/src/validate/warnings.rs` | 示例与默认模板静默、`{{body}}`、JSON 花括号、AI 关闭 |
+| `validate_config_warns_for_decision_questions_without_an_enabled_section` | `crates/cli/tests/validate_config_cmd_tests.rs` | typed-decision 问题未启用时给 `decision_inert` warning |
+| `validate_config_checks_the_decision_key_only_when_enabled` | 同上 | 启用时检查密钥变量、关闭时不检查 |
+| `validate_config_rejects_laya_auto_routing` | 同上 | 拒绝 Laya `auto`（non-goals §5.2） |
 | `ai_run_without_category_prompt_sends_article_title_and_body` | `crates/cli/tests/publish_cmd_tests.rs` | 默认模板实际把标题与正文发给模型 |
 
 （其余字段级校验项见 [../pipelines/06-config-loading.md](../pipelines/06-config-loading.md) 的完整测试矩阵，本 case 仅覆盖 CLI 入口。）

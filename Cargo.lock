@@ -2786,6 +2786,7 @@ dependencies = [
  "reqwest",
  "rss-ai-news-ai",
  "rss-ai-news-config",
+ "rss-ai-news-decision",
  "rss-ai-news-domain",
  "rss-ai-news-extractor",
  "rss-ai-news-feed",
@@ -2818,6 +2819,24 @@ dependencies = [
  "thiserror 2.0.21",
  "toml",
  "url",
+]
+
+[[package]]
+name = "rss-ai-news-decision"
+version = "0.9.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "reqwest",
+ "rss-ai-news-domain",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
+ "url",
+ "wiremock",
 ]
 
 [[package]]

@@ -20,7 +20,7 @@
        :label "CLI surface：clap derive 子命令"
        :layer instruction-interface
        :path "crates/cli/"
-       :downstream (domain config runtime storage feed extractor ai publish observability)
+       :downstream (domain config runtime storage feed extractor ai decision publish observability)
        :state active
        :notes "13 个子命令（ingest / ai-run / publish / publish-all / run / migrate / validate-config / doctor / replay / backfill / reindex / rebuild-report / recent-entries）。
                入口 crates/cli/src/lib.rs::run。args.rs 维护 clap derive 结构。
@@ -103,6 +103,15 @@
        :notes "OpenAI 兼容 client（reqwest）。prompt.rs 处理 placeholder + UTF-8 安全截断。
                parser.rs 强制 JSON schema 校验（keep / score / summary）。
                详见 plan/03-ai.md。")
+
+(crate :id decision
+       :label "typed-decision（Jev / Laya）"
+       :layer capability
+       :path "crates/decision/"
+       :downstream (domain)
+       :state active
+       :notes "ADR 0010 Phase A：SystemOne HTTP client、provider 子模块（jev / laya）、响应一致性校验、
+               配置段解析（config 只透传 toml::Value）。不接入任何 flow；可整体移除。详见 plan/18-typed-decision.md。")
 
 (crate :id report
        :label "Markdown 渲染 + rebuild"

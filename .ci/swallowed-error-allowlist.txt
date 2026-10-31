@@ -19,7 +19,7 @@ crates/ai/src/client.rs:240:AI 错误JSON解析失败或结构未知时省略正
 crates/publish/src/github.rs:550:GitHub 错误JSON解析失败时省略正文，仅保留状态码与422冲突信号，原已审核error-reporting豁免
 
 # ── 测试 harness：teardown / fire-and-forget ──
-crates/config/src/loader.rs:425:测试 fixture Workspace::drop 清理 temp 目录，Drop 内无法传播错误，best-effort
+crates/config/src/loader.rs:435:测试 fixture Workspace::drop 清理 temp 目录，Drop 内无法传播错误，best-effort
 crates/observability/tests/prometheus_http_test.rs:35:测试 spawn 的 hyper server 任务，退出 Err 不影响用例（端口探测已成功）；fire-and-forget
 crates/observability/tests/prometheus_http_test.rs:87:同上，第二处测试 server spawn 任务
 crates/observability/tests/tracing_init_file_appender_test.rs:39:测试代码：read_dir 失败时进入下一轮重试（最终断言由 deadline 兜底）

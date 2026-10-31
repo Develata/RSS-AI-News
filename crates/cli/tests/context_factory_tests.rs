@@ -256,5 +256,6 @@ api_key_env = "DEEPSEEK_API_KEY"
         source_secrets: SourceSecrets::default(),
         config_sha256: String::new(),
         cli_overrides: CliOverrides::default(),
+        decision: Default::default(),
     }
 }
