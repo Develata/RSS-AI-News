@@ -2,6 +2,9 @@ pub mod article;
 pub mod article_ai_result;
 mod article_ai_result_impl;
 mod article_ai_result_sql;
+pub mod decision_result;
+mod decision_result_impl;
+mod decision_result_sql;
 pub mod feed_entry;
 mod feed_entry_impl;
 mod feed_entry_sql;
@@ -49,6 +52,11 @@ pub use article::{
 pub use article_ai_result::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
     ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome,
+};
+pub use decision_result::{
+    ClaimedDecision, DecisionAttemptRecord, DecisionExecution, DecisionFailure,
+    DecisionFailureMode, DecisionIdentity, DecisionRawRecord, DecisionResultRepo,
+    DecisionResultRepository, DecisionResultState, DecisionSuccess,
 };
 pub use feed_entry::{
     ClaimedFeedEntry, FeedEntry, FeedEntryInsertOutcome, FeedEntryRepo, FeedEntryRepository,

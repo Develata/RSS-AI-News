@@ -57,6 +57,14 @@ const PINNED_UP_MIGRATIONS: &[(&str, &str)] = &[
         "migrations/postgres/0005_artifact_reference_indexes.up.sql",
         "3c9e9cb9e5289adba5f4d21084a2c61a821d3998c8336c176122d455170efa0b",
     ),
+    (
+        "migrations/sqlite/0006_decision_results.up.sql",
+        "63f6fd1fed1c40c1ccb47260d54ae959374459257aea14b34503f7076b963f63",
+    ),
+    (
+        "migrations/postgres/0006_decision_results.up.sql",
+        "a457b04b66c477897e849b269cefc39dc4477d0af3b0b09f53a38db82f93fddb",
+    ),
 ];
 
 fn repo_root() -> std::path::PathBuf {
