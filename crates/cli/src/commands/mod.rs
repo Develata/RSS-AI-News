@@ -7,6 +7,7 @@ use crate::{
 
 pub mod ai_run;
 pub mod backfill;
+pub mod decision_run;
 pub mod doctor;
 pub mod ingest;
 pub mod migrate;
@@ -67,6 +68,9 @@ pub async fn dispatch(cli: Cli, writer: &mut OutputWriter) -> Result<ExitCode, C
             MigrateAction::Run => writer.emit_summary("migrate", &migrate::run(&cli).await?),
             MigrateAction::Check => writer.emit_summary("migrate", &migrate::check(&cli).await?),
         },
+        Command::DecisionRun(args) => {
+            writer.emit_summary("decision-run", &decision_run::run(&cli, args).await?)
+        }
         Command::Run(args) => writer.emit_summary("run", &run::run(&cli, args).await?),
     }
 }

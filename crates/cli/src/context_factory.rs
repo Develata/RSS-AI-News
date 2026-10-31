@@ -6,14 +6,14 @@ use rss_ai_news_extractor::{ContentStrategy, ReadabilityStrategy, ReqwestHtmlFet
 use rss_ai_news_feed::ReqwestFeedFetcher;
 use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, LocalFsTarget, PublishTarget};
 use rss_ai_news_runtime::{
-    AiDeps, BackfillDeps, ExtractDeps, IngestDeps, PublishDeps, RebuildReportDeps,
-    RecentEntriesFlow, ReindexDeps, RunMeta,
+    AiDeps, BackfillDeps, DecisionRunDeps, DecisionRunSettings, ExtractDeps, IngestDeps,
+    PublishDeps, RebuildReportDeps, RecentEntriesFlow, ReindexDeps, RunMeta,
 };
 use rss_ai_news_storage::{
-    ArticleAiResultRepo, ArticleRepo, ConfigRotation, FeedEntryRepo, FeedSourceRepo,
-    PublishItemRepo, PublishRecordRepo, RawArtifactRepo, ReindexJobRepo, RuleVersionRepo,
-    RunEventRepo, StoragePool, applied_migration_versions, ensure_migration_state_exact,
-    pending_migration_versions, run_migrations,
+    ArticleAiResultRepo, ArticleRepo, ConfigRotation, DecisionExecution, DecisionResultRepo,
+    FeedEntryRepo, FeedSourceRepo, PublishItemRepo, PublishRecordRepo, RawArtifactRepo,
+    ReindexJobRepo, RuleVersionRepo, RunEventRepo, StoragePool, applied_migration_versions,
+    ensure_migration_state_exact, pending_migration_versions, run_migrations,
 };
 use std::{sync::Arc, time::Duration};
 use time::OffsetDateTime;
@@ -42,6 +42,34 @@ pub async fn open_read_storage(loaded: &LoadedConfig) -> Result<StoragePool, Cli
     .await?;
     ensure_migration_state_exact(&pool).await?;
     Ok(pool)
+}
+
+/// decision-run (ADR 0011): the configured client, its settings and the two
+/// read / one write repositories it needs. Nothing else is wired.
+pub fn build_decision_run_deps(
+    pool: &StoragePool,
+    client: Arc<rss_ai_news_decision::SystemOneClient>,
+    settings: &rss_ai_news_decision::DecisionSettings,
+    execution: DecisionExecution,
+) -> Arc<DecisionRunDeps> {
+    Arc::new(DecisionRunDeps {
+        run: RunMeta::default(),
+        settings: DecisionRunSettings {
+            concurrency: settings.concurrency,
+            lease_seconds: settings.lease_seconds,
+            max_attempts: settings.max_attempts,
+            request_timeout: settings.request_timeout,
+            raw_response: settings.raw_response,
+            raw_response_ttl_days: settings.raw_response_ttl_days,
+        },
+        endpoint_origin: client.endpoint_origin(),
+        execution_key: client.execution_key(),
+        client,
+        execution,
+        decision_repo: Arc::new(DecisionResultRepo::new_with_storage(pool.clone())),
+        article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
+        event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+    })
 }
 
 pub fn build_ingest_deps(

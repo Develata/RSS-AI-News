@@ -162,6 +162,8 @@ pub enum Command {
     ValidateConfig,
     /// 完整流程：ingest → ai-run（AI 关闭时跳过）→ publish-all
     Run(RunArgs),
+    /// typed-decision 影子运行：对近期文章提问并只记录答案（ADR 0011；不在 run 中）
+    DecisionRun(DecisionRunArgs),
 }
 
 impl Command {
@@ -181,6 +183,7 @@ impl Command {
             Self::Migrate(_) => "migrate",
             Self::ValidateConfig => "validate-config",
             Self::Run(_) => "run",
+            Self::DecisionRun(_) => "decision-run",
         }
     }
 
@@ -205,7 +208,8 @@ impl Command {
             | Self::Publish(_)
             | Self::PublishAll(_)
             | Self::Backfill(_)
-            | Self::Run(_) => false,
+            | Self::Run(_)
+            | Self::DecisionRun(_) => false,
         }
     }
 }
@@ -234,6 +238,16 @@ pub struct AiRunArgs {
     /// 每个分类最多处理的批数（多分类时按分类分别计），覆盖 [runtime].max_batches_per_run；0 = 不限
     #[arg(long = "max-batches", value_name = "N")]
     pub max_batches: Option<u32>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct DecisionRunArgs {
+    /// 本次最多发出的请求数，覆盖 [decision].max_requests_per_run
+    #[arg(long = "max-requests", value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10_000))]
+    pub max_requests: Option<u32>,
+    /// 候选窗口（小时），覆盖 [decision].window_hours；补跑旧文章时显式放宽
+    #[arg(long = "window-hours", value_name = "N", value_parser = clap::value_parser!(u32).range(1..=8760))]
+    pub window_hours: Option<u32>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
