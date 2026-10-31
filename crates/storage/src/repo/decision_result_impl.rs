@@ -21,14 +21,48 @@ use super::decision_result_sql::{
     RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL, TERMINALIZE_EXHAUSTED_SQL, UPSERT_POLICY_SQL,
 };
 
+/// A lock or statement timeout, wherever it was raised: PostgreSQL
+/// `query_canceled` (57014, `statement_timeout`) and `lock_not_available`
+/// (55P03, `lock_timeout`), SQLite busy / locked once `busy_timeout` ran out,
+/// or no pooled connection in time. decision-run treats these as "result
+/// unknown" rather than as plain errors (ADR 0011 §7).
+fn timeout_or(
+    error: sqlx::Error,
+    otherwise: impl FnOnce(sqlx::Error) -> StorageError,
+) -> StorageError {
+    let timed_out = match &error {
+        sqlx::Error::PoolTimedOut => true,
+        sqlx::Error::Database(db_error) => match db_error.code().as_deref() {
+            Some("57014" | "55P03") => true,
+            // SQLite extended codes keep the primary code in the low byte.
+            Some(code) => code
+                .parse::<u32>()
+                .is_ok_and(|code| matches!(code & 0xff, 5 | 6)),
+            None => false,
+        },
+        _ => false,
+    };
+    if timed_out {
+        StorageError::Timeout
+    } else {
+        otherwise(error)
+    }
+}
+
+fn bounded(error: sqlx::Error) -> StorageError {
+    timeout_or(error, StorageError::from)
+}
+
 async fn pg_begin_bounded(pool: &PgPool) -> Result<Transaction<'_, Postgres>, StorageError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin().await.map_err(bounded)?;
     sqlx::query("SET LOCAL lock_timeout = '1s'")
         .execute(&mut *tx)
-        .await?;
+        .await
+        .map_err(bounded)?;
     sqlx::query("SET LOCAL statement_timeout = '5s'")
         .execute(&mut *tx)
-        .await?;
+        .await
+        .map_err(bounded)?;
     Ok(tx)
 }
 
@@ -160,7 +194,11 @@ impl DecisionResultRepository for DecisionResultRepo {
                     .bind(now)
             };
         }
-        let classify = |error| classify_db_error(error, "decision_policies", policy_version);
+        let classify = |error| {
+            timeout_or(error, |error| {
+                classify_db_error(error, "decision_policies", policy_version)
+            })
+        };
         match &self.pool {
             StoragePool::Sqlite(pool) => {
                 query!().execute(pool).await.map_err(classify)?;
@@ -168,7 +206,7 @@ impl DecisionResultRepository for DecisionResultRepo {
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
                 query!().execute(&mut *tx).await.map_err(classify)?;
-                tx.commit().await?;
+                tx.commit().await.map_err(bounded)?;
             }
         }
         Ok(())
@@ -184,7 +222,11 @@ impl DecisionResultRepository for DecisionResultRepo {
     ) -> Result<u64, StorageError> {
         let cutoff = whole_second(cutoff);
         let laya_max_len = execution.laya_max_len.map(i64::from);
-        let classify = |error| classify_db_error(error, "decision_results", &identity.category_key);
+        let classify = |error| {
+            timeout_or(error, |error| {
+                classify_db_error(error, "decision_results", &identity.category_key)
+            })
+        };
         let count = match &self.pool {
             StoragePool::Sqlite(pool) => sqlx::query(GENERATE_PENDING_SQLITE_SQL)
                 .bind(&identity.category_key)
@@ -216,7 +258,7 @@ impl DecisionResultRepository for DecisionResultRepo {
                     .await
                     .map_err(classify)?
                     .rows_affected();
-                tx.commit().await?;
+                tx.commit().await.map_err(bounded)?;
                 count
             }
         };
@@ -244,7 +286,10 @@ impl DecisionResultRepository for DecisionResultRepo {
                 .bind(i64::from(limit))
         };
         match &self.pool {
-            StoragePool::Sqlite(pool) => Ok(query(CLAIM_SQLITE_SQL).fetch_all(pool).await?),
+            StoragePool::Sqlite(pool) => Ok(query(CLAIM_SQLITE_SQL)
+                .fetch_all(pool)
+                .await
+                .map_err(bounded)?),
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
                 let claimed = sqlx::query_as::<_, ClaimedDecision>(CLAIM_PG_SQL)
@@ -257,8 +302,9 @@ impl DecisionResultRepository for DecisionResultRepo {
                     .bind(i64::from(max_attempts))
                     .bind(i64::from(limit))
                     .fetch_all(&mut *tx)
-                    .await?;
-                tx.commit().await?;
+                    .await
+                    .map_err(bounded)?;
+                tx.commit().await.map_err(bounded)?;
                 Ok(claimed)
             }
         }
@@ -275,7 +321,8 @@ impl DecisionResultRepository for DecisionResultRepo {
             StoragePool::Sqlite(pool) => {
                 bind_success!(sqlx::query(RELEASE_SUCCESS_SQL), success, id, owner, now)
                     .execute(pool)
-                    .await?
+                    .await
+                    .map_err(bounded)?
                     .rows_affected()
             }
             StoragePool::Postgres(pool) => {
@@ -283,9 +330,10 @@ impl DecisionResultRepository for DecisionResultRepo {
                 let affected =
                     bind_success!(sqlx::query(RELEASE_SUCCESS_SQL), success, id, owner, now)
                         .execute(&mut *tx)
-                        .await?
+                        .await
+                        .map_err(bounded)?
                         .rows_affected();
-                tx.commit().await?;
+                tx.commit().await.map_err(bounded)?;
                 affected
             }
         };
@@ -300,17 +348,16 @@ impl DecisionResultRepository for DecisionResultRepo {
         now: OffsetDateTime,
     ) -> Result<Option<DecisionResultState>, StorageError> {
         let state = match &self.pool {
-            StoragePool::Sqlite(pool) => {
-                bind_failure!(
-                    sqlx::query_scalar::<_, String>(RELEASE_FAILURE_SQL),
-                    failure,
-                    id,
-                    owner,
-                    now
-                )
-                .fetch_optional(pool)
-                .await?
-            }
+            StoragePool::Sqlite(pool) => bind_failure!(
+                sqlx::query_scalar::<_, String>(RELEASE_FAILURE_SQL),
+                failure,
+                id,
+                owner,
+                now
+            )
+            .fetch_optional(pool)
+            .await
+            .map_err(bounded)?,
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
                 let state = bind_failure!(
@@ -321,8 +368,9 @@ impl DecisionResultRepository for DecisionResultRepo {
                     now
                 )
                 .fetch_optional(&mut *tx)
-                .await?;
-                tx.commit().await?;
+                .await
+                .map_err(bounded)?;
+                tx.commit().await.map_err(bounded)?;
                 state
             }
         };
@@ -344,11 +392,19 @@ impl DecisionResultRepository for DecisionResultRepo {
             };
         }
         match &self.pool {
-            StoragePool::Sqlite(pool) => Ok(query!().execute(pool).await?.rows_affected()),
+            StoragePool::Sqlite(pool) => Ok(query!()
+                .execute(pool)
+                .await
+                .map_err(bounded)?
+                .rows_affected()),
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
-                let count = query!().execute(&mut *tx).await?.rows_affected();
-                tx.commit().await?;
+                let count = query!()
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(bounded)?
+                    .rows_affected();
+                tx.commit().await.map_err(bounded)?;
                 Ok(count)
             }
         }
@@ -371,11 +427,19 @@ impl DecisionResultRepository for DecisionResultRepo {
             };
         }
         match &self.pool {
-            StoragePool::Sqlite(pool) => Ok(query!().execute(pool).await?.rows_affected()),
+            StoragePool::Sqlite(pool) => Ok(query!()
+                .execute(pool)
+                .await
+                .map_err(bounded)?
+                .rows_affected()),
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
-                let count = query!().execute(&mut *tx).await?.rows_affected();
-                tx.commit().await?;
+                let count = query!()
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(bounded)?
+                    .rows_affected();
+                tx.commit().await.map_err(bounded)?;
                 Ok(count)
             }
         }
@@ -391,7 +455,8 @@ impl DecisionResultRepository for DecisionResultRepo {
                 .bind(now)
                 .bind(i64::from(limit))
                 .execute(pool)
-                .await?
+                .await
+                .map_err(bounded)?
                 .rows_affected()),
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
@@ -399,9 +464,10 @@ impl DecisionResultRepository for DecisionResultRepo {
                     .bind(now)
                     .bind(i64::from(limit))
                     .execute(&mut *tx)
-                    .await?
+                    .await
+                    .map_err(bounded)?
                     .rows_affected();
-                tx.commit().await?;
+                tx.commit().await.map_err(bounded)?;
                 Ok(count)
             }
         }
@@ -414,11 +480,13 @@ impl DecisionResultRepository for DecisionResultRepo {
             };
         }
         match &self.pool {
-            StoragePool::Sqlite(pool) => Ok(query!().fetch_optional(pool).await?),
+            StoragePool::Sqlite(pool) => {
+                Ok(query!().fetch_optional(pool).await.map_err(bounded)?)
+            }
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
-                let article = query!().fetch_optional(&mut *tx).await?;
-                tx.commit().await?;
+                let article = query!().fetch_optional(&mut *tx).await.map_err(bounded)?;
+                tx.commit().await.map_err(bounded)?;
                 Ok(article)
             }
         }
@@ -437,11 +505,11 @@ impl DecisionResultRepository for DecisionResultRepo {
             };
         }
         let count = match &self.pool {
-            StoragePool::Sqlite(pool) => query!().fetch_one(pool).await?,
+            StoragePool::Sqlite(pool) => query!().fetch_one(pool).await.map_err(bounded)?,
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
-                let count = query!().fetch_one(&mut *tx).await?;
-                tx.commit().await?;
+                let count = query!().fetch_one(&mut *tx).await.map_err(bounded)?;
+                tx.commit().await.map_err(bounded)?;
                 count
             }
         };
@@ -466,13 +534,17 @@ impl RunEventRepository for DecisionResultRepo {
                     .bind(&event.context_json)
             };
         }
-        let classify = |error| classify_db_error(error, "run_events", &event.run_id);
+        let classify = |error| {
+            timeout_or(error, |error| {
+                classify_db_error(error, "run_events", &event.run_id)
+            })
+        };
         match &self.pool {
             StoragePool::Sqlite(pool) => query!().fetch_one(pool).await.map_err(classify),
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
                 let id = query!().fetch_one(&mut *tx).await.map_err(classify)?;
-                tx.commit().await?;
+                tx.commit().await.map_err(bounded)?;
                 Ok(id)
             }
         }

@@ -295,3 +295,23 @@ async fn pg_maintenance_and_raw_cleanup() {
     assert!(event_id > 0);
     ctx.cleanup().await;
 }
+
+#[tokio::test]
+#[ignore = "needs docker"]
+async fn pg_lock_timeouts_surface_as_storage_timeouts() {
+    let (ctx, repo, ids) = setup(1).await;
+    let mut holder = ctx.pg_pool().begin().await.unwrap();
+    sqlx::query("LOCK TABLE articles IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let error = repo.load_article(ids[0]).await.unwrap_err();
+    assert!(
+        matches!(error, rss_ai_news_storage::StorageError::Timeout),
+        "{error:?}"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    holder.rollback().await.unwrap();
+    ctx.cleanup().await;
+}

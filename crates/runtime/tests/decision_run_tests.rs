@@ -191,6 +191,7 @@ struct Faults {
     release_error: bool,
     owner_mismatch: bool,
     article_error: bool,
+    article_timeout: bool,
     article_hang: bool,
 }
 
@@ -297,6 +298,9 @@ impl DecisionResultRepository for FaultyRepo {
     async fn load_article(&self, article_id: i64) -> Result<Option<DecisionArticle>, StorageError> {
         if self.faults.article_error {
             return Err(injected());
+        }
+        if self.faults.article_timeout {
+            return Err(StorageError::Timeout);
         }
         if self.faults.article_hang {
             tokio::time::sleep(Duration::from_secs(600)).await;
@@ -837,4 +841,45 @@ async fn an_article_read_timeout_leaves_the_row_unknown() {
     assert_eq!(summary.storage_timeouts, 1);
     assert_eq!(summary.exit_class(), 1);
     assert_eq!(states(&pool).await, vec![("running".to_string(), 1)]);
+}
+
+#[tokio::test]
+async fn a_timeout_reported_by_storage_is_unknown_not_refunded() {
+    let (_dir, pool) = make_test_pool().await;
+    seed(&pool, "ai", 1).await;
+    let summary = run_with(
+        &pool,
+        ScriptedClient::new([]),
+        settings(),
+        vec![plan("ai", questions())],
+        10,
+        Faults {
+            article_timeout: true,
+            ..Faults::default()
+        },
+    )
+    .await;
+    assert_eq!((summary.storage_timeouts, summary.storage_errors), (1, 0));
+    assert_eq!(states(&pool).await, vec![("running".to_string(), 1)]);
+}
+
+#[tokio::test]
+async fn each_run_counts_its_own_calls() {
+    let (_dir, pool) = make_test_pool().await;
+    seed(&pool, "ai", 2).await;
+    let flow = DecisionRunFlow::new(deps(
+        &pool,
+        ScriptedClient::new([]),
+        settings(),
+        Faults::default(),
+    ));
+    let options = DecisionRunOptions {
+        categories: vec![plan("ai", questions())],
+        max_requests: 1,
+        window_hours: 48,
+    };
+    assert_eq!(flow.run(&options).await.calls, 1);
+    let second = flow.run(&options).await;
+    assert_eq!(second.calls, 1);
+    assert_eq!(second.categories[0].succeeded, 1);
 }

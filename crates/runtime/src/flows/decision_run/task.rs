@@ -16,7 +16,7 @@ use rss_ai_news_decision::{
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_storage::{
     ClaimedDecision, DecisionAttemptRecord, DecisionFailure, DecisionFailureMode,
-    DecisionRawRecord, DecisionResultState, DecisionSuccess,
+    DecisionRawRecord, DecisionResultState, DecisionSuccess, StorageError,
 };
 use time::OffsetDateTime;
 
@@ -214,6 +214,14 @@ pub(super) async fn process(input: TaskInput) -> TaskOutcome {
             )
             .await;
         }
+        // A timeout raised by the server or the pool is as unknown as one
+        // seen here.
+        Some(Err(StorageError::Timeout)) => {
+            return unknown(
+                TaskOutcome::new(&input, TaskStatus::Refunded { reason: "" }),
+                "storage_timeout",
+            );
+        }
         // A failed read changed nothing, so the row can be refunded.
         Some(Err(_)) => {
             let mut outcome = refund(&input, "storage_error", true).await;
@@ -358,8 +366,8 @@ async fn finish(input: &TaskInput, exchange: Exchange, latency_ms: i64) -> TaskO
             {
                 Some(Ok(true)) => outcome,
                 Some(Ok(false)) => unknown(outcome, "owner_mismatch"),
+                Some(Err(StorageError::Timeout)) | None => unknown(outcome, "storage_timeout"),
                 Some(Err(_)) => unknown(outcome, "release_failed"),
-                None => unknown(outcome, "storage_timeout"),
             }
         }
         Err(error) => {
@@ -451,8 +459,8 @@ async fn release_failure(
             outcome
         }
         Some(Ok(None)) => unknown(outcome, "owner_mismatch"),
+        Some(Err(StorageError::Timeout)) | None => unknown(outcome, "storage_timeout"),
         Some(Err(_)) => unknown(outcome, "release_failed"),
-        None => unknown(outcome, "storage_timeout"),
     }
 }
 

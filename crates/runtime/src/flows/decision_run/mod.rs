@@ -22,7 +22,7 @@ use std::{
 use rss_ai_news_decision::{DecisionClient, QuestionSpec, RawResponsePolicy};
 use rss_ai_news_storage::{
     ClaimedDecision, DecisionExecution, DecisionIdentity, DecisionResultRepository,
-    RunEventRepository, build_owner_id,
+    RunEventRepository, StorageError, build_owner_id,
 };
 use serde_json::json;
 use time::OffsetDateTime;
@@ -148,8 +148,6 @@ impl DecisionRunSummary {
 
 pub struct DecisionRunFlow {
     deps: Arc<DecisionRunDeps>,
-    /// Client calls so far; the request budget is settled against it.
-    calls: Arc<AtomicU64>,
 }
 
 fn storage_deadline() -> Duration {
@@ -158,10 +156,7 @@ fn storage_deadline() -> Duration {
 
 impl DecisionRunFlow {
     pub fn new(deps: Arc<DecisionRunDeps>) -> Self {
-        Self {
-            deps,
-            calls: Arc::new(AtomicU64::new(0)),
-        }
+        Self { deps }
     }
 
     fn emitter(&self) -> RunEventEmitter<'_> {
@@ -198,14 +193,15 @@ impl DecisionRunFlow {
         }
     }
 
-    /// A storage call bounded by D; `Err(None)` is a timeout.
-    async fn storage<T, E: std::fmt::Display>(
-        future: impl std::future::Future<Output = Result<T, E>>,
+    /// A storage call bounded by D; `Err(None)` is a timeout, here or one
+    /// the server / pool reported.
+    async fn storage<T>(
+        future: impl std::future::Future<Output = Result<T, StorageError>>,
     ) -> Result<T, Option<String>> {
         match tokio::time::timeout(storage_deadline(), future).await {
             Ok(Ok(value)) => Ok(value),
+            Ok(Err(StorageError::Timeout)) | Err(_) => Err(None),
             Ok(Err(error)) => Err(Some(error.to_string())),
-            Err(_) => Err(None),
         }
     }
 
@@ -406,6 +402,9 @@ impl DecisionRunFlow {
         let deps = &self.deps;
         let plans: Vec<Arc<CategoryPlan>> = opts.categories.iter().cloned().map(Arc::new).collect();
         let owner: Arc<str> = Arc::from(build_owner_id());
+        // Per run: client calls so far, bumped just before each call; the
+        // request budget is settled against it.
+        let calls = Arc::new(AtomicU64::new(0));
         let mut budget = opts.max_requests;
         let mut idle = vec![false; plans.len()];
         loop {
@@ -432,10 +431,10 @@ impl DecisionRunFlow {
                     continue;
                 }
                 progressed = true;
-                let calls = self
-                    .process_window(index, plan, &owner, claimed, claim_started, summary)
+                let spent = self
+                    .process_window(index, plan, &owner, &calls, claimed, claim_started, summary)
                     .await;
-                budget = budget.saturating_sub(calls);
+                budget = budget.saturating_sub(spent);
                 if summary.aborted.is_some() || summary.drain_timeout {
                     return;
                 }
@@ -503,13 +502,14 @@ impl DecisionRunFlow {
         index: usize,
         plan: &Arc<CategoryPlan>,
         owner: &Arc<str>,
+        calls: &Arc<AtomicU64>,
         claimed: Vec<ClaimedDecision>,
         claim_started: Instant,
         summary: &mut DecisionRunSummary,
     ) -> u32 {
         let deps = &self.deps;
         summary.claimed += claimed.len() as u64;
-        let calls_before = self.calls.load(Ordering::SeqCst);
+        let calls_before = calls.load(Ordering::SeqCst);
         let lease = Duration::from_secs(u64::from(deps.settings.lease_seconds));
         let row_deadline = claim_started + lease - Duration::from_secs(5);
         let mut join_set = JoinSet::new();
@@ -521,7 +521,7 @@ impl DecisionRunFlow {
                 row,
                 owner: Arc::clone(owner),
                 row_deadline,
-                calls: Arc::clone(&self.calls),
+                calls: Arc::clone(calls),
             }));
         }
         let mut outcomes = Vec::new();
@@ -571,9 +571,9 @@ impl DecisionRunFlow {
         }
         // Read after the join: includes calls whose task panicked or was
         // cancelled.
-        let calls = self.calls.load(Ordering::SeqCst);
-        summary.calls = calls;
-        u32::try_from(calls - calls_before).unwrap_or(u32::MAX)
+        let calls_now = calls.load(Ordering::SeqCst);
+        summary.calls = calls_now;
+        u32::try_from(calls_now - calls_before).unwrap_or(u32::MAX)
     }
 
     async fn record(&self, outcome: TaskOutcome, summary: &mut DecisionRunSummary) {
