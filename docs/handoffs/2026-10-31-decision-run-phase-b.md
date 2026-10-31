@@ -75,3 +75,6 @@
 - `5fe08e6` 上的验证：`cargo fmt --all --check` 通过；`cargo test --workspace --no-fail-fast --locked` 1030 passed / 0 failed / 73 ignored；
   `cargo acceptance run --lane static` 通过（clippy、rustdoc、swallowed-errors、acceptance-docs 等 7 项）。
 - PostgreSQL 测试（含新增的表锁 → `StorageError::Timeout` 用例）仍未在本地执行，交给 PR 上的 CI postgres lane。
+- PR #4 CI：第一次运行 postgres lane 失败于两个既有 PostgreSQL 测试写死的用户表数量（10，现应为 12），decision 的 PG 测试已在同次运行中通过；
+  修正见 `5dc28da`。重跑（run 41200677845）全绿：fmt + clippy + cargo test、postgres + sqlite + release lanes（含 `--include-ignored` 的
+  storage 测试）、docker build smoke。
