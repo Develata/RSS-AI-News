@@ -31,8 +31,13 @@ pub enum DecisionError {
     Server { status: u16 },
     #[error("decision provider returned HTTP {status}")]
     HttpStatus { status: u16 },
+    /// The connection could not be established; nothing was sent.
     #[error("decision provider connection failed")]
     Connection,
+    /// The connection broke after the request may have been sent (while
+    /// sending or reading the response).
+    #[error("decision provider connection broke during the exchange")]
+    Transport,
     #[error("decision response exceeded {limit} bytes")]
     ResponseTooLarge { limit: usize },
     #[error("invalid decision response: {reason}")]
@@ -61,6 +66,7 @@ impl ClassifiedError for DecisionError {
                 | Self::Unavailable { .. }
                 | Self::Server { .. }
                 | Self::Connection
+                | Self::Transport
         )
     }
 
@@ -77,6 +83,7 @@ impl ClassifiedError for DecisionError {
             Self::Server { .. } => "decision_server_error",
             Self::HttpStatus { .. } => "decision_http_status",
             Self::Connection => "decision_connection_failed",
+            Self::Transport => "decision_transport_failed",
             Self::ResponseTooLarge { .. } => "decision_response_too_large",
             Self::InvalidResponse { .. } => "decision_invalid_response",
             Self::InvalidRequest(_) => "decision_invalid_request",

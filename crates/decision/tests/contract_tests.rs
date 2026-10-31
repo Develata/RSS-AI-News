@@ -13,11 +13,17 @@ use tokio::{
 
 use rss_ai_news_decision::{
     ChoiceOption, ClientSettings, DecisionAnswer, DecisionClient, DecisionError, DecisionRequest,
-    Provider, QuestionKind, QuestionSpec, SpreadKind, StateTruncation, SystemOneClient,
+    Exchange, Provider, QuestionKind, QuestionSpec, SpreadKind, StateTruncation, SystemOneClient,
+    Withheld, canonical_policy, revalidate,
 };
 use rss_ai_news_domain::SecretString;
 use serde_json::{Value, json};
 use url::Url;
+
+/// Far enough that only the per-request timeout applies.
+fn deadline() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(3600)
+}
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -136,12 +142,16 @@ async fn ask(
     let server = serve(template).await;
     let qs = questions();
     let result = client(provider, &server.uri(), model, Duration::from_secs(10))
-        .decide(&DecisionRequest {
-            title: "标题",
-            body: "正文",
-            questions: &qs,
-        })
-        .await;
+        .decide(
+            &DecisionRequest {
+                title: "标题",
+                body: "正文",
+                questions: &qs,
+            },
+            deadline(),
+        )
+        .await
+        .result;
     (server, result)
 }
 
@@ -331,12 +341,16 @@ async fn state_body_is_cut_to_max_state_chars_on_a_char_boundary() {
     let qs = questions();
     SystemOneClient::new(settings.clone(), SecretString::from(KEY))
         .unwrap()
-        .decide(&DecisionRequest {
-            title: "t",
-            body: "中文正文内容",
-            questions: &qs,
-        })
+        .decide(
+            &DecisionRequest {
+                title: "t",
+                body: "中文正文内容",
+                questions: &qs,
+            },
+            deadline(),
+        )
         .await
+        .result
         .unwrap();
     assert_eq!(sent_body(&server).await["state"]["body"], "中文正");
     settings.max_state_chars = 0;
@@ -709,12 +723,16 @@ async fn redirects_are_not_followed() {
             "multilingual",
             Duration::from_secs(5),
         )
-        .decide(&DecisionRequest {
-            title: "t",
-            body: "b",
-            questions: &qs,
-        })
+        .decide(
+            &DecisionRequest {
+                title: "t",
+                body: "b",
+                questions: &qs,
+            },
+            deadline(),
+        )
         .await
+        .result
         .unwrap_err();
         assert_eq!(error, DecisionError::HttpStatus { status: code });
         server.verify().await;
@@ -739,12 +757,16 @@ async fn padded_specs_and_one_sided_noul_criteria_are_sent_normalised() {
             options[0].label = "paper ".to_string();
         }
         let response = client(provider, &server.uri(), model, Duration::from_secs(5))
-            .decide(&DecisionRequest {
-                title: "t",
-                body: "b",
-                questions: &qs,
-            })
+            .decide(
+                &DecisionRequest {
+                    title: "t",
+                    body: "b",
+                    questions: &qs,
+                },
+                deadline(),
+            )
             .await
+            .result
             .unwrap();
         assert_eq!(response.answers[0].id, "q_marketing");
         let mut expected = expected_questions(absent);
@@ -797,12 +819,16 @@ async fn raw_server(head: &'static str, hold: bool) -> String {
 async fn ask_raw(base: &str) -> DecisionError {
     let qs = questions();
     client(Provider::Laya, base, "multilingual", Duration::from_secs(1))
-        .decide(&DecisionRequest {
-            title: "t",
-            body: "b",
-            questions: &qs,
-        })
+        .decide(
+            &DecisionRequest {
+                title: "t",
+                body: "b",
+                questions: &qs,
+            },
+            deadline(),
+        )
         .await
+        .result
         .unwrap_err()
 }
 
@@ -893,12 +919,16 @@ async fn slow_responses_time_out() {
         "multilingual",
         Duration::from_secs(1),
     )
-    .decide(&DecisionRequest {
-        title: "t",
-        body: "b",
-        questions: &qs,
-    })
+    .decide(
+        &DecisionRequest {
+            title: "t",
+            body: "b",
+            questions: &qs,
+        },
+        deadline(),
+    )
     .await
+    .result
     .unwrap_err();
     assert_eq!(error, DecisionError::Timeout { seconds: 1 });
 }
@@ -918,12 +948,16 @@ async fn invalid_requests_never_reach_the_network() {
         Duration::from_secs(5),
     );
     let empty = jev
-        .decide(&DecisionRequest {
-            title: "t",
-            body: "b",
-            questions: &[],
-        })
-        .await;
+        .decide(
+            &DecisionRequest {
+                title: "t",
+                body: "b",
+                questions: &[],
+            },
+            deadline(),
+        )
+        .await
+        .result;
     assert!(matches!(empty, Err(DecisionError::InvalidRequest(_))));
     let eleven = [QuestionSpec {
         id: "q_level".to_string(),
@@ -933,12 +967,16 @@ async fn invalid_requests_never_reach_the_network() {
         },
     }];
     let too_many = jev
-        .decide(&DecisionRequest {
-            title: "t",
-            body: "b",
-            questions: &eleven,
-        })
-        .await;
+        .decide(
+            &DecisionRequest {
+                title: "t",
+                body: "b",
+                questions: &eleven,
+            },
+            deadline(),
+        )
+        .await
+        .result;
     assert!(matches!(too_many, Err(DecisionError::InvalidRequest(_))));
 }
 
@@ -989,13 +1027,256 @@ async fn unreachable_endpoint_is_a_connection_error() {
         "multilingual",
         Duration::from_secs(5),
     )
-    .decide(&DecisionRequest {
-        title: "t",
-        body: "b",
-        questions: &qs,
-    })
+    .decide(
+        &DecisionRequest {
+            title: "t",
+            body: "b",
+            questions: &qs,
+        },
+        deadline(),
+    )
     .await
+    .result
     .unwrap_err();
     assert_eq!(error, DecisionError::Connection);
     drop(reserved);
+}
+
+/// One Laya exchange against `template`, with the full `Exchange` returned.
+async fn laya_exchange(template: ResponseTemplate) -> (MockServer, Exchange) {
+    let server = serve(template).await;
+    let qs = questions();
+    let exchange = client(
+        Provider::Laya,
+        &server.uri(),
+        "multilingual",
+        Duration::from_secs(5),
+    )
+    .decide(
+        &DecisionRequest {
+            title: "标题",
+            body: "正文",
+            questions: &qs,
+        },
+        deadline(),
+    )
+    .await;
+    (server, exchange)
+}
+
+#[tokio::test]
+async fn exchange_reports_what_was_sent_and_captures_a_clean_body() {
+    let (server, exchange) =
+        laya_exchange(ResponseTemplate::new(200).set_body_json(laya_ok())).await;
+    exchange.result.unwrap();
+    let sent = exchange.sent.unwrap();
+    let state = sent_body(&server).await["state"].to_string();
+    assert_eq!(
+        sent.state_sha256,
+        hex::encode(<sha2::Sha256 as sha2::Digest>::digest(state.as_bytes()))
+    );
+    assert_eq!((sent.body_chars, sent.body_truncated), (2, false));
+    let raw = exchange.raw.unwrap();
+    let body = raw.body.clone().unwrap();
+    assert_eq!(raw.bytes, body.len() as u64);
+    assert_eq!(raw.withheld, None);
+    assert_eq!(
+        raw.sha256.as_deref(),
+        Some(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body)).as_str())
+    );
+    assert!(!format!("{raw:?}").contains("laya-rl-agent"));
+}
+
+#[tokio::test]
+async fn non_json_and_credential_bearing_bodies_are_withheld() {
+    let (_server, exchange) =
+        laya_exchange(ResponseTemplate::new(200).set_body_raw("<html>ok</html>", "text/html"))
+            .await;
+    assert!(matches!(
+        exchange.result,
+        Err(DecisionError::InvalidResponse { .. })
+    ));
+    let raw = exchange.raw.unwrap();
+    assert_eq!(
+        (raw.withheld, raw.body.is_some(), raw.bytes),
+        (Some(Withheld::NotJson), false, 15)
+    );
+    assert!(raw.sha256.is_some());
+
+    // Escaped inside an ignored field: the answer stands, the body is withheld.
+    let escaped: String = KEY
+        .chars()
+        .map(|c| format!("\\u{:04x}", c as u32))
+        .collect();
+    let text = laya_ok().to_string().replacen(
+        "\"legend\":{",
+        &format!("\"legend\":{{\"note\":\"{escaped}\","),
+        1,
+    );
+    let (_server, exchange) =
+        laya_exchange(ResponseTemplate::new(200).set_body_raw(text, "application/json")).await;
+    exchange.result.unwrap();
+    assert_eq!(exchange.raw.unwrap().withheld, Some(Withheld::Credential));
+
+    // In the stored model name: the whole response is rejected.
+    let mut reflected = laya_ok();
+    reflected["model"] = json!(format!("laya-{KEY}"));
+    let (_server, exchange) =
+        laya_exchange(ResponseTemplate::new(200).set_body_json(reflected)).await;
+    assert_invalid(exchange.result, "reflects the credential");
+    assert_eq!(exchange.raw.unwrap().withheld, Some(Withheld::Credential));
+}
+
+#[tokio::test]
+async fn a_broken_off_or_oversized_body_is_incomplete_without_a_digest() {
+    const BROKEN_200: &str = "HTTP/1.1 200 OK\r\ncontent-length: 1000\r\n\r\n{\"model\":";
+    let qs = questions();
+    let exchange = client(
+        Provider::Laya,
+        &raw_server(BROKEN_200, false).await,
+        "multilingual",
+        Duration::from_secs(1),
+    )
+    .decide(
+        &DecisionRequest {
+            title: "t",
+            body: "b",
+            questions: &qs,
+        },
+        deadline(),
+    )
+    .await;
+    assert_eq!(exchange.result.unwrap_err(), DecisionError::Transport);
+    let raw = exchange.raw.unwrap();
+    assert_eq!(
+        (raw.withheld, raw.sha256, raw.bytes),
+        (Some(Withheld::Incomplete), None, 9)
+    );
+}
+
+#[tokio::test]
+async fn the_deadline_bounds_the_call_and_keeps_a_known_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let qs = questions();
+    let request = DecisionRequest {
+        title: "t",
+        body: "b",
+        questions: &qs,
+    };
+    let exchange = client(
+        Provider::Laya,
+        &server.uri(),
+        "multilingual",
+        Duration::from_secs(5),
+    )
+    .decide(&request, std::time::Instant::now())
+    .await;
+    assert_eq!(
+        exchange.result.unwrap_err(),
+        DecisionError::Timeout { seconds: 0 }
+    );
+    assert!(exchange.sent.is_none());
+
+    const STALLED_401: &str =
+        "HTTP/1.1 401 Unauthorized\r\ncontent-length: 1000\r\n\r\n{\"detail\":";
+    let base = raw_server(STALLED_401, true).await;
+    let exchange = client(
+        Provider::Laya,
+        &base,
+        "multilingual",
+        Duration::from_secs(30),
+    )
+    .decide(&request, std::time::Instant::now() + Duration::from_secs(1))
+    .await;
+    assert_eq!(
+        exchange.result.unwrap_err(),
+        DecisionError::Unauthorized { status: 401 }
+    );
+}
+
+#[tokio::test]
+async fn a_dropped_connection_is_sent_once_and_never_retried() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&accepted);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut buffer = [0_u8; 4096];
+            let read = socket.read(&mut buffer).await.expect("read the request");
+            assert!(read > 0, "the client sends a request before the close");
+            // Close without any response.
+        }
+    });
+    let qs = questions();
+    let error = client(
+        Provider::Laya,
+        &format!("http://{address}"),
+        "multilingual",
+        Duration::from_secs(2),
+    )
+    .decide(
+        &DecisionRequest {
+            title: "t",
+            body: "b",
+            questions: &qs,
+        },
+        deadline(),
+    )
+    .await
+    .result
+    .unwrap_err();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(error, DecisionError::Transport);
+    assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_key_that_is_not_a_header_value_is_a_config_error() {
+    let settings = ClientSettings {
+        provider: Provider::Laya,
+        base_url: Url::parse("http://127.0.0.1:9").unwrap(),
+        model: "multilingual".to_string(),
+        request_timeout: Duration::from_secs(1),
+        max_state_chars: 10,
+        laya_max_len: 2048,
+        use_env_proxy: false,
+    };
+    let error = SystemOneClient::new(settings, SecretString::from(format!("{KEY}\n"))).unwrap_err();
+    assert!(matches!(error, DecisionError::InvalidConfig(_)));
+    assert!(!error.to_string().contains(KEY));
+}
+
+#[tokio::test]
+async fn a_stored_body_revalidates_offline_to_the_same_result() {
+    let (_server, exchange) =
+        laya_exchange(ResponseTemplate::new(200).set_body_json(laya_ok())).await;
+    let online = exchange.result.unwrap();
+    let body = exchange.raw.unwrap().body.unwrap();
+    let policy = canonical_policy(&questions(), 6000);
+    let offline = revalidate(Provider::Laya, "multilingual", Some(2048), &policy, &body).unwrap();
+    assert_eq!(offline, online);
+    let mut tampered = laya_ok();
+    tampered["answers"]["q_kind"]["choice"] = json!("other");
+    let tampered = tampered.to_string();
+    assert_invalid(
+        revalidate(
+            Provider::Laya,
+            "multilingual",
+            Some(2048),
+            &policy,
+            tampered.as_bytes(),
+        ),
+        "most probable",
+    );
+    assert!(matches!(
+        revalidate(Provider::Laya, "multilingual", Some(2048), "{}", &body),
+        Err(DecisionError::InvalidConfig(_))
+    ));
 }

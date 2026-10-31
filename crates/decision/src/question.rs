@@ -7,6 +7,11 @@ use std::collections::HashSet;
 /// tolerances meaningful for coarse provider precision.
 pub const MAX_CHOICE_OPTIONS: usize = 20;
 
+/// Project caps for both providers (Laya's own limits; Jev documents none).
+/// They bound the synchronous work per request (ADR 0011 §7).
+pub const MAX_QUESTIONS: usize = 50;
+pub const MAX_INSTRUCTION_CHARS: usize = 2000;
+
 /// One typed-decision question. Every check, request and hash uses
 /// [`QuestionSpec::normalized`], so surrounding whitespace never matters.
 /// The id is a stable key; Jev documents that ids are not shown to the model
@@ -115,6 +120,12 @@ pub fn validate_common(questions: &[QuestionSpec], prefix: &str) -> Vec<Issue> {
 /// [`validate_common`] for questions that are already normalised.
 pub(crate) fn check_common(questions: &[QuestionSpec], prefix: &str) -> Vec<Issue> {
     let mut issues = Vec::new();
+    if questions.len() > MAX_QUESTIONS {
+        issues.push(Issue::new(
+            prefix,
+            format!("at most {MAX_QUESTIONS} questions"),
+        ));
+    }
     let mut ids = HashSet::new();
     for (index, question) in questions.iter().enumerate() {
         let at = |field: &str| format!("{prefix}[{index}].{field}");
@@ -125,6 +136,12 @@ pub(crate) fn check_common(questions: &[QuestionSpec], prefix: &str) -> Vec<Issu
         }
         if question.instructions.is_empty() {
             issues.push(Issue::new(at("instructions"), "must not be empty"));
+        } else if question.instructions.chars().count() > MAX_INSTRUCTION_CHARS {
+            // Unicode scalar values, like Laya's Python `str` length.
+            issues.push(Issue::new(
+                at("instructions"),
+                format!("at most {MAX_INSTRUCTION_CHARS} characters"),
+            ));
         }
         match &question.kind {
             QuestionKind::Noul { .. } => {}
@@ -238,6 +255,20 @@ mod tests {
             .map(|issue| issue.message)
             .collect();
         assert_eq!(messages, ["must not be empty", "labels must be unique"]);
+    }
+
+    #[test]
+    fn project_caps_apply_to_every_provider() {
+        let mut long = noul("q_long");
+        long.instructions = "长".repeat(MAX_INSTRUCTION_CHARS + 1);
+        let issues = validate_common(&[long], "q");
+        assert_eq!(issues[0].field, "q[0].instructions");
+        let many: Vec<_> = (0..=MAX_QUESTIONS).map(|i| noul(&format!("q_{i}"))).collect();
+        assert_eq!(validate_common(&many, "q")[0].field, "q");
+        let fine = "长".repeat(MAX_INSTRUCTION_CHARS);
+        let mut edge = noul("q_edge");
+        edge.instructions = fine;
+        assert!(validate_common(&[edge], "q").is_empty());
     }
 
     #[test]

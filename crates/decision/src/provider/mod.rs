@@ -74,14 +74,28 @@ pub(crate) struct WireParams<'a> {
     pub laya_max_len: u32,
 }
 
+/// The `state` both providers receive. Its compact JSON (keys sorted) is what
+/// `SentState::state_sha256` hashes.
+pub(crate) fn state_value(title: &str, body: &str) -> Value {
+    serde_json::json!({ "title": title, "body": body })
+}
+
+/// Execution identity of results (ADR 0011 §4): `jev:{model}` or
+/// `laya:{model}:{laya_max_len}`. Deployment address and timing are not part
+/// of it.
+pub fn execution_key(provider: Provider, model: &str, laya_max_len: u32) -> String {
+    match provider {
+        Provider::Jev => format!("jev:{model}"),
+        Provider::Laya => format!("laya:{model}:{laya_max_len}"),
+    }
+}
+
 pub(crate) fn encode(
     provider: Provider,
     params: &WireParams<'_>,
-    title: &str,
-    body: &str,
+    state: Value,
     questions: &[QuestionSpec],
 ) -> Value {
-    let state = serde_json::json!({ "title": title, "body": body });
     match provider {
         Provider::Jev => jev::encode(params, state, questions),
         Provider::Laya => laya::encode(params, state, questions),

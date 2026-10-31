@@ -18,6 +18,31 @@ use crate::{
 pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 pub const DEFAULT_MAX_STATE_CHARS: u32 = 6000;
 pub const DEFAULT_LAYA_MAX_LEN: u32 = 2048;
+pub const DEFAULT_CONCURRENCY: u32 = 2;
+pub const DEFAULT_LEASE_SECONDS: u32 = 120;
+pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+pub const DEFAULT_MAX_REQUESTS_PER_RUN: u32 = 100;
+pub const DEFAULT_WINDOW_HOURS: u32 = 48;
+pub const DEFAULT_RAW_RESPONSE_TTL_DAYS: u32 = 30;
+/// D in ADR 0011 §7: the client-side deadline of every storage call.
+pub const STORAGE_DEADLINE_SECONDS: u32 = 5;
+
+/// `lease_seconds` must cover claim, read and release (one D each), the
+/// request timeout and 10 s of scheduling slack (ADR 0011 §7). A sizing
+/// rule, not a proof.
+pub fn min_lease_seconds(request_timeout_seconds: u32) -> u32 {
+    request_timeout_seconds + 3 * STORAGE_DEADLINE_SECONDS + 10
+}
+
+/// `[decision].raw_response` (ADR 0011 §8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawResponsePolicy {
+    /// Keep a 2xx body only when it failed validation.
+    OnFailure,
+    /// Keep every safely capturable 2xx body.
+    Always,
+    Never,
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct DecisionSettings {
@@ -31,6 +56,14 @@ pub struct DecisionSettings {
     pub max_state_chars: u32,
     pub laya_max_len: u32,
     laya_max_len_set: bool,
+    // decision-run (ADR 0011 §6, §8).
+    pub concurrency: u32,
+    pub lease_seconds: u32,
+    pub max_attempts: u32,
+    pub max_requests_per_run: u32,
+    pub window_hours: u32,
+    pub raw_response: RawResponsePolicy,
+    pub raw_response_ttl_days: u32,
 }
 
 /// Origin only for `base_url`; the key's variable name is not a secret.
@@ -51,6 +84,13 @@ impl fmt::Debug for DecisionSettings {
             .field("request_timeout", &self.request_timeout)
             .field("max_state_chars", &self.max_state_chars)
             .field("laya_max_len", &self.laya_max_len)
+            .field("concurrency", &self.concurrency)
+            .field("lease_seconds", &self.lease_seconds)
+            .field("max_attempts", &self.max_attempts)
+            .field("max_requests_per_run", &self.max_requests_per_run)
+            .field("window_hours", &self.window_hours)
+            .field("raw_response", &self.raw_response)
+            .field("raw_response_ttl_days", &self.raw_response_ttl_days)
             .finish_non_exhaustive()
     }
 }
@@ -107,6 +147,13 @@ struct RawSettings {
     request_timeout_seconds: Option<u64>,
     max_state_chars: Option<u32>,
     laya_max_len: Option<u32>,
+    concurrency: Option<u32>,
+    lease_seconds: Option<u32>,
+    max_attempts: Option<u32>,
+    max_requests_per_run: Option<u32>,
+    window_hours: Option<u32>,
+    raw_response: Option<String>,
+    raw_response_ttl_days: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -225,6 +272,79 @@ impl DecisionSettings {
         if !provider::LAYA_MAX_LEN.contains(&laya_max_len) {
             issues.push(Issue::new("decision.laya_max_len", "must be in 512..=8192"));
         }
+        let mut ranged = |field: &'static str,
+                          value: Option<u32>,
+                          default: u32,
+                          range: std::ops::RangeInclusive<u32>| {
+            let value = value.unwrap_or(default);
+            if !range.contains(&value) {
+                issues.push(Issue::new(
+                    field,
+                    format!("must be in {}..={}", range.start(), range.end()),
+                ));
+            }
+            value
+        };
+        let concurrency = ranged(
+            "decision.concurrency",
+            raw.concurrency,
+            DEFAULT_CONCURRENCY,
+            1..=8,
+        );
+        let lease_seconds = ranged(
+            "decision.lease_seconds",
+            raw.lease_seconds,
+            DEFAULT_LEASE_SECONDS,
+            30..=3600,
+        );
+        let max_attempts = ranged(
+            "decision.max_attempts",
+            raw.max_attempts,
+            DEFAULT_MAX_ATTEMPTS,
+            1..=10,
+        );
+        let max_requests_per_run = ranged(
+            "decision.max_requests_per_run",
+            raw.max_requests_per_run,
+            DEFAULT_MAX_REQUESTS_PER_RUN,
+            1..=10_000,
+        );
+        let window_hours = ranged(
+            "decision.window_hours",
+            raw.window_hours,
+            DEFAULT_WINDOW_HOURS,
+            1..=8760,
+        );
+        let raw_response_ttl_days = ranged(
+            "decision.raw_response_ttl_days",
+            raw.raw_response_ttl_days,
+            DEFAULT_RAW_RESPONSE_TTL_DAYS,
+            0..=3650,
+        );
+        let raw_response = match raw.raw_response.as_deref().map(str::trim) {
+            None | Some("on_failure") => RawResponsePolicy::OnFailure,
+            Some("always") => RawResponsePolicy::Always,
+            Some("never") => RawResponsePolicy::Never,
+            Some(_) => {
+                issues.push(Issue::new(
+                    "decision.raw_response",
+                    "must be \"on_failure\", \"always\" or \"never\"",
+                ));
+                RawResponsePolicy::OnFailure
+            }
+        };
+        if (1..=60).contains(&timeout) {
+            let minimum = min_lease_seconds(timeout as u32);
+            if lease_seconds < minimum {
+                issues.push(Issue::new(
+                    "decision.lease_seconds",
+                    format!(
+                        "must be at least {minimum} (request_timeout_seconds + {} for storage calls and slack)",
+                        minimum - timeout as u32
+                    ),
+                ));
+            }
+        }
         if provider == Provider::Jev && raw.laya_max_len.is_some() {
             warnings.push(Warning {
                 code: "decision_unused_field",
@@ -258,6 +378,13 @@ impl DecisionSettings {
                 max_state_chars,
                 laya_max_len,
                 laya_max_len_set: raw.laya_max_len.is_some(),
+                concurrency,
+                lease_seconds,
+                max_attempts,
+                max_requests_per_run,
+                window_hours,
+                raw_response,
+                raw_response_ttl_days,
             },
             warnings,
         ))
@@ -418,6 +545,7 @@ pub fn validate_sections(
             message: format!("env variable \"{name}\" is not set or blank"),
         });
     }
+    let mut asking_categories = 0_u32;
     for section in categories {
         let questions = match questions_from_section(section.value) {
             Ok(questions) => questions,
@@ -436,6 +564,9 @@ pub fn validate_sections(
         report
             .issues
             .extend(issues.into_iter().map(|found| issue(section.source, found)));
+        if !questions.is_empty() {
+            asking_categories += 1;
+        }
         if !questions.is_empty() && !settings.as_ref().is_some_and(|settings| settings.enabled) {
             report.warnings.push(Warning {
                 code: "decision_inert",
@@ -444,6 +575,16 @@ pub fn validate_sections(
                 category: Some(section.category_key.to_string()),
             });
         }
+    }
+    if let Some(settings) = settings.as_ref().filter(|settings| settings.enabled)
+        && settings.max_requests_per_run < settings.concurrency * asking_categories
+    {
+        report.warnings.push(Warning {
+            code: "decision_budget_below_round_one",
+            field: "decision.max_requests_per_run",
+            message: "Below concurrency × categories with questions: decision-run without --category refuses to start.",
+            category: None,
+        });
     }
     report
 }
@@ -577,6 +718,58 @@ options = [{ label = "paper", description = "论文" }, { label = "other", descr
         );
         assert!(DecisionSettings::from_section(&table("provider = \"laya\"\ntypo = 1")).is_err());
         assert!(DecisionSettings::from_section(&table("provider = \"openai\"")).is_err());
+    }
+
+    #[test]
+    fn run_settings_default_and_are_bounded() {
+        let (settings, _) = DecisionSettings::from_section(&table("provider = \"laya\"")).unwrap();
+        assert_eq!(
+            (
+                settings.concurrency,
+                settings.lease_seconds,
+                settings.max_attempts,
+                settings.max_requests_per_run,
+                settings.window_hours,
+                settings.raw_response,
+                settings.raw_response_ttl_days
+            ),
+            (2, 120, 3, 100, 48, RawResponsePolicy::OnFailure, 30)
+        );
+        let issues = DecisionSettings::from_section(&table(
+            "provider = \"laya\"\nconcurrency = 9\nraw_response = \"sometimes\"\nrequest_timeout_seconds = 30\nlease_seconds = 54",
+        ))
+        .unwrap_err();
+        let fields: Vec<_> = issues.iter().map(|issue| issue.field.as_str()).collect();
+        assert_eq!(
+            fields,
+            [
+                "decision.concurrency",
+                "decision.raw_response",
+                "decision.lease_seconds"
+            ]
+        );
+        assert!(
+            DecisionSettings::from_section(&table(
+                "provider = \"laya\"\nrequest_timeout_seconds = 30\nlease_seconds = 55"
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn warns_when_the_budget_cannot_cover_a_first_round() {
+        let questions = table(QUESTIONS);
+        let tight = table(&format!("{LAYA_ENABLED}\nmax_requests_per_run = 1"));
+        let report = validate_sections(Some(&tight), &sections(&questions), None);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.code == "decision_budget_below_round_one")
+        );
+        let enough = table(LAYA_ENABLED);
+        let report = validate_sections(Some(&enough), &sections(&questions), None);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
 
     #[test]

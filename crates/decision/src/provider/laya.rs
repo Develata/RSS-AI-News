@@ -22,9 +22,7 @@ pub(super) const EPS: f64 = 5e-5;
 /// Explicit checkpoints only. `auto` lets the server pick a checkpoint by
 /// input language, which is per-input model routing (non-goals §5.2).
 const MODELS: [&str; 3] = ["multilingual", "english", "typed-decisions"];
-const MAX_QUESTIONS: usize = 50;
 const MAX_LEVELS: usize = 50;
-const MAX_INSTRUCTION_CHARS: usize = 2000;
 pub(crate) const MAX_LEN: std::ops::RangeInclusive<u32> = 512..=8192;
 
 pub(super) fn check_model(model: &str) -> Result<(), String> {
@@ -38,21 +36,10 @@ pub(super) fn check_model(model: &str) -> Result<(), String> {
     }
 }
 
+/// Question count and instruction length are common project caps
+/// (`question::check_common`); only the level limit is Laya's own.
 pub(super) fn validate(questions: &[QuestionSpec], prefix: &str, issues: &mut Vec<Issue>) {
-    if questions.len() > MAX_QUESTIONS {
-        issues.push(Issue::new(
-            prefix,
-            format!("Laya accepts at most {MAX_QUESTIONS} questions"),
-        ));
-    }
     for (index, question) in questions.iter().enumerate() {
-        // Python `str` length: Unicode scalar values, not bytes.
-        if question.instructions.chars().count() > MAX_INSTRUCTION_CHARS {
-            issues.push(Issue::new(
-                format!("{prefix}[{index}].instructions"),
-                format!("Laya accepts at most {MAX_INSTRUCTION_CHARS} characters"),
-            ));
-        }
         if let QuestionKind::Score { levels } = &question.kind
             && levels.len() > MAX_LEVELS
         {

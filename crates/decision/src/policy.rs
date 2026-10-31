@@ -7,10 +7,11 @@
 //! `serde_json::Map` is a BTreeMap or (with `preserve_order`) an IndexMap.
 //! Provider, model and `laya_max_len` are execution parameters, not policy.
 
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::question::{QuestionKind, QuestionSpec, normalize};
+use crate::question::{ChoiceOption, QuestionKind, QuestionSpec, normalize};
 
 /// Bump when the canonical form itself changes.
 pub const POLICY_SCHEMA: u64 = 1;
@@ -32,6 +33,82 @@ pub fn policy_version(questions: &[QuestionSpec], max_state_chars: u32) -> Strin
     hex::encode(Sha256::digest(
         canonical_policy(questions, max_state_chars).as_bytes(),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalPolicy {
+    max_state_chars: u32,
+    policy_schema: u64,
+    questions: Vec<CanonicalQuestion>,
+    state_shape: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalQuestion {
+    id: String,
+    instructions: String,
+    #[serde(rename = "type")]
+    kind: String,
+    yes: Option<String>,
+    no: Option<String>,
+    options: Option<Vec<CanonicalOption>>,
+    levels: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalOption {
+    description: Option<String>,
+    label: String,
+}
+
+/// The questions and `max_state_chars` of a stored canonical policy. Only an
+/// exact canonical form is accepted: re-encoding must give the same text.
+pub fn questions_from_canonical(json: &str) -> Result<(Vec<QuestionSpec>, u32), String> {
+    let policy: CanonicalPolicy =
+        serde_json::from_str(json).map_err(|_| "not a canonical policy document".to_string())?;
+    if policy.policy_schema != POLICY_SCHEMA || policy.state_shape != ["title", "body"] {
+        return Err("unsupported policy schema or state shape".to_string());
+    }
+    let questions = policy
+        .questions
+        .into_iter()
+        .map(|question| {
+            let kind = match question.kind.as_str() {
+                "noul" => QuestionKind::Noul {
+                    yes: question.yes,
+                    no: question.no,
+                },
+                "choice" => QuestionKind::Choice {
+                    options: question
+                        .options
+                        .ok_or("choice without options")?
+                        .into_iter()
+                        .map(|option| ChoiceOption {
+                            label: option.label,
+                            description: option.description,
+                        })
+                        .collect(),
+                },
+                "score" => QuestionKind::Score {
+                    levels: question.levels.ok_or("score without levels")?,
+                },
+                _ => return Err("unknown question type"),
+            };
+            Ok(QuestionSpec {
+                id: question.id,
+                instructions: question.instructions,
+                kind,
+            })
+        })
+        .collect::<Result<Vec<_>, &str>>()
+        .map_err(str::to_string)?;
+    if canonical_policy(&questions, policy.max_state_chars) != json {
+        return Err("policy document is not in canonical form".to_string());
+    }
+    Ok((questions, policy.max_state_chars))
 }
 
 fn canonical_question(question: &QuestionSpec) -> Value {
@@ -151,6 +228,26 @@ mod tests {
             options[1].description = Some("  ".to_string());
         }
         assert_eq!(canonical_policy(&padded, 6000), SAMPLE_JSON);
+    }
+
+    #[test]
+    fn canonical_documents_round_trip() {
+        let (questions, max) = questions_from_canonical(SAMPLE_JSON).unwrap();
+        assert_eq!(max, 6000);
+        assert_eq!(questions, sample());
+        assert_eq!(questions_from_canonical(BARE_NOUL_JSON).unwrap().0, bare());
+        let reordered = SAMPLE_JSON.replacen(
+            r#"{"max_state_chars":6000,"policy_schema":1,"#,
+            r#"{"policy_schema":1,"max_state_chars":6000,"#,
+            1,
+        );
+        assert!(questions_from_canonical(&reordered).is_err());
+        assert!(
+            questions_from_canonical(
+                &SAMPLE_JSON.replace("\"policy_schema\":1", "\"policy_schema\":2")
+            )
+            .is_err()
+        );
     }
 
     #[test]

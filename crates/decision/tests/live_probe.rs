@@ -21,6 +21,11 @@ use rss_ai_news_decision::{
 use rss_ai_news_domain::SecretString;
 use url::Url;
 
+/// Far enough that only the per-request timeout applies.
+fn deadline() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(3600)
+}
+
 fn var(name: &str) -> Option<String> {
     env::var(format!("RSS_AI_NEWS_DECISION_PROBE_{name}"))
         .ok()
@@ -130,14 +135,18 @@ async fn live_probe() {
         },
     ];
     let response = client
-        .decide(&DecisionRequest {
+        .decide(
+&DecisionRequest {
             title: "Open-weight model release",
             body: "A lab released a 7B open-weight language model under Apache-2.0, \
                    with evaluation results on common reasoning benchmarks. \
                    某实验室以 Apache-2.0 许可发布了 7B 开源权重语言模型，并公布了推理基准评测结果。",
             questions: &questions,
-        })
+        },
+deadline(),
+)
         .await
+        .result
         .expect("live decision request");
 
     println!("execution: {:?}", response.execution);
