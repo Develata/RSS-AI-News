@@ -1,9 +1,9 @@
 # ADR 0011: decision-run —— typed-decision 影子运行（Phase B）
 
 - 日期：2026-10-31
-- 状态：`proposed`
+- 状态：`accepted`（2026-10-31）
 - 决策者：Develata。沿用 ADR 0010 已定：两个 provider、问题按板块配置、shadow 走独立 `decision-run`、
-  整个功能可移除；2026-10-31 已批准 §8 的两项不变量 7 例外。ADR 整体待批准
+  整个功能可移除；2026-10-31 批准 §8 的两项不变量 7 例外，并接受本 ADR
 - 前置：[ADR 0010](./0010-typed-decision-capability.md)（Phase A 已合入 main `e0ffdd0`；两家真机探针的通过记录见
   [handoff](../handoffs/2026-10-31-typed-decision-phase-a.md)）
 - 评审：Codex（gpt-6-astra，high）两轮。初稿 4 项 BLOCKER（claim 未绑定策略与执行身份、回放材料不足、lease 不覆盖整段工作、
@@ -258,7 +258,7 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
 
 ### 8. 结果、原始响应与回放（不变量 7）
 
-- **`answers_json`**：`{"schema":1,"answers":[…]}`，按问题顺序。由 runtime 用**策略快照中的问题定义**与归一化结果共同构造：
+- **`answers_json`**：`{"schema":1,"answers":[…]}`，按问题顺序。由**策略快照中的问题定义**与归一化结果共同构造（§9 的 `answers_document`）：
   - noul：`p_yes`、`top_probability`（Laya 才有）；
   - choice：`label`、`probabilities`（label → p 的对象，label 取自问题定义）、`spread_confidence {kind, value}`、`top_probability`；
   - score：`expected`、`probabilities`（下标即档位）、`spread_confidence`、`top_probability`。
@@ -291,7 +291,8 @@ CLI：`decision-run [--category KEY] [--max-requests N] [--window-hours N]`。
 
 ### 9. 对 decision crate 的扩展
 
-- 归一化结果类型增加 `Serialize`；新增 `revalidate` 与策略 JSON 解析（§8）。
+- 新增 `answers_document`：按 §8 的形状由问题定义与归一化结果生成 `answers_json`（放在同时掌握两类类型的 decision crate，
+  runtime 调用）；新增 `revalidate` 与策略 JSON 解析（§8）。
 - Jev 的问题校验补上项目上限：每板块 ≤ 50 题、每题 instructions ≤ 2000 字符（与 Laya 一致，§7 的前提）。
 - `DecisionClient` 改为 `decide(request, call_deadline) -> Exchange { result, raw: Option<RawInfo> }`（截止时间见 §7）。
   - `raw` 只在收到 2xx 时为 `Some`：`RawInfo { bytes, sha256: Option<[u8; 32]>, body: Option<Vec<u8>>, withheld: Option<Withheld> }`。

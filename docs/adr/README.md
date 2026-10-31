@@ -57,7 +57,7 @@
 | [0008](./0008-per-category-path-template.md) | 分类级 path_template 覆盖 | accepted |
 | [0009](./0009-boundary-resource-hardening.md) | 边界与资源加固 | accepted |
 | [0010](./0010-typed-decision-capability.md) | typed-decision 能力（Jev / Laya），Phase A | accepted |
-| [0011](./0011-decision-run-shadow-runner.md) | decision-run 影子运行，Phase B | proposed |
+| [0011](./0011-decision-run-shadow-runner.md) | decision-run 影子运行，Phase B | accepted |
 
 ## 与其它目录的关系
 
