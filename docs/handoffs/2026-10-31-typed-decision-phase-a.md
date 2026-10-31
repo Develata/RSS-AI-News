@@ -79,3 +79,19 @@
 - 入口：`docs/adr/0010-typed-decision-capability.md`、`docs/plan/18-typed-decision.md`、`crates/decision/src/lib.rs`。
 - 探针用法见 `crates/decision/tests/live_probe.rs` 顶部注释；key 从进程环境或工作区 `.env` 读取，不打印。
 - 回环 mock 测试必须用 `use_env_proxy: false`：reqwest 不匹配 `127.*` 形式的 `NO_PROXY`。
+
+## 2026-10-31 追加：合并远端与两家真机探针
+
+- 远端 main 期间合入 Dependabot 与 TLS RustSec 修复（`643c507`，只改 `Cargo.lock`）。以 merge `c3bdc1d` 合入本分支，
+  锁文件以远端为准，只多出 decision 包一段；未改写本地提交。
+- `c3bdc1d` 上重跑：fmt / clippy（`--locked`）通过；`cargo test --workspace --no-fail-fast --locked` 978 passed / 0 failed /
+  69 ignored；static lane 通过。
+- 真机探针，新 TLS 依赖下各 1 次请求：
+  - Laya（`https://laya.develata.me/`，`multilingual`）：通过，结果与合并前一致（4 位小数）。
+  - Jev（`https://api.typesafe.ai`，`jev-1.13.0`）：通过。`reported_model = jev-1.13.0`、`input_tokens = 466`；概率最多 2 位小数；
+    choice 置信度 (3·1.0−1)/2 = 1.0、score 置信度 1 − 0.08/(2/3) = 0.88、期望值 1.02，均与返回值一致。
+- 据此把 ε_Jev = 5e-3 由"暂定"改为确定（ADR §4、plan/18 §3、`provider/jev.rs`）：2 位小数的半个末位单位，不能再收紧。
+  上文"风险与后续事项"中的 Jev 精度一项至此关闭。
+- 两家对同一样例的 noul（是否营销）判断差异明显：Laya p_yes = 0.0064，Jev p_yes = 0.34。单样本不构成质量结论，
+  属于 Phase C 评估的范围。
+- worktree 的 `.env` 现同时存放 `LAYA_API_KEY` 与 `JEV_API_KEY`（gitignored，mode 600），仅本机探针使用。

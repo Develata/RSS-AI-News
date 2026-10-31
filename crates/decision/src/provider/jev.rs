@@ -15,8 +15,8 @@ use crate::{
 };
 
 /// Half a unit of the precision Jev returns. Not documented; the official
-/// examples carry two decimals, so this is provisional until the live probe
-/// measures it (ADR 0010 §4).
+/// examples and the 2026-10-31 live probe of `jev-1.13.0` both carry two
+/// decimals (ADR 0010 §4).
 pub(super) const EPS: f64 = 5e-3;
 
 const ALIASES: [&str; 2] = ["jev-latest", "jev-preview"];
