@@ -263,7 +263,9 @@ mod tests {
         long.instructions = "长".repeat(MAX_INSTRUCTION_CHARS + 1);
         let issues = validate_common(&[long], "q");
         assert_eq!(issues[0].field, "q[0].instructions");
-        let many: Vec<_> = (0..=MAX_QUESTIONS).map(|i| noul(&format!("q_{i}"))).collect();
+        let many: Vec<_> = (0..=MAX_QUESTIONS)
+            .map(|i| noul(&format!("q_{i}")))
+            .collect();
         assert_eq!(validate_common(&many, "q")[0].field, "q");
         let fine = "长".repeat(MAX_INSTRUCTION_CHARS);
         let mut edge = noul("q_edge");

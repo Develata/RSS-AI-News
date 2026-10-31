@@ -546,7 +546,10 @@ mod tests {
         let key = "sk-abc";
         assert!(contains_credential(br#"{"a":"x sk-abc y"}"#, key));
         assert!(contains_credential(br#"{"a":"sk\u002dabc"}"#, key));
-        assert!(contains_credential(br#"{"m":"sk-ab\u0063","m":"clean"}"#, key));
+        assert!(contains_credential(
+            br#"{"m":"sk-ab\u0063","m":"clean"}"#,
+            key
+        ));
         assert!(contains_credential(br#"{"sk\u002dabc":1}"#, key));
         assert!(!contains_credential(br#"{"a":"sk-ab","b":"c"}"#, key));
         assert!(!contains_credential(br#"{"a":"unterminated"#, key));
