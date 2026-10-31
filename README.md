@@ -766,6 +766,7 @@ rss-ai-news [global flags] <command>
 | `replay` | 从 raw artifact 回放 feed/html/AI 解析 |
 | `reindex` | 重算派生字段或规则版本 |
 | `recent-entries` | 严格只读导出最近发现的 entries 与 source health；publication cutoff 默认关闭 |
+| `decision-run` | typed-decision 影子运行：只记录答案，不在 `run` 中（见 `docs/plan/18-typed-decision.md` §8） |
 
 查看完整参数：
 
@@ -876,8 +877,8 @@ rss-ai-news --config-dir configs validate-config
 ## 当前版本状态（v0.9.1）
 
 - production graph：12 个 library crates + 1 个 single-shot binary；SQLite / PostgreSQL 双方言。
-- typed-decision（Jev / Laya，ADR 0010 Phase A）：默认关闭，仅 validate-config 校验其配置，不接入任何流程。
-- CLI：13 个顶层子命令；阶段失败经 summary 反映到退出码（JSON 恰好一个文档）；`run` / `ai-run` 逐分类执行 AI。
+- typed-decision（Jev / Laya，ADR 0010 / 0011）：默认关闭；启用后由独立的 `decision-run` 子命令对近期文章提问，只把答案写入 `decision_results`，不影响 ingest / ai-run / publish，也不在 `run` 中（需单独调度）。
+- CLI：14 个顶层子命令；阶段失败经 summary 反映到退出码（JSON 恰好一个文档）；`run` / `ai-run` 逐分类执行 AI。
 - config：`validate-config` 对保留字段、缺 `{body_text}` / `{title}` 的分类 prompt 输出非致命 warning；分类未写 prompt 时使用含占位符的内置默认模板。
 - development tooling：独立 Rust acceptance matrix，覆盖 6 lanes、local/full profiles 与 JSON evidence；step 有界输出与超时。
 - CI：`test`（static + workspace lanes）、`test-pg`（postgres + sqlite + release lanes，共用一次 release build）与 Docker job；3 个并行。

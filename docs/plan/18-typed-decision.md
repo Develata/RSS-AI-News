@@ -1,7 +1,9 @@
-# 18 — typed-decision 能力（Phase A）
+# 18 — typed-decision 能力（Phase A / B）
 
-决策与一手来源见 [../adr/0010-typed-decision-capability.md](../adr/0010-typed-decision-capability.md)（accepted）。
-本章是 Phase A 的实现契约。Phase A 不接入任何 flow、不建表、不加子命令；默认关闭时生产行为零变化。
+决策与一手来源见 [../adr/0010-typed-decision-capability.md](../adr/0010-typed-decision-capability.md)（Phase A，accepted）
+与 [../adr/0011-decision-run-shadow-runner.md](../adr/0011-decision-run-shadow-runner.md)（Phase B，accepted）。
+§1–§7 是 Phase A（能力层）的契约，§8 是 Phase B（独立的 `decision-run` 影子运行）的契约。
+默认关闭；不配置 `[decision]` 时生产行为零变化，`decision-run` 也不在 `run` 中。
 
 ## 1. 边界与可移除性
 
@@ -138,6 +140,74 @@
 | 两家请求体的完整 JSON（含规范化与单侧 noul 释义）；正常响应的归一化（Jev 两位小数的官方示例可通过）；拒绝：顶层元数据（Laya `routing.model` / `usage.truncated` / `usage.state_tokens_dropped` 缺失或不符、选项塌缩、缺 `model`）、Jev pin 不符、答案缺失 / 多余 / 类型不符、答案重复键、概率越界、置信度越界（Laya 六处、Jev 三处）、概率和、argmax、期望值、Laya 复算（三种题型的 `answer_confidence`、noul 的 `confidence`）、必填置信度（Jev choice / score，Laya 六处）、线格式数字（负数、指数 / 小数 token、超出 u64、NaN、字符串）；全部 status 类别、408、Retry-After、3xx 不跟随；错误体不回显；响应体上限（Content-Length 预检；无 Content-Length 时的流式上限未单独构造用例）；错误体停滞或中断时保留 status；超时；本地拒绝不发请求；连接被拒 | `crates/decision/tests/contract_tests.rs`（wiremock 与原始 TCP，25 个；client 关闭环境代理，在设置了失效代理时同样通过） |
 | validate-config：未启用时的 warning、启用时才检查密钥变量、拒绝 Laya `auto` | `crates/cli/tests/validate_config_cmd_tests.rs` |
 | 透传：缺段时不出现、有段时原样保留、Debug 不打印原始值 | `crates/config/src/decision.rs` |
+| 真机探针（`#[ignore]`）：连通性、契约、Jev 实际返回的精度 | `crates/decision/tests/live_probe.rs` |
 
 覆盖口径是"每条拒绝规则至少一个反例"，不是每个分支组合都有用例。
-| 真机探针（`#[ignore]`）：连通性、契约、Jev 实际返回的精度 | `crates/decision/tests/live_probe.rs` |
+
+## 8. decision-run（Phase B）
+
+设计与取舍见 ADR 0011；本节记录实现契约与偏离。
+
+### 8.1 位置
+
+| 层 | 文件 |
+|---|---|
+| CLI | `crates/cli/src/commands/decision_run.rs`（`Command::DecisionRun`，`--max-requests` / `--window-hours`） |
+| flow | `crates/runtime/src/flows/decision_run/{mod,task}.rs`（`DecisionRunDeps` 在模块内） |
+| storage | `crates/storage/src/repo/decision_result{,_sql,_impl}.rs`，迁移 `0006_decision_results` |
+| 能力 | `crates/decision`：`Exchange` / `RawInfo` / `SentState`、`answers_document`、`revalidate`、`questions_from_canonical` |
+
+移除步骤见 ADR 0011 §13（先停调度、确认进程退出，再发布带删表迁移的版本）。
+
+### 8.2 客户端扩展
+
+- `DecisionClient::decide(request, deadline) -> Exchange`：单次请求的超时取配置值与剩余时间的较小者；
+  已收到的非 2xx 状态在读体超时或中断时仍按该状态归类。
+- `Exchange.sent`：`state_sha256`（`state` 紧凑 JSON、键排序后的 SHA-256）、截断后正文字符数、是否截断；请求未构造时为 `None`。
+- `Exchange.raw`（仅 2xx）：`bytes`、完整体的 `sha256`、可安全保存时的 `body`，否则 `withheld` 为
+  `not_json` / `credential` / `incomplete`。
+- 凭据检查：响应体按字节查找 key，并对每个 JSON 字符串字面量（含对象键、重复键）解码转义后查找；
+  `reported_model` / `routing_model` 含 key 时整条响应判为 `InvalidResponse`。
+- 错误按阶段映射：构造失败 → `InvalidConfig`；超时 → `Timeout`；连接阶段 → `Connection`（未发出）；
+  其余 → 新增的 `Transport`（可能已发出）。key 在构造客户端时验证为合法 header 值；reqwest 自动重试关闭。
+- 项目上限对两家统一：每板块 ≤ 50 题、每题 instructions ≤ 2000 字符。
+
+### 8.3 数据
+
+- `decision_policies(policy_version, canonical_json)`：每次运行为参与的板块写入当前策略快照（已存在即跳过）。
+- `decision_results`：一行 = 文章 × `policy_version` × `execution_key`（`jev:{model}` / `laya:{model}:{laya_max_len}`）；
+  列与约束见迁移 0006 与 ADR 0011 §3。状态机 `DecisionResultState` 见 plan/08 §1。
+- `answers_json`（`answers_document`，`schema = 1`）示例：
+
+  ```json
+  {"answers":[{"id":"q_ad","p_yes":0.25,"top_probability":0.75,"type":"noul"},
+              {"id":"q_kind","label":"paper","probabilities":{"other":0.25,"paper":0.75},
+               "spread_confidence":{"kind":"jev_choice","value":0.5},"top_probability":null,"type":"choice"}],
+   "schema":1}
+  ```
+
+- 原始响应：`raw_response = on_failure`（缺省，只保存未通过校验的 2xx）| `always` | `never`；长度、摘要与
+  未保存原因总是记录。保存时写 `raw_response_expires_at`（`ttl_days = 0` 为永久）。
+
+### 8.4 运行
+
+- 顺序：留档清理（跨身份，每次运行上限 `max(1000, 2 × 预算)` 行，达到上限时摘要标记 `raw_gc_backlog`，
+  表示可能仍有过期留档）→ 策略快照 → 每个身份的 reclaim 与预算终态化 → 板块轮转。
+- 每一步领取一个窗口（≤ `concurrency`，且不超过剩余预算），全部派发、全部收取后再进入下一步；
+  没有可领取的行时才生成，每次最多一个窗口。
+- **偏离 ADR 0011 §5 的实现细节**：生成是单条 `INSERT … SELECT … ON CONFLICT DO NOTHING`（带窗口、`retired` 过滤与反连接），
+  没有分页游标；`NOT EXISTS` 排除已有行，并发冲突只会让本次插入数变少，不会卡住。
+- 单行：核对身份 → 读文章（存储期限 5 s）→ 最后一次 lease 检查（剩余 ≥ 请求超时 + 5 s，否则退还并暂停该板块）
+  → 调用（计一次额度）→ 按 ADR 0011 §10 的类别释放。
+- 收尾：窗口在 `lease_seconds` 内未收完即 `abort_all`，再收取 5 s，未确认的行留给 lease 回收，计 `drain_timeout`。
+- 事件：stage `decision_run`，由协调者在每个窗口后写，不含正文、答案与响应体。
+
+### 8.5 测试
+
+| 内容 | 位置 |
+|---|---|
+| 客户端：`Exchange` 四种原始体形态、凭据反射（含转义与重复键）、`Transport` / `Connection`、截止时间与已知 status、不自动重试、非法 header key、`revalidate` 与在线一致 | `crates/decision/tests/contract_tests.rs` |
+| `answers_document` 固定形状、策略 JSON 往返、项目上限 | `crates/decision/src/*` 单元测试 |
+| 存储：窗口（含亚秒与 SQLite 文本格式）、身份隔离、并行领取不相交、三种释放、维护、留档清理、约束 | `crates/storage/tests/decision_result_tests.rs`；PostgreSQL 版 `decision_result_pg_tests.rs`（postgres lane） |
+| flow：成功与事件、预算上限、全局 / 单篇失败、限流、疑似配置、留档策略、首轮公平、策略切换、lease 不足、panic、收尾超时 | `crates/runtime/tests/decision_run_tests.rs` |
+| CLI：配置类错误 78 且不开库、首轮预算、`--dry-run` 拒绝、对 mock laya-server 的端到端 | `crates/cli/tests/decision_run_cmd_tests.rs` |

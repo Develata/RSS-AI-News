@@ -294,6 +294,14 @@ model = "multilingual"                 # enabled 时必填；Laya: multilingual|
 request_timeout_seconds = 10           # 缺省 10，1..=60
 max_state_chars = 6000                 # 缺省 6000，1..=200000
 laya_max_len = 2048                    # 仅 Laya；缺省 2048，512..=8192
+# 以下只被 decision-run 使用（ADR 0011）
+concurrency = 2                        # 缺省 2，1..=8：一个窗口同时在途的请求数
+lease_seconds = 120                    # 缺省 120，30..=3600；须 ≥ request_timeout_seconds + 25
+max_attempts = 3                       # 缺省 3，1..=10
+max_requests_per_run = 100             # 缺省 100，1..=10000；不带 --category 时须 ≥ concurrency × 有问题的板块数
+window_hours = 48                      # 缺省 48，1..=8760：候选文章的时间窗口
+raw_response = "on_failure"            # on_failure（缺省）| always | never：2xx 原始响应留档
+raw_response_ttl_days = 30             # 缺省 30，0..=3650；0 = 永久保存
 
 [[category.decision.questions]]        # 省略或空列表 = 该板块不调用
 id = "q_marketing"                     # [a-z0-9_]，板块内唯一
@@ -303,7 +311,8 @@ instructions = "这篇是否主要是厂商营销或公关稿？"
 # score 用 levels = [...]（从低到高，Jev ≤ 10，Laya ≤ 50）
 ```
 
-validate-config 规则与 warning（`decision_inert`、`decision_model_alias`、`decision_unused_field`）见 plan/18 §6。
+validate-config 规则与 warning（`decision_inert`、`decision_model_alias`、`decision_unused_field`、
+`decision_budget_below_round_one`）见 plan/18 §6。
 启用时只检查 `api_key_env` 所指变量是否存在（进程环境优先，`.env` 后备，空白视为缺失），不读取、不回显其值。
 
 ## 独立能力与保留字段（2026-09-10）

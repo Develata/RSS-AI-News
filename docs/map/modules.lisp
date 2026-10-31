@@ -22,7 +22,7 @@
        :path "crates/cli/"
        :downstream (domain config runtime storage feed extractor ai decision publish observability)
        :state active
-       :notes "13 个子命令（ingest / ai-run / publish / publish-all / run / migrate / validate-config / doctor / replay / backfill / reindex / rebuild-report / recent-entries）。
+       :notes "14 个子命令（ingest / ai-run / publish / publish-all / run / migrate / validate-config / doctor / replay / backfill / reindex / rebuild-report / recent-entries / decision-run）。
                入口 crates/cli/src/lib.rs::run。args.rs 维护 clap derive 结构。
                注意：cli 不直接拉 report，渲染发生在 runtime/flows/publish/ 中调 report crate。
                注意：没有独立的 `extract` 子命令 —— 抓正文与抓 feed 合并在 `ingest`、`run`、`replay --kind=html`、`backfill --target=extract` 等入口里。")
@@ -54,9 +54,9 @@
        :label "流程协调层：Flow 编排 + 按用途装配依赖"
        :layer flow-coord
        :path "crates/runtime/"
-       :downstream (domain config storage feed extractor ai report publish observability)
+       :downstream (domain config storage feed extractor ai decision report publish observability)
        :state active
-       :notes "8 个公开 Flow 模块对应主链路 + reindex + backfill + rebuild_report + recent_entries；另有内部 maintenance 模块。
+       :notes "9 个公开 Flow 模块对应主链路 + reindex + backfill + rebuild_report + recent_entries + decision_run（ADR 0011，可整体移除）；另有内部 maintenance 模块。
                context.rs 定义 IngestDeps / ExtractDeps / AiDeps / PublishDeps /
                BackfillDeps / ReindexDeps / RebuildReportDeps；RunMeta 仅含 run_id / started_at。
                CLI context_factory 按命令分别构造，各 flow 无跨功能 dependency bag。
@@ -111,7 +111,8 @@
        :downstream (domain)
        :state active
        :notes "ADR 0010 Phase A：SystemOne HTTP client、provider 子模块（jev / laya）、响应一致性校验、
-               配置段解析（config 只透传 toml::Value）。不接入任何 flow；可整体移除。详见 plan/18-typed-decision.md。")
+               配置段解析（config 只透传 toml::Value）。ADR 0011 Phase B：Exchange / RawInfo、answers_document、
+               revalidate；只被 runtime 的 decision_run flow 调用。可整体移除。详见 plan/18-typed-decision.md。")
 
 (crate :id report
        :label "Markdown 渲染 + rebuild"

@@ -36,15 +36,15 @@
       :notes "解析 clap Cli + 全局 flag + 子命令分派；持有 WorkerGuard 到进程结束。")
 
 (node :id cli-commands
-      :label "13 个子命令模块"
+      :label "14 个子命令模块"
       :layer instruction-interface
       :crate cli
       :path "crates/cli/src/commands/"
       :kind module
       :state active
-      :notes "ai_run / backfill / doctor / ingest / migrate / publish / publish_all /
+      :notes "ai_run / backfill / decision_run / doctor / ingest / migrate / publish / publish_all /
               rebuild_report / reindex / replay / run / validate_config / recent_entries
-              （13 个 command .rs，加 mod.rs 共 14 个文件）。
+              （14 个 command .rs，加 mod.rs 共 15 个文件）。decision_run 不在 run 中（ADR 0011）。
               对应 acceptance-cases/commands/*.md。")
 
 ;; ====================================================================
@@ -173,6 +173,19 @@
                    run-event-emitter)
       :state active
       :notes "mod 滚动 JoinSet 编排 + dto / process / release；Arc<AiRunOptions> 与 Arc<str> 共享不可变配置，最多 32 个失败样例。")
+
+(node :id flow-decision-run
+      :label "DecisionRunFlow"
+      :layer flow-coord
+      :crate runtime
+      :path "crates/runtime/src/flows/decision_run/mod.rs"
+      :kind struct
+      :upstream (cli-commands)
+      :downstream (decision-crate repo-article run-event-emitter)
+      :state active
+      :notes "ADR 0011 影子运行：mod 按窗口领取 + 板块轮转 + 收尾期限，task 单行处理与失败分类；
+              DecisionRunDeps 定义在模块内，不进 context.rs。只写 decision_results / decision_policies
+              （storage repo decision_result*），不碰 articles.state。")
 
 (node :id flow-publish
       :label "PublishFlow"
@@ -315,7 +328,8 @@
       :path "crates/decision/src/lib.rs"
       :kind module
       :state active
-      :notes "DecisionClient / SystemOneClient + provider::{jev, laya} + validate_sections；Phase A 仅 validate-config 调用。")
+      :notes "DecisionClient / SystemOneClient（Exchange / RawInfo、调用截止时间、凭据反射检查）+ provider::{jev, laya}
+              + validate_sections + answers_document / revalidate；由 validate-config 与 flow-decision-run 调用。")
 
 (node :id ai-crate
       :label "ai crate"

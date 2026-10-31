@@ -31,6 +31,7 @@
 | `publish [flags]` | 单分类发布（5 阶段） | [../acceptance-cases/pipelines/04-publish-local-and-github.md](../acceptance-cases/pipelines/04-publish-local-and-github.md) |
 | `publish-all [flags]` | 全分类发布 | 同上 |
 | `run [flags]` | ingest + ai-run + publish-all 一次跑完 | 同各能力章 |
+| `decision-run [flags]` | typed-decision 影子运行（不在 `run` 中，另配调度） | [../acceptance-cases/commands/decision-run.md](../acceptance-cases/commands/decision-run.md) |
 | `doctor [--deep]` | 健康检查（含 deep 跨表不变量） | [../acceptance-cases/commands/doctor.md](../acceptance-cases/commands/doctor.md) |
 | `validate-config` | 三阶段配置校验 | [../acceptance-cases/commands/validate-config.md](../acceptance-cases/commands/validate-config.md) |
 | `migrate {run\|check}` | DB schema 迁移 | [../acceptance-cases/commands/migrate.md](../acceptance-cases/commands/migrate.md) |
@@ -55,6 +56,14 @@
 - `--batch-size <N>`（默认 `20`）
 - `--max-batches <N>`：批数上限**按分类分别计**（3 个分类 × `--max-batches 1` 最多 3 批）
 - `--model <ID>`：覆盖 `[ai].model`
+
+### `decision-run`
+- 需要 `[decision] enabled = true`；段缺失、关闭、凭据缺失、问题不合法、lease 下界或首轮预算不满足时，
+  在打开数据库之前以 exit 78 结束（ADR 0011 §11）
+- 未给全局 `--category` 时处理所有带问题的分类，要求 `max_requests_per_run ≥ concurrency × 分类数`
+- `--max-requests <N>`：本次最多发出的请求数，覆盖 `[decision].max_requests_per_run`（1..=10000）
+- `--window-hours <N>`：候选窗口，覆盖 `[decision].window_hours`（1..=8760）；补跑旧文章时显式放宽
+- 不支持 `--dry-run`；退出码：配置 / 凭据类中止 78，其它运行级中止 1，仅单篇失败或限流 0
 
 ### `publish` / `publish-all`
 - `--date <YYYY-MM-DD>`：指定 report 日期

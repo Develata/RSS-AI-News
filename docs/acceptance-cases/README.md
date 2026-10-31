@@ -88,3 +88,4 @@
 | AC-C-07 | [rebuild-report.md](./commands/rebuild-report.md) | passing |
 | AC-C-08 | [scheduler.md](./commands/scheduler.md) | partial |
 | AC-C-09 | [recent-entries.md](./commands/recent-entries.md) | passing |
+| AC-C-10 | [decision-run.md](./commands/decision-run.md) | passing |

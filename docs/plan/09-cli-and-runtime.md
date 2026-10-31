@@ -31,7 +31,7 @@ rss-ai-news [全局 flag] <subcommand> [子命令 flag]
 入口路径：
 - 二进制：[`src/main.rs`](../../src/main.rs)（`#[tokio::main] async fn main()`）
 - 命令路由：[`crates/cli/src/lib.rs`](../../crates/cli/src/lib.rs)（`pub async fn run() -> ExitCode`）
-- 各子命令：[`crates/cli/src/commands/`](../../crates/cli/src/commands/)（13 个 command module + `mod.rs`）
+- 各子命令：[`crates/cli/src/commands/`](../../crates/cli/src/commands/)（14 个 command module + `mod.rs`；`decision_run` 见 [./18-typed-decision.md](./18-typed-decision.md) §8）
 
 CLI 框架：`clap` derive。每个子命令是独立 enum 变体。
 

@@ -6,7 +6,7 @@
 ## 整体形态
 
 - 一只 **single-shot CLI**（`rss-ai-news`），每次 run 完成一段流水线后退出
-- production graph 为 12 个 library crate + 1 个根 binary（`decision` 为可选的 typed-decision 能力，Phase A 仅由 validate-config 使用）；workspace 另含 1 个零 product-crate 依赖的 acceptance tooling crate
+- production graph 为 12 个 library crate + 1 个根 binary（`decision` 为可选的 typed-decision 能力，由 validate-config 与独立的 `decision-run` 使用）；workspace 另含 1 个零 product-crate 依赖的 acceptance tooling crate
 - 主链路 5 段：`ingest → extract → ai-run → publish → publish-remote`
 - 调度外挂（外挂 cron / supercronic 镜像），见 [../plan/13-non-goals.md](../plan/13-non-goals.md)
 
@@ -67,7 +67,7 @@ FeedSource ──ingest──▶ FeedEntry ──extract──▶ Article ──
 ```text
 rss-ai-news → cli
 cli         → domain, config, runtime, storage, feed, extractor, ai, decision, publish, observability
-runtime     → domain, config, storage, feed, extractor, ai, report, publish, observability
+runtime     → domain, config, storage, feed, extractor, ai, decision, report, publish, observability
 report      → domain, storage
 storage     → domain
 config, feed, extractor, ai, decision, publish → domain
@@ -88,6 +88,7 @@ CLI 的 [`context_factory.rs`](../../crates/cli/src/context_factory.rs) 按命�
 | ExtractFlow | ExtractDeps | HTML fetcher、提取策略与 entry/article/artifact/event repositories |
 | AiRunFlow | AiDeps | 单次运行的 AI client 与 article/result/artifact/event repositories |
 | PublishFlow | PublishDeps | 快照 repositories、本地 publisher、可选远端 publisher |
+| DecisionRunFlow | DecisionRunDeps（定义在 flow 模块内） | decision client 与 article / decision_result / event repositories；只写 `decision_*` 两表（ADR 0011） |
 | BackfillFlow / ReindexFlow | BackfillDeps / ReindexDeps | 各自的对象/任务/规则 repositories，无网络 client |
 | RebuildReportFlow | RebuildReportDeps | 模板与快照读取，不持有 publisher |
 | recent-entries | 独立只读 repository traits | 不构造网络或 writer dependencies |

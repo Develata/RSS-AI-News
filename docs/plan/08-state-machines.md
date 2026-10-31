@@ -17,6 +17,9 @@
 
 辅助状态轮（不在 4 状态机内，但同等重要）：
 
+- `DecisionResultState`（`decision_results.state`）：typed-decision 影子运行的 pending / running / succeeded / failed，
+  定义在 `crates/storage/src/repo/decision_result.rs`（不进 domain，随功能整体移除），见
+  [../adr/0011-decision-run-shadow-runner.md](../adr/0011-decision-run-shadow-runner.md) §2 与 [./18-typed-decision.md](./18-typed-decision.md) §8
 - `ReindexJobState`：规则版本升级任务轮，见 [../adr/0004-active-rule-resolver-partial-unique.md](../adr/0004-active-rule-resolver-partial-unique.md)
 - `RuleVersionStatus`：`rule_versions` 的 pending / active / superseded 三态。
   reindex 管理的 kind 单向推进（pending → active → superseded）；**仅
