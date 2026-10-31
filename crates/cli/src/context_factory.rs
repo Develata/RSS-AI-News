@@ -44,14 +44,15 @@ pub async fn open_read_storage(loaded: &LoadedConfig) -> Result<StoragePool, Cli
     Ok(pool)
 }
 
-/// decision-run (ADR 0011): the configured client, its settings and the two
-/// read / one write repositories it needs. Nothing else is wired.
+/// decision-run (ADR 0011): the configured client, its settings and the one
+/// repository that owns every statement of the command. Nothing else is wired.
 pub fn build_decision_run_deps(
     pool: &StoragePool,
     client: Arc<rss_ai_news_decision::SystemOneClient>,
     settings: &rss_ai_news_decision::DecisionSettings,
     execution: DecisionExecution,
 ) -> Arc<DecisionRunDeps> {
+    let decision_repo = Arc::new(DecisionResultRepo::new_with_storage(pool.clone()));
     Arc::new(DecisionRunDeps {
         run: RunMeta::default(),
         settings: DecisionRunSettings {
@@ -66,9 +67,11 @@ pub fn build_decision_run_deps(
         execution_key: client.execution_key(),
         client,
         execution,
-        decision_repo: Arc::new(DecisionResultRepo::new_with_storage(pool.clone())),
-        article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
-        event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+        // One repo for every statement of the command, so each is bounded on
+        // PostgreSQL (ADR 0011 §7).
+        decision_repo: Arc::clone(&decision_repo)
+            as Arc<dyn rss_ai_news_storage::DecisionResultRepository>,
+        event_repo: decision_repo,
     })
 }
 

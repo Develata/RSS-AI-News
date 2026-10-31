@@ -22,9 +22,12 @@ use rss_ai_news_runtime::{
     DecisionRunSummary, RunMeta,
 };
 use rss_ai_news_storage::{
-    ArticleRepo, DecisionExecution, DecisionIdentity, DecisionResultRepo, RunEventRepo, StoragePool,
+    ClaimedDecision, DecisionArticle, DecisionExecution, DecisionFailure, DecisionIdentity,
+    DecisionResultRepo, DecisionResultRepository, DecisionResultState, DecisionSuccess,
+    RunEventRepo, StorageError, StoragePool,
 };
 use sqlx::SqlitePool;
+use time::OffsetDateTime;
 
 use common::{
     insert_config_rule, insert_source_with_category, make_test_pool, seed_extractor_rule_version,
@@ -37,6 +40,8 @@ const BODY: &str = "正文里有一段不应出现在事件里的文字";
 enum Reply {
     Ok,
     Err(DecisionError),
+    /// The client gave up before sending (deadline already passed).
+    Unsent,
     /// 2xx body that failed validation, with a capturable raw body.
     InvalidWithRaw,
     Hang,
@@ -125,6 +130,11 @@ impl DecisionClient for ScriptedClient {
                 sent: sent(),
                 raw: None,
             },
+            Reply::Unsent => Exchange {
+                result: Err(DecisionError::Timeout { seconds: 0 }),
+                sent: None,
+                raw: None,
+            },
             Reply::InvalidWithRaw => Exchange {
                 result: Err(DecisionError::InvalidResponse {
                     reason: "probabilities do not sum to 1".to_string(),
@@ -175,12 +185,143 @@ fn settings() -> DecisionRunSettings {
     }
 }
 
+/// Storage faults to inject around the real SQLite repository.
+#[derive(Default)]
+struct Faults {
+    release_error: bool,
+    owner_mismatch: bool,
+    article_error: bool,
+    article_hang: bool,
+}
+
+struct FaultyRepo {
+    inner: DecisionResultRepo,
+    faults: Faults,
+}
+
+fn injected() -> StorageError {
+    StorageError::Unavailable("injected".to_string())
+}
+
+#[async_trait]
+impl DecisionResultRepository for FaultyRepo {
+    async fn upsert_policy(
+        &self,
+        policy_version: &str,
+        canonical_json: &str,
+        now: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .upsert_policy(policy_version, canonical_json, now)
+            .await
+    }
+    async fn generate_pending(
+        &self,
+        identity: &DecisionIdentity,
+        execution: &DecisionExecution,
+        cutoff: OffsetDateTime,
+        limit: u32,
+        now: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        self.inner
+            .generate_pending(identity, execution, cutoff, limit, now)
+            .await
+    }
+    async fn claim(
+        &self,
+        identity: &DecisionIdentity,
+        owner: &str,
+        lease_expires_at: OffsetDateTime,
+        max_attempts: u32,
+        limit: u32,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ClaimedDecision>, StorageError> {
+        self.inner
+            .claim(identity, owner, lease_expires_at, max_attempts, limit, now)
+            .await
+    }
+    async fn release_success(
+        &self,
+        id: i64,
+        owner: &str,
+        success: &DecisionSuccess,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        if self.faults.release_error {
+            return Err(injected());
+        }
+        if self.faults.owner_mismatch {
+            return Ok(false);
+        }
+        self.inner.release_success(id, owner, success, now).await
+    }
+    async fn release_failure(
+        &self,
+        id: i64,
+        owner: &str,
+        failure: &DecisionFailure,
+        now: OffsetDateTime,
+    ) -> Result<Option<DecisionResultState>, StorageError> {
+        if self.faults.release_error {
+            return Err(injected());
+        }
+        if self.faults.owner_mismatch {
+            return Ok(None);
+        }
+        self.inner.release_failure(id, owner, failure, now).await
+    }
+    async fn reclaim_expired(
+        &self,
+        identity: &DecisionIdentity,
+        now: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        self.inner.reclaim_expired(identity, now).await
+    }
+    async fn terminalize_exhausted(
+        &self,
+        identity: &DecisionIdentity,
+        max_attempts: u32,
+        now: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        self.inner
+            .terminalize_exhausted(identity, max_attempts, now)
+            .await
+    }
+    async fn purge_expired_raw(
+        &self,
+        now: OffsetDateTime,
+        limit: u32,
+    ) -> Result<u64, StorageError> {
+        self.inner.purge_expired_raw(now, limit).await
+    }
+    async fn load_article(&self, article_id: i64) -> Result<Option<DecisionArticle>, StorageError> {
+        if self.faults.article_error {
+            return Err(injected());
+        }
+        if self.faults.article_hang {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+        }
+        self.inner.load_article(article_id).await
+    }
+    async fn count_other_identity_pending(
+        &self,
+        identity: &DecisionIdentity,
+    ) -> Result<u64, StorageError> {
+        self.inner.count_other_identity_pending(identity).await
+    }
+}
+
 fn deps(
     pool: &SqlitePool,
     client: Arc<ScriptedClient>,
     settings: DecisionRunSettings,
+    faults: Faults,
 ) -> Arc<DecisionRunDeps> {
     let storage = StoragePool::Sqlite(pool.clone());
+    let repo = Arc::new(FaultyRepo {
+        inner: DecisionResultRepo::new_with_storage(storage.clone()),
+        faults,
+    });
     Arc::new(DecisionRunDeps {
         run: RunMeta::default(),
         settings,
@@ -192,8 +333,7 @@ fn deps(
             laya_max_len: Some(2048),
         },
         execution_key: EXECUTION_KEY.to_string(),
-        decision_repo: Arc::new(DecisionResultRepo::new_with_storage(storage.clone())),
-        article_repo: Arc::new(ArticleRepo::new_with_storage(storage.clone())),
+        decision_repo: repo,
         event_repo: Arc::new(RunEventRepo::new_with_storage(storage)),
     })
 }
@@ -241,7 +381,26 @@ async fn run(
     categories: Vec<CategoryPlan>,
     max_requests: u32,
 ) -> DecisionRunSummary {
-    DecisionRunFlow::new(deps(pool, client, settings))
+    run_with(
+        pool,
+        client,
+        settings,
+        categories,
+        max_requests,
+        Faults::default(),
+    )
+    .await
+}
+
+async fn run_with(
+    pool: &SqlitePool,
+    client: Arc<ScriptedClient>,
+    settings: DecisionRunSettings,
+    categories: Vec<CategoryPlan>,
+    max_requests: u32,
+    faults: Faults,
+) -> DecisionRunSummary {
+    DecisionRunFlow::new(deps(pool, client, settings, faults))
         .run(&DecisionRunOptions {
             categories,
             max_requests,
@@ -540,6 +699,10 @@ async fn a_panicking_task_stops_the_run_and_leaves_the_row_to_reclaim() {
     )
     .await;
     assert_eq!(summary.tasks_panicked, 1);
+    assert_eq!(
+        summary.calls, 1,
+        "the call is counted before the client runs"
+    );
     assert_eq!(summary.exit_class(), 1);
     assert_eq!(states(&pool).await, vec![("running".to_string(), 1)]);
 }
@@ -561,7 +724,117 @@ async fn a_hanging_call_is_cancelled_at_the_drain_deadline() {
     )
     .await;
     assert!(summary.drain_timeout);
+    assert_eq!(summary.calls, 1, "a cancelled call still spent budget");
     assert_eq!(summary.exit_class(), 1);
     assert!(started.elapsed() < Duration::from_secs(30));
+    assert_eq!(states(&pool).await, vec![("running".to_string(), 1)]);
+}
+
+#[tokio::test]
+async fn an_unsent_call_still_spends_budget() {
+    let (_dir, pool) = make_test_pool().await;
+    seed(&pool, "ai", 2).await;
+    seed(&pool, "ml", 3).await;
+    let mut settings = settings();
+    settings.concurrency = 1;
+    let client = ScriptedClient::new([Reply::Unsent]);
+    let summary = run(
+        &pool,
+        client.clone(),
+        settings,
+        vec![plan("ai", questions()), plan("ml", questions())],
+        2,
+    )
+    .await;
+    assert_eq!((summary.calls, client.calls()), (2, 2));
+}
+
+#[tokio::test]
+async fn a_failed_release_after_a_rate_limit_exits_1() {
+    let (_dir, pool) = make_test_pool().await;
+    seed(&pool, "ai", 1).await;
+    let summary = run_with(
+        &pool,
+        ScriptedClient::new([Reply::Err(DecisionError::RateLimited {
+            retry_after_seconds: None,
+        })]),
+        settings(),
+        vec![plan("ai", questions())],
+        10,
+        Faults {
+            release_error: true,
+            ..Faults::default()
+        },
+    )
+    .await;
+    assert!(summary.rate_limited);
+    assert_eq!(summary.release_failed, 1);
+    assert_eq!(summary.exit_class(), 1);
+}
+
+#[tokio::test]
+async fn an_owner_mismatch_stops_the_run_without_writing() {
+    let (_dir, pool) = make_test_pool().await;
+    seed(&pool, "ai", 3).await;
+    let summary = run_with(
+        &pool,
+        ScriptedClient::new([]),
+        settings(),
+        vec![plan("ai", questions())],
+        10,
+        Faults {
+            owner_mismatch: true,
+            ..Faults::default()
+        },
+    )
+    .await;
+    assert_eq!(summary.owner_mismatch, 2, "one window, then the run stops");
+    assert_eq!(summary.exit_class(), 1);
+    assert_eq!(
+        states(&pool).await,
+        vec![("running".to_string(), 1), ("running".to_string(), 1)]
+    );
+}
+
+#[tokio::test]
+async fn an_article_read_error_refunds_and_counts_a_storage_error() {
+    let (_dir, pool) = make_test_pool().await;
+    seed(&pool, "ai", 1).await;
+    let client = ScriptedClient::new([]);
+    let summary = run_with(
+        &pool,
+        client.clone(),
+        settings(),
+        vec![plan("ai", questions())],
+        10,
+        Faults {
+            article_error: true,
+            ..Faults::default()
+        },
+    )
+    .await;
+    assert_eq!((summary.storage_errors, client.calls()), (1, 0));
+    assert_eq!(summary.exit_class(), 1);
+    assert_eq!(states(&pool).await, vec![("pending".to_string(), 0)]);
+}
+
+#[tokio::test]
+async fn an_article_read_timeout_leaves_the_row_unknown() {
+    let (_dir, pool) = make_test_pool().await;
+    seed(&pool, "ai", 1).await;
+    let summary = run_with(
+        &pool,
+        ScriptedClient::new([]),
+        settings(),
+        vec![plan("ai", questions())],
+        10,
+        Faults {
+            article_hang: true,
+            ..Faults::default()
+        },
+    )
+    .await;
+    assert_eq!(summary.storage_timeouts, 1);
+    assert_eq!(summary.exit_class(), 1);
     assert_eq!(states(&pool).await, vec![("running".to_string(), 1)]);
 }

@@ -9,7 +9,9 @@
 //! (`category_key`, `policy_version`, `execution_key`): a run never executes a
 //! row generated for another policy or provider. On PostgreSQL each call runs
 //! in a short transaction with server-side `lock_timeout` / `statement_timeout`;
-//! the caller adds the client-side deadline.
+//! the caller adds the client-side deadline. The repo also reads article text
+//! and writes decision-run's `run_events` (it implements
+//! `RunEventRepository`), so every statement of the command is bounded.
 
 use async_trait::async_trait;
 use sqlx::FromRow;
@@ -64,6 +66,13 @@ pub struct DecisionExecution {
     pub requested_model: String,
     /// `Some` for Laya only (enforced by a CHECK).
     pub laya_max_len: Option<u32>,
+}
+
+/// What decision-run sends about an article.
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct DecisionArticle {
+    pub title: String,
+    pub body_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
@@ -216,6 +225,10 @@ pub trait DecisionResultRepository: Send + Sync {
     /// Clears up to `limit` expired raw bodies across every identity.
     async fn purge_expired_raw(&self, now: OffsetDateTime, limit: u32)
     -> Result<u64, StorageError>;
+
+    /// Title and body of an article, under the same bounded transaction as
+    /// the task statements. `None` when the row does not exist.
+    async fn load_article(&self, article_id: i64) -> Result<Option<DecisionArticle>, StorageError>;
 
     /// `pending` rows of the category that belong to another identity.
     async fn count_other_identity_pending(

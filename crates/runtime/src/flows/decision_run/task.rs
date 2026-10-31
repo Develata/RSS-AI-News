@@ -3,7 +3,10 @@
 //! events (the coordinator does, after the window).
 
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -94,14 +97,18 @@ impl Abort {
 pub struct TaskOutcome {
     pub category_index: usize,
     pub row_id: i64,
-    /// The client was called (one unit of the request budget).
-    pub called: bool,
     pub status: TaskStatus,
     pub input_tokens: u64,
     pub raw_withheld: Option<&'static str>,
     pub retry_after_seconds: Option<u64>,
     /// The category stops for this run.
     pub pause: bool,
+    /// The provider answered 429 (kept even when a later fault decides the
+    /// stop).
+    pub rate_limited: bool,
+    /// A storage fault seen before the release (`storage_error`), counted
+    /// apart from the row's final status.
+    pub fault: Option<&'static str>,
     pub abort: Option<Abort>,
 }
 
@@ -130,8 +137,12 @@ pub(super) struct TaskInput {
     pub category_index: usize,
     pub row: ClaimedDecision,
     pub owner: Arc<str>,
-    /// `lease_expires_at − 5 s`, on the monotonic clock.
+    /// `lease_expires_at − 5 s` on the monotonic clock, measured from before
+    /// the claim statement (the stored expiry was computed then).
     pub row_deadline: Instant,
+    /// Client calls of the run, bumped just before each call so that panics
+    /// and cancellations are still counted against the budget.
+    pub calls: Arc<AtomicU64>,
 }
 
 fn storage_deadline() -> Duration {
@@ -152,7 +163,8 @@ impl TaskOutcome {
         Self {
             category_index: input.category_index,
             row_id: input.row.id,
-            called: false,
+            rate_limited: false,
+            fault: None,
             status,
             input_tokens: 0,
             raw_withheld: None,
@@ -176,7 +188,7 @@ pub(super) async fn process(input: TaskInput) -> TaskOutcome {
 
     let article = match bounded(
         input.row_deadline,
-        deps.article_repo.find_by_id(row.article_id),
+        deps.decision_repo.load_article(row.article_id),
     )
     .await
     {
@@ -202,9 +214,20 @@ pub(super) async fn process(input: TaskInput) -> TaskOutcome {
             )
             .await;
         }
-        // Reading changes nothing, so the row can be refunded.
-        Some(Err(_)) => return refund(&input, "storage_error", true).await,
-        None => return refund(&input, "storage_timeout", true).await,
+        // A failed read changed nothing, so the row can be refunded.
+        Some(Err(_)) => {
+            let mut outcome = refund(&input, "storage_error", true).await;
+            outcome.fault = Some("storage_error");
+            return outcome;
+        }
+        // A timed-out storage call has an unknown result: leave the row to
+        // lease reclaim rather than issue another write (ADR 0011 §7).
+        None => {
+            return unknown(
+                TaskOutcome::new(&input, TaskStatus::Refunded { reason: "" }),
+                "storage_timeout",
+            );
+        }
     };
 
     let call_budget = deps.settings.request_timeout + storage_deadline();
@@ -216,6 +239,7 @@ pub(super) async fn process(input: TaskInput) -> TaskOutcome {
 
     let call_deadline = (Instant::now() + deps.settings.request_timeout)
         .min(input.row_deadline - storage_deadline());
+    input.calls.fetch_add(1, Ordering::SeqCst);
     let started = Instant::now();
     let exchange = deps
         .client
@@ -287,7 +311,6 @@ async fn finish(input: &TaskInput, exchange: Exchange, latency_ms: i64) -> TaskO
         .as_ref()
         .and_then(|raw| raw.withheld)
         .map(|withheld| withheld.as_str());
-    let called = exchange.sent.is_some();
     let policy = deps.settings.raw_response;
     match &exchange.result {
         Ok(response) => {
@@ -314,7 +337,6 @@ async fn finish(input: &TaskInput, exchange: Exchange, latency_ms: i64) -> TaskO
                     attempt,
                 };
                 let mut base = TaskOutcome::new(input, TaskStatus::Refunded { reason: "" });
-                base.called = called;
                 base.raw_withheld = raw_withheld;
                 return release_failure(input, failure, FailureClass::ItemPermanent, base).await;
             };
@@ -325,11 +347,10 @@ async fn finish(input: &TaskInput, exchange: Exchange, latency_ms: i64) -> TaskO
                 attempt,
             };
             let mut outcome = TaskOutcome::new(input, TaskStatus::Succeeded);
-            outcome.called = called;
             outcome.raw_withheld = raw_withheld;
             outcome.input_tokens = response.usage.input_tokens;
             match bounded(
-                input.row_deadline + storage_deadline(),
+                input.row_deadline,
                 deps.decision_repo
                     .release_success(input.row.id, &input.owner, &success, now),
             )
@@ -359,13 +380,13 @@ async fn finish(input: &TaskInput, exchange: Exchange, latency_ms: i64) -> TaskO
                 attempt: attempt_record(deps, &exchange, latency_ms, keep_body, now),
             };
             let mut base = TaskOutcome::new(input, TaskStatus::Refunded { reason: "" });
-            base.called = called;
             base.raw_withheld = raw_withheld;
             if let DecisionError::RateLimited {
                 retry_after_seconds,
             } = error
             {
                 base.retry_after_seconds = *retry_after_seconds;
+                base.rate_limited = true;
             }
             match class {
                 FailureClass::ItemRetryable => base.pause = true,
@@ -389,9 +410,13 @@ async fn finish(input: &TaskInput, exchange: Exchange, latency_ms: i64) -> TaskO
     }
 }
 
+/// The row's state is unknown: an infrastructure stop that outranks a rate
+/// limit (exit 1 over 0) but not a configuration stop (78).
 fn unknown(mut outcome: TaskOutcome, kind: &'static str) -> TaskOutcome {
     outcome.status = TaskStatus::Unknown { kind };
-    outcome.abort.get_or_insert(Abort::Infrastructure { kind });
+    if !matches!(outcome.abort, Some(Abort::Provider { config: true, .. })) {
+        outcome.abort = Some(Abort::Infrastructure { kind });
+    }
     outcome
 }
 
@@ -405,7 +430,7 @@ async fn release_failure(
     let kind = failure.kind.clone();
     let refunded = failure.mode == DecisionFailureMode::Refund;
     match bounded(
-        input.row_deadline + storage_deadline(),
+        input.row_deadline,
         deps.decision_repo.release_failure(
             input.row.id,
             &input.owner,

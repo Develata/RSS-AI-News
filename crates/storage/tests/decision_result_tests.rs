@@ -7,9 +7,10 @@ mod common;
 use std::{collections::HashSet, sync::Arc};
 
 use rss_ai_news_storage::{
-    DecisionAttemptRecord, DecisionExecution, DecisionFailure, DecisionFailureMode,
-    DecisionIdentity, DecisionRawRecord, DecisionResultRepo, DecisionResultRepository,
-    DecisionResultState, DecisionSuccess, StoragePool,
+    DecisionArticle, DecisionAttemptRecord, DecisionExecution, DecisionFailure,
+    DecisionFailureMode, DecisionIdentity, DecisionRawRecord, DecisionResultRepo,
+    DecisionResultRepository, DecisionResultState, DecisionSuccess, NewRunEvent,
+    RunEventRepository, StoragePool,
 };
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime, macros::datetime};
@@ -474,4 +475,37 @@ async fn constraints_reject_invalid_rows() {
     .execute(&pool)
     .await;
     assert!(short_policy.is_err());
+}
+
+#[tokio::test]
+async fn the_repo_reads_article_text_and_writes_run_events() {
+    let (pool, repo, ids) = setup(1).await;
+    assert_eq!(
+        repo.load_article(ids[0]).await.unwrap(),
+        Some(DecisionArticle {
+            title: "title".to_string(),
+            body_text: "body".to_string(),
+        })
+    );
+    assert_eq!(repo.load_article(ids[0] + 1000).await.unwrap(), None);
+    let id = repo
+        .insert(&NewRunEvent {
+            run_id: "run-1".to_string(),
+            trace_id: None,
+            stage: "decision_run".to_string(),
+            severity: "info".to_string(),
+            event_kind: "run_started".to_string(),
+            target_kind: None,
+            target_id: None,
+            message: "started".to_string(),
+            context_json: Some("{}".to_string()),
+        })
+        .await
+        .unwrap();
+    let stage: String = sqlx::query_scalar("SELECT stage FROM run_events WHERE id = ?")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stage, "decision_run");
 }

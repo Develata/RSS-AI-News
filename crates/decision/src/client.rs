@@ -303,10 +303,12 @@ impl SystemOneClient {
     fn capture(&self, body: &[u8]) -> RawInfo {
         let withheld = if serde_json::from_slice::<serde::de::IgnoredAny>(body).is_err() {
             Some(Withheld::NotJson)
-        } else if contains_credential(body, self.api_key.expose_secret()) {
-            Some(Withheld::Credential)
         } else {
-            None
+            match scan_credential(body, self.api_key.expose_secret()) {
+                CredentialScan::Clean => None,
+                CredentialScan::Credential => Some(Withheld::Credential),
+                CredentialScan::Unverifiable => Some(Withheld::NotJson),
+            }
         };
         RawInfo {
             bytes: body.len() as u64,
@@ -443,16 +445,27 @@ impl DecisionClient for SystemOneClient {
     }
 }
 
-/// Whether `body` carries `key`, as raw bytes or inside any JSON string
-/// literal once its escapes (`\uXXXX`, `\/`, ...) are decoded. The scan is
-/// lexical, so duplicate object keys are all seen, not just the last one.
-pub(crate) fn contains_credential(body: &[u8], key: &str) -> bool {
+/// Outcome of scanning a body for the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialScan {
+    Clean,
+    Credential,
+    /// A string literal does not decode (e.g. a lone surrogate), so its
+    /// content cannot be checked: fail closed.
+    Unverifiable,
+}
+
+/// Looks for `key` as raw bytes and inside every JSON string literal once
+/// its escapes (`\uXXXX`, `\/`, ...) are decoded. The scan is lexical, so
+/// duplicate object keys are all seen, not just the last one; a literal that
+/// does not decode makes the body unverifiable rather than clean.
+pub(crate) fn scan_credential(body: &[u8], key: &str) -> CredentialScan {
     let needle = key.as_bytes();
     if needle.is_empty() {
-        return false;
+        return CredentialScan::Clean;
     }
     if body.windows(needle.len()).any(|window| window == needle) {
-        return true;
+        return CredentialScan::Credential;
     }
     let mut index = 0;
     while index < body.len() {
@@ -466,13 +479,19 @@ pub(crate) fn contains_credential(body: &[u8], key: &str) -> bool {
             index += if body[index] == b'\\' { 2 } else { 1 };
         }
         let end = (index + 1).min(body.len());
-        if serde_json::from_slice::<String>(&body[start..end]).is_ok_and(|text| text.contains(key))
-        {
-            return true;
+        match serde_json::from_slice::<String>(&body[start..end]) {
+            Ok(text) if text.contains(key) => return CredentialScan::Credential,
+            Ok(_) => {}
+            Err(_) => return CredentialScan::Unverifiable,
         }
         index = end;
     }
-    false
+    CredentialScan::Clean
+}
+
+#[cfg(test)]
+fn contains_credential(body: &[u8], key: &str) -> bool {
+    scan_credential(body, key) != CredentialScan::Clean
 }
 
 /// `Retry-After` in delay-seconds form only (RFC 9110 §10.2.3 `1*DIGIT`).
@@ -552,7 +571,24 @@ mod tests {
         ));
         assert!(contains_credential(br#"{"sk\u002dabc":1}"#, key));
         assert!(!contains_credential(br#"{"a":"sk-ab","b":"c"}"#, key));
-        assert!(!contains_credential(br#"{"a":"unterminated"#, key));
+        assert!(
+            contains_credential(br#"{"a":"unterminated"#, key),
+            "fails closed"
+        );
+    }
+
+    #[test]
+    fn a_lone_surrogate_cannot_hide_the_key() {
+        let body = br#"{"x":"\ud800sk\u002dabc"}"#;
+        assert!(serde_json::from_slice::<serde::de::IgnoredAny>(body).is_ok());
+        assert_eq!(
+            scan_credential(body, "sk-abc"),
+            CredentialScan::Unverifiable
+        );
+        assert_eq!(
+            scan_credential(br#"{"a":"\u00e9","b":["x"]}"#, "sk-abc"),
+            CredentialScan::Clean
+        );
     }
 
     #[test]

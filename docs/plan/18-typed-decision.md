@@ -154,7 +154,7 @@
 |---|---|
 | CLI | `crates/cli/src/commands/decision_run.rs`（`Command::DecisionRun`，`--max-requests` / `--window-hours`） |
 | flow | `crates/runtime/src/flows/decision_run/{mod,task}.rs`（`DecisionRunDeps` 在模块内） |
-| storage | `crates/storage/src/repo/decision_result{,_sql,_impl}.rs`，迁移 `0006_decision_results` |
+| storage | `crates/storage/src/repo/decision_result{,_sql,_impl}.rs`，迁移 `0006_decision_results`；该 repo 同时负责本命令的读文章与 `run_events` 写入（实现 `RunEventRepository`），使每条语句在 PostgreSQL 上都带服务端超时 |
 | 能力 | `crates/decision`：`Exchange` / `RawInfo` / `SentState`、`answers_document`、`revalidate`、`questions_from_canonical` |
 
 移除步骤见 ADR 0011 §13（先停调度、确认进程退出，再发布带删表迁移的版本）。
@@ -167,6 +167,7 @@
 - `Exchange.raw`（仅 2xx）：`bytes`、完整体的 `sha256`、可安全保存时的 `body`，否则 `withheld` 为
   `not_json` / `credential` / `incomplete`。
 - 凭据检查：响应体按字节查找 key，并对每个 JSON 字符串字面量（含对象键、重复键）解码转义后查找；
+  任一字面量无法解码（如单独的代理项 `\ud800`）即视为无法验证，不交出原文（`withheld = not_json`）；
   `reported_model` / `routing_model` 含 key 时整条响应判为 `InvalidResponse`。
 - 错误按阶段映射：构造失败 → `InvalidConfig`；超时 → `Timeout`；连接阶段 → `Connection`（未发出）；
   其余 → 新增的 `Transport`（可能已发出）。key 在构造客户端时验证为合法 header 值；reqwest 自动重试关闭。
@@ -197,8 +198,11 @@
   没有可领取的行时才生成，每次最多一个窗口。
 - **偏离 ADR 0011 §5 的实现细节**：生成是单条 `INSERT … SELECT … ON CONFLICT DO NOTHING`（带窗口、`retired` 过滤与反连接），
   没有分页游标；`NOT EXISTS` 排除已有行，并发冲突只会让本次插入数变少，不会卡住。
-- 单行：核对身份 → 读文章（存储期限 5 s）→ 最后一次 lease 检查（剩余 ≥ 请求超时 + 5 s，否则退还并暂停该板块）
-  → 调用（计一次额度）→ 按 ADR 0011 §10 的类别释放。
+- 单行：核对身份 → 读文章（存储期限 5 s；出错则退还并计 `storage_errors`，超时则不再写、留给 lease 回收）
+  → 最后一次 lease 检查（剩余 ≥ 请求超时 + 5 s，否则退还并暂停该板块）→ 调用 → 按 ADR 0011 §10 的类别释放。
+  行截止时间从 claim 语句之前算起（`lease_expires_at` 也在那时计算），释放不再额外放宽。
+- 调用额度：调用客户端前一刻在共享计数器上加一，按计数器结算，因此 panic、取消与"未发出"的调用都计入预算。
+- 中止优先级：配置 / 凭据类（78）> 其它运行级（1）> 限流（0）；限流之后若释放失败，按 1 退出，`rate_limited` 标记仍保留。
 - 收尾：窗口在 `lease_seconds` 内未收完即 `abort_all`，再收取 5 s，未确认的行留给 lease 回收，计 `drain_timeout`。
 - 事件：stage `decision_run`，由协调者在每个窗口后写，不含正文、答案与响应体。
 

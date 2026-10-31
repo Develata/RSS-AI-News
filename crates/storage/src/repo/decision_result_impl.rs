@@ -7,18 +7,18 @@ use async_trait::async_trait;
 use sqlx::{PgPool, Postgres, Transaction};
 use time::{Duration, OffsetDateTime, UtcOffset};
 
-use crate::{StorageError, StoragePool, classify_db_error};
+use crate::{NewRunEvent, RunEventRepository, StorageError, StoragePool, classify_db_error};
 
 use super::decision_result::{
-    ClaimedDecision, DecisionAttemptRecord, DecisionExecution, DecisionFailure,
+    ClaimedDecision, DecisionArticle, DecisionAttemptRecord, DecisionExecution, DecisionFailure,
     DecisionFailureMode, DecisionIdentity, DecisionRawRecord, DecisionResultRepo,
     DecisionResultRepository, DecisionResultState, DecisionSuccess,
 };
 use super::decision_result_sql::{
     CLAIM_PG_SQL, CLAIM_SQLITE_SQL, COUNT_OTHER_IDENTITY_PENDING_SQL, GENERATE_PENDING_PG_SQL,
-    GENERATE_PENDING_SQLITE_SQL, PURGE_EXPIRED_RAW_PG_SQL, PURGE_EXPIRED_RAW_SQLITE_SQL,
-    RECLAIM_EXPIRED_SQL, RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL, TERMINALIZE_EXHAUSTED_SQL,
-    UPSERT_POLICY_SQL,
+    GENERATE_PENDING_SQLITE_SQL, INSERT_RUN_EVENT_SQL, LOAD_ARTICLE_TEXT_SQL,
+    PURGE_EXPIRED_RAW_PG_SQL, PURGE_EXPIRED_RAW_SQLITE_SQL, RECLAIM_EXPIRED_SQL,
+    RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL, TERMINALIZE_EXHAUSTED_SQL, UPSERT_POLICY_SQL,
 };
 
 async fn pg_begin_bounded(pool: &PgPool) -> Result<Transaction<'_, Postgres>, StorageError> {
@@ -407,6 +407,23 @@ impl DecisionResultRepository for DecisionResultRepo {
         }
     }
 
+    async fn load_article(&self, article_id: i64) -> Result<Option<DecisionArticle>, StorageError> {
+        macro_rules! query {
+            () => {
+                sqlx::query_as::<_, DecisionArticle>(LOAD_ARTICLE_TEXT_SQL).bind(article_id)
+            };
+        }
+        match &self.pool {
+            StoragePool::Sqlite(pool) => Ok(query!().fetch_optional(pool).await?),
+            StoragePool::Postgres(pool) => {
+                let mut tx = pg_begin_bounded(pool).await?;
+                let article = query!().fetch_optional(&mut *tx).await?;
+                tx.commit().await?;
+                Ok(article)
+            }
+        }
+    }
+
     async fn count_other_identity_pending(
         &self,
         identity: &DecisionIdentity,
@@ -429,5 +446,35 @@ impl DecisionResultRepository for DecisionResultRepo {
             }
         };
         u64::try_from(count).map_err(|_| StorageError::Corruption("negative COUNT(*)".to_string()))
+    }
+}
+
+#[async_trait]
+impl RunEventRepository for DecisionResultRepo {
+    async fn insert(&self, event: &NewRunEvent) -> Result<i64, StorageError> {
+        macro_rules! query {
+            () => {
+                sqlx::query_scalar::<_, i64>(INSERT_RUN_EVENT_SQL)
+                    .bind(&event.run_id)
+                    .bind(&event.trace_id)
+                    .bind(&event.stage)
+                    .bind(&event.severity)
+                    .bind(&event.event_kind)
+                    .bind(&event.target_kind)
+                    .bind(event.target_id)
+                    .bind(&event.message)
+                    .bind(&event.context_json)
+            };
+        }
+        let classify = |error| classify_db_error(error, "run_events", &event.run_id);
+        match &self.pool {
+            StoragePool::Sqlite(pool) => query!().fetch_one(pool).await.map_err(classify),
+            StoragePool::Postgres(pool) => {
+                let mut tx = pg_begin_bounded(pool).await?;
+                let id = query!().fetch_one(&mut *tx).await.map_err(classify)?;
+                tx.commit().await?;
+                Ok(id)
+            }
+        }
     }
 }

@@ -54,7 +54,7 @@ pub use article_ai_result::{
     ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome,
 };
 pub use decision_result::{
-    ClaimedDecision, DecisionAttemptRecord, DecisionExecution, DecisionFailure,
+    ClaimedDecision, DecisionArticle, DecisionAttemptRecord, DecisionExecution, DecisionFailure,
     DecisionFailureMode, DecisionIdentity, DecisionRawRecord, DecisionResultRepo,
     DecisionResultRepository, DecisionResultState, DecisionSuccess,
 };

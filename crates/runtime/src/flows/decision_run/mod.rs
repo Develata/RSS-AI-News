@@ -12,13 +12,16 @@
 mod task;
 
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use rss_ai_news_decision::{DecisionClient, QuestionSpec, RawResponsePolicy};
 use rss_ai_news_storage::{
-    ArticleRepository, DecisionExecution, DecisionIdentity, DecisionResultRepository,
+    ClaimedDecision, DecisionExecution, DecisionIdentity, DecisionResultRepository,
     RunEventRepository, build_owner_id,
 };
 use serde_json::json;
@@ -52,8 +55,10 @@ pub struct DecisionRunDeps {
     pub endpoint_origin: String,
     pub execution: DecisionExecution,
     pub execution_key: String,
+    /// Also reads the articles, so every statement is bounded (ADR 0011 §7).
     pub decision_repo: Arc<dyn DecisionResultRepository>,
-    pub article_repo: Arc<dyn ArticleRepository>,
+    /// Production passes the same `DecisionResultRepo`, whose inserts are
+    /// bounded on PostgreSQL.
     pub event_repo: Arc<dyn RunEventRepository>,
 }
 
@@ -143,6 +148,8 @@ impl DecisionRunSummary {
 
 pub struct DecisionRunFlow {
     deps: Arc<DecisionRunDeps>,
+    /// Client calls so far; the request budget is settled against it.
+    calls: Arc<AtomicU64>,
 }
 
 fn storage_deadline() -> Duration {
@@ -151,7 +158,10 @@ fn storage_deadline() -> Duration {
 
 impl DecisionRunFlow {
     pub fn new(deps: Arc<DecisionRunDeps>) -> Self {
-        Self { deps }
+        Self {
+            deps,
+            calls: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     fn emitter(&self) -> RunEventEmitter<'_> {
@@ -416,13 +426,14 @@ impl DecisionRunFlow {
                     Ok(claimed) => claimed,
                     Err(error) => return Self::storage_failure(summary, error, "claim"),
                 };
+                let (claimed, claim_started) = claimed;
                 if claimed.is_empty() {
                     idle[index] = true;
                     continue;
                 }
                 progressed = true;
                 let calls = self
-                    .process_window(index, plan, &owner, claimed, summary)
+                    .process_window(index, plan, &owner, claimed, claim_started, summary)
                     .await;
                 budget = budget.saturating_sub(calls);
                 if summary.aborted.is_some() || summary.drain_timeout {
@@ -444,9 +455,12 @@ impl DecisionRunFlow {
         window: u32,
         cutoff: OffsetDateTime,
         stats: &mut CategoryStats,
-    ) -> Result<Vec<rss_ai_news_storage::ClaimedDecision>, Option<String>> {
+    ) -> Result<(Vec<ClaimedDecision>, Instant), Option<String>> {
         let deps = &self.deps;
+        // The instant before the stored expiry is computed: row deadlines are
+        // measured from here, so they are never later than that expiry.
         let claim = || async {
+            let started = Instant::now();
             let now = OffsetDateTime::now_utc();
             let lease = now + time::Duration::seconds(i64::from(deps.settings.lease_seconds));
             Self::storage(deps.decision_repo.claim(
@@ -458,11 +472,12 @@ impl DecisionRunFlow {
                 now,
             ))
             .await
+            .map(|claimed| (claimed, started))
         };
-        let claimed = claim().await?;
+        let (claimed, started) = claim().await?;
         if !claimed.is_empty() {
             stats.claimed += claimed.len() as u64;
-            return Ok(claimed);
+            return Ok((claimed, started));
         }
         let generated = Self::storage(deps.decision_repo.generate_pending(
             &plan.identity,
@@ -474,11 +489,11 @@ impl DecisionRunFlow {
         .await?;
         stats.generated += generated;
         if generated == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), started));
         }
-        let claimed = claim().await?;
+        let (claimed, started) = claim().await?;
         stats.claimed += claimed.len() as u64;
-        Ok(claimed)
+        Ok((claimed, started))
     }
 
     /// Dispatches every claimed row at once and joins them all. Returns the
@@ -488,15 +503,15 @@ impl DecisionRunFlow {
         index: usize,
         plan: &Arc<CategoryPlan>,
         owner: &Arc<str>,
-        claimed: Vec<rss_ai_news_storage::ClaimedDecision>,
+        claimed: Vec<ClaimedDecision>,
+        claim_started: Instant,
         summary: &mut DecisionRunSummary,
     ) -> u32 {
         let deps = &self.deps;
         summary.claimed += claimed.len() as u64;
-        // Measured from just after the claim: never later than the stored
-        // expiry, which was computed before the claim statement ran.
+        let calls_before = self.calls.load(Ordering::SeqCst);
         let lease = Duration::from_secs(u64::from(deps.settings.lease_seconds));
-        let row_deadline = Instant::now() + lease - Duration::from_secs(5);
+        let row_deadline = claim_started + lease - Duration::from_secs(5);
         let mut join_set = JoinSet::new();
         for row in claimed {
             join_set.spawn(task::process(task::TaskInput {
@@ -506,6 +521,7 @@ impl DecisionRunFlow {
                 row,
                 owner: Arc::clone(owner),
                 row_deadline,
+                calls: Arc::clone(&self.calls),
             }));
         }
         let mut outcomes = Vec::new();
@@ -550,23 +566,28 @@ impl DecisionRunFlow {
                 kind: "task_panicked",
             });
         }
-        let mut calls = 0;
         for outcome in outcomes {
-            if outcome.called {
-                calls += 1;
-            }
             self.record(outcome, summary).await;
         }
-        calls
+        // Read after the join: includes calls whose task panicked or was
+        // cancelled.
+        let calls = self.calls.load(Ordering::SeqCst);
+        summary.calls = calls;
+        u32::try_from(calls - calls_before).unwrap_or(u32::MAX)
     }
 
     async fn record(&self, outcome: TaskOutcome, summary: &mut DecisionRunSummary) {
         let index = outcome.category_index;
         let category = summary.categories[index].category.clone();
-        if outcome.called {
-            summary.calls += 1;
-        }
         summary.input_tokens += outcome.input_tokens;
+        match outcome.fault {
+            Some("storage_timeout") => summary.storage_timeouts += 1,
+            Some(_) => summary.storage_errors += 1,
+            None => {}
+        }
+        if outcome.rate_limited {
+            summary.rate_limited = true;
+        }
         if outcome.pause && summary.categories[index].paused.is_none() {
             summary.categories[index].paused = Some(match outcome.status {
                 TaskStatus::Refunded {
@@ -660,12 +681,6 @@ impl DecisionRunFlow {
             .await;
         }
         if let Some(abort) = outcome.abort {
-            if let Abort::Provider {
-                rate_limited: true, ..
-            } = &abort
-            {
-                summary.rate_limited = true;
-            }
             summary.abort(abort);
         }
     }

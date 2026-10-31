@@ -206,6 +206,22 @@ WHERE id IN (
 )
 "#;
 
+pub(super) const LOAD_ARTICLE_TEXT_SQL: &str = r#"
+SELECT title, body_text FROM articles WHERE id = $1
+"#;
+
+/// The statement `repo::run_event` uses, repeated here so decision-run's
+/// events also get the bounded PostgreSQL transaction (and so removing the
+/// feature touches no shared repository).
+pub(super) const INSERT_RUN_EVENT_SQL: &str = r#"
+INSERT INTO run_events (
+    run_id, trace_id, stage, severity, event_kind,
+    target_kind, target_id, message, context_json
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id
+"#;
+
 pub(super) const COUNT_OTHER_IDENTITY_PENDING_SQL: &str = r#"
 SELECT COUNT(*) FROM decision_results
 WHERE category_key = $1

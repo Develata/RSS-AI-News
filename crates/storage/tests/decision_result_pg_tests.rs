@@ -270,5 +270,28 @@ async fn pg_maintenance_and_raw_cleanup() {
     .execute(ctx.pg_pool())
     .await;
     assert!(laya_without_len.is_err());
+    let article = repo
+        .load_article(claimed[0].article_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(article.body_text, "body");
+    let event_id = rss_ai_news_storage::RunEventRepository::insert(
+        &repo,
+        &rss_ai_news_storage::NewRunEvent {
+            run_id: "run-1".to_string(),
+            trace_id: None,
+            stage: "decision_run".to_string(),
+            severity: "info".to_string(),
+            event_kind: "run_started".to_string(),
+            target_kind: None,
+            target_id: None,
+            message: "started".to_string(),
+            context_json: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(event_id > 0);
     ctx.cleanup().await;
 }
