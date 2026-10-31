@@ -64,10 +64,11 @@ async fn postgres_migrations_apply_idempotent_and_undo_clean_on_pg16() {
     .fetch_one(pg_pool)
     .await
     .expect("count tables after apply");
-    // 0001+0002 共建 10 张用户表 + sqlx 自带 _sqlx_migrations
+    // 0001+0002 共建 10 张用户表，0006 再加 decision_policies / decision_results
+    // （ADR 0011），外加 sqlx 自带 _sqlx_migrations
     assert_eq!(
-        table_count, 11,
-        "expected 10 user tables + _sqlx_migrations, got {table_count}"
+        table_count, 13,
+        "expected 12 user tables + _sqlx_migrations, got {table_count}"
     );
 
     // ── 4. undo 到 v0：反向 down 所有 migration ──

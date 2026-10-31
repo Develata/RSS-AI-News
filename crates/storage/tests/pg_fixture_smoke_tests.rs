@@ -2,7 +2,7 @@
 //! 在真实 PG 16-alpine 容器上能：
 //!   1. 启容器（首次）/ 复用容器（二次）
 //!   2. CREATE 独立 schema
-//!   3. 在该 schema 内 apply 全量 migration（10 张用户表 + `_sqlx_migrations`）
+//!   3. 在该 schema 内 apply 全量 migration（12 张用户表 + `_sqlx_migrations`）
 //!   4. 两个并发 `PgTestContext` 互相不可见对方建的表
 //!
 //! 这条 smoke 是 P3-C-1..P3-C-4 所有 PG-only 测试的前置依赖。fixture 一旦
@@ -33,7 +33,7 @@ async fn pg_fixture_creates_isolated_schema_with_full_migrations() {
         "search_path={search_path:?} should include schema={schema:?}"
     );
 
-    // 2) 该 schema 下用户表数 = 10（0001+0002 共建），加 `_sqlx_migrations` = 11
+    // 2) 该 schema 下用户表数 = 12（0001+0002 共建 10 张，0006 加 2 张），加 `_sqlx_migrations` = 13
     let table_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::BIGINT FROM information_schema.tables \
          WHERE table_schema = $1 AND table_type = 'BASE TABLE'",
@@ -43,8 +43,8 @@ async fn pg_fixture_creates_isolated_schema_with_full_migrations() {
     .await
     .expect("count tables in per-test schema");
     assert_eq!(
-        table_count, 11,
-        "per-test schema should contain 10 user tables + _sqlx_migrations, got {table_count}"
+        table_count, 13,
+        "per-test schema should contain 12 user tables (10 core + 2 decision-run, ADR 0011) + _sqlx_migrations, got {table_count}"
     );
 
     // 3) `public` schema 必须为空（migration 没污染默认 schema）
