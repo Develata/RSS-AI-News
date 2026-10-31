@@ -3052,6 +3052,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rss-ai-news-ai",
  "rss-ai-news-config",
+ "rss-ai-news-decision",
  "rss-ai-news-domain",
  "rss-ai-news-extractor",
  "rss-ai-news-feed",

@@ -1,5 +1,6 @@
 pub mod ai_run;
 pub mod backfill;
+pub mod decision_run;
 pub mod extract;
 pub mod ingest;
 mod maintenance;
@@ -15,6 +16,10 @@ pub use ai_run::{
 pub use backfill::{
     BackfillAiOptions, BackfillAiSummary, BackfillExtractOptions, BackfillExtractSummary,
     BackfillFlow,
+};
+pub use decision_run::{
+    CategoryPlan, CategoryStats, DecisionRunDeps, DecisionRunFlow, DecisionRunOptions,
+    DecisionRunSettings, DecisionRunSummary,
 };
 pub use extract::{
     ExtractEntryOutcome, ExtractEntryStatus, ExtractFlow, ExtractOptions, ExtractSummary,

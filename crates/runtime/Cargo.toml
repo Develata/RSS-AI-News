@@ -12,6 +12,8 @@ rss-ai-news-extractor.workspace = true
 rss-ai-news-ai.workspace = true
 rss-ai-news-report.workspace = true
 rss-ai-news-publish.workspace = true
+# Typed-decision shadow runner only (flows/decision_run, ADR 0011).
+rss-ai-news-decision.workspace = true
 # Tracing/metrics/redaction and generic health types; concrete checks live here.
 rss-ai-news-observability.workspace = true
 async-trait = "0.1"
