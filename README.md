@@ -490,6 +490,10 @@ item_template = """
 
 常用占位符：
 
+`{summary_blockquote}` 与 `{excerpt_block}` 按纯文本转义 Markdown 标点，避免摘要中的
+`<progress>` 等字面量被 VitePress 解释为标签；模板自身的 Badge 不变。原始占位符
+`{summary}`、`{summary_inline}` 和 `{excerpt}` 保持原行为，自定义模板需自行处理输出上下文。
+
 | 模板字段 | 可用占位符 |
 |---|---|
 | `path_template` | `{category_key}`、`{CATEGORY_KEY}`、`{date}`、`{YYYY}`、`{MM}`、`{DD}`、`{YYYYMMDD}` |

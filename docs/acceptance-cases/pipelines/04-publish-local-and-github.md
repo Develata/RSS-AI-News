@@ -50,6 +50,8 @@
 | `freeze_skips_articles_without_correct_category_key` | 同上 | category 隔离 |
 | `render_advances_snapshot_frozen_to_rendered_when_items_exist` | `crates/runtime/tests/publish_render_tests.rs` | render happy |
 | `render_returns_failed_when_publish_record_has_no_items` | 同上 | 空 items 失败 |
+| `render_markdown_escapes_summary_and_excerpt_as_literal_text` | `crates/report/tests/render_tests.rs` | 摘要/摘录的字面量标签安全转义，保留 Badge 与 YAML 原值 |
+| `render_markdown_escapes_multiline_summary_without_changing_raw_templates` | 同上 | 多行与空行保留，原始占位符兼容 |
 | `store_local_with_no_remote_target_publishes_locally_and_promotes_articles` | `crates/runtime/tests/publish_store_local_tests.rs` | 本地 + promote |
 | `store_local_uses_category_path_template_override` | 同上 | 分类 path override |
 | `store_local_with_remote_target_advances_to_stored_local_without_promoting_articles` | 同上 | 有远端不 promote |

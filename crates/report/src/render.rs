@@ -53,7 +53,7 @@ pub fn render_markdown(
     let excerpt_block = if excerpt.is_empty() {
         String::new()
     } else {
-        format!("> {excerpt}\n")
+        format!("> {}\n", escape_markdown_text(&excerpt))
     };
     let generated_at = config
         .generated_at
@@ -245,13 +245,15 @@ fn render_tags(tags_json: &str) -> Result<String, ReportError> {
 }
 
 fn blockquote_summary(summary: &str) -> String {
+    // Frozen summaries are article text, not template HTML/Markdown. Escape
+    // before adding quote markers so literal tags cannot become Vue elements.
     summary
         .lines()
         .map(|line| {
             if line.trim().is_empty() {
                 ">".to_string()
             } else {
-                format!(">{line}")
+                format!(">{}", escape_markdown_text(line))
             }
         })
         .collect::<Vec<_>>()

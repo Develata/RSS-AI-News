@@ -99,6 +99,14 @@ generated_at: 2026-06-04T12:34:56Z
 
 ### 3.2 正文格式
 
+默认模板的 `{summary_blockquote}` 和 `{excerpt_block}` 将摘要视为纯文本，
+先转义 Markdown 控制标点，再添加引用标记；例如字面量 `<progress>` 输出为
+`\<progress\>`，不应被 VitePress/Vue 当成 HTML 元素。多行摘要保留行边界和空行。
+模板生成的 `{score_badge}` 保持组件语法。冻结快照、YAML excerpt 和显式原始
+占位符（`{summary}`、`{summary_inline}`、`{excerpt}`）不改变，使用原始占位符的
+自定义模板仍须自行负责其输出上下文。改变渲染器后，旧快照重渲染的字节可能变化；
+不回写快照、不自动重发历史报告。
+
 每个 PublishItem 渲染为：
 
 ```markdown
