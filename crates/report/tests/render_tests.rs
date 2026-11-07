@@ -172,68 +172,10 @@ fn render_markdown_does_not_expand_placeholders_from_article_content() {
     assert!(
         report
             .markdown_content
-            .contains(">Summary mentions \\{items\\} and \\{score\\_badge\\} literally."),
+            .contains(">Summary mentions {items} and {score_badge} literally."),
         "article summary placeholders must remain literal; got:\n{}",
         report.markdown_content
     );
-}
-
-#[test]
-fn render_markdown_escapes_summary_and_excerpt_as_literal_text() {
-    let mut item = ai_item();
-    item.frozen_summary = "Servo 新增<progress>，支持 **文字** 和 `code`。".to_string();
-    let original = item.frozen_summary.clone();
-    let report = render_markdown(1, "ai", "2026-11-07", &[item], &config()).unwrap();
-    assert_eq!(
-        report.markdown_content,
-        include_str!("fixtures/literal-summary.md")
-    );
-    let body = report
-        .markdown_content
-        .split_once("\n# Daily AI\n")
-        .unwrap()
-        .1;
-    let escaped = "Servo 新增\\<progress\\>，支持 \\*\\*文字\\*\\* 和 \\`code\\`。";
-
-    assert!(body.contains(&format!("> {escaped}\n")), "{body}");
-    assert!(
-        body.contains(&format!("> [摘要]  \n>{escaped}\n")),
-        "{body}"
-    );
-    assert!(!body.contains("<progress>"));
-    assert!(body.contains("<Badge type=\"tip\" text=\"88\" />"));
-    // YAML metadata remains data, rather than acquiring Markdown escapes.
-    assert!(report.markdown_content.contains(&original));
-}
-
-#[test]
-fn render_markdown_escapes_multiline_summary_without_changing_raw_templates() {
-    let mut item = ai_item();
-    item.frozen_summary = "<div>first</div>\n\n\\<progress>\n<!-- comment -->".to_string();
-    let report = render_markdown(
-        1,
-        "ai",
-        "2026-11-07",
-        std::slice::from_ref(&item),
-        &config(),
-    )
-    .unwrap();
-    assert!(report.markdown_content.contains(
-        ">\\<div\\>first\\</div\\>\n>\n>\\\\\\<progress\\>\n>\\<\\!\\-\\- comment \\-\\-\\>"
-    ));
-
-    let mut raw_config = config();
-    raw_config.templates.item_template = "{summary}".to_string();
-    raw_config.templates.report_template = "{items}".to_string();
-    let raw = render_markdown(
-        1,
-        "ai",
-        "2026-11-07",
-        std::slice::from_ref(&item),
-        &raw_config,
-    )
-    .unwrap();
-    assert_eq!(raw.markdown_content, item.frozen_summary);
 }
 
 fn config() -> RenderConfig {

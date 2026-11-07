@@ -12,6 +12,3 @@ migrations/**/*.sql text eol=lf
 # Frozen configs retain exact LF bytes, including Markdown hard-break spaces
 # inside the historical TOML report template.
 crates/cli/tests/fixtures/v0.7.1/*.toml text eol=lf whitespace=-blank-at-eol
-
-# Render snapshots preserve Markdown hard breaks and the final template newline.
-crates/report/tests/fixtures/*.md text eol=lf whitespace=-blank-at-eol,-blank-at-eof
