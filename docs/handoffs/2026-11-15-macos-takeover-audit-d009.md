@@ -110,3 +110,14 @@ octocrab 0.54.7；d3a0f6d 与其 revert 1bea8aa 互相抵消）。2026-11-09 的
   string pool"；`cargo clean -p sqlx-macros` 后可复现，把 proc-macro 的 opt-level 设为 0 后同样失败，只有设 `strip=none` 才通过。
   结论：本机（macOS 27.2、CLT `ld-27106`、`/Library/Developer/CommandLineTools/usr/bin/strip`）上，release profile 默认的
   `strip = "debuginfo"` 会弄坏 proc-macro dylib。属于机器环境问题，与仓库无关；仓库未改动，Linux / CI / docker 不受影响。
+
+## 2026-11-15 追加：推送与 RUSTSEC-2026-0459 处理
+
+- 730377a..05c1ddf 已经 Develata 授权推送到 main。ci run 43710958441 在 05c1ddf 上全部通过（fmt + clippy + cargo test、
+  postgres + sqlite + release lanes、docker build smoke），process.rs 改动由此在 ubuntu 上得到验证。
+- Develata 选定方案 (a)：`maintenance.yml` 的 audit 步骤增加 `--ignore RUSTSEC-2026-0459`，理由与复查触发条件写在该步骤的
+  注释里（复查条件：sqlx 发版允许 libsqlite3-sys ≥ 0.39，届时升级并删除该 ignore）。与 rsa 不同，这条漏洞**在活跃依赖图中**，
+  ignore 依据的是攻击面（本地向量；需攻击者已能写入数据目录），不是"无执行路径"。
+- 本地验证：`bash .ci/check_dependency_security_policy.sh` 通过；`cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459`
+  exit 0（4 条允许的 warning）。maintenance workflow 本身尚未在 CI 上用新命令跑过。
+- PR 上跑 cargo audit（原待办 2）现在不再被这条漏洞卡住，方案仍待 Develata 确认。
