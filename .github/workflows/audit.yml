@@ -1,0 +1,49 @@
+name: audit
+
+# RustSec check for changes that can alter the dependency graph, so a lockfile
+# regression (e.g. a Dependabot or revert PR) fails before merge. It runs only
+# on those paths: a new advisory against an unchanged graph is caught by the
+# weekly maintenance run instead of turning every unrelated PR red. Accepted
+# advisories live in .cargo/audit.toml.
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - '**/Cargo.toml'
+      - .cargo/**
+      - rust-toolchain.toml
+      - .ci/check_dependency_security_policy.sh
+      - .github/actions/cargo-audit/**
+      - .github/workflows/audit.yml
+      - .github/workflows/maintenance.yml
+  pull_request:
+    branches: [main]
+    # Keep in sync with the push paths above.
+    paths:
+      - Cargo.lock
+      - '**/Cargo.toml'
+      - .cargo/**
+      - rust-toolchain.toml
+      - .ci/check_dependency_security_policy.sh
+      - .github/actions/cargo-audit/**
+      - .github/workflows/audit.yml
+      - .github/workflows/maintenance.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.97.0'
+      - uses: ./.github/actions/cargo-audit

@@ -4,8 +4,10 @@ set -euo pipefail
 # RSS-AI-News 只使用 Octocrab personal-token auth。Octocrab 0.54 的 default
 # feature 会启用 jwt-rust-crypto，并把存在 RUSTSEC-2023-0071 且尚无修复版的
 # rsa crate 拉进 active graph。Cargo.lock 可以保留 inactive rsa；禁止的是可执行依赖路径。
+# --workspace：默认只查根包的依赖树，漏掉其他成员（如 tools/acceptance）；
+# --target all：默认只查 host 平台，漏掉其他平台的条件依赖。
 set +e
-output="$(cargo tree --locked -e features -i rsa 2>&1)"
+output="$(cargo tree --locked --workspace --target all -e features -i rsa 2>&1)"
 rc=$?
 set -e
 

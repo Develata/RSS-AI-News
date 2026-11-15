@@ -1,0 +1,35 @@
+name: cargo-audit
+description: >-
+  Install the pinned cargo-audit release binary, run the dependency security
+  policy, then `cargo audit` with the accepted advisories in .cargo/audit.toml.
+  Expects a checkout and a Rust toolchain; run from the repository root.
+
+runs:
+  using: composite
+  steps:
+    # Prebuilt release binary instead of `cargo install` (a ~3 min compile on a
+    # cold cache). Nothing here compiles the workspace, so no rust-cache.
+    - name: install cargo-audit
+      shell: bash
+      env:
+        CARGO_AUDIT_VERSION: 0.22.2
+        # SHA-256 of cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz, matching
+        # the release asset digest.
+        # https://github.com/rustsec/rustsec/releases/tag/cargo-audit%2Fv0.22.2
+        CARGO_AUDIT_SHA256: 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
+      run: |
+        archive="cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}"
+        curl -sSfL -o "$RUNNER_TEMP/$archive.tgz" \
+          "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${CARGO_AUDIT_VERSION}/$archive.tgz"
+        echo "${CARGO_AUDIT_SHA256}  $RUNNER_TEMP/$archive.tgz" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/$archive.tgz" -C "$RUNNER_TEMP"
+        install -m 0755 "$RUNNER_TEMP/$archive/cargo-audit" "$HOME/.cargo/bin/cargo-audit"
+        cargo audit --version
+    # The RUSTSEC-2023-0071 entry in .cargo/audit.toml holds only while rsa has
+    # no active path; this policy fails if a feature change activates it.
+    - name: dependency security policy
+      shell: bash
+      run: bash .ci/check_dependency_security_policy.sh
+    - name: cargo audit
+      shell: bash
+      run: cargo audit

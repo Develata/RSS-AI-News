@@ -11,42 +11,14 @@ permissions:
 jobs:
   security:
     runs-on: ubuntu-latest
-    env:
-      CARGO_AUDIT_VERSION: 0.22.2
-      # SHA-256 of cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz, matching
-      # the release asset digest.
-      # https://github.com/rustsec/rustsec/releases/tag/cargo-audit%2Fv0.22.2
-      CARGO_AUDIT_SHA256: 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.97.0'
-      # Prebuilt release binary instead of `cargo install` (a ~3 min compile
-      # whenever the weekly run missed its cache). Nothing here compiles the
-      # workspace, so the job carries no rust-cache.
-      - name: install cargo-audit
-        run: |
-          archive="cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}"
-          curl -sSfL -o "$RUNNER_TEMP/$archive.tgz" \
-            "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${CARGO_AUDIT_VERSION}/$archive.tgz"
-          echo "${CARGO_AUDIT_SHA256}  $RUNNER_TEMP/$archive.tgz" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/$archive.tgz" -C "$RUNNER_TEMP"
-          install -m 0755 "$RUNNER_TEMP/$archive/cargo-audit" "$HOME/.cargo/bin/cargo-audit"
-          cargo audit --version
-      # rsa remains only in the lockfile's inactive optional dependency graph.
-      # The separate policy fails if a feature change activates it.
-      - run: bash .ci/check_dependency_security_policy.sh
-      # RUSTSEC-2026-0459 (libsqlite3-sys 0.30.1, bundled SQLite < 3.54) IS in
-      # the active graph via sqlx-sqlite `bundled`. Fixed in libsqlite3-sys
-      # >= 0.39, but sqlx-sqlite 0.8.6 pins ^0.30.1 and 0.9.0 caps it at
-      # < 0.38, so no upgrade path exists yet. Local vector only: the process
-      # must open a crafted db + `-wal` pair with mismatched page sizes, and
-      # the service opens only the operator-configured database, so an
-      # attacker would already need write access to its data directory.
-      # Revisit (and drop this ignore) once a sqlx release allows
-      # libsqlite3-sys >= 0.39.
-      - run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459
+      # Same check as the path-filtered audit workflow; here it also catches
+      # new advisories against an unchanged graph.
+      - uses: ./.github/actions/cargo-audit
 
   perf:
     if: github.event_name == 'workflow_dispatch'

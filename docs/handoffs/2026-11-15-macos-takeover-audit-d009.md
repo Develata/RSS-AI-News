@@ -121,3 +121,15 @@ octocrab 0.54.7；d3a0f6d 与其 revert 1bea8aa 互相抵消）。2026-11-09 的
 - 本地验证：`bash .ci/check_dependency_security_policy.sh` 通过；`cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459`
   exit 0（4 条允许的 warning）。maintenance workflow 本身尚未在 CI 上用新命令跑过。
 - PR 上跑 cargo audit（原待办 2）现在不再被这条漏洞卡住，方案仍待 Develata 确认。
+
+## 2026-11-16 追加：PR 上的 cargo audit（原待办 2）
+
+- 6672dd7 已推送；maintenance 手动 run 43727694418 全绿（security + perf），ci run 43727692693 通过。
+- 按 Develata 认可的方案实现：accepted advisory 集中到 `.cargo/audit.toml`；安装 / 策略检查 / `cargo audit` 抽成 composite action
+  `.github/actions/cargo-audit`；新增路径过滤的 `.github/workflows/audit.yml`（PR 与 push 到 main）；maintenance 改用同一个 action。
+  说明见 `docs/operations/ci-and-release.md` 的"依赖安全审计"。
+- codex-reviewer 审查后采纳：路径过滤补上 `.cargo/**`、`rust-toolchain.toml`、`maintenance.yml`；策略脚本原来只查根包和 host 平台
+  （已用 `cargo tree --depth 0` 核实默认范围只有根包），改为 `--workspace --target all`；文档写明 diff 上限、`main` 无 branch protection
+  （约定门槛而非 required check）、warning 不失败。
+- 本地验证：`actionlint` 通过；策略脚本通过（正对照：同参数可查到 libsqlite3-sys v0.30.1）；`cargo audit` 有配置 exit 0、无配置 exit 1；
+  static lane 通过。未验证：audit workflow 尚未在 GitHub 上触发过。

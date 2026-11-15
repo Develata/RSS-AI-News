@@ -1,0 +1,23 @@
+# cargo-audit config: the single list of accepted advisories. Every entry
+# records why it is accepted and when to revisit it. The maintenance and
+# audit workflows run plain `cargo audit`, which reads this file.
+
+[advisories]
+ignore = [
+    # rsa (Marvin attack), no fixed release. rsa stays only in the lockfile's
+    # inactive optional graph (octocrab jwt-rust-crypto, disabled in
+    # Cargo.toml); .ci/check_dependency_security_policy.sh fails if a feature
+    # change activates it. Revisit when rsa ships a fix.
+    "RUSTSEC-2023-0071",
+
+    # libsqlite3-sys 0.30.1 / bundled SQLite < 3.54 (CVE-2026-119375). This
+    # one IS in the active graph via sqlx-sqlite `bundled`. Fixed in
+    # libsqlite3-sys >= 0.39, but sqlx-sqlite 0.8.6 pins ^0.30.1 and 0.9.0
+    # caps it at < 0.38, so no upgrade path exists yet. Local vector only:
+    # the process must open a crafted db + `-wal` pair with mismatched page
+    # sizes, and the service opens only the operator-configured database, so
+    # an attacker would already need write access to its data directory.
+    # Revisit (and drop this entry) once a sqlx release allows
+    # libsqlite3-sys >= 0.39.
+    "RUSTSEC-2026-0459",
+]

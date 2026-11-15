@@ -39,6 +39,24 @@ release build 52s。PG 测试保持 `--test-threads=1`：本地实测 1 线程 1
 
 CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks 触发 `cargo fmt`）。
 
+## 依赖安全审计（cargo audit）
+
+两个 workflow 共用 composite action [`.github/actions/cargo-audit`](../../.github/actions/cargo-audit/action.yml)：先装固定版本、
+校验 SHA-256 的 cargo-audit 预编译二进制，再跑 `.ci/check_dependency_security_policy.sh`，最后跑不带参数的 `cargo audit`。
+
+- [`.github/workflows/audit.yml`](../../.github/workflows/audit.yml)：PR target `main` 与 push 到 `main`，但只在改动可能影响依赖图或
+  审计链的路径时触发（`Cargo.lock`、任意 `Cargo.toml`、`.cargo/**`、`rust-toolchain.toml`、依赖策略脚本、该 action、`audit.yml`
+  与 `maintenance.yml`）。用途是让锁文件回退在合入前就报红（v0.10.0 的 PR #2 就是这样漏过去的）。未改这些路径的 PR 不跑它，所以
+  针对未变依赖图的新 advisory 不会让无关 PR 变红。过滤按文件路径判断，受 GitHub 的 diff 上限约束（超大 diff 可能漏触发或无条件触发）；
+  `main` 没有 branch protection，它与 CI 一样是约定的合入门槛，不是 required check。
+- [`.github/workflows/maintenance.yml`](../../.github/workflows/maintenance.yml) 的 `security` job：每周一定时（也可手动触发），
+  负责发现针对未变依赖图的新 advisory。
+
+接受的 advisory 统一列在 [`.cargo/audit.toml`](../../.cargo/audit.toml)，每条写明理由与复查条件；不要在命令行加 `--ignore`。
+失败条件是未接受的 vulnerability；unmaintained、yanked 等 warning 只报告、不失败（cargo-audit 默认行为，与改动前一致）。
+rsa 的豁免依赖策略脚本：它用 `cargo tree --workspace --target all` 检查 rsa 在所有成员、所有平台上都没有活跃路径。
+本地复现：在仓库根目录运行 `bash .ci/check_dependency_security_policy.sh && cargo audit`（cargo-audit 从当前目录读取该配置）。
+
 ## Release workflow
 
 文件：[`.github/workflows/release.yml`](../../.github/workflows/release.yml)。
@@ -167,6 +185,6 @@ docker compose -f docker-compose.scheduler.yml up -d --force-recreate
 
 ## 相关文档
 
-- workflow 文件：[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)、[`.github/workflows/release.yml`](../../.github/workflows/release.yml)
+- workflow 文件：[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)、[`.github/workflows/release.yml`](../../.github/workflows/release.yml)、[`.github/workflows/audit.yml`](../../.github/workflows/audit.yml)、[`.github/workflows/maintenance.yml`](../../.github/workflows/maintenance.yml)
 - 部署：[./docker-and-scheduler.md](./docker-and-scheduler.md)
 - 设计：[../plan/12-deployment.md](../plan/12-deployment.md)
