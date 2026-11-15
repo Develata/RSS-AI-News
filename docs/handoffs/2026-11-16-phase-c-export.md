@@ -51,3 +51,20 @@ AI 计数说明、Docker host 网络前提）与 1 项 NEEDS_VERIFICATION（多�
 - 下一步等 Develata 跑导出并完成标注；之后是评估（noul 的 AUC、`top_probability` 校准、与 AI `keep_decision` 的相关、
   Laya vs Jev、每篇 `input_tokens`、留出数据上的阈值拟合）。让判断参与过滤是骨架级变更，需先写 ADR 0012 并获批。
 - 导出文件含文章标题与链接，不进仓库。
+
+## 2026-11-16 追加：首轮生产导出与 LLM 对照（探索性）
+
+- 生产导出（Develata 在生产 PG 上运行，数据不进仓库）：只有 1 个板块 `ai_ml`、1 个策略、1 个执行身份 `laya:multilingual:2048`，
+  2408 篇成功、无失败；平均 1183 input token / 篇；正文本地截断 11%、Laya token 截断 4.9%。没有 Jev 数据，无法做 Laya vs Jev。
+- 参照标注：按 Develata 要求由 8 个 Haiku 子代理对 200 篇样本标注同样两题（164 篇读到原文，36 篇只看标题），
+  **不是人工标注**；目的就是比较判断模型与通用 LLM 的差距。Haiku 看不到 Laya 答案。
+- 结果（n=200，括号为 bootstrap 95% CI；"只读到原文"子集结论相同）：
+  - `q_marketing`：Laya 判 53% 为营销，Haiku 11%；AUC(Laya p_yes → Haiku yes) 0.68（0.59–0.77），0.5 阈值一致率 0.54。
+    Laya 的营销概率与它自己的技术价值正相关（Spearman +0.41），Haiku 为 −0.35；与 deepseek 保留决定的 AUC 为 0.67（营销概率越高越常被保留）。
+    推断：题目"是否主要是营销宣传，**而不是**提供可核实的新技术信息"含否定对比且未填 yes/no 释义，Laya 很可能部分按相反或"是否技术新闻"理解。未验证。
+  - `q_technical_value`：Laya 从不判 0 档，68% 判 1 档；Haiku 多判 2 档。完全一致 0.36、相差 ≤1 档 0.95、QWK 0.29（0.17–0.39）、
+    Spearman 0.32（0.18–0.44）。`top_probability` 与和 Haiku 的一致率无单调关系（未校准，与 ADR 0010 的预期一致）。
+  - 对 deepseek 保留决定的区分力：Laya 技术价值期望 AUC 0.75（0.67–0.81），Haiku 0.80（0.74–0.86）；对 deepseek 重要性分数
+    （仅保留文章，55–92）两者都几乎不相关（≈0.07 / 0.10）。
+- 建议的下一步（待 Develata 决定）：重写 `q_marketing`（正向提问，填 yes / no 释义），会产生新的 policy_version，旧结果保留；
+  跑一段时间后用同一导出再比一次。在此之前不宜让该题参与过滤。
