@@ -200,7 +200,7 @@ attempt_count，失败直转终态），只接 reclaim。接线时机、事件�
 | Timestamp | TEXT (ISO 8601) | TIMESTAMPTZ |
 | Binary | BLOB | BYTEA |
 | Partial unique index | `CREATE UNIQUE INDEX ... WHERE ...` | 同 |
-| Concurrency | 不支持 `FOR UPDATE SKIP LOCKED`；claim 为单条 `UPDATE … WHERE id IN (SELECT … LIMIT n) RETURNING`，写入由 SQLite 单写者锁串行，等待上限为连接的 `busy_timeout`（WAL 模式，见 `pool.rs`）；仓库中无 `BEGIN IMMEDIATE` | `FOR UPDATE SKIP LOCKED` |
+| Concurrency | 不支持 `FOR UPDATE SKIP LOCKED`；claim 为单条条件 `UPDATE … RETURNING`（批量领取通常为 `WHERE id IN (SELECT … LIMIT n)`，reindex 等用标量子查询或按 id 直接更新），写入由 SQLite 单写者锁串行，等待上限为连接的 `busy_timeout`（WAL 模式，见 `pool.rs`）；仓库中无 `BEGIN IMMEDIATE` | `FOR UPDATE SKIP LOCKED` |
 
 详见 [../adr/0006-postgres-go-real-no-shrink.md](../adr/0006-postgres-go-real-no-shrink.md)。
 
@@ -242,7 +242,8 @@ schema 变更只能新增迁移，且 SQLite / PostgreSQL 两个方言同时提�
 ### 7.2 migrate 子命令
 
 - `migrate run` — 先确认无 running / pending reindex job，再 `run_migrations`（driver=URL 必须与配置 driver 一致）
-- `migrate check` — 只读：`applied_migration_versions` 对比内嵌版本，存在 pending 即 `MigrateCheckPending`（exit 1），不执行迁移
+- `migrate check` — 不执行迁移：`applied_migration_versions` 对比内嵌版本，存在 pending 即 `MigrateCheckPending`（exit 1）。
+  它不是无副作用的：打开 SQLite 连接时仍会按 `pool.rs` 在路径不存在时创建数据库文件，并把 journal 设为 WAL（WAL 设置持久）
 
 `migrate` **不**经过 Flow 编排，直接调 storage 层。`validate-config` 同样。
 

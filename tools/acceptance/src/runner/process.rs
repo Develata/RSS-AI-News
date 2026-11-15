@@ -204,8 +204,11 @@ fn kill_tree(child: &mut Child) {
 ///
 /// One `ps -A -o pid= -o ppid=` snapshot (POSIX options, accepted by both
 /// procps and BSD `ps`) gives the parent relation; the tree is then walked in
-/// memory. A process forked after the snapshot is caught by the caller's next
-/// round. If `ps` fails, no descendant is reported (best-effort).
+/// memory. A later round may catch a process forked after the snapshot while
+/// it still hangs off the tree; one whose parent was killed first has been
+/// re-parented away and is missed, as is anything forked after the last
+/// round (best-effort). If `ps` cannot be run, none is reported; whatever
+/// parsable lines a `ps` that exits non-zero printed are still used.
 #[cfg(unix)]
 fn descendants(root: u32) -> Vec<u32> {
     let Ok(output) = Command::new("ps")
