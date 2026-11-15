@@ -324,6 +324,11 @@ fn chunked_server(body: Vec<u8>, delay: Duration) -> (String, std::thread::JoinH
                 Err(error) => panic!("accept fixture connection: {error}"),
             }
         };
+        // BSD-derived systems (macOS) let the accepted socket inherit the
+        // listener's O_NONBLOCK; Linux does not. The reads below block.
+        stream
+            .set_nonblocking(false)
+            .expect("blocking fixture stream");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("read timeout");

@@ -6,8 +6,8 @@
 //!   much the child writes; the *last* bytes are kept, since failures are
 //!   reported at the end of the output.
 //! - A timed-out step is killed together with its descendants, best-effort
-//!   (Linux: found by walking `ps --ppid`), so no orphan `rustc`/`cargo`
-//!   keeps running.
+//!   (Unix: found from one POSIX `ps -A -o pid= -o ppid=` snapshot per
+//!   round), so no orphan `rustc`/`cargo` keeps running.
 //! - Children stay in the runner's process group, so a terminal Ctrl-C (sent
 //!   to the foreground group) stops them together with the runner.
 //! - `run_bounded` always reaps the child before returning. The pipe wait gets
@@ -17,8 +17,9 @@
 //!   keeps the output read so far; that leftover process is *not* killed (it
 //!   was re-parented away from the tree), and its reader thread ends when it
 //!   exits.
-//! - Descendant discovery uses `ps --ppid` (procps, Linux). Elsewhere (macOS,
-//!   Windows) only the direct child is killed on timeout.
+//! - Descendant discovery uses only POSIX `ps` options, so procps (Linux) and
+//!   BSD `ps` (macOS) both work. On Windows only the direct child is killed on
+//!   timeout.
 
 use std::{
     io::{self, Read},
@@ -199,24 +200,39 @@ fn kill_tree(child: &mut Child) {
     }
 }
 
-/// All descendants of `root`, parents before children (`ps` from procps).
+/// All descendants of `root`, parents before children.
+///
+/// One `ps -A -o pid= -o ppid=` snapshot (POSIX options, accepted by both
+/// procps and BSD `ps`) gives the parent relation; the tree is then walked in
+/// memory. A process forked after the snapshot is caught by the caller's next
+/// round. If `ps` fails, no descendant is reported (best-effort).
 #[cfg(unix)]
 fn descendants(root: u32) -> Vec<u32> {
+    let Ok(output) = Command::new("ps")
+        .args(["-A", "-o", "pid=", "-o", "ppid="])
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    let table = String::from_utf8_lossy(&output.stdout);
+    let pairs: Vec<(u32, u32)> = table
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let ppid = fields.next()?.parse().ok()?;
+            Some((pid, ppid))
+        })
+        .collect();
     let mut found = Vec::new();
     let mut frontier = vec![root];
     while let Some(parent) = frontier.pop() {
-        let Ok(output) = Command::new("ps")
-            .args(["-o", "pid=", "--ppid", &parent.to_string()])
-            .output()
-        else {
-            break;
-        };
-        for pid in String::from_utf8_lossy(&output.stdout)
-            .split_whitespace()
-            .filter_map(|pid| pid.parse::<u32>().ok())
-        {
-            found.push(pid);
-            frontier.push(pid);
+        for &(pid, ppid) in &pairs {
+            if ppid == parent && pid != root && !found.contains(&pid) {
+                found.push(pid);
+                frontier.push(pid);
+            }
         }
     }
     found

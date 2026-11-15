@@ -1016,10 +1016,14 @@ async fn construction_rejects_bad_settings() {
 #[tokio::test]
 async fn unreachable_endpoint_is_a_connection_error() {
     // Bound but never listening: Linux refuses the connect, and holding the
-    // socket keeps any other process from taking the port meanwhile.
+    // socket keeps any other process from taking the port meanwhile. macOS
+    // instead leaves a SYN to a bound, non-listening port unanswered (the
+    // client times out), so elsewhere the port is released before connecting.
     let reserved = TcpSocket::new_v4().unwrap();
     reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let address = reserved.local_addr().unwrap();
+    #[cfg(not(target_os = "linux"))]
+    drop(reserved);
     let qs = questions();
     let error = client(
         Provider::Laya,
@@ -1039,6 +1043,7 @@ async fn unreachable_endpoint_is_a_connection_error() {
     .result
     .unwrap_err();
     assert_eq!(error, DecisionError::Connection);
+    #[cfg(target_os = "linux")]
     drop(reserved);
 }
 
