@@ -93,7 +93,7 @@ CLI 框架：`clap` derive。每个子命令是独立 enum 变体。
 | rebuild-report | `commands/rebuild_report.rs` | `flows::rebuild_report::RebuildReportFlow` | byte-equal 重渲染 |
 | reindex | `commands/reindex.rs` | `flows::reindex::ReindexFlow` | 3 类 target |
 | recent-entries | `commands/recent_entries.rs` | `flows::recent_entries::RecentEntriesFlow` | strict read-only deps；不构造 `RunContext` |
-| migrate | `commands/migrate.rs` | `storage::migrate::run/check` | 不构造 RunContext |
+| migrate | `commands/migrate.rs` | `storage::{run_migrations, applied_migration_versions, pending_migration_versions}` | 不构造 RunContext |
 | validate-config | `commands/validate_config.rs` | `config::validate` | 不构造 RunContext |
 | run | `commands/run.rs` | 串行调用 ingest + ai-run + publish | 一体化模式 |
 
