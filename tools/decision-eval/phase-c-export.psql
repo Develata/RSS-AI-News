@@ -1,0 +1,239 @@
+-- Phase C read-only export (PostgreSQL). See README.md in this directory.
+--
+-- Usage (from an empty output directory; files are written to the cwd):
+--   psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f phase-c-export.psql
+-- Optional variables: -v per_category=200 -v seed=phase-c-1
+--
+-- Everything runs in ONE read-only REPEATABLE READ transaction, so all files
+-- come from the same snapshot even while decision-run / ai-run keep writing.
+-- No statement writes: READ ONLY makes the server reject any write, and the
+-- sample is recomputed in every query (a read-only transaction cannot create
+-- even temporary objects); the deterministic order makes it identical.
+--
+-- Sample: per category, up to :per_category articles that have at least one
+-- succeeded decision_results row (any policy / execution identity), ordered
+-- by md5(article_id || seed). This is uniform over those articles and does
+-- not depend on any model output. Change the seed to draw a different sample.
+
+\set ON_ERROR_STOP on
+\if :{?per_category}
+\else
+  \set per_category 200
+\endif
+\if :{?seed}
+\else
+  \set seed phase-c-1
+\endif
+
+BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+-- Per statement; idle_in_transaction bounds a stalled client between COPYs
+-- (an open snapshot holds back vacuum). Neither bounds the whole run.
+SET LOCAL statement_timeout = '120s';
+SET LOCAL lock_timeout = '5s';
+SET LOCAL idle_in_transaction_session_timeout = '60s';
+SET LOCAL TimeZone = 'UTC';
+
+-- Precondition: an article's category comes from its single feed source, so
+-- decision_results should never give one article two categories. If it does,
+-- the per-category sample would export its rows twice; stop instead of
+-- guessing which category it belongs to.
+SELECT EXISTS (
+    SELECT 1 FROM decision_results
+    GROUP BY article_id
+    HAVING count(DISTINCT category_key) > 1
+) AS multi_category \gset
+\if :multi_category
+  -- Fails the transaction; ON_ERROR_STOP then exits psql non-zero.
+  DO $$ BEGIN RAISE EXCEPTION 'phase-c-export: an article has decision_results in more than one category'; END $$;
+\endif
+
+-- 1. summary.csv: what exists, per category x policy x execution identity x
+--    state, over ALL decision_results rows (not only the sample).
+--    paired_other_provider_articles (succeeded groups only): articles that
+--    also have a succeeded row from the OTHER provider under the SAME
+--    policy_version, i.e. the same questions answered by both Jev and Laya.
+\o summary.csv
+COPY (
+    SELECT d.category_key,
+           d.policy_version,
+           d.execution_key,
+           d.state,
+           count(*) AS rows,
+           count(DISTINCT d.article_id) AS articles,
+           count(DISTINCT d.article_id) FILTER (WHERE d.state = 'succeeded' AND EXISTS (
+               SELECT 1 FROM decision_results o
+               WHERE o.article_id = d.article_id
+                 AND o.policy_version = d.policy_version
+                 AND o.provider <> d.provider
+                 AND o.state = 'succeeded'
+           )) AS paired_other_provider_articles,
+           min(d.created_at) AS first_created_at,
+           max(d.completed_at) AS last_completed_at,
+           sum(d.input_tokens) AS input_tokens_sum,
+           round(avg(d.input_tokens), 1) AS input_tokens_avg,
+           round(avg(d.latency_ms), 1) AS latency_ms_avg,
+           count(*) FILTER (WHERE d.body_truncated) AS body_truncated_rows,
+           count(*) FILTER (WHERE d.provider_truncated) AS provider_truncated_rows
+    FROM decision_results d
+    GROUP BY d.category_key, d.policy_version, d.execution_key, d.state
+    ORDER BY d.category_key, d.policy_version, d.execution_key, d.state
+) TO STDOUT WITH (FORMAT csv, HEADER);
+
+-- 2. policies.csv: the question definitions behind every policy_version.
+\o policies.csv
+COPY (
+    SELECT policy_version, created_at, canonical_json
+    FROM decision_policies
+    ORDER BY created_at, policy_version
+) TO STDOUT WITH (FORMAT csv, HEADER);
+
+-- 3. labels.csv: the BLIND labeling sheet. One row per sampled article x
+--    distinct question of the policies that SUCCEEDED on it (a policy that
+--    only failed has no answers to compare); no model output of any kind. Fill `label` (and
+--    optionally `note`); label_hint says what a valid label looks like.
+\o labels.csv
+COPY (
+    WITH judged AS (
+        SELECT DISTINCT article_id, category_key
+        FROM decision_results
+        WHERE state = 'succeeded'
+    ),
+    sample AS (
+        SELECT article_id, category_key, sample_rank
+        FROM (
+            SELECT article_id, category_key,
+                   row_number() OVER (
+                       PARTITION BY category_key
+                       ORDER BY md5(article_id::text || :'seed'), article_id
+                   ) AS sample_rank
+            FROM judged
+        ) ranked
+        WHERE sample_rank <= :per_category
+    ),
+    questions AS (
+        SELECT s.article_id,
+               q.ord,
+               q.value AS question,
+               p.policy_version
+        FROM sample s
+        JOIN (SELECT DISTINCT article_id, policy_version
+              FROM decision_results
+              WHERE state = 'succeeded') dp ON dp.article_id = s.article_id
+        JOIN decision_policies p ON p.policy_version = dp.policy_version
+        CROSS JOIN LATERAL jsonb_array_elements(p.canonical_json::jsonb -> 'questions')
+            WITH ORDINALITY AS q(value, ord)
+    )
+    SELECT s.category_key,
+           s.sample_rank,
+           s.article_id,
+           a.title,
+           a.canonical_link,
+           fe.published_at,
+           q.question ->> 'id' AS question_id,
+           q.question ->> 'type' AS question_type,
+           q.question ->> 'instructions' AS instructions,
+           q.question ->> 'yes' AS yes_means,
+           q.question ->> 'no' AS no_means,
+           (SELECT string_agg(o ->> 'label' || coalesce(': ' || (o ->> 'description'), ''),
+                              ' | ' ORDER BY oi)
+              FROM jsonb_array_elements(q.question -> 'options') WITH ORDINALITY AS x(o, oi)
+           ) AS options,
+           (SELECT string_agg((li - 1)::text || '=' || l, ' | ' ORDER BY li)
+              FROM jsonb_array_elements_text(q.question -> 'levels') WITH ORDINALITY AS y(l, li)
+           ) AS levels,
+           CASE q.question ->> 'type'
+               WHEN 'noul' THEN 'yes / no'
+               WHEN 'choice' THEN 'one option label'
+               WHEN 'score' THEN 'level index 0..n-1'
+           END AS label_hint,
+           string_agg(DISTINCT q.policy_version, ' ') AS policy_versions,
+           NULL::text AS label,
+           NULL::text AS note
+    FROM sample s
+    JOIN articles a ON a.id = s.article_id
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN questions q ON q.article_id = s.article_id
+    GROUP BY s.category_key, s.sample_rank, s.article_id, a.title, a.canonical_link,
+             fe.published_at, q.question
+    ORDER BY s.category_key, s.sample_rank, min(q.ord), question_id, q.question::text
+) TO STDOUT WITH (FORMAT csv, HEADER);
+
+-- 4. results.csv: everything the models said about the sampled articles.
+--    One row per decision_results row (all states, so coverage and failures
+--    are visible), with the article's latest finished AI result. AI rows with
+--    keep_decision = 0 are stored as state 'filtered', so both states count.
+\o results.csv
+COPY (
+    WITH judged AS (
+        SELECT DISTINCT article_id, category_key
+        FROM decision_results
+        WHERE state = 'succeeded'
+    ),
+    sample AS (
+        SELECT article_id, category_key, sample_rank
+        FROM (
+            SELECT article_id, category_key,
+                   row_number() OVER (
+                       PARTITION BY category_key
+                       ORDER BY md5(article_id::text || :'seed'), article_id
+                   ) AS sample_rank
+            FROM judged
+        ) ranked
+        WHERE sample_rank <= :per_category
+    )
+    SELECT s.category_key,
+           s.sample_rank,
+           s.article_id,
+           a.title,
+           a.state AS article_state,
+           d.id AS decision_result_id,
+           d.policy_version,
+           d.execution_key,
+           d.provider,
+           d.requested_model,
+           d.reported_model,
+           d.routing_model,
+           d.endpoint_origin,
+           d.laya_max_len,
+           d.state,
+           d.attempt_count,
+           d.last_error_kind,
+           d.answers_json,
+           d.input_tokens,
+           d.latency_ms,
+           d.body_chars_sent,
+           d.body_truncated,
+           d.provider_truncated,
+           d.state_tokens_dropped,
+           d.completed_at,
+           ai.id AS ai_result_id,
+           ai.state AS ai_state,
+           ai.model_id AS ai_model_id,
+           ai.prompt_version AS ai_prompt_version,
+           ai.output_schema_version AS ai_output_schema_version,
+           ai.keep_decision AS ai_keep_decision,
+           ai.importance_score AS ai_importance_score,
+           ai.completed_at AS ai_completed_at,
+           ai_count.n AS ai_finished_results
+    FROM sample s
+    JOIN articles a ON a.id = s.article_id
+    JOIN decision_results d ON d.article_id = s.article_id
+    LEFT JOIN LATERAL (
+        SELECT r.id, r.state, r.model_id, r.prompt_version, r.output_schema_version,
+               r.keep_decision, r.importance_score, r.completed_at
+        FROM article_ai_results r
+        WHERE r.article_id = s.article_id AND r.state IN ('succeeded', 'filtered')
+        ORDER BY r.completed_at DESC NULLS LAST, r.id DESC
+        LIMIT 1
+    ) ai ON true
+    LEFT JOIN LATERAL (
+        SELECT count(*) AS n
+        FROM article_ai_results r
+        WHERE r.article_id = s.article_id AND r.state IN ('succeeded', 'filtered')
+    ) ai_count ON true
+    ORDER BY s.category_key, s.sample_rank, d.policy_version, d.execution_key, d.id
+) TO STDOUT WITH (FORMAT csv, HEADER);
+
+\o
+COMMIT;
+\echo 'wrote summary.csv policies.csv labels.csv results.csv'
