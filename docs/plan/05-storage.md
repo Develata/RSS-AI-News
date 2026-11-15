@@ -166,7 +166,7 @@ WHERE state IN ('fetching', 'extracting')
 
 **`attempt_count` 不重置**，作为重试预算的硬约束。
 
-涉及 lease 的表：`feed_entries` / `article_ai_results` / `publish_records` / `reindex_jobs`。
+涉及 lease 的表：`feed_entries` / `article_ai_results` / `publish_records` / `reindex_jobs` / `decision_results`（0006，见 ADR 0011）。
 
 ### 5.1 重试预算耗尽闭环（W15）
 

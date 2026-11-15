@@ -84,3 +84,29 @@ octocrab 0.54.7；d3a0f6d 与其 revert 1bea8aa 互相抵消）。2026-11-09 的
 
 - 新机器首次运行验收矩阵时，先跑 `cargo acceptance run --lane static --lane workspace`；其余 lane 需要 PG 或 docker。
 - `.githooks` 在新 clone 中默认未启用（`core.hooksPath` 为空），提交前需手动跑 fmt / clippy，或按 `.githooks/README.md` 启用。
+
+## 2026-11-15 追加：完整 local profile 与事实更正
+
+### 更正（以本节为准）
+
+- `cargo audit` 允许的 warning 是 **4 条**（astral-tokio-tar、fxhash unmaintained；chacha20、spin yanked），上文写成了 3 条。
+- sqlx 的上限：sqlx-sqlite 0.8.6 依赖 `libsqlite3-sys = "0.30.1"`（caret，即 < 0.31）；sqlx-sqlite 0.9.0 依赖 `>=0.30.1, <0.38.0`。
+  两者都够不到修复版本 ≥ 0.39。sqlx 0.8.6 有 `sqlite-unbundled` feature（已在 registry 的 `Cargo.toml` 中核实），但对应的系统 SQLite
+  同样需要 ≥ 3.54。
+- "macOS 临时端口随机分配、碰撞概率极低"是推断。补充证据：decision 的完整 `contract_tests` 二进制（32 个测试并行）连续运行 20 次，
+  0 失败。
+- "其余 lane 需要 PG 或 docker"不对：`local` profile 中的 `sqlite` / `release` lane 都不需要；只有 `postgres` / `docker` lane 需要
+  （本机 docker daemon 未运行）。
+
+### 新增文档修正
+
+- plan/05 §5 的 lease 表清单补上 `decision_results`（0006 有 `lease_owner` / `lease_expires_at`）。
+
+### 验证（HEAD = 本节所在提交的父提交 + 本节文档改动）
+
+- `CARGO_PROFILE_RELEASE_STRIP=none cargo acceptance run --profile local --expected-version 0.10.0`：**Passed**
+  （static / workspace / sqlite / release 四条 lane）。
+- 不带该环境变量时，release 构建失败：dyld 拒绝加载 `target/release/deps/libsqlx_macros-*.dylib`，报 "mis-aligned LINKEDIT
+  string pool"；`cargo clean -p sqlx-macros` 后可复现，把 proc-macro 的 opt-level 设为 0 后同样失败，只有设 `strip=none` 才通过。
+  结论：本机（macOS 27.2、CLT `ld-27106`、`/Library/Developer/CommandLineTools/usr/bin/strip`）上，release profile 默认的
+  `strip = "debuginfo"` 会弄坏 proc-macro dylib。属于机器环境问题，与仓库无关；仓库未改动，Linux / CI / docker 不受影响。
