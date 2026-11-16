@@ -135,8 +135,9 @@ jobs:
           push: false
           load: true
           tags: rss-ai-news:scheduler
+          # Reads the runtime layers it shares; writes nothing. A scheduler scope
+          # was never read by CI or release and only took cache quota.
           cache-from: type=gha,scope=runtime
-          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=scheduler' || '' }}
       - name: smoke run --help (runtime)
         run: docker run --rm rss-ai-news:runtime --help
       - name: smoke run --help (debug)
