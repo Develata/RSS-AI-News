@@ -75,6 +75,12 @@ quality 由 strategy 自己决定。AI 阶段会跳过 `Fallback` 行（避免�
 依靠数据库唯一约束原子插入或返回已有 article，禁止 SELECT-exists 再 INSERT。
 命中后 feed_entry 进入 dedup_skipped 并关联已有 article；schema/claim 状态由 storage 负责。
 
+命中时已有 article 的字段保持不变（先写者为准，`ON CONFLICT DO NOTHING`）：这次提取新写入的 html artifact
+**不会**补到已有 article 的 `body_html_artifact_id`。已有 article 可能本来就没有 artifact（`on_failure` 下提取成功、
+`off`、采样未命中、写入失败，或被 TTL 清理后置 NULL），即便如此也不补挂。新 artifact 以 feed entry id 为 key，
+写入成功且未被清理时，`replay --kind html --key <feed_entry_id>` 仍可回放，`--diff` 经 `feed_entries.article_id`
+找到对应 article（R3 审查遗留，2026-11-16 定为既定语义）。
+
 ### 4.1 与一/二层的区别
 
 - 一/二层在 INSERT 前发生，**不**产生新 `feed_entries` 行

@@ -4,7 +4,11 @@ use std::{
 };
 
 use rss_ai_news_ai::{ParsedResponse, parse_response};
-use rss_ai_news_domain::{dto::extract::ArticleFetchTask, state::FeedKind};
+use rss_ai_news_domain::{
+    dto::extract::ArticleFetchTask,
+    model::RawArtifact,
+    state::{ArtifactKind, FeedKind},
+};
 use rss_ai_news_extractor::{ContentStrategy, ReadabilityStrategy};
 use rss_ai_news_feed::parse_feed;
 use rss_ai_news_runtime::RuntimeError;
@@ -59,14 +63,15 @@ pub async fn run(cli: &Cli, args: &ReplayArgs) -> Result<ReplayCommandSummary, C
         })?;
         deps.artifact_repo.find_by_key(kind, key).await?
     };
-    let artifact = artifact.ok_or_else(|| CliError::ReplayArtifactNotFound {
-        kind: kind.to_string(),
-        key: args
-            .id
-            .map(|id| id.to_string())
-            .or_else(|| args.key.clone())
-            .unwrap_or_default(),
-    })?;
+    let artifact =
+        of_kind(artifact, args.kind).ok_or_else(|| CliError::ReplayArtifactNotFound {
+            kind: kind.to_string(),
+            key: args
+                .id
+                .map(|id| id.to_string())
+                .or_else(|| args.key.clone())
+                .unwrap_or_default(),
+        })?;
     let bytes = artifact.inline_body.as_deref().ok_or_else(|| {
         CliError::Runtime(RuntimeError::Config(
             "file-backed artifacts not supported in W9c replay".to_string(),
@@ -152,33 +157,43 @@ pub async fn run(cli: &Cli, args: &ReplayArgs) -> Result<ReplayCommandSummary, C
     })
 }
 
+/// Compares a replayed HTML payload with the article its feed entry produced.
+///
+/// An `html_payload` artifact is keyed by the feed entry id (see
+/// `flows/extract.rs::write_html_artifact`), so the article is found through
+/// `feed_entries.article_id`. That also covers a content-dedup hit, whose entry
+/// points at the earlier article. Looking the key up as a `canonical_link`
+/// never matched, so `--diff` always reported `found: false`.
 async fn html_diff(
     pool: &rss_ai_news_storage::StoragePool,
-    canonical_link: &str,
+    artifact_key: &str,
     replay_hash: &str,
     replay_word_count: u32,
 ) -> Result<Value, CliError> {
-    // W11-P4-C2：`?` → `$1` 跨方言占位符 + StoragePool match 分发。
-    let sql =
-        "SELECT title, word_count, content_hash FROM articles WHERE canonical_link = $1 LIMIT 1";
+    let Ok(feed_entry_id) = artifact_key.parse::<i64>() else {
+        return Ok(json!({ "found": false }));
+    };
+    let sql = "SELECT a.id, a.title, a.word_count, a.content_hash FROM feed_entries fe \
+               JOIN articles a ON a.id = fe.article_id WHERE fe.id = $1 LIMIT 1";
     let row = match pool {
         rss_ai_news_storage::StoragePool::Sqlite(p) => {
-            sqlx::query_as::<_, (String, i64, String)>(sql)
-                .bind(canonical_link)
+            sqlx::query_as::<_, (i64, String, i64, String)>(sql)
+                .bind(feed_entry_id)
                 .fetch_optional(p)
                 .await
         }
         rss_ai_news_storage::StoragePool::Postgres(p) => {
-            sqlx::query_as::<_, (String, i64, String)>(sql)
-                .bind(canonical_link)
+            sqlx::query_as::<_, (i64, String, i64, String)>(sql)
+                .bind(feed_entry_id)
                 .fetch_optional(p)
                 .await
         }
     }
     .map_err(rss_ai_news_storage::StorageError::from)?;
     Ok(match row {
-        Some((title, word_count, content_hash)) => json!({
+        Some((article_id, title, word_count, content_hash)) => json!({
             "found": true,
+            "article_id": article_id,
             "title_db": title,
             "word_count_db": word_count,
             "word_count_replay": replay_word_count,
@@ -188,10 +203,158 @@ async fn html_diff(
     })
 }
 
+/// `--id` looks an artifact up without its kind, and the keys of different
+/// kinds live in different id spaces (a feed payload is keyed by source id,
+/// an HTML payload by feed entry id). An artifact of another kind is treated
+/// as not found rather than parsed, and diffed, as the requested kind.
+fn of_kind(artifact: Option<RawArtifact>, kind: ReplayKind) -> Option<RawArtifact> {
+    let expected = match kind {
+        ReplayKind::Feed => ArtifactKind::FeedPayload,
+        ReplayKind::Html => ArtifactKind::HtmlPayload,
+        ReplayKind::Ai => ArtifactKind::AiRawResponse,
+    };
+    artifact.filter(|artifact| artifact.kind == expected)
+}
+
 fn kind_storage(kind: ReplayKind) -> &'static str {
     match kind {
         ReplayKind::Feed => "feed_payload",
         ReplayKind::Html => "html_payload",
         ReplayKind::Ai => "ai_raw_response",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rss_ai_news_storage::{StoragePool, build_sqlite_pool, run_migrations};
+    use sqlx::SqlitePool;
+
+    use rss_ai_news_domain::{model::RawArtifact, state::ArtifactKind};
+    use time::OffsetDateTime;
+
+    use super::{html_diff, of_kind};
+    use crate::args::ReplayKind;
+
+    fn artifact(kind: ArtifactKind) -> RawArtifact {
+        RawArtifact {
+            id: 7,
+            kind,
+            artifact_key: "42".to_string(),
+            content_encoding: "identity".to_string(),
+            storage_kind: "inline".to_string(),
+            inline_body: Some(b"<html></html>".to_vec()),
+            file_path: None,
+            byte_size: 13,
+            sha256: "sha".to_string(),
+            retention_policy: "always".to_string(),
+            expires_at: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    /// `--id` ignores the kind, so a feed payload keyed by source 42 must not
+    /// be replayed and diffed as the HTML of feed entry 42.
+    #[test]
+    fn an_artifact_of_another_kind_is_not_replayed() {
+        assert!(of_kind(Some(artifact(ArtifactKind::FeedPayload)), ReplayKind::Html).is_none());
+        assert!(of_kind(Some(artifact(ArtifactKind::HtmlPayload)), ReplayKind::Ai).is_none());
+        assert!(of_kind(Some(artifact(ArtifactKind::HtmlPayload)), ReplayKind::Html).is_some());
+        assert!(of_kind(Some(artifact(ArtifactKind::FeedPayload)), ReplayKind::Feed).is_some());
+        assert!(of_kind(None, ReplayKind::Html).is_none());
+    }
+
+    async fn insert_id(pool: &SqlitePool, sql: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(sql)
+            .fetch_one(pool)
+            .await
+            .expect("fixture row should insert")
+    }
+
+    async fn insert_entry(pool: &SqlitePool, source: i64, uid: &str) -> i64 {
+        insert_id(
+            pool,
+            &format!(
+                "INSERT INTO feed_entries (source_id, feed_entry_uid, normalized_link, link_hash, \
+                 title_raw, discovered_at, state, dedup_decision) VALUES ({source}, '{uid}', \
+                 'https://example.com/{uid}', 'hash-{uid}', 'title {uid}', CURRENT_TIMESTAMP, \
+                 'pending_fetch', 'fresh') RETURNING id"
+            ),
+        )
+        .await
+    }
+
+    /// The artifact key is a feed entry id; the diff must reach the article
+    /// through that entry, including a dedup entry pointing at an earlier one.
+    #[tokio::test]
+    async fn html_diff_finds_the_article_through_the_feed_entry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let sqlite = build_sqlite_pool(&dir.path().join("replay.sqlite"), 2, 5_000)
+            .await
+            .expect("pool");
+        let pool = StoragePool::Sqlite(sqlite.clone());
+        run_migrations(&pool).await.expect("migrations");
+
+        let config = insert_id(
+            &sqlite,
+            "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256) \
+             VALUES ('config_fixture', 'cfg', 'test', 'sha-cfg') RETURNING id",
+        )
+        .await;
+        let extractor = insert_id(
+            &sqlite,
+            "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256) \
+             VALUES ('extractor_fixture', 'ext', 'test', 'sha-ext') RETURNING id",
+        )
+        .await;
+        let source = insert_id(
+            &sqlite,
+            &format!(
+                "INSERT INTO feed_sources (category_key, source_key, display_name, feed_url, \
+                 feed_kind, config_version) VALUES ('ai', 's', 'S', 'https://example.com/f.xml', \
+                 'rss', {config}) RETURNING id"
+            ),
+        )
+        .await;
+        let first = insert_entry(&sqlite, source, "first").await;
+        let dedup = insert_entry(&sqlite, source, "dedup").await;
+        let orphan = insert_entry(&sqlite, source, "orphan").await;
+        let article = insert_id(
+            &sqlite,
+            &format!(
+                "INSERT INTO articles (content_hash, canonical_link, title, body_text, \
+                 extractor_strategy, extractor_version, content_quality, word_count, \
+                 origin_feed_entry_id, state) VALUES ('hash-a', 'https://example.com/first', \
+                 'Title A', 'body', 'readability', {extractor}, 'high', 42, {first}, 'persisted') \
+                 RETURNING id"
+            ),
+        )
+        .await;
+        sqlx::query("UPDATE feed_entries SET article_id = ? WHERE id IN (?, ?)")
+            .bind(article)
+            .bind(first)
+            .bind(dedup)
+            .execute(&sqlite)
+            .await
+            .expect("link entries");
+
+        for entry in [first, dedup] {
+            let diff = html_diff(&pool, &entry.to_string(), "hash-a", 40)
+                .await
+                .expect("diff");
+            assert_eq!(diff["found"], true, "entry {entry}");
+            assert_eq!(diff["article_id"], article);
+            assert_eq!(diff["title_db"], "Title A");
+            assert_eq!(diff["word_count_db"], 42);
+            assert_eq!(diff["word_count_replay"], 40);
+            assert_eq!(diff["content_hash_match"], true);
+        }
+        let changed = html_diff(&pool, &first.to_string(), "hash-b", 42)
+            .await
+            .expect("diff");
+        assert_eq!(changed["content_hash_match"], false);
+        for key in [orphan.to_string(), "https://example.com/first".to_string()] {
+            let diff = html_diff(&pool, &key, "hash-a", 42).await.expect("diff");
+            assert_eq!(diff["found"], false, "key {key}");
+        }
     }
 }
