@@ -80,6 +80,9 @@ AI 计数说明、Docker host 网络前提）与 1 项 NEEDS_VERIFICATION（多�
   Laya 从不判技术价值最低档（193 篇里 0 篇）。
 - 原因（已核实来源）：Laya 模型卡写明 `english` / `multilingual` 是零样本基座，官方基准准确率 0.362 / 0.342（随机 0.318），
   定位是 "a fast base to specialise, not a zero-shot decision engine"。只有微调过的 `typed-decisions` 到 0.766。
+- Jev（`jev-1.13.0`，同 5 道题、同截断）：193 篇 0 失败，共 294,642 input token（第三方报价约 $0.04 / 百万，约 1 美分），平均 0.53 s。
+  对 Sonnet：营销 AUC 0.89 / 0.90 / 0.91（三种问法），技术价值 Spearman 0.80、QWK 0.74（英文题 0.78 / 0.70）；中文子集反而更高
+  （营销 0.94–0.98，QWK 0.79）。档位分布 47 / 88 / 49 / 9，与 LLM 接近。**是目前唯一接近 LLM 间一致度的判断模型。**
 - GLiNER2.5（Fastino，Apache 2.0，本地 CPU 推理，`gliner2` 2.1.0）同样数据、两种写法（只给题目和档位名 / 附 LLM 细则）。对 Sonnet：
   - `GLiNER2.5-multi-Decide`（287M，全量）：营销 AUC 0.74（中文 0.88）；技术价值 Spearman 0.31，但 argmax 偏向最高档。
   - `GLiNER2.5-Decide`（340M，仅英文 117 篇）：技术价值 Spearman 0.52（Laya 在同一子集为 −0.06）；
@@ -87,6 +90,7 @@ AI 计数说明、Docker host 网络前提）与 1 项 NEEDS_VERIFICATION（多�
   - 两者都比 Laya 好，但离 LLM 之间的一致度仍远，且概率未校准；要用于过滤仍需微调或阈值拟合。
 - 运维发现：
   - Laya 前的 1Panel WAF 会拦正文含 `curl … http://127.0.0.1…` 的请求（HTTP 403 拦截页）。客户端把 403 当 `Unauthorized`，
-    整轮停止并把该行退回 pending，下次运行又先领到同一篇，**生产上会因一篇文章卡住**。修法要区分"WAF 拦截"与"key 无效"，未改。
+    整轮停止并把该行退回 pending，下次运行又先领到同一篇，**生产上会因一篇文章卡住**。
+    已修：403 改归 `HttpStatus`（计次、退出码 1，最多卡 `max_attempts` 次运行），见 ADR 0011 §10 的 2026-11-16 修订。
   - 远端 Laya 处理 4000 字以上中文正文时先超时、后 502（推断为内存不足）。本地 arm64 自建镜像（laya-server v0.1.2）单并发峰值 2.07 GB，
     193 篇无失败，输出与远端一致（概率差 ≤ 1e-4）。
