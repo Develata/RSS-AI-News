@@ -107,3 +107,15 @@ D-008 改代码使 `--date-to` 含当天；rustdoc `-D warnings` 进 static lane
 - 入口：`crates/runtime/src/artifact.rs::waits_for_outcome`、`flows/ingest.rs`、`flows/extract.rs`、
   `crates/cli/src/commands/backfill.rs::parse_date_to`、`tools/acceptance/src/runner/lanes/static_checks.rs`。
 - 契约：plan/01 §7、plan/02 §5–§7、plan/10 §3 / §5、architecture-diff D-007 / D-008。
+
+## 2026-11-16 追加：遗留项处理（Develata 确认按推荐处理）
+
+- 已做：scheduler 镜像不再导出从未被读取的 `scope=scheduler` 缓存（`0c3f47f`）；删除零调用的
+  `ClassifiedError::display_debug`（trait + 9 个实现，plan/11 同步，`532949d`）。
+- 去重 artifact：不改语义，写入 plan/02 §4（先写者为准，新 artifact 只按 feed entry 关联）。审查时暴露既有缺陷：
+  `replay --kind html --diff` 用 feed entry id 去匹配 `canonical_link`，永远 `found: false`；`--id` 不校验 artifact 类型。
+  均已修（`dfc4540`），PG 16 上用真实迁移验证了查询（含 > int32 的 id、去重 entry、孤立 entry）。
+- 维持现状：storage 仅测试使用的 trait 方法、domain 未引用的对象层类型（需设计决定）、`PublishRequest` 预留字段、
+  `build_frontmatter`（其测试锁定 `yaml_escape` 的引号规则）。
+- codex-reviewer（gpt-6-astra，medium）两轮：无 BLOCKER；采纳 3 项 SHOULD_FIX、1 项 NICE_TO_HAVE（diff 输出 `article_id`）；
+  "公开 trait 删方法的 SemVer 影响"经核实这些 crate 未发布到 crates.io，仅仓库内使用。
