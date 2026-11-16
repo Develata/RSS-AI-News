@@ -58,7 +58,6 @@ trait ClassifiedError {
     fn is_retryable(&self) -> bool;
     fn error_kind(&self) -> &str;       // 存入 last_error_kind 列
     fn display_user(&self) -> String;   // CLI 用户可读
-    fn display_debug(&self) -> String;  // 日志/诊断详情
 }
 ```
 
@@ -67,7 +66,7 @@ trait ClassifiedError {
 - `error_kind()` — 短字符串（如 `"http_timeout"` / `"parse_failed"`），写入数据库 `last_error_kind`
   列，便于聚合分析
 - `display_user()` — 用户友好的简短消息，不暴露内部路径
-- `display_debug()` — 完整 chain，含 source error 与上下文
+- 不再有 `display_debug()`（2026-11-16 删除：9 个实现从未被调用）；调试详情走各 enum 的 `Debug` 与日志
 
 ## 3. 失败路径分类
 

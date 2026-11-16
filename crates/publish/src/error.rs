@@ -51,8 +51,4 @@ impl ClassifiedError for PublishError {
     fn display_user(&self) -> String {
         format!("{self}")
     }
-
-    fn display_debug(&self) -> String {
-        format!("{self:?}")
-    }
 }

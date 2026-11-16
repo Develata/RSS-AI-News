@@ -94,10 +94,6 @@ impl ClassifiedError for DecisionError {
     fn display_user(&self) -> String {
         self.to_string()
     }
-
-    fn display_debug(&self) -> String {
-        format!("{self:?}")
-    }
 }
 
 /// Map a non-2xx status. `code` is already allow-listed by the caller.

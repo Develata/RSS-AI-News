@@ -59,10 +59,6 @@ impl ClassifiedError for StorageError {
     fn display_user(&self) -> String {
         format!("{self}")
     }
-
-    fn display_debug(&self) -> String {
-        format!("{self:?}")
-    }
 }
 
 /// W11-P3-B / fix1：多方言数据库错误分类。

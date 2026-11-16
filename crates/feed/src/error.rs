@@ -58,21 +58,6 @@ impl ClassifiedError for FeedError {
             Self::InvalidUrl { .. } => "Feed URL 无效".to_string(),
         }
     }
-
-    fn display_debug(&self) -> String {
-        match self {
-            Self::HttpTimeout => "FeedError::HttpTimeout".to_string(),
-            Self::HttpStatus { code } => format!("FeedError::HttpStatus {{ code: {code} }}"),
-            Self::ConnectionFailed { source } => {
-                format!("FeedError::ConnectionFailed {{ source: {source} }}")
-            }
-            Self::ParseFailed { reason } => {
-                format!("FeedError::ParseFailed {{ reason: {reason} }}")
-            }
-            Self::TooLarge { bytes } => format!("FeedError::TooLarge {{ bytes: {bytes} }}"),
-            Self::InvalidUrl { url } => format!("FeedError::InvalidUrl {{ url: {url} }}"),
-        }
-    }
 }
 
 impl From<reqwest::Error> for FeedError {

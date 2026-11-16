@@ -115,10 +115,6 @@ impl ClassifiedError for AiError {
         };
         truncate_diagnostic(message, 16 * 1024)
     }
-
-    fn display_debug(&self) -> String {
-        format!("{self:?}")
-    }
 }
 
 pub(crate) fn classify_http_status(

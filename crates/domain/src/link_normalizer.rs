@@ -128,13 +128,6 @@ impl ClassifiedError for LinkNormalizeError {
             Self::UnsupportedScheme(_) => "链接协议不受支持".to_string(),
         }
     }
-
-    fn display_debug(&self) -> String {
-        match self {
-            Self::InvalidUrl(url) => format!("invalid URL: {url}"),
-            Self::UnsupportedScheme(scheme) => format!("unsupported URL scheme: {scheme}"),
-        }
-    }
 }
 
 #[cfg(test)]

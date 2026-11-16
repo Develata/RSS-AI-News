@@ -27,9 +27,6 @@ pub trait ClassifiedError {
 
     /// User-facing error message (CLI output).
     fn display_user(&self) -> String;
-
-    /// Debug-level error message (logs).
-    fn display_debug(&self) -> String;
 }
 
 /// Bound a diagnostic by UTF-8 bytes, including its truncation marker.
