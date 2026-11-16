@@ -68,3 +68,25 @@ AI 计数说明、Docker host 网络前提）与 1 项 NEEDS_VERIFICATION（多�
     （仅保留文章，55–92）两者都几乎不相关（≈0.07 / 0.10）。
 - 建议的下一步（待 Develata 决定）：重写 `q_marketing`（正向提问，填 yes / no 释义），会产生新的 policy_version，旧结果保留；
   跑一段时间后用同一导出再比一次。在此之前不宜让该题参与过滤。
+
+## 2026-11-16 追加：本地 A/B（题目语言与写法）与 GLiNER2.5 对照（探索性）
+
+数据与脚本都在会话 scratchpad，不进仓库；以下只记结论与可复现要点。
+
+- 样本：本地 SQLite 抓取 6 个源共 193 篇（英文 117：DeepMind 99、Google AI 18；中文 76：IT之家、雷锋网、InfoQ、量子位）。
+  参照为 Haiku 与 Sonnet 各自独立标注（同一细则、读 Laya 实际收到的前 6000 字），**不是人工标注**。两者一致：营销 κ 0.72、技术价值 QWK 0.88。
+- Laya（`multilingual`，2048）5 道题：中文原题、英文直译、正向提问加 yes/no 释义；技术价值中文、英文。对 Sonnet：
+  营销 AUC 0.56 / 0.62 / 0.65，技术价值 Spearman 0.22 / 0.06。换语言基本不改变 Laya 的判断（中英题 Spearman 0.80），只是和 LLM 对不上。
+  Laya 从不判技术价值最低档（193 篇里 0 篇）。
+- 原因（已核实来源）：Laya 模型卡写明 `english` / `multilingual` 是零样本基座，官方基准准确率 0.362 / 0.342（随机 0.318），
+  定位是 "a fast base to specialise, not a zero-shot decision engine"。只有微调过的 `typed-decisions` 到 0.766。
+- GLiNER2.5（Fastino，Apache 2.0，本地 CPU 推理，`gliner2` 2.1.0）同样数据、两种写法（只给题目和档位名 / 附 LLM 细则）。对 Sonnet：
+  - `GLiNER2.5-multi-Decide`（287M，全量）：营销 AUC 0.74（中文 0.88）；技术价值 Spearman 0.31，但 argmax 偏向最高档。
+  - `GLiNER2.5-Decide`（340M，仅英文 117 篇）：技术价值 Spearman 0.52（Laya 在同一子集为 −0.06）；
+    营销只给题目时 AUC 0.60，附细则后反向（0.28），说明对 label 描述很敏感。
+  - 两者都比 Laya 好，但离 LLM 之间的一致度仍远，且概率未校准；要用于过滤仍需微调或阈值拟合。
+- 运维发现：
+  - Laya 前的 1Panel WAF 会拦正文含 `curl … http://127.0.0.1…` 的请求（HTTP 403 拦截页）。客户端把 403 当 `Unauthorized`，
+    整轮停止并把该行退回 pending，下次运行又先领到同一篇，**生产上会因一篇文章卡住**。修法要区分"WAF 拦截"与"key 无效"，未改。
+  - 远端 Laya 处理 4000 字以上中文正文时先超时、后 502（推断为内存不足）。本地 arm64 自建镜像（laya-server v0.1.2）单并发峰值 2.07 GB，
+    193 篇无失败，输出与远端一致（概率差 ≤ 1e-4）。
