@@ -676,6 +676,21 @@ async fn every_status_maps_to_a_closed_error_class() {
         status(418, json!({})).await,
         DecisionError::HttpStatus { status: 418 }
     );
+    // A WAF in front of laya-server answers 403 with an HTML block page; it
+    // keeps its status and is no longer `Unauthorized` (ADR 0011 §10,
+    // 2026-11-16 revision).
+    let blocked = ask(
+        Provider::Laya,
+        "multilingual",
+        ResponseTemplate::new(403).set_body_raw(
+            "<!DOCTYPE html><html><head><title>blocked</title></head></html>",
+            "text/html",
+        ),
+    )
+    .await
+    .1
+    .unwrap_err();
+    assert_eq!(blocked, DecisionError::HttpStatus { status: 403 });
     assert_eq!(status(408, json!({})).await, DecisionError::RequestTimeout);
     for (header, seconds) in [
         ("7", Some(7)),

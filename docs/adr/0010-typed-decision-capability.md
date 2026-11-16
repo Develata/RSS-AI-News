@@ -166,7 +166,7 @@ pub trait DecisionClient: Send + Sync {
 
 | 情形 | 变体 | retryable 提示 |
 |---|---|---|
-| 401 / 403 | `Unauthorized` | 否 |
+| 401（2026-11-16 修订：原为 401 / 403） | `Unauthorized` | 否 |
 | 400 / 422 | `Rejected { status, code: Option }`：宽松解析 Laya 的 `detail.code` 或 Jev 的 `code` / `error` | 否 |
 | 413 | `PayloadTooLarge` | 否 |
 | 415 | `UnsupportedEncoding`（本项目不压缩请求，出现即实现缺陷） | 否 |
@@ -174,7 +174,7 @@ pub trait DecisionClient: Send + Sync {
 | 429 | `RateLimited { retry_after }` | 是 |
 | 503 / 529 | `Unavailable { status, code }`（Laya 的 503 也可能来自输入导致的确定性失败） | 是（仅提示） |
 | 其它 5xx | `Server { status }` | 是（仅提示） |
-| 其它非 2xx | `HttpStatus { status }` | 否 |
+| 其它非 2xx（含 403） | `HttpStatus { status }` | 否 |
 | 连接失败 | `Connection` | 是 |
 | 响应体超限 / 非 JSON / 校验失败 | `ResponseTooLarge` / `InvalidResponse { reason }` | 否 |
 | 配置错误 | `InvalidConfig` | 否 |

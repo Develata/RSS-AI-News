@@ -577,6 +577,48 @@ async fn suspected_configuration_errors_charge_the_trigger_and_exit_1() {
     assert_eq!(states(&pool).await, vec![("pending".to_string(), 1)]);
 }
 
+/// A 403 (`HttpStatus`, see the contract test for the mapping) is charged like
+/// any suspected configuration error, so the row reaches `max_attempts` and
+/// stops blocking later runs (ADR 0011 §10, 2026-11-16 revision). As
+/// `Unauthorized` it was refunded and claimed first forever.
+#[tokio::test]
+async fn a_blocked_article_is_charged_until_it_fails_and_stops_blocking() {
+    let (_dir, pool) = make_test_pool().await;
+    seed(&pool, "ai", 2).await;
+    let serial = DecisionRunSettings {
+        concurrency: 1,
+        ..settings()
+    };
+    let blocked = || Reply::Err(DecisionError::HttpStatus { status: 403 });
+    for attempt in 1..=3 {
+        let summary = run(
+            &pool,
+            ScriptedClient::new([blocked()]),
+            serial.clone(),
+            vec![plan("ai", questions())],
+            10,
+        )
+        .await;
+        assert_eq!(summary.exit_class(), 1, "attempt {attempt}");
+        assert_eq!(summary.calls, 1, "attempt {attempt}: the run stops");
+    }
+    let states_after_blocks = states(&pool).await;
+    assert_eq!(states_after_blocks[0], ("failed".to_string(), 3));
+    let summary = run(
+        &pool,
+        ScriptedClient::new([Reply::Ok]),
+        serial,
+        vec![plan("ai", questions())],
+        10,
+    )
+    .await;
+    assert_eq!(summary.exit_class(), 0);
+    assert_eq!(
+        states(&pool).await,
+        vec![("failed".to_string(), 3), ("succeeded".to_string(), 1)]
+    );
+}
+
 #[tokio::test]
 async fn raw_bodies_follow_the_policy() {
     for (policy, reply, expected) in [

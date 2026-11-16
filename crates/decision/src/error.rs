@@ -101,13 +101,20 @@ impl ClassifiedError for DecisionError {
 }
 
 /// Map a non-2xx status. `code` is already allow-listed by the caller.
+///
+/// Only 401 is treated as a rejected key. A 403 cannot tell an article-specific
+/// block (a WAF rejecting one body) from a global one (permission denied, an
+/// IP ban), so it falls through to `HttpStatus` and is charged: refunding it
+/// as `Unauthorized` let a blocked article be claimed first on every run and
+/// never reach `max_attempts`. The cost is that a lasting global 403 also
+/// spends row budgets (ADR 0011 §10, 2026-11-16 revision).
 pub(crate) fn classify_status(
     status: u16,
     code: Option<String>,
     retry_after_seconds: Option<u64>,
 ) -> DecisionError {
     match status {
-        401 | 403 => DecisionError::Unauthorized { status },
+        401 => DecisionError::Unauthorized { status },
         400 | 422 => DecisionError::Rejected { status, code },
         413 => DecisionError::PayloadTooLarge,
         415 => DecisionError::UnsupportedEncoding,
@@ -159,9 +166,14 @@ mod tests {
             classify_status(401, None, None),
             DecisionError::Unauthorized { status: 401 }
         );
+        // 403 is charged as `HttpStatus`, provider code or not (see `classify_status`).
         assert_eq!(
             classify_status(403, None, None),
-            DecisionError::Unauthorized { status: 403 }
+            DecisionError::HttpStatus { status: 403 }
+        );
+        assert_eq!(
+            classify_status(403, Some("CSRF_INVALID".into()), None),
+            DecisionError::HttpStatus { status: 403 }
         );
         assert!(matches!(
             classify_status(422, Some("VALIDATION_ERROR".into()), None),

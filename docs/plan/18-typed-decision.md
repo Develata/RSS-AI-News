@@ -97,7 +97,7 @@
 
 | HTTP / 情形 | `DecisionError` | retryable 提示 |
 |---|---|---|
-| 401 / 403 | `Unauthorized` | 否 |
+| 401（2026-11-16 修订：原为 401 / 403） | `Unauthorized` | 否 |
 | 400 / 422 | `Rejected { status, code }` | 否 |
 | 413 / 415 | `PayloadTooLarge` / `UnsupportedEncoding` | 否 |
 | 本地超时 | `Timeout { seconds }` | 是 |
@@ -105,7 +105,7 @@
 | 429 | `RateLimited { retry_after_seconds }`：只认 `Retry-After` 的十进制秒数（`1*DIGIT`）；HTTP-date、`+7`、溢出都记为无提示 | 是 |
 | 503 / 529 | `Unavailable { status, code }` | 是 |
 | 其它 5xx | `Server { status }` | 是 |
-| 其它非 2xx（含 3xx，不跟随） | `HttpStatus { status }` | 否 |
+| 其它非 2xx（含 403；含 3xx，不跟随） | `HttpStatus { status }` | 否 |
 | 连接失败 | `Connection` | 是 |
 | 响应体 > 1 MiB | `ResponseTooLarge` | 否 |
 | 非 2xx 的错误体超限、读取超时或中断 | 按 status 归类（`code` 记为无） | 同该 status |
