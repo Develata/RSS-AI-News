@@ -326,6 +326,55 @@ async fn jev_alias_accepts_any_reported_version_but_a_pin_must_match() {
     assert_invalid(result, "reported model");
 }
 
+/// Shaped like the response the OpenRouter System One API returned through
+/// new-api on 2026-11-17: its own model id plus `id`, `provider` and cost
+/// fields that TypeSafe does not send.
+fn jev_openrouter(model: &str) -> Value {
+    let mut body = jev_ok();
+    body["model"] = json!(model);
+    body["id"] = json!("gen-dec-1794919442-test");
+    body["provider"] = json!("TypeSafe");
+    body["usage"] = json!({
+        "input_tokens": 298, "output_tokens": 17, "cost": 0.000012516, "is_byok": false,
+        "cost_details": {"upstream_inference_cost": 0.000012516,
+                         "upstream_inference_prompt_cost": 0.000012516,
+                         "upstream_inference_completions_cost": 0}
+    });
+    body
+}
+
+#[tokio::test]
+async fn jev_accepts_openrouter_model_ids_and_keeps_them_as_reported() {
+    for (requested, reported) in [
+        ("jev-latest", "typesafe/jev-1.14-20261014"),
+        ("jev-1.13", "typesafe/jev-1.13-20260917"),
+    ] {
+        let (_server, result) = ask(
+            Provider::Jev,
+            requested,
+            ResponseTemplate::new(200).set_body_json(jev_openrouter(reported)),
+        )
+        .await;
+        let response = result.unwrap();
+        assert_eq!(response.execution.requested_model, requested);
+        assert_eq!(response.execution.reported_model, reported);
+        assert_eq!(response.usage.input_tokens, 298);
+    }
+    for (requested, reported) in [
+        ("jev-1.13.0", "typesafe/jev-1.13-20260917"),
+        ("jev-1.13", "typesafe/jev-1.14-20261014"),
+        ("jev-latest", "openai/jev-1.14"),
+    ] {
+        let (_server, result) = ask(
+            Provider::Jev,
+            requested,
+            ResponseTemplate::new(200).set_body_json(jev_openrouter(reported)),
+        )
+        .await;
+        assert_invalid(result, "reported model");
+    }
+}
+
 #[tokio::test]
 async fn state_body_is_cut_to_max_state_chars_on_a_char_boundary() {
     let server = serve(ResponseTemplate::new(200).set_body_json(laya_ok())).await;
@@ -1299,4 +1348,62 @@ async fn a_stored_body_revalidates_offline_to_the_same_result() {
         revalidate(Provider::Laya, "multilingual", Some(2048), "{}", &body),
         Err(DecisionError::InvalidConfig(_))
     ));
+}
+
+async fn jev_exchange(model: &str, template: ResponseTemplate) -> (MockServer, Exchange) {
+    let server = serve(template).await;
+    let qs = questions();
+    let exchange = client(Provider::Jev, &server.uri(), model, Duration::from_secs(5))
+        .decide(
+            &DecisionRequest {
+                title: "标题",
+                body: "正文",
+                questions: &qs,
+            },
+            deadline(),
+        )
+        .await;
+    (server, exchange)
+}
+
+#[tokio::test]
+async fn an_openrouter_body_revalidates_offline_and_a_reflected_key_is_still_caught() {
+    let reported = "typesafe/jev-1.14-20261014";
+    let (_server, exchange) = jev_exchange(
+        "jev-latest",
+        ResponseTemplate::new(200).set_body_json(jev_openrouter(reported)),
+    )
+    .await;
+    let online = exchange.result.unwrap();
+    let raw = exchange.raw.unwrap();
+    assert_eq!(raw.withheld, None);
+    let body = raw.body.unwrap();
+    let policy = canonical_policy(&questions(), 6000);
+    let offline = revalidate(Provider::Jev, "jev-latest", None, &policy, &body).unwrap();
+    assert_eq!(offline, online);
+    assert_eq!(offline.execution.reported_model, reported);
+
+    // The accepted OpenRouter form must not let a reflected key through,
+    // written plainly or JSON-escaped.
+    let escaped: String = KEY
+        .chars()
+        .map(|c| format!("\\u{:04x}", c as u32))
+        .collect();
+    let plain = jev_openrouter(&format!("typesafe/jev-{KEY}")).to_string();
+    let hidden = jev_openrouter("typesafe/jev-MARK")
+        .to_string()
+        .replacen("MARK", &escaped, 1);
+    for text in [plain, hidden] {
+        let (_server, exchange) = jev_exchange(
+            "jev-latest",
+            ResponseTemplate::new(200).set_body_raw(text, "application/json"),
+        )
+        .await;
+        assert_invalid(exchange.result, "reflects the credential");
+        let raw = exchange.raw.unwrap();
+        assert_eq!(
+            (raw.withheld, raw.body.is_some()),
+            (Some(Withheld::Credential), false)
+        );
+    }
 }

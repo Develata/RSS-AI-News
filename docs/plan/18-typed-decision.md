@@ -68,7 +68,9 @@
   - 问题 ≤ 50；instructions ≤ 2000 字符；score ≤ 50 档；`max_len` 512..=8192。
 - **响应**（失败即 `InvalidResponse`；原因是固定文本加问题 id，不回显 provider 内容）：
   - 顶层：
-    - Jev：用版本号时 `model` 须等于请求值，用别名时只要求 `jev-` 前缀；
+    - Jev：用版本号时 `model` 须等于请求值，用别名时只要求 `jev-` 前缀；另接受 OpenRouter 的 `typesafe/` 形式
+      （别名：`typesafe/jev-…`；版本号：`typesafe/<请求值>`，可带 `-YYYYMMDD`，`jev-1.13.0` 不对应 `typesafe/jev-1.13-…`），
+      规则见 [ADR 0010 §4](../adr/0010-typed-decision-capability.md) 的 2026-11-17 修订；
     - Laya：`routing.model` 必需且等于请求的检查点，`usage.truncated` 与 `usage.state_tokens_dropped` 必需；
       `usage.options` 中出现 `distinct < total`（选项塌缩）即拒绝。
   - answers：拒绝重复键；键集合与问题 id 完全相等；每个答案的 type 与问题一致。

@@ -131,6 +131,11 @@ pub trait DecisionClient: Send + Sync {
 - **顶层**：
   - `model` 为非空字符串；
   - Jev 用版本号时，`reported_model` 必须等于请求值；用别名时只要求 `jev-` 前缀；
+    （2026-11-17 修订：OpenRouter 的 System One API 报告自己的模型 id，如 `typesafe/jev-1.14-20261014`。
+    别名也接受 `typesafe/jev-…`；版本号也接受 `typesafe/<请求值>` 及其后跟 `-YYYYMMDD` 的形式，
+    即 `jev-1.13` 匹配 `typesafe/jev-1.13-20260917`。`jev-1.13.0` 不匹配，不猜测两家版本号的对应。
+    `reported_model` 按原样保存，可据此区分上游与实际版本。经 new-api 网关走 OpenRouter 时，旧规则会把
+    每篇判为 `InvalidResponse`（单篇永久失败）。）
   - Laya 的 `routing.model` 必须等于请求的检查点名；
   - `usage.input_tokens` 为非负整数；Laya 必须有 `truncated`（bool）与 `state_tokens_dropped`（非负整数）。
 - **answers**：
