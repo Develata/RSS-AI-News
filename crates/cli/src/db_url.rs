@@ -8,17 +8,41 @@
 use std::path::Path;
 
 use rss_ai_news_config::{ConfigError, DatabaseDriver, Diagnostic, DiagnosticReport, LoadedConfig};
-use rss_ai_news_storage::StoragePool;
+use rss_ai_news_storage::{
+    PG_HOSTADDR_UNSUPPORTED, StoragePool, pg_hostaddr_in_use, pghostaddr_set,
+};
 
 use crate::error::CliError;
 
 /// 返回最终用于 [`StoragePool::build`] 的 URL，失败给出明确诊断。
 pub fn resolve_storage_url(loaded: &LoadedConfig) -> Result<String, CliError> {
-    resolve_storage_url_parts(
+    let url = resolve_storage_url_parts(
         loaded.app.database.driver,
         loaded.env.database_url.as_deref(),
         &loaded.app.database.sqlite_path,
-    )
+    )?;
+    reject_pg_hostaddr(&url, pghostaddr_set())?;
+    Ok(url)
+}
+
+/// PostgreSQL 不支持 `hostaddr`（见 [`pg_hostaddr_in_use`]）：在配置阶段拒绝，
+/// exit 78，而不是等建池时以运行时错误失败。SQLite 不读这些设置，不检查。
+fn reject_pg_hostaddr(url: &str, pghostaddr_set: bool) -> Result<(), CliError> {
+    if !StoragePool::is_postgres_url(url) || !pg_hostaddr_in_use(url, pghostaddr_set) {
+        return Ok(());
+    }
+    let field_path = if pghostaddr_set {
+        "env.pghostaddr"
+    } else {
+        "env.database_url"
+    };
+    Err(CliError::Config(ConfigError::ValidationFailed {
+        report: DiagnosticReport::new(vec![Diagnostic::new(
+            "env",
+            field_path,
+            PG_HOSTADDR_UNSUPPORTED,
+        )]),
+    }))
 }
 
 /// 字段级版本，便于单测不构造完整 [`LoadedConfig`]。空白 / 空字符串 URL
@@ -176,6 +200,38 @@ mod tests {
             }
             other => panic!("expected Config::ValidationFailed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pg_hostaddr_is_a_config_error_without_secrets() {
+        let plain = "postgres://private_user:private_password@db.example/news";
+        let with_param = format!("{plain}?hostaddr=10.0.0.9");
+        for (url, pghostaddr_set, field) in [
+            (plain, true, "env.pghostaddr"),
+            (with_param.as_str(), false, "env.database_url"),
+            (with_param.as_str(), true, "env.pghostaddr"),
+        ] {
+            let error = reject_pg_hostaddr(url, pghostaddr_set).unwrap_err();
+            assert!(matches!(
+                error.exit_code(),
+                crate::exit_code::ExitCode::ConfigError
+            ));
+            let CliError::Config(ConfigError::ValidationFailed { report }) = &error else {
+                panic!("expected Config::ValidationFailed, got {error:?}");
+            };
+            assert_eq!(report.diagnostics[0].field_path, field);
+            let diagnostic = format!("{error:?} {}", error.display_user());
+            for secret in ["private_user", "private_password"] {
+                assert!(!diagnostic.contains(secret), "{diagnostic}");
+            }
+        }
+    }
+
+    #[test]
+    fn pg_without_hostaddr_and_sqlite_pass_the_hostaddr_check() {
+        reject_pg_hostaddr("postgres://u:p@db.example/news", false).unwrap();
+        reject_pg_hostaddr("sqlite://data/news.db", true).unwrap();
+        reject_pg_hostaddr("data/news.db?hostaddr=10.0.0.9", true).unwrap();
     }
 
     #[test]

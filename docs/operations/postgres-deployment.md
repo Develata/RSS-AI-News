@@ -38,9 +38,9 @@ DATABASE_URL=postgres://rss_ai:<password>@db-host:5432/rss_ai_news
 
 `DATABASE_URL` 优先于 `app.toml [database].sqlite_path`，由 `crates/cli/src/db_url.rs` 解析。
 
-不要依赖环境变量 `PGHOSTADDR`。SQLx 0.9（v0.10.3 起）会优先连接 `PGHOSTADDR` 而不是 URL 里的 host，所以只要它非空、
-而 `DATABASE_URL` 没有 `hostaddr` 参数，建连接池时就直接报错。需要固定 IP 时写进 URL，例如
-`postgres://rss_ai:<password>@db-host:5432/rss_ai_news?hostaddr=10.0.0.5`；否则取消该变量。
+不支持 `hostaddr`，包括环境变量 `PGHOSTADDR`（任何值，包括空串）和 `DATABASE_URL` 的 `hostaddr` 参数。
+SQLx 0.9（v0.10.3 起）对它的路由与早先版本不同，可能连到另一台服务器，所以出现其中任何一个时，CLI 都按配置错误退出（exit 78）。
+需要固定 IP 时，直接把 IP 写在 URL 的 host 部分，例如 `postgres://rss_ai:<password>@10.0.0.5:5432/rss_ai_news`。
 
 ### 3. 改 app.toml
 

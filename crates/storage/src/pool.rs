@@ -183,41 +183,45 @@ pub async fn build_pg_pool(url: &str, max_connections: u32) -> Result<PgPool, St
         .map_err(StorageError::from)
 }
 
-/// 两个 PG 建池入口共用的连接选项：解析 URL，并拒绝隐式的 `PGHOSTADDR`。
+/// 两个 PG 建池入口共用的连接选项：先拒绝 `hostaddr`，再解析 URL。
+///
+/// CLI 在配置阶段已做同样的检查（exit 78）；这里是 storage 层自己的防线。
 fn pg_connect_options(url: &str) -> Result<PgConnectOptions, StorageError> {
-    // FromStr 实现解析 user:password@host:port/db 等 URL 字段，password 不进 Debug 输出。
-    let options = PgConnectOptions::from_str(url).map_err(StorageError::from)?;
-    reject_implicit_pghostaddr(url, std::env::var("PGHOSTADDR").ok().as_deref())?;
-    Ok(options)
+    if pg_hostaddr_in_use(url, pghostaddr_set()) {
+        return Err(StorageError::Sqlx(sqlx::Error::Configuration(
+            PG_HOSTADDR_UNSUPPORTED.into(),
+        )));
+    }
+    PgConnectOptions::from_str(url).map_err(StorageError::from)
 }
 
-/// 环境里有 `PGHOSTADDR`、而 `DATABASE_URL` 没有显式写 `hostaddr` 参数时拒绝连接。
+/// 用到 `hostaddr` 时的固定报错文本。不含任何环境值或 URL，避免带出凭据。
+pub const PG_HOSTADDR_UNSUPPORTED: &str = "PGHOSTADDR and the hostaddr connection parameter \
+    are not supported: SQLx 0.9 routes them differently from earlier releases and may reach \
+    another server. Unset PGHOSTADDR and remove hostaddr from DATABASE_URL; put the server \
+    address in the URL host";
+
+/// 是否用到了 `hostaddr`：环境里有 `PGHOSTADDR`（任何值，包括空串），或 URL 带
+/// `hostaddr` 参数。用到时一律拒绝连接。
 ///
-/// SQLx 0.9 把 `PGHOSTADDR` 存为单独的 `hostaddr`，TCP 连接时优先用它（libpq 语义）；
-/// 0.8 把它当作 host，URL 里的 host 会覆盖它。不检查的话，升级后同一个 `DATABASE_URL`
-/// 可能静默连到另一台服务器。没有清除 `hostaddr` 的 API，无法原样恢复旧行为，所以 fail
-/// closed：操作者要么取消 `PGHOSTADDR`，要么在 URL 里写 `hostaddr=<ip>` 表明意图（URL
-/// 参数优先于环境变量）。空值视为未设置。
+/// SQLx 0.8 把 `hostaddr` 当作 host：`PGHOSTADDR` 会被 URL 里的 host 覆盖，空串也会
+/// 顶替 `PGHOST`；URL 参数 `hostaddr` 走 TCP。SQLx 0.9 把它存为单独的字段，TCP 连接
+/// 时优先用它，但 socket 路由（`PGHOST` 或 URL host 指向目录）又优先于它。这些组合下
+/// 两版会连到不同的服务器，而 SQLx 0.9 没有清除该字段的接口，无法原样恢复旧行为。
+/// 不涉及 `hostaddr` 时，两版的 host / socket 解析逐行相同。
 ///
-/// 环境值作为参数传入而不是在函数里读取，测试因此不必修改进程环境（edition 2024 中
-/// `set_var` 是 `unsafe`，并且与并行测试互相干扰）。错误信息不含 URL，避免带出密码。
-fn reject_implicit_pghostaddr(url: &str, pghostaddr: Option<&str>) -> Result<(), StorageError> {
-    let Some(pghostaddr) = pghostaddr.filter(|value| !value.is_empty()) else {
-        return Ok(());
-    };
-    let explicit_hostaddr = url::Url::parse(url)
-        .is_ok_and(|parsed| parsed.query_pairs().any(|(key, _)| key == "hostaddr"));
-    if explicit_hostaddr {
-        return Ok(());
-    }
-    Err(StorageError::Sqlx(sqlx::Error::Configuration(
-        format!(
-            "PGHOSTADDR is set ({pghostaddr}) but DATABASE_URL has no hostaddr parameter; \
-             SQLx would connect to PGHOSTADDR instead of the host in DATABASE_URL. \
-             Unset PGHOSTADDR, or add hostaddr=<ip> to DATABASE_URL"
-        )
-        .into(),
-    )))
+/// 环境状态作为参数传入，测试因此不必修改进程环境（edition 2024 中 `set_var` 是
+/// `unsafe`，并与并行测试互相干扰）。URL 无法解析时返回 `false`，由 SQLx 报格式错误。
+pub fn pg_hostaddr_in_use(url: &str, pghostaddr_set: bool) -> bool {
+    pghostaddr_set
+        || url::Url::parse(url)
+            .is_ok_and(|parsed| parsed.query_pairs().any(|(key, _)| key == "hostaddr"))
+}
+
+/// 进程环境里是否有 `PGHOSTADDR`，即 SQLx 读取的同一个环境。用 `var_os`，非 UTF-8 的值
+/// 也算设置。
+pub fn pghostaddr_set() -> bool {
+    std::env::var_os("PGHOSTADDR").is_some()
 }
 
 async fn build_pg_read_only_pool(url: &str) -> Result<PgPool, StorageError> {
@@ -268,39 +272,46 @@ mod tests {
     const PG_URL: &str = "postgres://user:secret@db.example:5432/news";
 
     #[test]
-    fn pghostaddr_unset_or_empty_is_allowed() {
-        reject_implicit_pghostaddr(PG_URL, None).unwrap();
-        reject_implicit_pghostaddr(PG_URL, Some("")).unwrap();
-    }
-
-    /// SQLx 0.9 would route these to PGHOSTADDR instead of the URL host (or, with
-    /// no URL host, differently from SQLx 0.8); refuse without echoing the URL.
-    #[test]
-    fn implicit_pghostaddr_is_rejected_without_leaking_the_url() {
+    fn urls_without_hostaddr_are_allowed_when_pghostaddr_is_unset() {
         for url in [
             PG_URL,
             "postgres:///news",
-            "postgres://user:secret@db.example/news?host=other.example",
+            "postgres:///news?host=/var/run/postgresql",
+            "postgres://user:secret@db.example/news?sslmode=require&host=other.example",
+            "not a url",
         ] {
-            for pghostaddr in ["10.0.0.9", "not-an-ip"] {
-                let error = reject_implicit_pghostaddr(url, Some(pghostaddr)).unwrap_err();
-                let message = error.to_string();
-                assert!(message.contains("PGHOSTADDR"), "{message}");
-                assert!(message.contains("hostaddr="), "{message}");
-                assert!(!message.contains("secret"), "{message}");
-                assert!(!error.is_retryable());
-            }
+            assert!(!pg_hostaddr_in_use(url, false), "{url}");
         }
     }
 
+    /// Any PGHOSTADDR (even empty) or URL hostaddr routes differently under
+    /// SQLx 0.9 than under 0.8 for some PGHOST / URL host combination.
     #[test]
-    fn explicit_hostaddr_in_url_is_allowed_with_pghostaddr() {
+    fn pghostaddr_or_url_hostaddr_is_in_use() {
+        for url in [PG_URL, "postgres:///news", "postgres:///news?host=/tmp"] {
+            assert!(pg_hostaddr_in_use(url, true), "{url}");
+        }
         for url in [
             format!("{PG_URL}?hostaddr=10.0.0.9"),
             format!("{PG_URL}?sslmode=require&hostaddr=10.0.0.9"),
+            "postgres:///news?host=/tmp&hostaddr=10.0.0.9".to_string(),
+            // query keys are percent-decoded, as SQLx decodes them
+            format!("{PG_URL}?host%61ddr=10.0.0.9"),
         ] {
-            reject_implicit_pghostaddr(&url, Some("10.0.0.7")).unwrap();
+            assert!(pg_hostaddr_in_use(&url, false), "{url}");
         }
+    }
+
+    /// The builder refuses before any network I/O and never echoes the URL.
+    #[tokio::test]
+    async fn pg_pool_with_url_hostaddr_is_refused_without_leaking_the_url() {
+        let error = build_pg_pool(&format!("{PG_URL}?hostaddr=10.0.0.9"), 1)
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(PG_HOSTADDR_UNSUPPORTED), "{message}");
+        assert!(!message.contains("secret"), "{message}");
+        assert!(!error.is_retryable());
     }
 
     #[test]
