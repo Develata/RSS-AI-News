@@ -263,25 +263,27 @@ mod tests {
         assert!(of_kind(None, ReplayKind::Html).is_none());
     }
 
-    async fn insert_id(pool: &SqlitePool, sql: &str) -> i64 {
-        // AssertSqlSafe：测试夹具，SQL 由本模块写死的 format! 生成。
-        sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
+    async fn insert_id(pool: &SqlitePool, sql: &'static str) -> i64 {
+        sqlx::query_scalar::<_, i64>(sql)
             .fetch_one(pool)
             .await
             .expect("fixture row should insert")
     }
 
     async fn insert_entry(pool: &SqlitePool, source: i64, uid: &str) -> i64 {
-        insert_id(
-            pool,
-            &format!(
-                "INSERT INTO feed_entries (source_id, feed_entry_uid, normalized_link, link_hash, \
-                 title_raw, discovered_at, state, dedup_decision) VALUES ({source}, '{uid}', \
-                 'https://example.com/{uid}', 'hash-{uid}', 'title {uid}', CURRENT_TIMESTAMP, \
-                 'pending_fetch', 'fresh') RETURNING id"
-            ),
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO feed_entries (source_id, feed_entry_uid, normalized_link, link_hash, \
+             title_raw, discovered_at, state, dedup_decision) VALUES (?, ?, ?, ?, ?, \
+             CURRENT_TIMESTAMP, 'pending_fetch', 'fresh') RETURNING id",
         )
+        .bind(source)
+        .bind(uid)
+        .bind(format!("https://example.com/{uid}"))
+        .bind(format!("hash-{uid}"))
+        .bind(format!("title {uid}"))
+        .fetch_one(pool)
         .await
+        .expect("fixture entry should insert")
     }
 
     /// The artifact key is a feed entry id; the diff must reach the article
@@ -307,29 +309,29 @@ mod tests {
              VALUES ('extractor_fixture', 'ext', 'test', 'sha-ext') RETURNING id",
         )
         .await;
-        let source = insert_id(
-            &sqlite,
-            &format!(
-                "INSERT INTO feed_sources (category_key, source_key, display_name, feed_url, \
-                 feed_kind, config_version) VALUES ('ai', 's', 'S', 'https://example.com/f.xml', \
-                 'rss', {config}) RETURNING id"
-            ),
+        let source = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO feed_sources (category_key, source_key, display_name, feed_url, \
+             feed_kind, config_version) VALUES ('ai', 's', 'S', 'https://example.com/f.xml', \
+             'rss', ?) RETURNING id",
         )
-        .await;
+        .bind(config)
+        .fetch_one(&sqlite)
+        .await
+        .expect("fixture source should insert");
         let first = insert_entry(&sqlite, source, "first").await;
         let dedup = insert_entry(&sqlite, source, "dedup").await;
         let orphan = insert_entry(&sqlite, source, "orphan").await;
-        let article = insert_id(
-            &sqlite,
-            &format!(
-                "INSERT INTO articles (content_hash, canonical_link, title, body_text, \
-                 extractor_strategy, extractor_version, content_quality, word_count, \
-                 origin_feed_entry_id, state) VALUES ('hash-a', 'https://example.com/first', \
-                 'Title A', 'body', 'readability', {extractor}, 'high', 42, {first}, 'persisted') \
-                 RETURNING id"
-            ),
+        let article = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO articles (content_hash, canonical_link, title, body_text, \
+             extractor_strategy, extractor_version, content_quality, word_count, \
+             origin_feed_entry_id, state) VALUES ('hash-a', 'https://example.com/first', \
+             'Title A', 'body', 'readability', ?, 'high', 42, ?, 'persisted') RETURNING id",
         )
-        .await;
+        .bind(extractor)
+        .bind(first)
+        .fetch_one(&sqlite)
+        .await
+        .expect("fixture article should insert");
         sqlx::query("UPDATE feed_entries SET article_id = ? WHERE id IN (?, ?)")
             .bind(article)
             .bind(first)

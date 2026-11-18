@@ -6,8 +6,8 @@
 
 /// reindex_jobs 的 SELECT 列清单。写成宏而非 const，是为了让下面的 SELECT
 /// 能用 `concat!` 在编译期拼成 `&'static str`：SQLx 0.9 的 `query*()` 只收
-/// `SqlSafeStr`（`&'static str` 或显式 `AssertSqlSafe`），运行期 `format!`
-/// 出来的 `String` 不再被接受。
+/// `SqlSafeStr`（例如 `&'static str`），运行期 `format!` 出来的 `String`
+/// 不再被接受。拼出的 SQL 与旧 `format!` 版本只差空白，查询语义相同。
 macro_rules! select_reindex_job_columns {
     () => {
         "id, target, rule_version_id, last_processed_id, total_estimated, \
