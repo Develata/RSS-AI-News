@@ -3,10 +3,5 @@
 # audit workflows run plain `cargo audit`, which reads this file.
 
 [advisories]
-ignore = [
-    # rsa (Marvin attack), no fixed release. rsa stays only in the lockfile's
-    # inactive optional graph (octocrab jwt-rust-crypto, disabled in
-    # Cargo.toml); .ci/check_dependency_security_policy.sh fails if a feature
-    # change activates it. Revisit when rsa ships a fix.
-    "RUSTSEC-2023-0071",
-]
+# No advisory is currently accepted.
+ignore = []
