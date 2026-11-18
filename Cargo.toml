@@ -53,7 +53,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signa
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "json"] }
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "time", "migrate"] }
+sqlx = { version = "0.9.1", features = ["runtime-tokio", "sqlite", "postgres", "time", "migrate"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

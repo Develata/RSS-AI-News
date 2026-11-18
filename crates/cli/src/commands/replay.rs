@@ -264,7 +264,8 @@ mod tests {
     }
 
     async fn insert_id(pool: &SqlitePool, sql: &str) -> i64 {
-        sqlx::query_scalar::<_, i64>(sql)
+        // AssertSqlSafe：测试夹具，SQL 由本模块写死的 format! 生成。
+        sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
             .fetch_one(pool)
             .await
             .expect("fixture row should insert")

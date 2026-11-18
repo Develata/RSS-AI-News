@@ -16,9 +16,10 @@ use super::reindex_job::{
 use super::reindex_job_sql::{
     ABORT_SQL, ADVANCE_CHECKPOINT_SQL, ADVANCE_TO_COMPLETED_SQL, ASSERT_LEASE_HELD_SQL,
     CLAIM_BY_ID_PG_SQL, CLAIM_PENDING_PG_SQL, COMPLETE_WITHOUT_CLAIM_SQL,
+    FIND_ACTIVE_REINDEX_JOB_BY_TARGET_SQL, FIND_REINDEX_JOB_BY_ID_SQL,
     FINISH_REINDEX_DEMOTE_ACTIVE_SQL, FINISH_REINDEX_PROMOTE_PENDING_SQL,
     FINISH_REINDEX_UPDATE_JOB_SQL, INSERT_REINDEX_JOB_PENDING_SQL, INSERT_RULE_VERSION_PENDING_SQL,
-    MARK_FAILED_SQL, RECLAIM_EXPIRED_LEASES_SQL, SELECT_REINDEX_JOB_COLUMNS,
+    LIST_RUNNING_REINDEX_JOBS_SQL, MARK_FAILED_SQL, RECLAIM_EXPIRED_LEASES_SQL,
 };
 
 pub(super) async fn pg_start_reindex_tx(
@@ -298,13 +299,7 @@ pub(super) async fn pg_reclaim_expired_leases(
 }
 
 pub(super) async fn pg_list_running(pool: &PgPool) -> Result<Vec<ReindexJob>, StorageError> {
-    let sql = format!(
-        "SELECT {SELECT_REINDEX_JOB_COLUMNS} \
-         FROM reindex_jobs \
-         WHERE state IN ('pending', 'running') \
-         ORDER BY id ASC"
-    );
-    sqlx::query_as::<_, ReindexJob>(&sql)
+    sqlx::query_as::<_, ReindexJob>(LIST_RUNNING_REINDEX_JOBS_SQL)
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)
@@ -314,9 +309,7 @@ pub(super) async fn pg_find_by_id(
     pool: &PgPool,
     id: i64,
 ) -> Result<Option<ReindexJob>, StorageError> {
-    let sql =
-        format!("SELECT {SELECT_REINDEX_JOB_COLUMNS} FROM reindex_jobs WHERE id = $1 LIMIT 1");
-    sqlx::query_as::<_, ReindexJob>(&sql)
+    sqlx::query_as::<_, ReindexJob>(FIND_REINDEX_JOB_BY_ID_SQL)
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -327,13 +320,7 @@ pub(super) async fn pg_find_active_by_target(
     pool: &PgPool,
     target: &str,
 ) -> Result<Option<ReindexJob>, StorageError> {
-    let sql = format!(
-        "SELECT {SELECT_REINDEX_JOB_COLUMNS} \
-         FROM reindex_jobs \
-         WHERE target = $1 AND state IN ('pending', 'running') \
-         LIMIT 1"
-    );
-    sqlx::query_as::<_, ReindexJob>(&sql)
+    sqlx::query_as::<_, ReindexJob>(FIND_ACTIVE_REINDEX_JOB_BY_TARGET_SQL)
         .bind(target)
         .fetch_optional(pool)
         .await

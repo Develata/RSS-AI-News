@@ -324,7 +324,8 @@ async fn recent_entries_query_plan_uses_existing_indexes() {
     }
 
     let explain = format!("EXPLAIN QUERY PLAN {RECENT_ENTRIES_SQLITE_QUERY_FOR_DIAGNOSTICS}");
-    let plan = sqlx::query_as::<_, (i64, i64, i64, String)>(&explain)
+    // AssertSqlSafe：只拼接编译期常量 SQL。
+    let plan = sqlx::query_as::<_, (i64, i64, i64, String)>(sqlx::AssertSqlSafe(explain))
         .bind("daily-math")
         .bind(fixed_time(0) - Duration::days(1))
         .bind(0_i64)
