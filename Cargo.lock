@@ -3051,6 +3051,7 @@ dependencies = [
  "time",
  "tokio",
  "ulid",
+ "url",
 ]
 
 [[package]]

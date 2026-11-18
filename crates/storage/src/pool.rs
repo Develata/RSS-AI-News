@@ -174,8 +174,7 @@ pub const PG_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// 超时上限：参见 [`PG_ACQUIRE_TIMEOUT`]。
 pub async fn build_pg_pool(url: &str, max_connections: u32) -> Result<PgPool, StorageError> {
-    // FromStr 实现解析 user:password@host:port/db 等 URL 字段，password 不进 Debug 输出。
-    let options = PgConnectOptions::from_str(url).map_err(StorageError::from)?;
+    let options = pg_connect_options(url)?;
     PgPoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(PG_ACQUIRE_TIMEOUT)
@@ -184,8 +183,45 @@ pub async fn build_pg_pool(url: &str, max_connections: u32) -> Result<PgPool, St
         .map_err(StorageError::from)
 }
 
-async fn build_pg_read_only_pool(url: &str) -> Result<PgPool, StorageError> {
+/// 两个 PG 建池入口共用的连接选项：解析 URL，并拒绝隐式的 `PGHOSTADDR`。
+fn pg_connect_options(url: &str) -> Result<PgConnectOptions, StorageError> {
+    // FromStr 实现解析 user:password@host:port/db 等 URL 字段，password 不进 Debug 输出。
     let options = PgConnectOptions::from_str(url).map_err(StorageError::from)?;
+    reject_implicit_pghostaddr(url, std::env::var("PGHOSTADDR").ok().as_deref())?;
+    Ok(options)
+}
+
+/// 环境里有 `PGHOSTADDR`、而 `DATABASE_URL` 没有显式写 `hostaddr` 参数时拒绝连接。
+///
+/// SQLx 0.9 把 `PGHOSTADDR` 存为单独的 `hostaddr`，TCP 连接时优先用它（libpq 语义）；
+/// 0.8 把它当作 host，URL 里的 host 会覆盖它。不检查的话，升级后同一个 `DATABASE_URL`
+/// 可能静默连到另一台服务器。没有清除 `hostaddr` 的 API，无法原样恢复旧行为，所以 fail
+/// closed：操作者要么取消 `PGHOSTADDR`，要么在 URL 里写 `hostaddr=<ip>` 表明意图（URL
+/// 参数优先于环境变量）。空值视为未设置。
+///
+/// 环境值作为参数传入而不是在函数里读取，测试因此不必修改进程环境（edition 2024 中
+/// `set_var` 是 `unsafe`，并且与并行测试互相干扰）。错误信息不含 URL，避免带出密码。
+fn reject_implicit_pghostaddr(url: &str, pghostaddr: Option<&str>) -> Result<(), StorageError> {
+    let Some(pghostaddr) = pghostaddr.filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let explicit_hostaddr = url::Url::parse(url)
+        .is_ok_and(|parsed| parsed.query_pairs().any(|(key, _)| key == "hostaddr"));
+    if explicit_hostaddr {
+        return Ok(());
+    }
+    Err(StorageError::Sqlx(sqlx::Error::Configuration(
+        format!(
+            "PGHOSTADDR is set ({pghostaddr}) but DATABASE_URL has no hostaddr parameter; \
+             SQLx would connect to PGHOSTADDR instead of the host in DATABASE_URL. \
+             Unset PGHOSTADDR, or add hostaddr=<ip> to DATABASE_URL"
+        )
+        .into(),
+    )))
+}
+
+async fn build_pg_read_only_pool(url: &str) -> Result<PgPool, StorageError> {
+    let options = pg_connect_options(url)?;
     PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(PG_ACQUIRE_TIMEOUT)
@@ -227,6 +263,44 @@ mod tests {
         assert!(!StoragePool::is_postgres_url(""));
         assert!(!StoragePool::is_postgres_url("postgr://x")); // 前缀不全
         assert!(!StoragePool::is_postgres_url("mysql://x"));
+    }
+
+    const PG_URL: &str = "postgres://user:secret@db.example:5432/news";
+
+    #[test]
+    fn pghostaddr_unset_or_empty_is_allowed() {
+        reject_implicit_pghostaddr(PG_URL, None).unwrap();
+        reject_implicit_pghostaddr(PG_URL, Some("")).unwrap();
+    }
+
+    /// SQLx 0.9 would route these to PGHOSTADDR instead of the URL host (or, with
+    /// no URL host, differently from SQLx 0.8); refuse without echoing the URL.
+    #[test]
+    fn implicit_pghostaddr_is_rejected_without_leaking_the_url() {
+        for url in [
+            PG_URL,
+            "postgres:///news",
+            "postgres://user:secret@db.example/news?host=other.example",
+        ] {
+            for pghostaddr in ["10.0.0.9", "not-an-ip"] {
+                let error = reject_implicit_pghostaddr(url, Some(pghostaddr)).unwrap_err();
+                let message = error.to_string();
+                assert!(message.contains("PGHOSTADDR"), "{message}");
+                assert!(message.contains("hostaddr="), "{message}");
+                assert!(!message.contains("secret"), "{message}");
+                assert!(!error.is_retryable());
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_hostaddr_in_url_is_allowed_with_pghostaddr() {
+        for url in [
+            format!("{PG_URL}?hostaddr=10.0.0.9"),
+            format!("{PG_URL}?sslmode=require&hostaddr=10.0.0.9"),
+        ] {
+            reject_implicit_pghostaddr(&url, Some("10.0.0.7")).unwrap();
+        }
     }
 
     #[test]
