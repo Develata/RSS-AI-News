@@ -4,11 +4,35 @@
 //! 外，所有 const 跨方言完全等价。const 由 [`super::reindex_job_impl`] 的
 //! sqlite_*/pg_* helper 共享。
 
-pub(super) const SELECT_REINDEX_JOB_COLUMNS: &str = r#"
-    id, target, rule_version_id, last_processed_id, total_estimated,
-    state, error, aborted_reason, lease_owner, lease_expires_at,
-    attempt_count, started_at, finished_at, created_at, updated_at
-"#;
+/// reindex_jobs 的 SELECT 列清单。写成宏而非 const，是为了让下面的 SELECT
+/// 能用 `concat!` 在编译期拼成 `&'static str`：SQLx 0.9 的 `query*()` 只收
+/// `SqlSafeStr`（例如 `&'static str`），运行期 `format!` 出来的 `String`
+/// 不再被接受。拼出的 SQL 与旧 `format!` 版本只差空白，查询语义相同。
+macro_rules! select_reindex_job_columns {
+    () => {
+        "id, target, rule_version_id, last_processed_id, total_estimated, \
+         state, error, aborted_reason, lease_owner, lease_expires_at, \
+         attempt_count, started_at, finished_at, created_at, updated_at"
+    };
+}
+
+pub(super) const LIST_RUNNING_REINDEX_JOBS_SQL: &str = concat!(
+    "SELECT ",
+    select_reindex_job_columns!(),
+    " FROM reindex_jobs WHERE state IN ('pending', 'running') ORDER BY id ASC"
+);
+
+pub(super) const FIND_REINDEX_JOB_BY_ID_SQL: &str = concat!(
+    "SELECT ",
+    select_reindex_job_columns!(),
+    " FROM reindex_jobs WHERE id = $1 LIMIT 1"
+);
+
+pub(super) const FIND_ACTIVE_REINDEX_JOB_BY_TARGET_SQL: &str = concat!(
+    "SELECT ",
+    select_reindex_job_columns!(),
+    " FROM reindex_jobs WHERE target = $1 AND state IN ('pending', 'running') LIMIT 1"
+);
 
 pub(super) const INSERT_RULE_VERSION_PENDING_SQL: &str = r#"
 INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status)

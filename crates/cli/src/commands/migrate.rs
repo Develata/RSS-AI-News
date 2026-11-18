@@ -210,7 +210,8 @@ mod tests {
             RETURNING id
             "#
         );
-        sqlx::query_scalar::<_, i64>(&sql)
+        // AssertSqlSafe：三个 clause 只取自上面 match 的固定字面量。
+        sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
             .bind(target)
             .bind(rule_id)
             .bind(state)

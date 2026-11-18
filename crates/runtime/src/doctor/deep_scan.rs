@@ -1,6 +1,6 @@
 use rss_ai_news_config::RetryConfig;
 use rss_ai_news_storage::{StorageError, StoragePool};
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -304,12 +304,17 @@ async fn run_spec(
     spec: Spec,
     now: OffsetDateTime,
 ) -> Result<InvariantResult, StorageError> {
-    let count_sql = format!("SELECT COUNT(*) FROM ({}) AS violations", spec.select);
-    let select_sql = format!("{} LIMIT 50", spec.select);
+    // AssertSqlSafe：只拼接 `spec.select`（`&'static str`，来自上面写死的
+    // spec 表）与字面量；所有运行期值仍走 `bind`。
+    let count_sql = AssertSqlSafe(format!(
+        "SELECT COUNT(*) FROM ({}) AS violations",
+        spec.select
+    ));
+    let select_sql = AssertSqlSafe(format!("{} LIMIT 50", spec.select));
 
     let (total_count, violations) = match pool {
         StoragePool::Sqlite(p) => {
-            let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
+            let mut count_q = sqlx::query_scalar::<_, i64>(count_sql);
             if let Some(max) = spec.max_attempts {
                 count_q = count_q.bind(i64::from(max));
             }
@@ -317,7 +322,7 @@ async fn run_spec(
                 count_q = count_q.bind(now);
             }
             let total_count = count_q.fetch_one(p).await.map_err(StorageError::from)?;
-            let mut select_q = sqlx::query(&select_sql);
+            let mut select_q = sqlx::query(select_sql);
             if let Some(max) = spec.max_attempts {
                 select_q = select_q.bind(i64::from(max));
             }
@@ -335,7 +340,7 @@ async fn run_spec(
             (total_count, violations)
         }
         StoragePool::Postgres(p) => {
-            let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql);
+            let mut count_q = sqlx::query_scalar::<_, i64>(count_sql);
             if let Some(max) = spec.max_attempts {
                 count_q = count_q.bind(i64::from(max));
             }
@@ -343,7 +348,7 @@ async fn run_spec(
                 count_q = count_q.bind(now);
             }
             let total_count = count_q.fetch_one(p).await.map_err(StorageError::from)?;
-            let mut select_q = sqlx::query(&select_sql);
+            let mut select_q = sqlx::query(select_sql);
             if let Some(max) = spec.max_attempts {
                 select_q = select_q.bind(i64::from(max));
             }

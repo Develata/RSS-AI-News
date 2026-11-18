@@ -161,10 +161,12 @@ impl PgTestContext {
                 .await
                 .ok();
         }
+        // AssertSqlSafe：DDL 标识符无法参数绑定；schema 名来自
+        // next_schema_name()，字符集仅 [a-z0-9_]，不含外部输入。
         let drop_sql = format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", self.schema);
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            sqlx::query(&drop_sql).execute(&self.admin),
+            sqlx::query(sqlx::AssertSqlSafe(drop_sql)).execute(&self.admin),
         )
         .await
         .ok();
@@ -184,10 +186,12 @@ impl Drop for PgTestContext {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 // W11-P4-fix2.H2 lint：detached cleanup 任务，错误无救赎；显式 .ok()。
-                sqlx::query(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"))
-                    .execute(&admin)
-                    .await
-                    .ok();
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"
+                )))
+                .execute(&admin)
+                .await
+                .ok();
             });
         }
     }
@@ -209,7 +213,7 @@ pub async fn make_pg_test_pool() -> PgTestContext {
 
     // 1) admin pool 上 CREATE SCHEMA。schema 名字符集仅 [a-z0-9_]，但仍引号
     //    包裹防御 PG 的 unquoted identifier 大小写折叠。
-    sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
         .execute(&admin)
         .await
         .expect("create per-test schema");

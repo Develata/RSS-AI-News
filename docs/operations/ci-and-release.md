@@ -54,7 +54,9 @@ CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks �
 
 接受的 advisory 统一列在 [`.cargo/audit.toml`](../../.cargo/audit.toml)，每条写明理由与复查条件；不要在命令行加 `--ignore`。
 失败条件是未接受的 vulnerability；unmaintained、yanked 等 warning 只报告、不失败（cargo-audit 默认行为，与改动前一致）。
-rsa 的豁免依赖策略脚本：它用 `cargo tree --workspace --target all` 检查 rsa 在所有成员、所有平台上都没有活跃路径。
+依赖策略脚本用 `cargo tree --workspace --target all` 检查任何版本的 rsa 在所有成员、所有平台上都没有活跃路径。
+`.cargo/audit.toml` 不再豁免 RUSTSEC-2023-0071（rsa，修复版本为 >= 0.10.0）；受影响版本的 rsa 哪怕只以 inactive 形式回到
+`Cargo.lock`，`cargo audit` 也会失败。
 本地复现：在仓库根目录运行 `bash .ci/check_dependency_security_policy.sh && cargo audit`（cargo-audit 从当前目录读取该配置）。
 
 ## Release workflow
@@ -182,6 +184,7 @@ docker compose -f docker-compose.scheduler.yml up -d --force-recreate
 | v0.10.0 | 2026-10-31 | [../reports/releases/v0.10.0.md](../reports/releases/v0.10.0.md) |
 | v0.10.1 | 2026-11-17 | [../reports/releases/v0.10.1.md](../reports/releases/v0.10.1.md) |
 | v0.10.2 | 2026-11-17 | [../reports/releases/v0.10.2.md](../reports/releases/v0.10.2.md) |
+| v0.10.3 | 2026-11-18 | [../reports/releases/v0.10.3.md](../reports/releases/v0.10.3.md) |
 
 > 当前约定：minor / major release 写 report；纯 bugfix patch 可不写。改变公开 surface 或 release tooling 的 patch 仍写 report。
 
