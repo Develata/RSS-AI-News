@@ -34,6 +34,7 @@
 - `path_template` 含 `..` / 反斜杠 / 无日期 token → exit 78
 - `report_template` 缺 `{items}` / 未知 placeholder / 大括号不匹配 → exit 78
 - 跨分类 path 冲突 → exit 78
+- `driver = "postgres"` 时，进程环境里有 `PGHOSTADDR`（任何值），或 `DATABASE_URL` 带 `hostaddr` 参数 → exit 78。与数据库命令一致，见 [postgres-deployment](../../operations/postgres-deployment.md)
 - `report` 一次性输出**全部** ConfigError（diagnostic 列表），不首错即停
 
 ## 测试覆盖
@@ -54,6 +55,7 @@
 | `validate_config_checks_the_decision_key_only_when_enabled` | 同上 | 启用时检查密钥变量、关闭时不检查 |
 | `validate_config_rejects_laya_auto_routing` | 同上 | 拒绝 Laya `auto`（non-goals §5.2） |
 | `ai_run_without_category_prompt_sends_article_title_and_body` | `crates/cli/tests/publish_cmd_tests.rs` | 默认模板实际把标题与正文发给模型 |
+| `pg_hostaddr_is_a_config_error_without_secrets`、`pg_without_hostaddr_and_sqlite_pass_the_hostaddr_check` | `crates/cli/src/db_url.rs` | `check_pg_hostaddr`（validate-config 与数据库命令共用）：PG + `hostaddr` → exit 78、不回显凭据；SQLite 不检查 |
 
 （其余字段级校验项见 [../pipelines/06-config-loading.md](../pipelines/06-config-loading.md) 的完整测试矩阵，本 case 仅覆盖 CLI 入口。）
 

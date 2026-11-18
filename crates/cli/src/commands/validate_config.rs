@@ -47,6 +47,12 @@ pub async fn run(cli: &Cli) -> Result<ValidateConfigSummary, CliError> {
     overrides.log_level = None;
     overrides.log_format = None;
     let loaded = config::load(&cli.config_dir, None, overrides)?;
+    // 部署前置门禁要与数据库命令一致：PG 用到 `hostaddr` 时同样 exit 78。
+    crate::db_url::check_pg_hostaddr(
+        loaded.app.database.driver,
+        loaded.env.database_url.as_deref(),
+        rss_ai_news_storage::pghostaddr_set(),
+    )?;
     // W14-B：诊断命令全量审计每个板块的 AI 凭证可解析性（普通 load 只按
     // filtered 范围做全局 gate + ai-run 选定板块后 fail-fast，不查未选板块）。
     config::audit_ai_credentials(&loaded)?;

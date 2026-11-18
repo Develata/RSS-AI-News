@@ -198,17 +198,21 @@ fn pg_connect_options(url: &str) -> Result<PgConnectOptions, StorageError> {
 /// 用到 `hostaddr` 时的固定报错文本。不含任何环境值或 URL，避免带出凭据。
 pub const PG_HOSTADDR_UNSUPPORTED: &str = "PGHOSTADDR and the hostaddr connection parameter \
     are not supported: SQLx 0.9 routes them differently from earlier releases and may reach \
-    another server. Unset PGHOSTADDR and remove hostaddr from DATABASE_URL; put the server \
-    address in the URL host";
+    another server. Unset PGHOSTADDR, remove the hostaddr and host query parameters from \
+    DATABASE_URL, and put the server address (and port) in the URL host";
 
 /// 是否用到了 `hostaddr`：环境里有 `PGHOSTADDR`（任何值，包括空串），或 URL 带
 /// `hostaddr` 参数。用到时一律拒绝连接。
 ///
-/// SQLx 0.8 把 `hostaddr` 当作 host：`PGHOSTADDR` 会被 URL 里的 host 覆盖，空串也会
-/// 顶替 `PGHOST`；URL 参数 `hostaddr` 走 TCP。SQLx 0.9 把它存为单独的字段，TCP 连接
-/// 时优先用它，但 socket 路由（`PGHOST` 或 URL host 指向目录）又优先于它。这些组合下
+/// SQLx 0.8 把 `hostaddr` 写入 host（已设置的 socket 仍优先）：`PGHOSTADDR` 会被 URL
+/// 里的 host 覆盖，空串也会顶替 `PGHOST`。SQLx 0.9 把它存为单独的字段，TCP 连接时
+/// 优先用它，但 socket 路由（`PGHOST` 或 URL host 指向目录）又优先于它。这些组合下
 /// 两版会连到不同的服务器，而 SQLx 0.9 没有清除该字段的接口，无法原样恢复旧行为。
-/// 不涉及 `hostaddr` 时，两版的 host / socket 解析逐行相同。
+/// 在本项目的 Tokio 路径上，排除 `hostaddr` 后，两版选择相同的 socket 路径或 TCP
+/// 主机与端口。
+///
+/// 报错文本要求同时删掉 `host` 查询参数：它会覆盖 URL 的 host，旧 URL 里若有
+/// `?host=a&hostaddr=<ip>`，只把 IP 挪进 URL host 会改连到 `a`。
 ///
 /// 环境状态作为参数传入，测试因此不必修改进程环境（edition 2024 中 `set_var` 是
 /// `unsafe`，并与并行测试互相干扰）。URL 无法解析时返回 `false`，由 SQLx 报格式错误。

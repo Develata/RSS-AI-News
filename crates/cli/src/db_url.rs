@@ -21,14 +21,27 @@ pub fn resolve_storage_url(loaded: &LoadedConfig) -> Result<String, CliError> {
         loaded.env.database_url.as_deref(),
         &loaded.app.database.sqlite_path,
     )?;
-    reject_pg_hostaddr(&url, pghostaddr_set())?;
+    check_pg_hostaddr(
+        loaded.app.database.driver,
+        loaded.env.database_url.as_deref(),
+        pghostaddr_set(),
+    )?;
     Ok(url)
 }
 
 /// PostgreSQL 不支持 `hostaddr`（见 [`pg_hostaddr_in_use`]）：在配置阶段拒绝，
-/// exit 78，而不是等建池时以运行时错误失败。SQLite 不读这些设置，不检查。
-fn reject_pg_hostaddr(url: &str, pghostaddr_set: bool) -> Result<(), CliError> {
-    if !StoragePool::is_postgres_url(url) || !pg_hostaddr_in_use(url, pghostaddr_set) {
+/// exit 78，而不是等建池时以运行时错误失败。数据库命令（经
+/// [`resolve_storage_url`]）与 `validate-config` 共用。SQLite 不读这些设置，不检查。
+///
+/// `pghostaddr_set` 只反映进程环境：`.env` 文件里的值不会导出到进程环境，SQLx 也
+/// 看不到它。
+pub fn check_pg_hostaddr(
+    driver: DatabaseDriver,
+    database_url: Option<&str>,
+    pghostaddr_set: bool,
+) -> Result<(), CliError> {
+    let url = database_url.map(str::trim).unwrap_or_default();
+    if !matches!(driver, DatabaseDriver::Postgres) || !pg_hostaddr_in_use(url, pghostaddr_set) {
         return Ok(());
     }
     let field_path = if pghostaddr_set {
@@ -207,11 +220,13 @@ mod tests {
         let plain = "postgres://private_user:private_password@db.example/news";
         let with_param = format!("{plain}?hostaddr=10.0.0.9");
         for (url, pghostaddr_set, field) in [
-            (plain, true, "env.pghostaddr"),
-            (with_param.as_str(), false, "env.database_url"),
-            (with_param.as_str(), true, "env.pghostaddr"),
+            (Some(plain), true, "env.pghostaddr"),
+            (None, true, "env.pghostaddr"),
+            (Some(with_param.as_str()), false, "env.database_url"),
+            (Some(with_param.as_str()), true, "env.pghostaddr"),
         ] {
-            let error = reject_pg_hostaddr(url, pghostaddr_set).unwrap_err();
+            let error =
+                check_pg_hostaddr(DatabaseDriver::Postgres, url, pghostaddr_set).unwrap_err();
             assert!(matches!(
                 error.exit_code(),
                 crate::exit_code::ExitCode::ConfigError
@@ -229,9 +244,14 @@ mod tests {
 
     #[test]
     fn pg_without_hostaddr_and_sqlite_pass_the_hostaddr_check() {
-        reject_pg_hostaddr("postgres://u:p@db.example/news", false).unwrap();
-        reject_pg_hostaddr("sqlite://data/news.db", true).unwrap();
-        reject_pg_hostaddr("data/news.db?hostaddr=10.0.0.9", true).unwrap();
+        let pg = DatabaseDriver::Postgres;
+        check_pg_hostaddr(pg, Some("postgres://u:p@db.example/news"), false).unwrap();
+        check_pg_hostaddr(pg, Some("postgres://u:p@db.example/news?host=other"), false).unwrap();
+        check_pg_hostaddr(pg, None, false).unwrap();
+        let sqlite = DatabaseDriver::Sqlite;
+        check_pg_hostaddr(sqlite, Some("sqlite://data/news.db"), true).unwrap();
+        check_pg_hostaddr(sqlite, Some("data/news.db?hostaddr=10.0.0.9"), true).unwrap();
+        check_pg_hostaddr(sqlite, None, true).unwrap();
     }
 
     #[test]
