@@ -198,8 +198,8 @@ fn pg_connect_options(url: &str) -> Result<PgConnectOptions, StorageError> {
 /// 用到 `hostaddr` 时的固定报错文本。不含任何环境值或 URL，避免带出凭据。
 pub const PG_HOSTADDR_UNSUPPORTED: &str = "PGHOSTADDR and the hostaddr connection parameter \
     are not supported: SQLx 0.9 routes them differently from earlier releases and may reach \
-    another server. Unset PGHOSTADDR, remove the hostaddr and host query parameters from \
-    DATABASE_URL, and put the server address (and port) in the URL host";
+    another server. Unset PGHOSTADDR, remove the hostaddr, host and port query parameters from \
+    DATABASE_URL, and put the server address and port in the URL host";
 
 /// 是否用到了 `hostaddr`：环境里有 `PGHOSTADDR`（任何值，包括空串），或 URL 带
 /// `hostaddr` 参数。用到时一律拒绝连接。
@@ -211,8 +211,9 @@ pub const PG_HOSTADDR_UNSUPPORTED: &str = "PGHOSTADDR and the hostaddr connectio
 /// 在本项目的 Tokio 路径上，排除 `hostaddr` 后，两版选择相同的 socket 路径或 TCP
 /// 主机与端口。
 ///
-/// 报错文本要求同时删掉 `host` 查询参数：它会覆盖 URL 的 host，旧 URL 里若有
-/// `?host=a&hostaddr=<ip>`，只把 IP 挪进 URL host 会改连到 `a`。
+/// 报错文本要求同时删掉 `host` 和 `port` 查询参数：它们会覆盖 URL 里的 host 和端口。
+/// 旧 URL 里若有 `?host=a&hostaddr=<ip>`，只把 IP 挪进 URL host 会改连到 `a`；残留的
+/// `port` 在旧 URL 里可能只是 socket 文件名的后缀，改走 TCP 后却会决定端口。
 ///
 /// 环境状态作为参数传入，测试因此不必修改进程环境（edition 2024 中 `set_var` 是
 /// `unsafe`，并与并行测试互相干扰）。URL 无法解析时返回 `false`，由 SQLx 报格式错误。
@@ -314,6 +315,11 @@ mod tests {
             .unwrap_err();
         let message = error.to_string();
         assert!(message.contains(PG_HOSTADDR_UNSUPPORTED), "{message}");
+        // The fix-up advice must cover every query key that can redirect the endpoint.
+        assert!(
+            message.contains("hostaddr, host and port query parameters"),
+            "{message}"
+        );
         assert!(!message.contains("secret"), "{message}");
         assert!(!error.is_retryable());
     }

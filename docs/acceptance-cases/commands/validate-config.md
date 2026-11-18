@@ -35,7 +35,8 @@
 - `report_template` 缺 `{items}` / 未知 placeholder / 大括号不匹配 → exit 78
 - 跨分类 path 冲突 → exit 78
 - `driver = "postgres"` 时，进程环境里有 `PGHOSTADDR`（任何值），或 `DATABASE_URL` 带 `hostaddr` 参数 → exit 78。与数据库命令一致，见 [postgres-deployment](../../operations/postgres-deployment.md)
-- `report` 一次性输出**全部** ConfigError（diagnostic 列表），不首错即停
+- 配置加载（`config::load`）阶段的 `report` 一次性输出该阶段**全部** ConfigError（diagnostic 列表），不首错即停。
+  加载成功后，PG `hostaddr` 检查、分类 AI 凭据审计、typed-decision 检查依次执行，遇到第一个失败即返回
 
 ## 测试覆盖
 
