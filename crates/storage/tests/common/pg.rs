@@ -8,8 +8,9 @@
 //!
 //! - **per-process 共享一个 PG 16-alpine 容器**：通过 [`PG_CONTAINER`]
 //!   `OnceCell` 缓存；第一个测试拉起容器（冷启 ~2-5s），后续测试复用
-//!   （per-test 拉容器成本不可接受）。容器在测试进程退出时随 `OnceCell`
-//!   静态生命周期一同 drop，PG 服务器随之停止 —— 残留 schema 自然消失。
+//!   （per-test 拉容器成本不可接受）。Rust 不对 static 调用析构，容器的
+//!   `Drop` 永远不会运行；由 [`spawn_container_reaper`] 拉起的 watcher 在测试
+//!   进程退出后删除容器（连同匿名卷），残留 schema 随之消失。
 //!
 //! - **per-call admin pool**：每次 [`make_pg_test_pool`] 通过
 //!   [`build_admin_pool`] fresh build 一个 `max=2` 的 admin pool（连
@@ -53,6 +54,7 @@
 #![allow(dead_code)]
 
 use std::{
+    process::Child,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -65,8 +67,16 @@ use testcontainers_modules::{
 };
 use tokio::sync::OnceCell;
 
-/// 进程级 PG 容器单例。`OnceCell` 静态生命周期保证容器活到进程退出。
-static PG_CONTAINER: OnceCell<ContainerAsync<Postgres>> = OnceCell::const_new();
+/// 进程级 PG 容器单例。`OnceCell` 静态生命周期保证容器活到进程退出；static 永不
+/// drop，所以删除容器靠同一单例里的 reaper（见 [`spawn_container_reaper`]）。
+static PG_CONTAINER: OnceCell<SharedPg> = OnceCell::const_new();
+
+struct SharedPg {
+    container: ContainerAsync<Postgres>,
+    /// watcher 子进程。持有 `Child` 即持有它 stdin pipe 的写端；写端只在本进程
+    /// 退出时由内核关闭，watcher 据此删除容器。
+    _reaper: Option<Child>,
+}
 
 // W11-P4-fix4: 原 `PG_ADMIN_POOL: OnceCell<PgPool>` 跨 `#[tokio::test]` runtime
 // 共享有 latent bug —— 每个 `#[tokio::test]` 默认 `current_thread` runtime；
@@ -249,15 +259,21 @@ pub async fn make_pg_test_pool() -> PgTestContext {
 /// 共享容器 + 拉端口信息。第一次调用拉镜像（postgres:16-alpine ~80MB）+
 /// 启容器（~2-5s）；之后复用。
 async fn pg_endpoint() -> PgEndpoint {
-    let container = PG_CONTAINER
+    let shared = PG_CONTAINER
         .get_or_init(|| async {
-            Postgres::default()
+            let container = Postgres::default()
                 .with_tag("16-alpine")
                 .start()
                 .await
-                .expect("start shared pg container")
+                .expect("start shared pg container");
+            let reaper = spawn_container_reaper(container.id());
+            SharedPg {
+                container,
+                _reaper: reaper,
+            }
         })
         .await;
+    let container = &shared.container;
     let host = container
         .get_host()
         .await
@@ -268,6 +284,54 @@ async fn pg_endpoint() -> PgEndpoint {
         .await
         .expect("container mapped port");
     PgEndpoint { host, port }
+}
+
+/// 测试进程退出时删除共享容器：正常结束、测试失败、Ctrl-C、SIGKILL 都覆盖。
+///
+/// watcher 是一个 `sh` 子进程，阻塞读 stdin 直到 EOF，然后 `docker rm -f -v <id>`。
+/// 选项与 testcontainers 自己删除容器时一致：强制，并删除镜像声明的匿名卷。
+/// pipe 的写端放在永不 drop 的 static 里，所以只有本进程退出（任何方式）时内核才会
+/// 关闭它。
+///
+/// 三处细节：
+/// - watcher 在独立进程组里，终端 Ctrl-C 不会先杀掉它；
+/// - stdout / stderr 接 null，cargo 和 acceptance runner 的输出捕获不必等它退出；
+/// - 只按容器 id 删除，不按 label 删除，不会误删其他进程的容器。
+///
+/// 仅 Unix（Windows 上没有 `sh`）。拉不起 watcher 时只打印警告，容器会像以前一样残留，
+/// 测试照常进行。
+#[cfg(unix)]
+fn spawn_container_reaper(container_id: &str) -> Option<Child> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let spawned = Command::new("sh")
+        .args([
+            "-c",
+            r#"cat >/dev/null; docker rm -f -v "$1" >/dev/null 2>&1"#,
+            "sh",
+            container_id,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn();
+    match spawned {
+        Ok(child) => Some(child),
+        Err(error) => {
+            eprintln!(
+                "warning: cannot start the PG container reaper ({error}); \
+                 container {container_id} will outlive this test process"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn spawn_container_reaper(_container_id: &str) -> Option<Child> {
+    None
 }
 
 /// admin pool（per-call）：连默认 `public` schema，仅给当前 `PgTestContext`
