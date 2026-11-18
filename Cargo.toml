@@ -100,7 +100,7 @@ tempfile = "3"
 
 # GitHub API
 # Octocrab 0.54 即使 personal-token path 也要求一个 JWT backend；选择 AWS-LC，
-# 避免 jwt-rust-crypto 把无修复版 RUSTSEC-2023-0071 的 RSA 拉进 active graph。
+# 避免 jwt-rust-crypto 把受 RUSTSEC-2023-0071 影响的 rsa 拉进 active graph。
 octocrab = { version = "0.54", default-features = false, features = ["follow-redirect", "retry", "rustls", "timeout", "tracing", "default-client", "rustls-ring", "jwt-aws-lc-rs"] }
 
 # HTML parsing

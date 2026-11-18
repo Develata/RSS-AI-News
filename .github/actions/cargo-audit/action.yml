@@ -25,9 +25,10 @@ runs:
         tar -xzf "$RUNNER_TEMP/$archive.tgz" -C "$RUNNER_TEMP"
         install -m 0755 "$RUNNER_TEMP/$archive/cargo-audit" "$HOME/.cargo/bin/cargo-audit"
         cargo audit --version
-    # rsa (RUSTSEC-2023-0071, no fixed release) must have no active path; this
-    # policy names the feature path if a change activates it. The advisory is
-    # not ignored, so rsa anywhere in Cargo.lock also fails `cargo audit`.
+    # This policy forbids any rsa version on the active graph and names the
+    # feature path that activates it. RUSTSEC-2023-0071 (rsa, patched in
+    # >= 0.10.0) is not ignored, so an affected rsa anywhere in Cargo.lock also
+    # fails `cargo audit`.
     - name: dependency security policy
       shell: bash
       run: bash .ci/check_dependency_security_policy.sh

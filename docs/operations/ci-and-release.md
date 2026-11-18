@@ -54,8 +54,9 @@ CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks �
 
 接受的 advisory 统一列在 [`.cargo/audit.toml`](../../.cargo/audit.toml)，每条写明理由与复查条件；不要在命令行加 `--ignore`。
 失败条件是未接受的 vulnerability；unmaintained、yanked 等 warning 只报告、不失败（cargo-audit 默认行为，与改动前一致）。
-依赖策略脚本用 `cargo tree --workspace --target all` 检查 rsa（RUSTSEC-2023-0071，尚无修复版）在所有成员、所有平台上都没有活跃路径。
-rsa 目前不在 `Cargo.lock` 中，`.cargo/audit.toml` 也不再豁免它，所以它哪怕只以 inactive 形式回到锁文件，`cargo audit` 也会失败。
+依赖策略脚本用 `cargo tree --workspace --target all` 检查任何版本的 rsa 在所有成员、所有平台上都没有活跃路径。
+`.cargo/audit.toml` 不再豁免 RUSTSEC-2023-0071（rsa，修复版本为 >= 0.10.0）；受影响版本的 rsa 哪怕只以 inactive 形式回到
+`Cargo.lock`，`cargo audit` 也会失败。
 本地复现：在仓库根目录运行 `bash .ci/check_dependency_security_policy.sh && cargo audit`（cargo-audit 从当前目录读取该配置）。
 
 ## Release workflow
