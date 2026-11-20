@@ -286,7 +286,7 @@ async fn feed_release_retryable_on_final_attempt_folds_to_failed() {
 
     let repo = FeedEntryRepo::new(pool.clone());
     let claimed = repo
-        .claim_pending_fetch(&claim_request("worker-a"))
+        .claim_pending_fetch(&claim_request("worker-a"), &[])
         .await
         .expect("claim should succeed");
     assert!(claimed.iter().any(|entry| entry.id == entry_id));
@@ -298,6 +298,7 @@ async fn feed_release_retryable_on_final_attempt_folds_to_failed() {
             "fetch timeout",
             "http_timeout",
             MAX_ATTEMPTS,
+            OffsetDateTime::now_utc() + Duration::minutes(10),
             OffsetDateTime::now_utc(),
         )
         .await

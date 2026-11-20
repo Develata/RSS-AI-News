@@ -383,9 +383,8 @@ async fn extract_releases_retryable_on_5xx() {
     assert_eq!(row.0, "pending_fetch");
     assert_eq!(row.1, 1);
     assert_eq!(row.2, Some("http_5xx".to_string()));
-    // F8-1 W4-1: retryable 失败时退出原因必须是 retryable_deferred，
-    // 不能与 max_batches_reached 复用同一信号。max_batches=0 表示无上限，
-    // 此处 retryable_deferred=true / max_batches_reached=false。
+    // retryable_deferred = 本 run 有行进入 cooldown、重试推迟到后续 run；
+    // 循环本身因 claim 为空（无其他可领取行）自然结束，未命中上限。
     assert!(summary.retryable_deferred);
     assert!(!summary.max_batches_reached);
 }
@@ -786,8 +785,7 @@ async fn max_batches_caps_loop_and_reports_reached_flag() {
     assert_eq!(summary.batches_executed, 2);
     assert_eq!(summary.claimed, 2);
     assert!(summary.max_batches_reached, "should hit cap with 3 pending");
-    // F8-1 W4-1: cap-hit 路径必须 retryable_deferred=false（与 retryable
-    // 退出路径互斥）。parse_failed_strategy → PermanentFailed，不会触发 defer。
+    // parse_failed_strategy → PermanentFailed，没有行进入 retry cooldown。
     assert!(!summary.retryable_deferred);
 
     let pending_left: i64 =
@@ -829,8 +827,7 @@ async fn max_batches_zero_means_unlimited_until_queue_drained() {
     assert_eq!(summary.claimed, 3);
     assert_eq!(summary.batches_executed, 3);
     assert!(!summary.max_batches_reached);
-    // F8-1 W4-1: 自然耗尽路径（claim 返回空）必须 retryable_deferred=false。
-    // 与 cap-hit / retryable-defer 路径形成三态判别。
+    // 自然耗尽（claim 返回空）且没有 retryable 失败。
     assert!(!summary.retryable_deferred);
 
     let pending_left: i64 =
@@ -907,4 +904,426 @@ async fn extract_live_tasks_are_bounded_by_concurrency() {
         peak <= 3,
         "{peak} context owners: only flow + 2 live tasks allowed"
     );
+}
+
+// === Retry cooldown: retryable failures no longer stop the run ===
+//
+// These tests inject a `TestClock` into `ExtractDeps::clock` and advance it
+// from fetcher or strategy hooks, so "time passes during the run" is exact and
+// nothing sleeps.
+
+/// Controllable wall clock for `ExtractDeps::clock`.
+struct TestClock(std::sync::Mutex<time::OffsetDateTime>);
+
+impl TestClock {
+    fn at(start: time::OffsetDateTime) -> Arc<Self> {
+        Arc::new(Self(std::sync::Mutex::new(start)))
+    }
+
+    fn now(&self) -> time::OffsetDateTime {
+        *self.0.lock().expect("clock lock")
+    }
+
+    fn advance(&self, by: time::Duration) {
+        *self.0.lock().expect("clock lock") += by;
+    }
+}
+
+/// Fixed whole-second start instant for every clock below.
+fn t0() -> time::OffsetDateTime {
+    time::OffsetDateTime::from_unix_timestamp(1_795_000_000).expect("valid timestamp")
+}
+
+/// Side effect a [`RecordingFetcher`] applies while fetching a given entry.
+#[derive(Clone, Copy)]
+enum OnFetch {
+    /// Advance the injected clock.
+    Advance(time::Duration),
+    /// Simulate another run reclaiming this entry's expired lease: it returns
+    /// to `pending_fetch` with no owner, so the current run's release misses.
+    ReclaimLease(i64),
+}
+
+/// Fetcher that records every fetch and applies [`OnFetch`] side effects.
+struct RecordingFetcher {
+    pool: SqlitePool,
+    clock: Arc<TestClock>,
+    responses: Mutex<HashMap<i64, Result<RawHtmlFetch, ExtractorError>>>,
+    calls: Mutex<Vec<i64>>,
+    /// `(fetched_id, effect)` pairs: each applied when `fetched_id` is fetched.
+    on_fetch: Vec<(i64, OnFetch)>,
+}
+
+#[async_trait]
+impl HtmlFetcher for RecordingFetcher {
+    async fn fetch_html(&self, task: &ArticleFetchTask) -> Result<RawHtmlFetch, ExtractorError> {
+        self.calls.lock().await.push(task.feed_entry_id);
+        for &(fetched, effect) in &self.on_fetch {
+            if fetched != task.feed_entry_id {
+                continue;
+            }
+            match effect {
+                OnFetch::Advance(by) => self.clock.advance(by),
+                OnFetch::ReclaimLease(id) => {
+                    sqlx::query(
+                        "UPDATE feed_entries SET state = 'pending_fetch', lease_owner = NULL, \
+                         lease_expires_at = NULL WHERE id = ?",
+                    )
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await
+                    .expect("lease reclaim should apply");
+                }
+            }
+        }
+        let response = self.responses.lock().await.remove(&task.feed_entry_id);
+        response.unwrap_or(Err(ExtractorError::ConnectionFailed))
+    }
+}
+
+fn recording_flow(
+    pool: &SqlitePool,
+    clock: &Arc<TestClock>,
+    responses: HashMap<i64, Result<RawHtmlFetch, ExtractorError>>,
+    on_fetch: Vec<(i64, OnFetch)>,
+) -> (ExtractFlow, Arc<RecordingFetcher>) {
+    recording_flow_with(
+        pool,
+        clock,
+        responses,
+        on_fetch,
+        vec![per_entry_success_strategy()],
+    )
+}
+
+fn recording_flow_with(
+    pool: &SqlitePool,
+    clock: &Arc<TestClock>,
+    responses: HashMap<i64, Result<RawHtmlFetch, ExtractorError>>,
+    on_fetch: Vec<(i64, OnFetch)>,
+    strategies: Vec<Arc<dyn ContentStrategy>>,
+) -> (ExtractFlow, Arc<RecordingFetcher>) {
+    let fetcher = Arc::new(RecordingFetcher {
+        pool: pool.clone(),
+        clock: Arc::clone(clock),
+        responses: Mutex::new(responses),
+        calls: Mutex::default(),
+        on_fetch,
+    });
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let mut deps = common::extract_deps(pool.clone(), app, fetcher.clone(), strategies);
+    let clock = Arc::clone(clock);
+    deps.clock = Arc::new(move || clock.now());
+    (ExtractFlow::new(Arc::new(deps)), fetcher)
+}
+
+/// Success with a content hash unique to the entry (no cross-entry dedup).
+fn per_entry_success_strategy() -> Arc<dyn ContentStrategy> {
+    Arc::new(MockStrategy {
+        strategy: ExtractorStrategy::Readability,
+        extract_fn: Box::new(|task, _bytes, final_url| {
+            Ok(ExtractedArticle {
+                feed_entry_id: task.feed_entry_id,
+                canonical_link: final_url.to_string(),
+                title: task.title_raw.clone(),
+                body_text: "body text with enough words".to_string(),
+                body_html: None,
+                extractor_strategy: ExtractorStrategy::Readability,
+                content_quality: ContentQuality::High,
+                word_count: 5,
+                content_hash: format!("content-hash-{}", task.feed_entry_id),
+            })
+        }),
+    })
+}
+
+async fn set_next_attempt_at(pool: &SqlitePool, id: i64, at: time::OffsetDateTime) {
+    sqlx::query("UPDATE feed_entries SET next_attempt_at = ? WHERE id = ?")
+        .bind(at)
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("next_attempt_at should update");
+}
+
+async fn entry_row(pool: &SqlitePool, id: i64) -> (String, i64, Option<time::OffsetDateTime>) {
+    sqlx::query_as("SELECT state, attempt_count, next_attempt_at FROM feed_entries WHERE id = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("entry should be readable")
+}
+
+/// Seed a pending entry discovered `minute` minutes after a fixed instant, so
+/// oldest-first claim order does not depend on wall-clock reads.
+async fn seed_at(pool: &SqlitePool, source_id: i64, uid: &str, minute: i64) -> i64 {
+    let id = seed_pending_fetch_entry(pool, source_id, uid, &format!("hash-{uid}"), None).await;
+    sqlx::query("UPDATE feed_entries SET discovered_at = ? WHERE id = ?")
+        .bind(t0() - time::Duration::days(3) + time::Duration::minutes(minute))
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("discovered_at should update");
+    id
+}
+
+fn opts(batch_size: u32, max_batches: u32) -> ExtractOptions {
+    ExtractOptions {
+        batch_size,
+        max_attempts: 5,
+        max_batches,
+    }
+}
+
+const MIN: time::Duration = time::Duration::MINUTE;
+
+#[tokio::test]
+async fn timeout_on_first_entry_does_not_block_later_healthy_entry() {
+    // Regression for v0.10.3: batch_size=1, the oldest entry times out, and the
+    // run used to stop there ("deferring re-claim to next run").
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let slow = seed_at(&pool, source_id, "uid-slow", 0).await;
+    let healthy = seed_at(&pool, source_id, "uid-ok", 1).await;
+    let clock = TestClock::at(t0());
+    // While `healthy` is fetched an hour passes, so `slow`'s cooldown expires
+    // before the run's last claim. The run must still not retry `slow`.
+    let (flow, fetcher) = recording_flow(
+        &pool,
+        &clock,
+        responses([
+            (slow, Err(ExtractorError::HttpTimeout)),
+            (healthy, Ok(raw(healthy, b"<html>ok</html>"))),
+        ]),
+        vec![(healthy, OnFetch::Advance(60 * MIN))],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+
+    assert_eq!(*fetcher.calls.lock().await, [slow, healthy]);
+    assert_eq!((summary.claimed, summary.batches_executed), (2, 2));
+    assert_eq!((summary.persisted, summary.retryable_failed), (1, 1));
+    assert!(summary.retryable_deferred);
+    assert!(!summary.max_batches_reached);
+    assert_eq!(entry_row(&pool, healthy).await.0, "persisted");
+    // First failed attempt: 10-minute cooldown from the release.
+    assert_eq!(
+        entry_row(&pool, slow).await,
+        ("pending_fetch".to_string(), 1, Some(t0() + 10 * MIN))
+    );
+}
+
+#[tokio::test]
+async fn entry_whose_lease_was_reclaimed_is_not_claimed_again_in_the_same_run() {
+    // Another run reclaims `slow`'s lease while it is being fetched, so this
+    // run's retryable release misses (owner guard) and writes no cooldown. The
+    // row is claimable again, but this run must not take it a second time.
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let slow = seed_at(&pool, source_id, "uid-slow", 0).await;
+    let healthy = seed_at(&pool, source_id, "uid-ok", 1).await;
+    let clock = TestClock::at(t0());
+    let (flow, fetcher) = recording_flow(
+        &pool,
+        &clock,
+        responses([
+            (slow, Err(ExtractorError::HttpTimeout)),
+            (healthy, Ok(raw(healthy, b"<html>ok</html>"))),
+        ]),
+        vec![(slow, OnFetch::ReclaimLease(slow))],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+
+    assert_eq!(*fetcher.calls.lock().await, [slow, healthy]);
+    assert_eq!((summary.claimed, summary.persisted), (2, 1));
+    assert_eq!(
+        entry_row(&pool, slow).await,
+        ("pending_fetch".to_string(), 1, None)
+    );
+    assert_eq!(entry_row(&pool, healthy).await.0, "persisted");
+}
+
+#[tokio::test]
+async fn entry_due_mid_run_is_claimed_but_entry_failed_this_run_is_not() {
+    // `waiting` is still cooling when the run starts (deadline t0+5min) and is
+    // due by the second claim (t0+30min): eligibility is checked at each claim,
+    // so the run takes it. `slow` failed in this run; it is due by the third
+    // claim (t0+90min) but stays excluded.
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let slow = seed_at(&pool, source_id, "uid-slow", 0).await;
+    let waiting = seed_at(&pool, source_id, "uid-waiting", 1).await;
+    set_next_attempt_at(&pool, waiting, t0() + 5 * MIN).await;
+    let clock = TestClock::at(t0());
+    let (flow, fetcher) = recording_flow(
+        &pool,
+        &clock,
+        responses([
+            (slow, Err(ExtractorError::HttpTimeout)),
+            (waiting, Ok(raw(waiting, b"<html>ok</html>"))),
+        ]),
+        vec![
+            (slow, OnFetch::Advance(30 * MIN)),
+            (waiting, OnFetch::Advance(60 * MIN)),
+        ],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+
+    assert_eq!(*fetcher.calls.lock().await, [slow, waiting]);
+    assert_eq!((summary.claimed, summary.batches_executed), (2, 2));
+    assert_eq!(entry_row(&pool, waiting).await.0, "persisted");
+    assert_eq!(
+        entry_row(&pool, slow).await,
+        ("pending_fetch".to_string(), 1, Some(t0() + 40 * MIN))
+    );
+}
+
+#[tokio::test]
+async fn cooldown_is_measured_from_the_release_not_from_the_fetch() {
+    // The strategy chain takes 8 minutes and then reports a retryable error;
+    // the 10-minute cooldown must start when the row is released.
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let id = seed_at(&pool, source_id, "uid-slow-parse", 0).await;
+    let clock = TestClock::at(t0());
+    let strategy_clock = Arc::clone(&clock);
+    let slow_retryable: Arc<dyn ContentStrategy> = Arc::new(MockStrategy {
+        strategy: ExtractorStrategy::Readability,
+        extract_fn: Box::new(move |_task, _bytes, _final_url| {
+            strategy_clock.advance(8 * MIN);
+            Err(ExtractorError::HttpTimeout)
+        }),
+    });
+    let (flow, _) = recording_flow_with(
+        &pool,
+        &clock,
+        responses([(id, Ok(raw(id, b"<html>x</html>")))]),
+        vec![],
+        vec![slow_retryable],
+    );
+
+    assert_eq!(flow.run(opts(1, 0)).await.retryable_failed, 1);
+    assert_eq!(entry_row(&pool, id).await.2, Some(t0() + 18 * MIN));
+    // The row records the same release instant the cooldown starts from.
+    let updated_at: time::OffsetDateTime =
+        sqlx::query_scalar("SELECT updated_at FROM feed_entries WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("updated_at should be readable");
+    assert_eq!(updated_at, t0() + 8 * MIN);
+}
+
+#[tokio::test]
+async fn cooling_entry_is_skipped_until_deadline_then_retried_by_later_run() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let id = seed_at(&pool, source_id, "uid-cool", 0).await;
+    let clock = TestClock::at(t0());
+
+    // Run 1 at t0: retryable 503 puts the entry into cooldown until t0+10min.
+    let (flow, _) = recording_flow(
+        &pool,
+        &clock,
+        responses([(id, Err(ExtractorError::HttpStatus { code: 503 }))]),
+        vec![],
+    );
+    assert_eq!(flow.run(opts(1, 0)).await.retryable_failed, 1);
+    assert_eq!(entry_row(&pool, id).await.2, Some(t0() + 10 * MIN));
+
+    // Run 2, one second before the deadline: not claimed, not fetched.
+    clock.advance(10 * MIN - time::Duration::SECOND);
+    let (flow, fetcher) =
+        recording_flow(&pool, &clock, responses([(id, Ok(raw(id, b"x")))]), vec![]);
+    let summary = flow.run(opts(1, 0)).await;
+    assert_eq!((summary.claimed, summary.batches_executed), (0, 0));
+    assert!(fetcher.calls.lock().await.is_empty());
+
+    // Run 3, exactly at the deadline: retried and persisted.
+    clock.advance(time::Duration::SECOND);
+    let (flow, _) = recording_flow(&pool, &clock, responses([(id, Ok(raw(id, b"x")))]), vec![]);
+    let summary = flow.run(opts(1, 0)).await;
+    assert_eq!((summary.claimed, summary.persisted), (1, 1));
+    let (state, attempts, _) = entry_row(&pool, id).await;
+    assert_eq!((state.as_str(), attempts), ("persisted", 2));
+}
+
+#[tokio::test]
+async fn queue_of_only_cooling_entries_exits_without_spinning() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    for i in 0..3 {
+        let id = seed_at(&pool, source_id, &format!("uid-c{i}"), i).await;
+        set_next_attempt_at(&pool, id, t0() + 60 * MIN).await;
+    }
+    let clock = TestClock::at(t0());
+    let (flow, fetcher) = recording_flow(&pool, &clock, HashMap::new(), vec![]);
+
+    // Unlimited batches: only an empty claim can end the loop.
+    let summary = flow.run(opts(1, 0)).await;
+
+    assert_eq!((summary.claimed, summary.batches_executed), (0, 0));
+    assert!(!summary.max_batches_reached && !summary.retryable_deferred);
+    assert_eq!(
+        summary.claim_error, None,
+        "ended on an empty claim, not an error"
+    );
+    assert!(fetcher.calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn max_batches_still_caps_a_run_with_retryable_failures() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        ids.push(seed_at(&pool, source_id, &format!("uid-t{i}"), i).await);
+    }
+    // No responses: every fetch fails with retryable ConnectionFailed.
+    let clock = TestClock::at(t0());
+    let (flow, fetcher) = recording_flow(&pool, &clock, HashMap::new(), vec![]);
+
+    let summary = flow.run(opts(1, 2)).await;
+
+    assert_eq!(*fetcher.calls.lock().await, ids[..2]);
+    assert_eq!((summary.claimed, summary.batches_executed), (2, 2));
+    assert_eq!(summary.retryable_failed, 2);
+    assert!(summary.max_batches_reached);
+    assert!(summary.retryable_deferred);
+    assert_eq!(entry_row(&pool, ids[2]).await.1, 0, "third entry untouched");
+}
+
+/// Known limitation, not a requirement: the claim is still oldest-first, so an
+/// eligible backlog larger than `batch_size * max_batches` keeps a fresh entry
+/// out of the run. The cooldown fix does not change this. Invert this test if
+/// a bounded fresh-first claim policy is adopted.
+#[tokio::test]
+async fn oldest_first_backlog_still_starves_fresh_entries_under_cap() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let mut queue = HashMap::new();
+    for i in 0..3 {
+        // Discovered three days before t0.
+        let id = seed_at(&pool, source_id, &format!("uid-o{i}"), i).await;
+        queue.insert(id, Ok(raw(id, b"old")));
+    }
+    let fresh = seed_pending_fetch_entry(&pool, source_id, "uid-fresh", "hash-fresh", None).await;
+    sqlx::query("UPDATE feed_entries SET discovered_at = ? WHERE id = ?")
+        .bind(t0() - 5 * MIN)
+        .bind(fresh)
+        .execute(&pool)
+        .await
+        .expect("discovered_at should update");
+    queue.insert(fresh, Ok(raw(fresh, b"fresh")));
+    let clock = TestClock::at(t0());
+    let (flow, fetcher) = recording_flow(&pool, &clock, queue, vec![]);
+
+    let summary = flow.run(opts(1, 2)).await;
+
+    assert_eq!(summary.persisted, 2);
+    assert!(summary.max_batches_reached);
+    assert!(!fetcher.calls.lock().await.contains(&fresh));
+    assert_eq!(entry_row(&pool, fresh).await.0, "pending_fetch");
 }

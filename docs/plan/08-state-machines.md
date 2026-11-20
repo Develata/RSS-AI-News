@@ -110,8 +110,9 @@ ReindexJob 无 retry 预算：claim 不过滤 attempt_count，失败经 `mark_fa
   `extracting → dedup_skipped`，**有真实状态转移**
 - **lease 过期 reclaim**：`Fetching` / `Extracting` 经 reclaim 回 `PendingFetch`，attempt_count
   保留
-- **失败分支**：retryable 错误回 `PendingFetch`；超 budget 或不可重试转 `Failed`，写
-  `last_error*` 列
+- **失败分支**：retryable 错误回 `PendingFetch` 并写 `next_attempt_at` 冷却截止点（截止前
+  不被 claim）；预算内最后一次尝试（`attempt_count == max_attempts`）失败或不可重试转
+  `Failed`，写 `last_error*` 列
 
 ## 4. Article 状态机
 

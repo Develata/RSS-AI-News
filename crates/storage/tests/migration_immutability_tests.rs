@@ -65,6 +65,14 @@ const PINNED_UP_MIGRATIONS: &[(&str, &str)] = &[
         "migrations/postgres/0006_decision_results.up.sql",
         "a457b04b66c477897e849b269cefc39dc4477d0af3b0b09f53a38db82f93fddb",
     ),
+    (
+        "migrations/sqlite/0007_feed_entry_retry_cooldown.up.sql",
+        "954b1b808959df65d456faa1fe2d044abe0d34ec06e82104e1b0d1176fc0c9d6",
+    ),
+    (
+        "migrations/postgres/0007_feed_entry_retry_cooldown.up.sql",
+        "a53362425f3bb21a1e44bd83e217d977776b1d59f42c9c7ee69f4ed89ef17c56",
+    ),
 ];
 
 fn repo_root() -> std::path::PathBuf {

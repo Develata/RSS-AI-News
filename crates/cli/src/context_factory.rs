@@ -7,7 +7,7 @@ use rss_ai_news_feed::ReqwestFeedFetcher;
 use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, LocalFsTarget, PublishTarget};
 use rss_ai_news_runtime::{
     AiDeps, BackfillDeps, DecisionRunDeps, DecisionRunSettings, ExtractDeps, IngestDeps,
-    PublishDeps, RebuildReportDeps, RecentEntriesFlow, ReindexDeps, RunMeta,
+    PublishDeps, RebuildReportDeps, RecentEntriesFlow, ReindexDeps, RunMeta, context::system_clock,
 };
 use rss_ai_news_storage::{
     ArticleAiResultRepo, ArticleRepo, ConfigRotation, DecisionExecution, DecisionResultRepo,
@@ -121,6 +121,7 @@ pub fn build_extract_deps(
         article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
         artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
         event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+        clock: system_clock(),
     }))
 }
 

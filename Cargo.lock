@@ -2820,7 +2820,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "rss-ai-news-cli",
  "tokio",
@@ -2828,7 +2828,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-acceptance"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "clap",
  "serde",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-ai"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -2852,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-cli"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "clap",
  "hex",
@@ -2882,7 +2882,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-config"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "dotenvy",
  "rss-ai-news-domain",
@@ -2896,7 +2896,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-decision"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "async-trait",
  "hex",
@@ -2914,7 +2914,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-domain"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -2926,7 +2926,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-extractor"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "async-trait",
  "hex",
@@ -2942,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-feed"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "async-trait",
  "feed-rs",
@@ -2956,7 +2956,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-observability"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "async-trait",
  "once_cell",
@@ -2974,7 +2974,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-publish"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2995,7 +2995,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-report"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "regex",
  "rss-ai-news-domain",
@@ -3009,7 +3009,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-runtime"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "async-trait",
  "fastrand",
@@ -3040,7 +3040,7 @@ dependencies = [
 
 [[package]]
 name = "rss-ai-news-storage"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "async-trait",
  "rss-ai-news-domain",

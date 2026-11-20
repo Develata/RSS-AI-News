@@ -163,9 +163,14 @@ pub trait FeedEntryRepository: Send + Sync {
         &self,
         filter: &RecentFeedEntryFilter,
     ) -> Result<Vec<RecentFeedEntry>, StorageError>;
+    /// 领取 `pending_fetch` 行。`next_attempt_at` 晚于 `request.now` 的行仍在
+    /// retry cooldown，不被领取（比较精确到毫秒，从不提前）。`exclude_ids` 中的
+    /// 行不被领取；extract 传本 run 内失败或结果未确认的已领取 id，使失败行不在
+    /// 同一 run 内被重领，即使其 release 因 lease 被他人 reclaim 而落空。
     async fn claim_pending_fetch(
         &self,
         request: &ClaimRequest,
+        exclude_ids: &[i64],
     ) -> Result<Vec<ClaimedFeedEntry>, StorageError>;
     async fn release_success(
         &self,
@@ -176,6 +181,9 @@ pub trait FeedEntryRepository: Send + Sync {
     ) -> Result<bool, StorageError>;
     /// W15 §3 折叠：retryable 失败按 `attempt_count >= max_attempts` 在 SQL 内
     /// 决定回 `pending_fetch` / 转 `failed`。`last_error*` 写真实底层错误。
+    /// `retry_at` 与 lease 释放在同一条 owner-guarded UPDATE 内写入
+    /// `next_attempt_at`（转为 UTC 并向上取整到毫秒），在此之前 claim 不会再领取该行。
+    #[allow(clippy::too_many_arguments)]
     async fn release_retryable_failure(
         &self,
         id: i64,
@@ -183,6 +191,7 @@ pub trait FeedEntryRepository: Send + Sync {
         error: &str,
         kind: &str,
         max_attempts: u32,
+        retry_at: OffsetDateTime,
         now: OffsetDateTime,
     ) -> Result<ReleaseFailureOutcome, StorageError>;
     async fn release_permanent_failure(

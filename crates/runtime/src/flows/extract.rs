@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -41,17 +42,15 @@ pub struct ExtractSummary {
     /// 实际执行的批次数（F6-3）。命中 `max_batches` 上限时等于上限值；
     /// 队列耗尽时小于上限。供 observability / 测试可见。
     pub batches_executed: u32,
-    /// `true` 表示循环因 `max_batches` 上限退出（仍有 pending 行）；
-    /// `false` 表示自然耗尽（claim 返回空批次）或因 retryable 失败 defer。
+    /// `true` 表示循环因 `max_batches` 上限退出（可能仍有可领取行）；
+    /// `false` 表示自然耗尽（claim 返回空批次：没有未冷却的 pending 行）。
     /// 配合一条 INFO 日志（cli-semantics §4.4 line 198）让运维知晓本次 run
-    /// 是否需要后续调度兜底。`max_batches_reached` 与 `retryable_deferred`
-    /// 互斥（同一 run 内最多有一个为 `true`）。
+    /// 是否需要后续调度兜底。
     pub max_batches_reached: bool,
-    /// `true` 表示循环因本批次出现 RetryableFailed 主动 defer 到下次 run
-    /// （F6-3 retryable-bail 路径；W4-1）。`false` 表示既未 defer 也未命中
-    /// 上限——配合 `max_batches_reached` 三值组合可区分三种退出路径：
-    /// `(cap_hit, retryable, queue_exhausted)` → `(T, F)`, `(F, T)`, `(F, F)`。
-    /// 让 observability 消费者无须靠 `batches_executed < cap` 隐式推断。
+    /// `true` 表示本 run 至少有一行 retryable 失败；本 run 不再尝试这些行，重试
+    /// 推迟到之后的 run。通常该行已带 cooldown 回到 `pending_fetch`；若 release
+    /// 落空（lease 已被并发 run reclaim），该行不带 cooldown，由其他 run 处理。
+    /// 它不终止循环，因此可与 `max_batches_reached` 同时为 `true`。
     pub retryable_deferred: bool,
     /// `error_kind` when claiming a batch failed; the loop stopped there.
     pub claim_error: Option<String>,
@@ -103,13 +102,21 @@ impl ExtractFlow {
 
         let owner = build_owner_id();
         let mut summary = ExtractSummary::default();
+        // Ids claimed in this run whose outcome is not a confirmed terminal
+        // success (failed, release missed, task panicked). Later claims exclude
+        // them, so this run never retries an entry it already tried, even when
+        // the release did not land (another run reclaimed the expired lease) or
+        // a backfill reset the row. Confirmed successes leave the set: their
+        // rows are terminal and can never be claimed again, so the list stays
+        // proportional to this run's failures rather than to its total work.
+        let mut excluded: HashSet<i64> = HashSet::new();
         // W15 §3.3：claim 过滤与 release 折叠必须用同一预算值，hoist 一处计算。
         let max_attempts = opts
             .max_attempts
             .max(self.ctx.retry.feed_entry_max_attempts);
 
         // W15 §5：首次 claim 前执行一次 ① reclaim + ② sweep（顺序固定，best-effort）。
-        let maintenance_now = OffsetDateTime::now_utc();
+        let maintenance_now = (self.ctx.clock)();
         let reclaimed = self
             .ctx
             .feed_entry_repo
@@ -143,7 +150,7 @@ impl ExtractFlow {
                 break;
             }
 
-            let now = OffsetDateTime::now_utc();
+            let now = (self.ctx.clock)();
             let request = ClaimRequest {
                 owner: owner.clone(),
                 now,
@@ -154,37 +161,30 @@ impl ExtractFlow {
                 batch_size: opts.batch_size.max(1),
                 max_attempts,
             };
-            let claimed = match self.ctx.feed_entry_repo.claim_pending_fetch(&request).await {
+            let claimed = match self
+                .ctx
+                .feed_entry_repo
+                .claim_pending_fetch(&request, &excluded.iter().copied().collect::<Vec<_>>())
+                .await
+            {
                 Ok(claimed) => claimed,
                 Err(error) => {
+                    // Stop here; the completion event below still reports what
+                    // earlier batches did.
                     tracing::error!("failed to claim extract entries: {error}");
-                    emitter
-                        .emit(
-                            "run_completed",
-                            "info",
-                            None,
-                            None,
-                            "extract run completed",
-                            Some(json!({
-                                "claimed": summary.claimed,
-                                "claim_error": error.error_kind(),
-                                "batches_executed": summary.batches_executed,
-                            })),
-                        )
-                        .await;
                     summary.claim_error = Some(error.error_kind().to_string());
-                    return summary;
+                    break;
                 }
             };
 
-            // 自然耗尽：本批次 claim 到空集，pending 队列已无可处理项。
+            // 自然耗尽：本批次 claim 到空集，没有未冷却的 pending 行。
             if claimed.is_empty() {
                 break;
             }
 
             summary.claimed += claimed.len() as u32;
             summary.batches_executed += 1;
-            let retryable_before = summary.retryable_failed;
+            excluded.extend(claimed.iter().map(|entry| entry.id));
 
             let concurrency = self.ctx.http.concurrent_fetches.max(1) as usize;
             let mut join_set = JoinSet::new();
@@ -201,30 +201,29 @@ impl ExtractFlow {
                     break;
                 };
                 match result {
-                    Ok(outcome) => summary.record(outcome),
+                    Ok(outcome) => {
+                        if outcome.status.is_terminal_success() {
+                            excluded.remove(&outcome.feed_entry_id);
+                        }
+                        summary.record(outcome);
+                    }
                     Err(error) => {
                         tracing::error!("extract entry task panicked or was cancelled: {error}");
                         summary.tasks_panicked += 1;
                     }
                 }
             }
-
-            // F6-3: 本批次产生了 retryable 失败 ⇒ 这些行已经回到 pending_fetch
-            // 且 lease 释放，下一次 claim 会立即把它们捞回来形成 retry-loop。
-            // 此处主动终止，留待下一次 run 重试（符合
-            // `extract_releases_retryable_on_5xx` 测试以及"重试跨 run 而非
-            // 同 run"的语义）。
-            let batch_retryable = summary.retryable_failed - retryable_before;
-            if batch_retryable > 0 {
-                summary.retryable_deferred = true;
-                tracing::info!(
-                    stage = "extract",
-                    batches_executed = summary.batches_executed,
-                    batch_retryable,
-                    "retryable failures in batch; deferring re-claim to next run"
-                );
-                break;
-            }
+            // Retryable failures do not stop the loop: their rows are cooling
+            // down and excluded, so the next claim only takes other claimable
+            // work.
+        }
+        if summary.retryable_deferred {
+            tracing::info!(
+                stage = "extract",
+                retryable_failed = summary.retryable_failed,
+                batches_executed = summary.batches_executed,
+                "retryable failures; retries deferred to later runs"
+            );
         }
 
         emitter
@@ -245,6 +244,7 @@ impl ExtractFlow {
                     "batches_executed": summary.batches_executed,
                     "max_batches_reached": summary.max_batches_reached,
                     "retryable_deferred": summary.retryable_deferred,
+                    "claim_error": summary.claim_error,
                 })),
             )
             .await;
@@ -263,6 +263,10 @@ impl ExtractFlow {
             stage: "extract",
             repo: ctx.event_repo.as_ref(),
         };
+        let retry = RetrySchedule {
+            max_attempts,
+            attempt_count: claimed.attempt_count,
+        };
         let fetch_task = ArticleFetchTask {
             feed_entry_id: claimed.id,
             normalized_link: claimed.normalized_link,
@@ -274,7 +278,7 @@ impl ExtractFlow {
         let raw = match ctx.html_fetcher.fetch_html(&fetch_task).await {
             Ok(raw) => raw,
             Err(error) => {
-                let now = OffsetDateTime::now_utc();
+                let now = (ctx.clock)();
                 // W18（plan/17）：永久性抓取失败（403 付费墙 / 404 / too_large）
                 // 且 feed 摘要可用时降级成文，与下方解析链失败分支对称。
                 // 可重试错误（超时/5xx）不消费摘要——重试仍有机会拿到全文，
@@ -293,19 +297,13 @@ impl ExtractFlow {
                     .await;
                 }
                 return release_extract_error(
-                    &ctx,
-                    &emitter,
-                    claimed.id,
-                    &owner,
-                    error,
-                    max_attempts,
-                    now,
+                    &ctx, &emitter, claimed.id, &owner, error, retry, now,
                 )
                 .await;
             }
         };
 
-        let now = OffsetDateTime::now_utc();
+        let now = (ctx.clock)();
         let artifact_writer = ArtifactWriter {
             config: &ctx.artifact,
             repo: ctx.artifact_repo.as_ref(),
@@ -334,8 +332,7 @@ impl ExtractFlow {
                 .await
             }
             ChainResult::Retryable(error) => {
-                release_extract_error(&ctx, &emitter, claimed.id, &owner, error, max_attempts, now)
-                    .await
+                release_extract_error(&ctx, &emitter, claimed.id, &owner, error, retry, now).await
             }
             ChainResult::Failed(errors) => {
                 if let Some(fallback) = load_summary_fallback(&ctx, &fetch_task).await {
@@ -639,16 +636,28 @@ async fn release_extract_error(
     feed_entry_id: i64,
     owner: &str,
     error: ExtractorError,
-    max_attempts: u32,
+    retry: RetrySchedule,
     now: OffsetDateTime,
 ) -> ExtractEntryOutcome {
     let message = error.display_user();
     let kind = error.error_kind().to_string();
     if error.is_retryable() {
+        // One instant for the row's `updated_at` and the cooldown: `now` may
+        // predate artifact writes and the strategy chain, which would shorten
+        // the cooldown and misdate the release.
+        let released_at = (ctx.clock)();
         // W15 §3：release SQL 内按预算折叠——耗尽即转 failed 终态。
         let outcome = match ctx
             .feed_entry_repo
-            .release_retryable_failure(feed_entry_id, owner, &message, &kind, max_attempts, now)
+            .release_retryable_failure(
+                feed_entry_id,
+                owner,
+                &message,
+                &kind,
+                retry.max_attempts,
+                retry.next_attempt_at(released_at),
+                released_at,
+            )
             .await
         {
             Ok(outcome) => {
@@ -750,6 +759,37 @@ async fn release_permanent_failure(
     }
 }
 
+/// Shortest retry cooldown, applied after the first failed attempt.
+const RETRY_BACKOFF_BASE: Duration = Duration::minutes(10);
+/// Longest retry cooldown; later attempts stop doubling here.
+const RETRY_BACKOFF_CAP: Duration = Duration::hours(2);
+
+/// Retry budget and cooldown inputs for one claimed entry.
+#[derive(Debug, Clone, Copy)]
+struct RetrySchedule {
+    max_attempts: u32,
+    /// `attempt_count` after the claim's increment (the current attempt, ≥ 1).
+    attempt_count: i64,
+}
+
+impl RetrySchedule {
+    /// When a retryable failure released at `now` becomes claimable again.
+    /// The releasing run itself never retries the entry (it stays excluded).
+    fn next_attempt_at(&self, now: OffsetDateTime) -> OffsetDateTime {
+        now + retry_backoff(self.attempt_count)
+    }
+}
+
+/// Bounded exponential backoff: `min(BASE * 2^(attempt - 1), CAP)`.
+///
+/// `attempt` is the attempt that just failed (1 for the first); values below 1
+/// are treated as 1. The default 5-attempt budget waits 10, 20, 40 and 80 min.
+fn retry_backoff(attempt: i64) -> Duration {
+    // 2^4 * BASE already exceeds CAP; clamping the exponent avoids overflow.
+    let exponent = attempt.clamp(1, 5) - 1;
+    (RETRY_BACKOFF_BASE * (1_i32 << exponent)).min(RETRY_BACKOFF_CAP)
+}
+
 fn strategy_to_str(strategy: ExtractorStrategy) -> &'static str {
     match strategy {
         ExtractorStrategy::Readability => "readability",
@@ -765,6 +805,18 @@ fn quality_to_str(quality: ContentQuality) -> &'static str {
     }
 }
 
+impl ExtractEntryStatus {
+    /// `true` only when the row's terminal release landed: these statuses are
+    /// produced exclusively after `release_*` returned `Ok(true)`. Conflicts and
+    /// release errors are reported as `RetryableFailed` / `PermanentFailed`.
+    fn is_terminal_success(&self) -> bool {
+        matches!(
+            self,
+            Self::Persisted | Self::FallbackPersisted | Self::DedupSkipped
+        )
+    }
+}
+
 impl ExtractSummary {
     /// Count every outcome; retain only the first 32 failures for diagnostics.
     fn record(&mut self, outcome: ExtractEntryOutcome) {
@@ -772,7 +824,10 @@ impl ExtractSummary {
             ExtractEntryStatus::Persisted => self.persisted += 1,
             ExtractEntryStatus::FallbackPersisted => self.fallback_persisted += 1,
             ExtractEntryStatus::DedupSkipped => self.dedup_skipped += 1,
-            ExtractEntryStatus::RetryableFailed => self.retryable_failed += 1,
+            ExtractEntryStatus::RetryableFailed => {
+                self.retryable_failed += 1;
+                self.retryable_deferred = true;
+            }
             ExtractEntryStatus::PermanentFailed => self.permanent_failed += 1,
         }
         if matches!(
@@ -788,6 +843,41 @@ impl ExtractSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_backoff_doubles_and_is_bounded() {
+        let minutes = |attempt| retry_backoff(attempt).whole_minutes();
+        assert_eq!(minutes(i64::MIN), 10);
+        assert_eq!(minutes(0), 10);
+        assert_eq!(minutes(1), 10);
+        assert_eq!(minutes(2), 20);
+        assert_eq!(minutes(3), 40);
+        assert_eq!(minutes(4), 80);
+        assert_eq!(minutes(5), 120);
+        assert_eq!(minutes(i64::MAX), 120);
+    }
+
+    #[test]
+    fn next_attempt_adds_backoff_for_the_failed_attempt() {
+        let now = OffsetDateTime::from_unix_timestamp(1_000_000).unwrap();
+        let retry = |attempt_count| RetrySchedule {
+            max_attempts: 5,
+            attempt_count,
+        };
+        assert_eq!(retry(1).next_attempt_at(now), now + Duration::minutes(10));
+        assert_eq!(retry(3).next_attempt_at(now), now + Duration::minutes(40));
+    }
+
+    #[test]
+    fn only_landed_terminal_outcomes_leave_the_exclusion_set() {
+        use ExtractEntryStatus::*;
+        assert!(Persisted.is_terminal_success());
+        assert!(FallbackPersisted.is_terminal_success());
+        assert!(DedupSkipped.is_terminal_success());
+        // Includes lease conflicts and failed releases, which also map here.
+        assert!(!RetryableFailed.is_terminal_success());
+        assert!(!PermanentFailed.is_terminal_success());
+    }
 
     #[test]
     fn summary_bounds_samples_without_losing_counts() {
