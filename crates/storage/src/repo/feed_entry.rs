@@ -163,9 +163,13 @@ pub trait FeedEntryRepository: Send + Sync {
         &self,
         filter: &RecentFeedEntryFilter,
     ) -> Result<Vec<RecentFeedEntry>, StorageError>;
+    /// 领取 `pending_fetch` 行。`retry_cutoff` 是 retry cooldown 截止点：
+    /// `next_attempt_at > retry_cutoff` 的行仍在冷却、不被领取。extract 传
+    /// run 开始时刻，使本 run 释放的 retryable 行在本 run 内不可再领。
     async fn claim_pending_fetch(
         &self,
         request: &ClaimRequest,
+        retry_cutoff: OffsetDateTime,
     ) -> Result<Vec<ClaimedFeedEntry>, StorageError>;
     async fn release_success(
         &self,
@@ -176,6 +180,9 @@ pub trait FeedEntryRepository: Send + Sync {
     ) -> Result<bool, StorageError>;
     /// W15 §3 折叠：retryable 失败按 `attempt_count >= max_attempts` 在 SQL 内
     /// 决定回 `pending_fetch` / 转 `failed`。`last_error*` 写真实底层错误。
+    /// `retry_at` 与 lease 释放在同一条 owner-guarded UPDATE 内写入
+    /// `next_attempt_at`，在此之前 claim 不会再领取该行。
+    #[allow(clippy::too_many_arguments)]
     async fn release_retryable_failure(
         &self,
         id: i64,
@@ -183,6 +190,7 @@ pub trait FeedEntryRepository: Send + Sync {
         error: &str,
         kind: &str,
         max_attempts: u32,
+        retry_at: OffsetDateTime,
         now: OffsetDateTime,
     ) -> Result<ReleaseFailureOutcome, StorageError>;
     async fn release_permanent_failure(

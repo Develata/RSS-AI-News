@@ -74,13 +74,16 @@ async fn reset_failed_entries_are_reclaimable() {
 
     let now = OffsetDateTime::now_utc();
     let claimed = repo
-        .claim_pending_fetch(&ClaimRequest {
-            owner: "test-worker".to_string(),
+        .claim_pending_fetch(
+            &ClaimRequest {
+                owner: "test-worker".to_string(),
+                now,
+                lease_expires_at: now + Duration::minutes(5),
+                batch_size: 10,
+                max_attempts: 5,
+            },
             now,
-            lease_expires_at: now + Duration::minutes(5),
-            batch_size: 10,
-            max_attempts: 5,
-        })
+        )
         .await
         .unwrap();
 

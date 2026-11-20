@@ -28,6 +28,17 @@ use super::feed_entry_sql::{
     TERMINALIZE_EXHAUSTED_FEED_SQL, UPDATE_LINK_HASH_SQL,
 };
 
+/// `release_retryable_failure` 的绑定参数，两方言 helper 共用。
+struct RetryableRelease<'a> {
+    id: i64,
+    owner: &'a str,
+    error: &'a str,
+    kind: &'a str,
+    max_attempts: u32,
+    retry_at: OffsetDateTime,
+    now: OffsetDateTime,
+}
+
 // ── trait 实现 ─────────────────────────────────────────────────
 
 #[async_trait]
@@ -79,10 +90,11 @@ impl FeedEntryRepository for FeedEntryRepo {
     async fn claim_pending_fetch(
         &self,
         request: &ClaimRequest,
+        retry_cutoff: OffsetDateTime,
     ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
         match &self.pool {
-            StoragePool::Sqlite(p) => sqlite_claim_pending_fetch(p, request).await,
-            StoragePool::Postgres(p) => pg_claim_pending_fetch(p, request).await,
+            StoragePool::Sqlite(p) => sqlite_claim_pending_fetch(p, request, retry_cutoff).await,
+            StoragePool::Postgres(p) => pg_claim_pending_fetch(p, request, retry_cutoff).await,
         }
     }
 
@@ -106,17 +118,21 @@ impl FeedEntryRepository for FeedEntryRepo {
         error: &str,
         kind: &str,
         max_attempts: u32,
+        retry_at: OffsetDateTime,
         now: OffsetDateTime,
     ) -> Result<ReleaseFailureOutcome, StorageError> {
+        let release = RetryableRelease {
+            id,
+            owner,
+            error,
+            kind,
+            max_attempts,
+            retry_at,
+            now,
+        };
         match &self.pool {
-            StoragePool::Sqlite(p) => {
-                sqlite_release_feed_retryable_failure(p, id, owner, error, kind, max_attempts, now)
-                    .await
-            }
-            StoragePool::Postgres(p) => {
-                pg_release_feed_retryable_failure(p, id, owner, error, kind, max_attempts, now)
-                    .await
-            }
+            StoragePool::Sqlite(p) => sqlite_release_feed_retryable_failure(p, &release).await,
+            StoragePool::Postgres(p) => pg_release_feed_retryable_failure(p, &release).await,
         }
     }
 
@@ -302,6 +318,7 @@ async fn sqlite_list_recent(
 async fn sqlite_claim_pending_fetch(
     pool: &SqlitePool,
     request: &ClaimRequest,
+    retry_cutoff: OffsetDateTime,
 ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
     sqlx::query_as::<_, ClaimedFeedEntry>(CLAIM_PENDING_FETCH_SQLITE_SQL)
         .bind(&request.owner)
@@ -310,6 +327,7 @@ async fn sqlite_claim_pending_fetch(
         .bind(request.now)
         .bind(i64::from(request.max_attempts))
         .bind(i64::from(request.batch_size))
+        .bind(retry_cutoff)
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)
@@ -370,20 +388,16 @@ async fn sqlite_reclaim_expired_leases(
 
 async fn sqlite_release_feed_retryable_failure(
     pool: &SqlitePool,
-    id: i64,
-    owner: &str,
-    error: &str,
-    kind: &str,
-    max_attempts: u32,
-    now: OffsetDateTime,
+    r: &RetryableRelease<'_>,
 ) -> Result<ReleaseFailureOutcome, StorageError> {
     let state = sqlx::query_scalar::<_, String>(RELEASE_FEED_RETRYABLE_FAILURE_SQL)
-        .bind(i64::from(max_attempts))
-        .bind(error)
-        .bind(kind)
-        .bind(now)
-        .bind(id)
-        .bind(owner)
+        .bind(i64::from(r.max_attempts))
+        .bind(r.error)
+        .bind(r.kind)
+        .bind(r.now)
+        .bind(r.id)
+        .bind(r.owner)
+        .bind(r.retry_at)
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;
@@ -624,6 +638,7 @@ async fn pg_list_recent(
 async fn pg_claim_pending_fetch(
     pool: &PgPool,
     request: &ClaimRequest,
+    retry_cutoff: OffsetDateTime,
 ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
     sqlx::query_as::<_, ClaimedFeedEntry>(CLAIM_PENDING_FETCH_PG_SQL)
         .bind(&request.owner)
@@ -632,6 +647,7 @@ async fn pg_claim_pending_fetch(
         .bind(request.now)
         .bind(i64::from(request.max_attempts))
         .bind(i64::from(request.batch_size))
+        .bind(retry_cutoff)
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)
@@ -692,20 +708,16 @@ async fn pg_reclaim_expired_leases(
 
 async fn pg_release_feed_retryable_failure(
     pool: &PgPool,
-    id: i64,
-    owner: &str,
-    error: &str,
-    kind: &str,
-    max_attempts: u32,
-    now: OffsetDateTime,
+    r: &RetryableRelease<'_>,
 ) -> Result<ReleaseFailureOutcome, StorageError> {
     let state = sqlx::query_scalar::<_, String>(RELEASE_FEED_RETRYABLE_FAILURE_SQL)
-        .bind(i64::from(max_attempts))
-        .bind(error)
-        .bind(kind)
-        .bind(now)
-        .bind(id)
-        .bind(owner)
+        .bind(i64::from(r.max_attempts))
+        .bind(r.error)
+        .bind(r.kind)
+        .bind(r.now)
+        .bind(r.id)
+        .bind(r.owner)
+        .bind(r.retry_at)
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;

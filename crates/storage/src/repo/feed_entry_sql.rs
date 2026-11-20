@@ -129,6 +129,10 @@ LIMIT $4
 "#;
 
 /// SQLite claim：子查询无 `FOR UPDATE`（语法不支持，整库写锁兜底）。
+///
+/// `$7` 是 retry cooldown 截止点（extract 传 run 开始时刻）：`next_attempt_at`
+/// 晚于它的行仍在冷却，不占批次名额。release 写入的截止点严格晚于 run 开始，
+/// 故同一 run 内释放的行在该 run 内不会被再次领取。
 pub(super) const CLAIM_PENDING_FETCH_SQLITE_SQL: &str = r#"
 UPDATE feed_entries
 SET state = 'fetching',
@@ -141,6 +145,7 @@ WHERE id IN (
     WHERE state = 'pending_fetch'
       AND (lease_expires_at IS NULL OR lease_expires_at < $4)
       AND attempt_count < $5
+      AND (next_attempt_at IS NULL OR next_attempt_at <= $7)
     ORDER BY discovered_at ASC
     LIMIT $6
 )
@@ -163,6 +168,7 @@ WHERE id IN (
     WHERE state = 'pending_fetch'
       AND (lease_expires_at IS NULL OR lease_expires_at < $4)
       AND attempt_count < $5
+      AND (next_attempt_at IS NULL OR next_attempt_at <= $7)
     ORDER BY discovered_at ASC
     LIMIT $6
     FOR UPDATE SKIP LOCKED
@@ -189,11 +195,14 @@ WHERE id = $5 AND lease_owner = $6
 /// W15 §3 折叠：retryable 失败按预算决定回队 / 转终态，规则收口在 SQL。
 /// `RETURNING state` 供调用方判定走向。claim 过滤发生在自增前，故 release
 /// 时 `attempt_count >= max` 当且仅当本次是预算内最后一次尝试。
+/// `next_attempt_at = $7` 与 lease 释放同一条 owner-guarded UPDATE 原子落盘；
+/// 折叠成 `failed` 的行也写入（终态不被 claim 读取，backfill reset 会清空）。
 pub(super) const RELEASE_FEED_RETRYABLE_FAILURE_SQL: &str = r#"
 UPDATE feed_entries
 SET state = CASE WHEN attempt_count >= $1 THEN 'failed' ELSE 'pending_fetch' END,
     lease_owner = NULL, lease_expires_at = NULL,
-    last_error = $2, last_error_kind = $3, updated_at = $4
+    last_error = $2, last_error_kind = $3, updated_at = $4,
+    next_attempt_at = $7
 WHERE id = $5 AND lease_owner = $6
 RETURNING state
 "#;
@@ -270,6 +279,7 @@ SET state = 'pending_fetch',
     last_error_kind = NULL,
     lease_owner = NULL,
     lease_expires_at = NULL,
+    next_attempt_at = NULL,
     updated_at = $3
 WHERE state = 'failed'
   AND ($1 IS NULL OR created_at >= $1)
@@ -295,6 +305,7 @@ SET state = 'pending_fetch',
     last_error_kind = NULL,
     lease_owner = NULL,
     lease_expires_at = NULL,
+    next_attempt_at = NULL,
     updated_at = $3
 WHERE state = 'failed'
   AND ($1 IS NULL OR replace(substr(created_at, 1, 19), 'T', ' ') >= $1)
