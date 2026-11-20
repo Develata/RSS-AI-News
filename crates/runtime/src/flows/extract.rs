@@ -223,7 +223,6 @@ impl ExtractFlow {
             // pending_fetch with a cooldown past `run_started_at`, so the next
             // claim skips them and only takes other claimable work.
         }
-        summary.retryable_deferred = summary.retryable_failed > 0;
         if summary.retryable_deferred {
             tracing::info!(
                 stage = "extract",
@@ -820,7 +819,10 @@ impl ExtractSummary {
             ExtractEntryStatus::Persisted => self.persisted += 1,
             ExtractEntryStatus::FallbackPersisted => self.fallback_persisted += 1,
             ExtractEntryStatus::DedupSkipped => self.dedup_skipped += 1,
-            ExtractEntryStatus::RetryableFailed => self.retryable_failed += 1,
+            ExtractEntryStatus::RetryableFailed => {
+                self.retryable_failed += 1;
+                self.retryable_deferred = true;
+            }
             ExtractEntryStatus::PermanentFailed => self.permanent_failed += 1,
         }
         if matches!(

@@ -8,7 +8,7 @@ pending_fetch (claim+lease)
     → 抓取永久失败（4xx/too_large/invalid_url）→ summary fallback
       → 摘要可用 → fallback_persisted（W18，见 ./17-extract-fetch-fallback.md）
       → 无摘要   → failed
-    → 抓取可重试失败（超时/5xx）→ 回 pending_fetch（W15 预算路径）
+    → 抓取可重试失败（超时/5xx）→ 回 pending_fetch + next_attempt_at 冷却（W15 预算路径，§5.3）
   → extracting (策略链提取)
     → 第三层 content_hash 去重
     → 成功 → INSERT articles + feed_entries.state='persisted'
@@ -91,11 +91,13 @@ quality 由 strategy 自己决定。AI 阶段会跳过 `Fallback` 行（避免�
 由 `ExtractFlow` 在 [`crates/runtime/src/flows/extract.rs`](../../crates/runtime/src/flows/extract.rs) 编排：
 
 ```text
+run_started_at = now()                      -- 本 run 的 cooldown 截止点
 loop:
-  1. claim_pending_fetch(batch_size) → 最多 N 行 feed_entries
+  1. claim_pending_fetch(batch_size, run_started_at) → 最多 N 行 feed_entries
      UPDATE feed_entries SET state='fetching', lease_owner=?, attempt_count += 1
      WHERE state='pending_fetch' AND (lease_expires_at IS NULL OR lease_expires_at < now)
-     LIMIT N RETURNING *
+       AND (next_attempt_at IS NULL OR next_attempt_at <= run_started_at)
+     ORDER BY discovered_at ASC LIMIT N RETURNING *
   2. 对每行：
      a. HTTP GET → raw HTML（超时/大小边界）
      b. 永久抓取失败才懒读摘要并尝试 fallback
@@ -106,7 +108,8 @@ loop:
      g. 命中 → feed_entries='dedup_skipped'，关联 article_id
      h. 未命中 → INSERT articles，feed_entries='persisted'
      i. fallback 命中 → INSERT articles (quality='fallback')，feed_entries='fallback_persisted'
-  3. 检查 max_batches，未达且仍有 pending → 继续；否则 break
+  3. claim 为空 → break；达到 max_batches → break；否则继续
+     （retryable 失败**不**终止循环，见 §5.3）
 ```
 
 ### 5.1 batch_size 与 max_batches
@@ -122,6 +125,21 @@ claim 行集合仍占 O(batch size) 内存；CLI 批大小范围见 [09-cli-and-
 
 claim SQL 用 `FOR UPDATE SKIP LOCKED`（PG）或单条 UPDATE...RETURNING 的数据库写锁（SQLite）保证并发安全。
 lease 字段约束见 [./08-state-machines.md](./08-state-machines.md) §2.3 + [./05-storage.md](./05-storage.md)。
+
+### 5.3 retryable 失败冷却（2026-11-20）
+
+- retryable 失败（超时 / 5xx / 连接失败，且预算未尽）回 `pending_fetch`，并在同一条
+  owner-guarded release UPDATE 内写 `next_attempt_at = max(失败时刻, run_started_at) + backoff`。
+- backoff 按刚失败的 attempt 有界指数增长：10 / 20 / 40 / 80 min，上限 2 h
+  （`RETRY_BACKOFF_BASE` / `RETRY_BACKOFF_CAP`，`flows/extract.rs`）。
+- claim 用 run 开始时刻作 cutoff，且 deadline 总晚于 run 开始，所以本 run 释放的行在本 run 内
+  不会再被领取（即使其冷却在 run 结束前到期）；冷却行在 `LIMIT` 前被过滤，不占批次名额。
+- 循环继续领取其余可领取行，直到 claim 为空或达到 `max_batches`。`retryable_deferred`
+  表示本 run 有行进入冷却，可与 `max_batches_reached` 同时为 true。
+- 预算、最后一次尝试折叠为 `failed`、`terminalize_exhausted` sweep、过期 lease reclaim、
+  永久失败与 summary fallback 均不变；backfill reset 清空 `next_attempt_at`。
+- claim 仍按 `discovered_at ASC`：可领取的旧积压大于 `batch_size × max_batches` 时，新条目
+  仍可能整轮排不上（`oldest_first_backlog_still_starves_fresh_entries_under_cap` 记录此限制）。
 
 ## 6. RawArtifact 留档（HTML）
 
@@ -154,9 +172,9 @@ rss-ai-news replay --kind html --key <feed_entry_id> --diff
 
 | 失败点 | 错误变体 | retryable | 处理 |
 |---|---|---|---|
-| HTML fetch 超时 | `ExtractorError::HttpTimeout` | true | 回 `pending_fetch` |
+| HTML fetch 超时 | `ExtractorError::HttpTimeout` | true | 回 `pending_fetch` + 冷却（§5.3） |
 | HTML 4xx | `ExtractorError::HttpStatus { 4xx }` | false | 尝试 fallback（W18）；无摘要则 `failed` |
-| HTML 5xx | `ExtractorError::HttpStatus { 5xx }` | true | 回 `pending_fetch` |
+| HTML 5xx | `ExtractorError::HttpStatus { 5xx }` | true | 回 `pending_fetch` + 冷却（§5.3） |
 | payload 过大 | `ExtractorError::TooLarge` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | 提取失败 | `ExtractorError::ParseFailed` | false | 尝试 fallback；失败则 `failed` |
 | 内容太短 | `ExtractorError::ContentTooShort` | false | 尝试 fallback；失败则 `failed` |
@@ -198,5 +216,5 @@ CLI 按 strategy_order 装配 Readability；unknown/重复/空列表在结构校
 summary_fallback 仍是最终降级步骤（兼容已有行为），不是网络成功前执行的策略。
 Readability 成文须满足 min_body_chars；短摘要 fallback 保留既有允许策略。
 claim 后正常成功路径不读 summary_raw；只有永久抓取失败或解析链耗尽才按 id 懒读取。
-超时/5xx 保持跨 run 重试。HTTP 期间不持有数据库事务。
+超时/5xx 保持跨 run 重试（冷却见 §5.3）。HTTP 期间不持有数据库事务。
 Feed/HTML 用有上限的分块 Vec 累计后直接移交，保留 Content-Length 与实际读取双重检查。

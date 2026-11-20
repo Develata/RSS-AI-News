@@ -182,7 +182,9 @@ RETURNING state;  -- 调用方据此判别 ReleaseFailureOutcome { released, exh
 
 辅以 `terminalize_exhausted` 兜底 sweep（可领取态 + `attempt_count >= max` + lease
 空/过期 → 终态；`COALESCE` 保留已有 `last_error*`，缺失时填 `retry budget exhausted`），
-覆盖"崩溃发生在最后一次尝试"的路径。reindex 无预算语义（claim 不过滤
+覆盖"崩溃发生在最后一次尝试"的路径。`feed_entries` 的 retryable release 还在同一条
+UPDATE 内写 `next_attempt_at`，`claim_pending_fetch` 跳过截止点晚于 cutoff 的行（0007，
+[./02-extract.md](./02-extract.md) §5.3）。reindex 无预算语义（claim 不过滤
 attempt_count，失败直转终态），只接 reclaim。接线时机、事件与恢复路径见
 [./15-retry-exhaustion-and-reclaim.md](./15-retry-exhaustion-and-reclaim.md) §5–§7。
 
@@ -238,6 +240,7 @@ schema 变更只能新增迁移，且 SQLite / PostgreSQL 两个方言同时提�
 | 0004 | `0004_feed_entry_link_dedup_atomicity` | feed entry canonical / shadow 标记 + link_hash partial unique index（§4.2） |
 | 0005 | `0005_artifact_reference_indexes` | raw artifact 引用列索引（artifact 过期时的反查） |
 | 0006 | `0006_decision_results` | decision_policies / decision_results（typed-decision shadow，[ADR 0011](../adr/0011-decision-run-shadow-runner.md)） |
+| 0007 | `0007_feed_entry_retry_cooldown` | `feed_entries.next_attempt_at`：extract retryable 失败的冷却截止点（[02-extract §5.3](./02-extract.md)） |
 
 ### 7.2 migrate 子命令
 

@@ -1014,7 +1014,11 @@ async fn timeout_on_first_entry_does_not_block_later_healthy_entry() {
     let slow = seed_pending_fetch_entry(&pool, source_id, "uid-slow", "hash-slow", None).await;
     let healthy = seed_pending_fetch_entry(&pool, source_id, "uid-ok", "hash-ok", None).await;
     // When `healthy` is fetched, `slow`'s cooldown has already passed: the run
-    // must still not reclaim `slow`.
+    // must still not reclaim `slow`. (SQLite compares these RFC3339 texts
+    // lexically; two instants milliseconds apart can misorder in rare cases
+    // when the trimmed fraction of one is a prefix of the other. The storage
+    // test `retryable_release_sets_deadline_and_claim_honours_it` covers the
+    // same cutoff rule with whole-second timestamps.)
     let (flow, fetcher) = recording_flow(
         &pool,
         responses([
