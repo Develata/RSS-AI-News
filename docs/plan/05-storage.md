@@ -134,9 +134,12 @@ SET state = 'fetching',
 WHERE id IN (
   SELECT id FROM feed_entries
   WHERE state = 'pending_fetch'
-    AND (lease_expires_at IS NULL OR lease_expires_at < CURRENT_TIMESTAMP)
-  ORDER BY priority DESC, id
-  LIMIT $3
+    AND (lease_expires_at IS NULL OR julianday(lease_expires_at) < julianday($now_ms_floor))
+    AND attempt_count < $max_attempts
+    AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday($now_ms_floor))
+    AND id NOT IN (SELECT value FROM json_each($exclude_ids))
+  ORDER BY discovered_at ASC
+  LIMIT $batch_size
 )
 RETURNING *;
 
@@ -145,9 +148,10 @@ UPDATE feed_entries
 SET state = 'fetching', ...
 WHERE id IN (
   SELECT id FROM feed_entries
-  WHERE state = 'pending_fetch' AND (...)
-  ORDER BY priority DESC, id
-  LIMIT $3
+  WHERE state = 'pending_fetch' AND (...)          -- 同上；冷却直接比较 TIMESTAMPTZ，
+    AND id <> ALL($exclude_ids::BIGINT[])          -- 排除列表为数组
+  ORDER BY discovered_at ASC
+  LIMIT $batch_size
   FOR UPDATE SKIP LOCKED
 )
 RETURNING *;
@@ -161,8 +165,20 @@ SET state = 'pending_fetch',  -- 回滚到前置 pending
     lease_owner = NULL,
     lease_expires_at = NULL
 WHERE state IN ('fetching', 'extracting')
-  AND lease_expires_at < CURRENT_TIMESTAMP;
+  AND lease_expires_at < $now;        -- PG；SQLite 见下段（julianday + 文本回退）
 ```
+
+不要在 SQLite 上用 `CURRENT_TIMESTAMP` 比较这些列：它是 `YYYY-MM-DD HH:MM:SS`（空格分隔），
+与 sqlx 写入的 RFC3339（`T` 分隔）按文本比较时同一天的行会全部判错。
+
+SQLite 以小数位数可变的 RFC3339 TEXT 存时间，同一秒内字典序 ≠ 时刻序（`…00.12Z` <
+`…00.1Z`），故 `feed_entries` 的 claim / reclaim / `terminalize_exhausted` 在 SQLite 上用
+`julianday()` 比较 lease：比较侧 now 转 UTC 并向下取整到毫秒，claim 写入的
+`lease_expires_at` 转 UTC 并向上取整到毫秒；严格 `<` 加上 `julianday()` 的单调舍入，保证
+lease 绝不提前判过期（最多晚约 2 ms）。`julianday()` 解析不了的文本（例如 `+15:00` 偏移）
+回退到原先的文本比较，避免行被永久跳过。PG 直接比较 `TIMESTAMPTZ`。其余 lease 表
+（`article_ai_results` / `publish_records` / `reindex_jobs` / `decision_results`）与 doctor
+的同类谓词仍是字典序比较，待单独修复。
 
 **`attempt_count` 不重置**，作为重试预算的硬约束。
 
@@ -182,7 +198,9 @@ RETURNING state;  -- 调用方据此判别 ReleaseFailureOutcome { released, exh
 
 辅以 `terminalize_exhausted` 兜底 sweep（可领取态 + `attempt_count >= max` + lease
 空/过期 → 终态；`COALESCE` 保留已有 `last_error*`，缺失时填 `retry budget exhausted`），
-覆盖"崩溃发生在最后一次尝试"的路径。reindex 无预算语义（claim 不过滤
+覆盖"崩溃发生在最后一次尝试"的路径。`feed_entries` 的 retryable release 还在同一条
+UPDATE 内写 `next_attempt_at`，`claim_pending_fetch` 跳过截止点晚于 cutoff 的行（0007，
+[./02-extract.md](./02-extract.md) §5.3）。reindex 无预算语义（claim 不过滤
 attempt_count，失败直转终态），只接 reclaim。接线时机、事件与恢复路径见
 [./15-retry-exhaustion-and-reclaim.md](./15-retry-exhaustion-and-reclaim.md) §5–§7。
 
@@ -238,6 +256,7 @@ schema 变更只能新增迁移，且 SQLite / PostgreSQL 两个方言同时提�
 | 0004 | `0004_feed_entry_link_dedup_atomicity` | feed entry canonical / shadow 标记 + link_hash partial unique index（§4.2） |
 | 0005 | `0005_artifact_reference_indexes` | raw artifact 引用列索引（artifact 过期时的反查） |
 | 0006 | `0006_decision_results` | decision_policies / decision_results（typed-decision shadow，[ADR 0011](../adr/0011-decision-run-shadow-runner.md)） |
+| 0007 | `0007_feed_entry_retry_cooldown` | `feed_entries.next_attempt_at`：extract retryable 失败的冷却截止点（[02-extract §5.3](./02-extract.md)） |
 
 ### 7.2 migrate 子命令
 

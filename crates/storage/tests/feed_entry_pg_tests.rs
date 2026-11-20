@@ -289,13 +289,16 @@ async fn pg_claim_pending_fetch_then_release_success() {
 
     let now = OffsetDateTime::now_utc();
     let claimed = repo
-        .claim_pending_fetch(&ClaimRequest {
-            owner: "worker-A".to_string(),
-            now,
-            lease_expires_at: lease_expires(now),
-            batch_size: 4,
-            max_attempts: 3,
-        })
+        .claim_pending_fetch(
+            &ClaimRequest {
+                owner: "worker-A".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 4,
+                max_attempts: 3,
+            },
+            &[],
+        )
         .await
         .expect("pg claim_pending_fetch");
     assert_eq!(claimed.len(), 1);
@@ -366,13 +369,16 @@ async fn pg_claim_pending_fetch_skips_explicitly_locked_row() {
     let now = OffsetDateTime::now_utc();
     let claimed = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        repo.claim_pending_fetch(&ClaimRequest {
-            owner: "worker-B".to_string(),
-            now,
-            lease_expires_at: lease_expires(now),
-            batch_size: 1,
-            max_attempts: 3,
-        }),
+        repo.claim_pending_fetch(
+            &ClaimRequest {
+                owner: "worker-B".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 1,
+                max_attempts: 3,
+            },
+            &[],
+        ),
     )
     .await
     .expect("claim_pending_fetch must return within 5s (else SKIP LOCKED regressed)")
@@ -620,6 +626,232 @@ async fn pg_reset_failed_in_window_counts_and_resets() {
         "failed → pending_fetch（claim 认的状态，非死状态 discovered）"
     );
     assert_eq!(reset_row.attempt_count, 0);
+
+    ctx.cleanup().await;
+}
+
+/// PG mirror of `feed_entry_retry_cooldown_tests.rs`: the retryable release
+/// writes `next_attempt_at` under the owner guard, the claim skips cooling rows
+/// before `LIMIT` using the cutoff (not `now`), the deadline is inclusive, the
+/// exhausted fold stays terminal, and backfill reset clears the cooldown.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_retry_cooldown_is_honoured_by_claim() {
+    let ctx = make_pg_test_pool().await;
+    let source_id = seed_feed_source(&ctx, "cooldown").await;
+    let repo = FeedEntryRepo::new_with_storage(ctx.storage_pool().clone());
+    let request = |owner: &str, now: OffsetDateTime| ClaimRequest {
+        owner: owner.to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 3,
+    };
+    let pg = ctx.pg_pool();
+    let next_attempt_at = |id: i64| async move {
+        sqlx::query_scalar::<_, Option<OffsetDateTime>>(
+            "SELECT next_attempt_at FROM feed_entries WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pg)
+        .await
+        .unwrap()
+    };
+    let t0 = parse_timestamp("2026-11-20T10:20:00Z");
+    let old = repo
+        .insert_if_new(&new_feed_entry(source_id, "uid-cool-old"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Wrong owner: nothing written, lease kept.
+    assert_eq!(
+        repo.claim_pending_fetch(&request("worker-A", t0), &[])
+            .await
+            .unwrap()[0]
+            .id,
+        old
+    );
+    let deadline = t0 + time::Duration::minutes(10);
+    let conflict = repo
+        .release_retryable_failure(old, "worker-B", "timeout", "http_timeout", 3, deadline, t0)
+        .await
+        .unwrap();
+    assert!(!conflict.released);
+    assert_eq!(next_attempt_at(old).await, None);
+
+    let outcome = repo
+        .release_retryable_failure(old, "worker-A", "timeout", "http_timeout", 3, deadline, t0)
+        .await
+        .unwrap();
+    assert!(outcome.released && !outcome.exhausted);
+    assert_eq!(next_attempt_at(old).await, Some(deadline));
+
+    // A newer entry takes the only batch slot while the older one cools.
+    let fresh = repo
+        .insert_if_new(&new_feed_entry(source_id, "uid-cool-new"))
+        .await
+        .unwrap()
+        .unwrap();
+    let before = deadline - time::Duration::seconds(1);
+    let claimed = repo
+        .claim_pending_fetch(&request("worker-A", before), &[])
+        .await
+        .unwrap();
+    assert_eq!(claimed.iter().map(|e| e.id).collect::<Vec<_>>(), [fresh]);
+    // Past the deadline but excluded (failed earlier in the same run).
+    let late = t0 + time::Duration::minutes(20);
+    assert!(
+        repo.claim_pending_fetch(&request("worker-A", late), &[old])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Sub-millisecond gap: a deadline 300 us after `now` still waits.
+    let fractional = deadline + time::Duration::microseconds(100_400);
+    sqlx::query("UPDATE feed_entries SET next_attempt_at = $1 WHERE id = $2")
+        .bind(fractional + time::Duration::microseconds(600))
+        .bind(old)
+        .execute(pg)
+        .await
+        .unwrap();
+    assert!(
+        repo.claim_pending_fetch(&request("worker-B", fractional), &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    sqlx::query("UPDATE feed_entries SET next_attempt_at = $1 WHERE id = $2")
+        .bind(deadline)
+        .bind(old)
+        .execute(pg)
+        .await
+        .unwrap();
+    let retried = repo
+        .claim_pending_fetch(&request("worker-C", deadline), &[])
+        .await
+        .unwrap();
+    assert_eq!(retried.len(), 1);
+    assert_eq!((retried[0].id, retried[0].attempt_count), (old, 2));
+
+    // Third and last attempt (max_attempts = 3) folds to `failed`.
+    let third_at = deadline + time::Duration::minutes(20);
+    repo.release_retryable_failure(
+        old,
+        "worker-C",
+        "timeout",
+        "http_timeout",
+        3,
+        third_at,
+        deadline,
+    )
+    .await
+    .unwrap();
+    let last = repo
+        .claim_pending_fetch(&request("worker-D", third_at), &[])
+        .await
+        .unwrap();
+    assert_eq!(last[0].attempt_count, 3);
+    let exhausted = repo
+        .release_retryable_failure(
+            old,
+            "worker-D",
+            "timeout",
+            "http_timeout",
+            3,
+            third_at + time::Duration::hours(1),
+            third_at,
+        )
+        .await
+        .unwrap();
+    assert!(exhausted.released && exhausted.exhausted);
+    assert_eq!(repo.find_by_id(old).await.unwrap().unwrap().state, "failed");
+
+    // Backfill reset clears the inert deadline so the row is claimable again.
+    repo.reset_failed_in_window(&ResetFailedFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(next_attempt_at(old).await, None);
+
+    // Exclusion list (BIGINT[]): the now-claimable row is skipped when listed.
+    let after_reset = third_at + time::Duration::hours(2);
+    assert!(
+        repo.claim_pending_fetch(&request("worker-E", after_reset), &[old])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let unlisted = repo
+        .claim_pending_fetch(&request("worker-E", after_reset), &[])
+        .await
+        .unwrap();
+    assert_eq!(unlisted.iter().map(|e| e.id).collect::<Vec<_>>(), [old]);
+
+    ctx.cleanup().await;
+}
+
+/// PG mirror of the SQLite sub-millisecond case, through the release path: the
+/// stored deadline is rounded up to a millisecond and the claim never takes the
+/// row before it.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_release_deadline_is_never_early() {
+    let ctx = make_pg_test_pool().await;
+    let source_id = seed_feed_source(&ctx, "subms").await;
+    let repo = FeedEntryRepo::new_with_storage(ctx.storage_pool().clone());
+    let request = |owner: &str, now: OffsetDateTime| ClaimRequest {
+        owner: owner.to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+    let us = time::Duration::microseconds;
+    let t0 = parse_timestamp("2026-11-20T10:20:00Z");
+    let id = repo
+        .insert_if_new(&new_feed_entry(source_id, "uid-subms"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        repo.claim_pending_fetch(&request("worker-A", t0), &[])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Deadline .100900: stored as .101000.
+    let deadline = t0 + us(100_900);
+    let outcome = repo
+        .release_retryable_failure(id, "worker-A", "timeout", "http_timeout", 5, deadline, t0)
+        .await
+        .unwrap();
+    assert!(outcome.released && !outcome.exhausted);
+    let stored: Option<OffsetDateTime> =
+        sqlx::query_scalar("SELECT next_attempt_at FROM feed_entries WHERE id = $1")
+            .bind(id)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, Some(t0 + us(101_000)));
+    // 100 us before the deadline, and after it but before the stored value.
+    for now in [t0 + us(100_800), t0 + us(100_950)] {
+        assert!(
+            repo.claim_pending_fetch(&request("worker-B", now), &[])
+                .await
+                .unwrap()
+                .is_empty(),
+            "claimed at {now}"
+        );
+    }
+    assert_eq!(
+        repo.claim_pending_fetch(&request("worker-B", t0 + us(101_000)), &[])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
     ctx.cleanup().await;
 }

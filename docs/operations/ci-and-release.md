@@ -185,6 +185,7 @@ docker compose -f docker-compose.scheduler.yml up -d --force-recreate
 | v0.10.1 | 2026-11-17 | [../reports/releases/v0.10.1.md](../reports/releases/v0.10.1.md) |
 | v0.10.2 | 2026-11-17 | [../reports/releases/v0.10.2.md](../reports/releases/v0.10.2.md) |
 | v0.10.3 | 2026-11-18 | [../reports/releases/v0.10.3.md](../reports/releases/v0.10.3.md) |
+| v0.10.4 | 2026-11-21 | [../reports/releases/v0.10.4.md](../reports/releases/v0.10.4.md) |
 
 > 当前约定：minor / major release 写 report；纯 bugfix patch 可不写。改变公开 surface 或 release tooling 的 patch 仍写 report。
 
