@@ -1,8 +1,9 @@
 //! feed_entries 共享 SQL 字符串。
 //!
-//! W11-P3-E-2：除 `claim_pending_fetch`（PG 加 `FOR UPDATE SKIP LOCKED`，§6.4
-//! 契约）外所有 const 跨方言完全等价。const 由 [`super::feed_entry_impl`] 的
-//! sqlite_*/pg_* helper 共享。
+//! W11-P3-E-2：const 由 [`super::feed_entry_impl`] 的 sqlite_*/pg_* helper 共享。
+//! 分叉的只有：`claim_pending_fetch`（PG 加 `FOR UPDATE SKIP LOCKED`，§6.4 契约）、
+//! 按时刻比较 TEXT 时间戳的 SQLite 变体（`_SQLITE_SQL` 后缀，见
+//! [`CLAIM_PENDING_FETCH_SQLITE_SQL`] 的说明），其余跨方言完全等价。
 
 pub(super) const INSERT_FEED_ENTRY_SQL: &str = r#"
 INSERT INTO feed_entries (
@@ -137,6 +138,10 @@ LIMIT $4
 /// SQLite 把时间存成小数位数可变的 RFC3339 TEXT，字典序在同一秒内不等于时刻序，
 /// 故冷却比较用 `julianday()`。它把时刻舍入到最近的毫秒；release 写入的截止点
 /// 已向上取整到毫秒（UTC），`$8` 已向下取整，两侧都无舍入，比较精确。
+///
+/// lease 过期同理用 `julianday()`：`$4` 与 `$8` 同值（UTC、向下取整到毫秒），
+/// `$2` 写入时转 UTC 并向上取整到毫秒。比较是严格 `<`，而 `julianday()` 的舍入
+/// 单调，故即使是本修复前写入的未取整 lease 也只会晚判过期（≤ 1 ms），不会提前。
 pub(super) const CLAIM_PENDING_FETCH_SQLITE_SQL: &str = r#"
 UPDATE feed_entries
 SET state = 'fetching',
@@ -147,7 +152,7 @@ SET state = 'fetching',
 WHERE id IN (
     SELECT id FROM feed_entries
     WHERE state = 'pending_fetch'
-      AND (lease_expires_at IS NULL OR lease_expires_at < $4)
+      AND (lease_expires_at IS NULL OR julianday(lease_expires_at) < julianday($4))
       AND attempt_count < $5
       AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday($8))
       AND id NOT IN (SELECT value FROM json_each($7))
@@ -226,6 +231,19 @@ WHERE lease_expires_at IS NOT NULL
   AND state IN ('fetching', 'extracting')
 "#;
 
+/// SQLite 变体：按时刻比较 lease（`julianday()`，理由见
+/// [`CLAIM_PENDING_FETCH_SQLITE_SQL`]）。`$2` 为 UTC、向下取整到毫秒的 now。
+pub(super) const RECLAIM_FEED_ENTRY_LEASES_SQLITE_SQL: &str = r#"
+UPDATE feed_entries
+SET state = 'pending_fetch',
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = $1
+WHERE lease_expires_at IS NOT NULL
+  AND julianday(lease_expires_at) < julianday($2)
+  AND state IN ('fetching', 'extracting')
+"#;
+
 pub(super) const RELEASE_DEDUP_SKIPPED_SQL: &str = r#"
 UPDATE feed_entries
 SET state = 'dedup_skipped',
@@ -265,6 +283,21 @@ SET state = 'failed',
 WHERE state = 'pending_fetch'
   AND attempt_count >= $2
   AND (lease_expires_at IS NULL OR lease_expires_at < $3)
+"#;
+
+/// SQLite 变体：按时刻比较 lease（同 [`RECLAIM_FEED_ENTRY_LEASES_SQLITE_SQL`]）。
+/// `$3` 为 UTC、向下取整到毫秒的 now。
+pub(super) const TERMINALIZE_EXHAUSTED_FEED_SQLITE_SQL: &str = r#"
+UPDATE feed_entries
+SET state = 'failed',
+    last_error = COALESCE(last_error, 'retry budget exhausted'),
+    last_error_kind = COALESCE(last_error_kind, 'retry_budget_exhausted'),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = $1
+WHERE state = 'pending_fetch'
+  AND attempt_count >= $2
+  AND (lease_expires_at IS NULL OR julianday(lease_expires_at) < julianday($3))
 "#;
 
 pub(super) const COUNT_FEED_ENTRIES_IN_WINDOW_SQL: &str = r#"

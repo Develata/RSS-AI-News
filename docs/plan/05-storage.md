@@ -134,7 +134,7 @@ SET state = 'fetching',
 WHERE id IN (
   SELECT id FROM feed_entries
   WHERE state = 'pending_fetch'
-    AND (lease_expires_at IS NULL OR lease_expires_at < $now)
+    AND (lease_expires_at IS NULL OR julianday(lease_expires_at) < julianday($now_ms_floor))
     AND attempt_count < $max_attempts
     AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday($now_ms_floor))
     AND id NOT IN (SELECT value FROM json_each($exclude_ids))
@@ -167,6 +167,14 @@ SET state = 'pending_fetch',  -- 回滚到前置 pending
 WHERE state IN ('fetching', 'extracting')
   AND lease_expires_at < CURRENT_TIMESTAMP;
 ```
+
+SQLite 以小数位数可变的 RFC3339 TEXT 存时间，同一秒内字典序 ≠ 时刻序（`…00.12Z` <
+`…00.1Z`），故 `feed_entries` 的 claim / reclaim / `terminalize_exhausted` 在 SQLite 上用
+`julianday()` 比较 lease：比较侧 now 转 UTC 并向下取整到毫秒，claim 写入的
+`lease_expires_at` 转 UTC 并向上取整到毫秒；严格 `<` 加上 `julianday()` 的单调舍入，保证
+lease 绝不提前判过期（最多晚约 2 ms）。PG 直接比较 `TIMESTAMPTZ`。其余 lease 表
+（`article_ai_results` / `publish_records` / `reindex_jobs` / `decision_results`）与 doctor
+的同类谓词仍是字典序比较，待单独修复。
 
 **`attempt_count` 不重置**，作为重试预算的硬约束。
 
