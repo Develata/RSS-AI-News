@@ -83,6 +83,7 @@ async fn reset_failed_entries_are_reclaimable() {
                 max_attempts: 5,
             },
             now,
+            &[],
         )
         .await
         .unwrap();

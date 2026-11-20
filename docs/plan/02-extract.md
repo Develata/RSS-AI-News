@@ -92,11 +92,13 @@ quality 由 strategy 自己决定。AI 阶段会跳过 `Fallback` 行（避免�
 
 ```text
 run_started_at = now()                      -- 本 run 的 cooldown 截止点
+claimed_ids = []                            -- 本 run 已领取过的 id
 loop:
-  1. claim_pending_fetch(batch_size, run_started_at) → 最多 N 行 feed_entries
+  1. claim_pending_fetch(batch_size, run_started_at, claimed_ids) → 最多 N 行 feed_entries
      UPDATE feed_entries SET state='fetching', lease_owner=?, attempt_count += 1
      WHERE state='pending_fetch' AND (lease_expires_at IS NULL OR lease_expires_at < now)
        AND (next_attempt_at IS NULL OR next_attempt_at <= run_started_at)
+       AND id NOT IN claimed_ids
      ORDER BY discovered_at ASC LIMIT N RETURNING *
   2. 对每行：
      a. HTTP GET → raw HTML（超时/大小边界）
@@ -129,17 +131,33 @@ lease 字段约束见 [./08-state-machines.md](./08-state-machines.md) §2.3 + [
 ### 5.3 retryable 失败冷却（2026-11-20）
 
 - retryable 失败（超时 / 5xx / 连接失败，且预算未尽）回 `pending_fetch`，并在同一条
-  owner-guarded release UPDATE 内写 `next_attempt_at = max(失败时刻, run_started_at) + backoff`。
+  owner-guarded release UPDATE 内写 `next_attempt_at = max(release 时刻, run_started_at) + backoff`
+  （时刻在 release 前采样，策略链耗时不缩短冷却）。
 - backoff 按刚失败的 attempt 有界指数增长：10 / 20 / 40 / 80 min，上限 2 h
   （`RETRY_BACKOFF_BASE` / `RETRY_BACKOFF_CAP`，`flows/extract.rs`）。
 - claim 用 run 开始时刻作 cutoff，且 deadline 总晚于 run 开始，所以本 run 释放的行在本 run 内
   不会再被领取（即使其冷却在 run 结束前到期）；冷却行在 `LIMIT` 前被过滤，不占批次名额。
+  上一 run 写下、在本 run 开始后才到期的 deadline 同样留到下一 run。
+- claim 另外排除本 run 已领取过的 id：每行每 run 至多被领取一次。这覆盖 release 落空的情形
+  （lease 过期被并发 run reclaim，owner guard 拦下 release，行回到 `pending_fetch` 且无冷却）
+  以及并发 backfill reset。跨 run 的过期 lease 恢复不变。
+- SQLite 以小数位数可变的 RFC3339 TEXT 存时间，同一秒内字典序 ≠ 时刻序，冷却比较用
+  `julianday()`（毫秒精度）；PG 直接比较 `TIMESTAMPTZ`。
 - 循环继续领取其余可领取行，直到 claim 为空或达到 `max_batches`。`retryable_deferred`
   表示本 run 有行进入冷却，可与 `max_batches_reached` 同时为 true。
 - 预算、最后一次尝试折叠为 `failed`、`terminalize_exhausted` sweep、过期 lease reclaim、
   永久失败与 summary fallback 均不变；backfill reset 清空 `next_attempt_at`。
 - claim 仍按 `discovered_at ASC`：可领取的旧积压大于 `batch_size × max_batches` 时，新条目
   仍可能整轮排不上（`oldest_first_backlog_still_starves_fresh_entries_under_cap` 记录此限制）。
+  冷却只保证一篇失败文章不再阻断整轮，不保证新文章能进入发布窗口。
+
+**提案（未实现）：有界 fresh-first claim。** 把可领取行分成两类：fresh =
+`COALESCE(published_at, discovered_at) >= now - 发布窗口`（与发布阶段的 48 h 窗口同口径；
+`published_at` 可为空故回退 `discovered_at`），其余为 backlog。每批 N 行中至少保留
+`R = max(1, ⌈N/4⌉)` 个名额给 backlog（按 `discovered_at ASC`），其余 `N − R` 给 fresh
+（同样 `ASC`，先救最接近出窗口的）；任一类不足时把名额让给另一类。`batch_size = 1` 时按
+claim 轮次分配（每 4 轮至少 1 轮取 backlog）。总批次上限、冷却、预算与 `claimed_ids` 排除
+均照旧。它只给新条目进入抽取的机会，发布仍取决于后续 AI / publish 阶段。
 
 ## 6. RawArtifact 留档（HTML）
 

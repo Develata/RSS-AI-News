@@ -102,8 +102,12 @@ impl ExtractFlow {
         let mut summary = ExtractSummary::default();
         // Retry cooldown cutoff for every claim in this run. Each retryable
         // release writes `next_attempt_at > run_started_at`, so an entry that
-        // failed in this run is never reclaimed by it, however long it runs.
+        // failed in this run is not reclaimed by it, however long it runs.
         let run_started_at = OffsetDateTime::now_utc();
+        // Every id claimed so far in this run; later claims exclude them, so an
+        // entry is claimed at most once per run even when its release did not
+        // land (another run reclaimed the expired lease) or a backfill reset it.
+        let mut claimed_ids: Vec<i64> = Vec::new();
         // W15 §3.3：claim 过滤与 release 折叠必须用同一预算值，hoist 一处计算。
         let max_attempts = opts
             .max_attempts
@@ -158,28 +162,16 @@ impl ExtractFlow {
             let claimed = match self
                 .ctx
                 .feed_entry_repo
-                .claim_pending_fetch(&request, run_started_at)
+                .claim_pending_fetch(&request, run_started_at, &claimed_ids)
                 .await
             {
                 Ok(claimed) => claimed,
                 Err(error) => {
+                    // Stop here; the completion event below still reports what
+                    // earlier batches did.
                     tracing::error!("failed to claim extract entries: {error}");
-                    emitter
-                        .emit(
-                            "run_completed",
-                            "info",
-                            None,
-                            None,
-                            "extract run completed",
-                            Some(json!({
-                                "claimed": summary.claimed,
-                                "claim_error": error.error_kind(),
-                                "batches_executed": summary.batches_executed,
-                            })),
-                        )
-                        .await;
                     summary.claim_error = Some(error.error_kind().to_string());
-                    return summary;
+                    break;
                 }
             };
 
@@ -190,6 +182,7 @@ impl ExtractFlow {
 
             summary.claimed += claimed.len() as u32;
             summary.batches_executed += 1;
+            claimed_ids.extend(claimed.iter().map(|entry| entry.id));
 
             let concurrency = self.ctx.http.concurrent_fetches.max(1) as usize;
             let mut join_set = JoinSet::new();
@@ -220,8 +213,8 @@ impl ExtractFlow {
                 }
             }
             // Retryable failures do not stop the loop: their rows went back to
-            // pending_fetch with a cooldown past `run_started_at`, so the next
-            // claim skips them and only takes other claimable work.
+            // pending_fetch with a cooldown past `run_started_at` and are in
+            // `claimed_ids`, so the next claim only takes other claimable work.
         }
         if summary.retryable_deferred {
             tracing::info!(
@@ -250,6 +243,7 @@ impl ExtractFlow {
                     "batches_executed": summary.batches_executed,
                     "max_batches_reached": summary.max_batches_reached,
                     "retryable_deferred": summary.retryable_deferred,
+                    "claim_error": summary.claim_error,
                 })),
             )
             .await;
@@ -658,7 +652,9 @@ async fn release_extract_error(
                 &message,
                 &kind,
                 retry.max_attempts,
-                retry.next_attempt_at(now),
+                // Sample the clock here: `now` may predate artifact writes and
+                // the strategy chain, which would shorten the cooldown.
+                retry.next_attempt_at(OffsetDateTime::now_utc()),
                 now,
             )
             .await

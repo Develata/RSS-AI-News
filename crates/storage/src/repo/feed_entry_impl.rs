@@ -39,6 +39,12 @@ struct RetryableRelease<'a> {
     now: OffsetDateTime,
 }
 
+/// `[1,2,3]` for SQLite `json_each`; ids are integers, so no escaping is needed.
+fn json_id_array(ids: &[i64]) -> String {
+    let body: Vec<String> = ids.iter().map(i64::to_string).collect();
+    format!("[{}]", body.join(","))
+}
+
 // ── trait 实现 ─────────────────────────────────────────────────
 
 #[async_trait]
@@ -91,10 +97,15 @@ impl FeedEntryRepository for FeedEntryRepo {
         &self,
         request: &ClaimRequest,
         retry_cutoff: OffsetDateTime,
+        exclude_ids: &[i64],
     ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
         match &self.pool {
-            StoragePool::Sqlite(p) => sqlite_claim_pending_fetch(p, request, retry_cutoff).await,
-            StoragePool::Postgres(p) => pg_claim_pending_fetch(p, request, retry_cutoff).await,
+            StoragePool::Sqlite(p) => {
+                sqlite_claim_pending_fetch(p, request, retry_cutoff, exclude_ids).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_claim_pending_fetch(p, request, retry_cutoff, exclude_ids).await
+            }
         }
     }
 
@@ -319,6 +330,7 @@ async fn sqlite_claim_pending_fetch(
     pool: &SqlitePool,
     request: &ClaimRequest,
     retry_cutoff: OffsetDateTime,
+    exclude_ids: &[i64],
 ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
     sqlx::query_as::<_, ClaimedFeedEntry>(CLAIM_PENDING_FETCH_SQLITE_SQL)
         .bind(&request.owner)
@@ -328,6 +340,7 @@ async fn sqlite_claim_pending_fetch(
         .bind(i64::from(request.max_attempts))
         .bind(i64::from(request.batch_size))
         .bind(retry_cutoff)
+        .bind(json_id_array(exclude_ids))
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)
@@ -639,6 +652,7 @@ async fn pg_claim_pending_fetch(
     pool: &PgPool,
     request: &ClaimRequest,
     retry_cutoff: OffsetDateTime,
+    exclude_ids: &[i64],
 ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
     sqlx::query_as::<_, ClaimedFeedEntry>(CLAIM_PENDING_FETCH_PG_SQL)
         .bind(&request.owner)
@@ -648,6 +662,7 @@ async fn pg_claim_pending_fetch(
         .bind(i64::from(request.max_attempts))
         .bind(i64::from(request.batch_size))
         .bind(retry_cutoff)
+        .bind(exclude_ids)
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)

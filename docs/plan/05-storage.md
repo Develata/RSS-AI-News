@@ -134,9 +134,12 @@ SET state = 'fetching',
 WHERE id IN (
   SELECT id FROM feed_entries
   WHERE state = 'pending_fetch'
-    AND (lease_expires_at IS NULL OR lease_expires_at < CURRENT_TIMESTAMP)
-  ORDER BY priority DESC, id
-  LIMIT $3
+    AND (lease_expires_at IS NULL OR lease_expires_at < $now)
+    AND attempt_count < $max_attempts
+    AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday($retry_cutoff))
+    AND id NOT IN (SELECT value FROM json_each($exclude_ids))
+  ORDER BY discovered_at ASC
+  LIMIT $batch_size
 )
 RETURNING *;
 
@@ -145,9 +148,10 @@ UPDATE feed_entries
 SET state = 'fetching', ...
 WHERE id IN (
   SELECT id FROM feed_entries
-  WHERE state = 'pending_fetch' AND (...)
-  ORDER BY priority DESC, id
-  LIMIT $3
+  WHERE state = 'pending_fetch' AND (...)          -- 同上；冷却直接比较 TIMESTAMPTZ，
+    AND id <> ALL($exclude_ids::BIGINT[])          -- 排除列表为数组
+  ORDER BY discovered_at ASC
+  LIMIT $batch_size
   FOR UPDATE SKIP LOCKED
 )
 RETURNING *;

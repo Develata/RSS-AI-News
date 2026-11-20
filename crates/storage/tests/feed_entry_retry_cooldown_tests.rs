@@ -65,7 +65,7 @@ async fn retryable_release_sets_deadline_and_claim_honours_it() {
     let repo = FeedEntryRepo::new(pool.clone());
 
     let claimed = repo
-        .claim_pending_fetch(&claim("worker-a", t0(), 1), t0())
+        .claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[])
         .await
         .unwrap();
     assert_eq!(claimed.len(), 1);
@@ -92,7 +92,7 @@ async fn retryable_release_sets_deadline_and_claim_honours_it() {
     // deadline (the cooldown expired mid-run). The row must stay unclaimed.
     let late = t0() + Duration::minutes(20);
     assert!(
-        repo.claim_pending_fetch(&claim("worker-a", late, 1), t0())
+        repo.claim_pending_fetch(&claim("worker-a", late, 1), t0(), &[])
             .await
             .unwrap()
             .is_empty()
@@ -100,14 +100,14 @@ async fn retryable_release_sets_deadline_and_claim_honours_it() {
     // Later run that starts one second before the deadline: still cooling.
     let just_before = deadline - Duration::seconds(1);
     assert!(
-        repo.claim_pending_fetch(&claim("worker-b", just_before, 1), just_before)
+        repo.claim_pending_fetch(&claim("worker-b", just_before, 1), just_before, &[])
             .await
             .unwrap()
             .is_empty()
     );
     // Run that starts exactly at the deadline: eligible again.
     let retried = repo
-        .claim_pending_fetch(&claim("worker-c", deadline, 1), deadline)
+        .claim_pending_fetch(&claim("worker-c", deadline, 1), deadline, &[])
         .await
         .unwrap();
     assert_eq!(retried.len(), 1);
@@ -126,13 +126,13 @@ async fn cooling_entry_takes_no_batch_slot() {
     let repo = FeedEntryRepo::new(pool.clone());
 
     let claimed = repo
-        .claim_pending_fetch(&claim("worker-a", t0(), 1), t0())
+        .claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[])
         .await
         .unwrap();
     assert_eq!(claimed.iter().map(|e| e.id).collect::<Vec<_>>(), [fresh]);
     // Only cooling rows left: the claim is empty, not a spin.
     assert!(
-        repo.claim_pending_fetch(&claim("worker-a", t0(), 1), t0())
+        repo.claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[])
             .await
             .unwrap()
             .is_empty()
@@ -146,7 +146,7 @@ async fn wrong_owner_release_writes_no_deadline() {
     let source_id = seed_source(&pool).await;
     let id = insert_feed_entry(&pool, source_id, "uid-owner", "hash-owner").await;
     let repo = FeedEntryRepo::new(pool.clone());
-    repo.claim_pending_fetch(&claim("worker-a", t0(), 1), t0())
+    repo.claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[])
         .await
         .unwrap();
 
@@ -189,7 +189,7 @@ async fn exhaustion_stays_terminal_regardless_of_cooldown() {
         .execute(&pool)
         .await
         .unwrap();
-    repo.claim_pending_fetch(&claim("worker-a", t0(), 1), t0())
+    repo.claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[])
         .await
         .unwrap();
     let outcome = repo
@@ -248,10 +248,80 @@ async fn backfill_reset_clears_cooldown() {
         ("pending_fetch".to_string(), None, 0, None)
     );
     assert_eq!(
-        repo.claim_pending_fetch(&claim("worker-a", t0(), 1), t0())
+        repo.claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[])
             .await
             .unwrap()
             .len(),
         1
     );
+}
+/// SQLite stores timestamps as RFC3339 text with a variable number of
+/// fractional digits, so text order is not instant order within one second
+/// (`...00.12Z` sorts before `...00.1Z`; `...00Z` after `...00.5Z`). The claim
+/// must compare instants.
+#[tokio::test]
+async fn cooldown_compares_instants_not_text() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let source_id = seed_source(&pool).await;
+    let id = insert_feed_entry(&pool, source_id, "uid-frac", "hash-frac").await;
+    let repo = FeedEntryRepo::new(pool.clone());
+    let ms = Duration::milliseconds;
+    let plus8 = time::UtcOffset::from_hms(8, 0, 0).unwrap();
+    // (deadline, cutoff, claimable)
+    let cases = [
+        // Deadline 20 ms after the cutoff: still cooling.
+        (t0() + ms(120), t0() + ms(100), false),
+        // Whole-second deadline before a fractional cutoff: due.
+        (t0(), t0() + ms(500), true),
+        // Equal instants: due (the deadline is inclusive).
+        (t0() + ms(250), t0() + ms(250), true),
+        // Same instant written with a +08:00 offset: due.
+        ((t0() + ms(250)).to_offset(plus8), t0() + ms(250), true),
+        // +08:00 deadline one second after a UTC cutoff: still cooling.
+        ((t0() + Duration::seconds(1)).to_offset(plus8), t0(), false),
+    ];
+    for (deadline, cutoff, claimable) in cases {
+        set_cooldown(&pool, id, deadline).await;
+        let claimed = repo
+            .claim_pending_fetch(&claim("worker-a", cutoff, 1), cutoff, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            !claimed.is_empty(),
+            claimable,
+            "deadline {deadline} vs cutoff {cutoff}"
+        );
+        // Put the row back for the next case.
+        sqlx::query(
+            "UPDATE feed_entries SET state = 'pending_fetch', lease_owner = NULL, \
+             lease_expires_at = NULL, attempt_count = 0 WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+}
+
+/// Excluded ids are skipped before `LIMIT`; the next eligible row is taken.
+#[tokio::test]
+async fn excluded_ids_are_not_claimed() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let source_id = seed_source(&pool).await;
+    let first = insert_feed_entry(&pool, source_id, "uid-ex1", "hash-ex1").await;
+    let second = insert_feed_entry(&pool, source_id, "uid-ex2", "hash-ex2").await;
+    let repo = FeedEntryRepo::new(pool.clone());
+
+    let claimed = repo
+        .claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[first])
+        .await
+        .unwrap();
+    assert_eq!(claimed.iter().map(|e| e.id).collect::<Vec<_>>(), [second]);
+    assert!(
+        repo.claim_pending_fetch(&claim("worker-a", t0(), 5), t0(), &[first, second])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(row(&pool, first).await.2, 0, "excluded row never claimed");
 }

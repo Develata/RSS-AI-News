@@ -101,7 +101,7 @@ async fn setup_claimed_entry(pool: &sqlx::SqlitePool, owner: &str) -> (FeedEntry
         .expect("article origin entry should not be claimable");
     let repo = FeedEntryRepo::new(pool.clone());
     let claimed = repo
-        .claim_pending_fetch(&claim_request(owner), OffsetDateTime::now_utc())
+        .claim_pending_fetch(&claim_request(owner), OffsetDateTime::now_utc(), &[])
         .await
         .expect("claim should succeed");
     assert!(claimed.iter().any(|entry| entry.id == entry_id));

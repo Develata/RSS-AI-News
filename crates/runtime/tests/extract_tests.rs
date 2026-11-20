@@ -908,27 +908,45 @@ async fn extract_live_tasks_are_bounded_by_concurrency() {
 
 // === Retry cooldown: retryable failures no longer stop the run ===
 
-/// Fetcher that records every fetch and can expire another entry's cooldown
-/// when a given entry is fetched (simulates a deadline passing mid-run).
+/// Side effect a [`RecordingFetcher`] applies while fetching a given entry.
+#[derive(Clone, Copy)]
+enum OnFetch {
+    /// Set this entry's `next_attempt_at` to an instant already in the past:
+    /// its cooldown has expired before the run's next claim.
+    ExpireCooldown(i64),
+    /// Simulate another run reclaiming this entry's expired lease: it returns
+    /// to `pending_fetch` with no owner, so the current run's release misses.
+    ReclaimLease(i64),
+}
+
+/// Fetcher that records every fetch and can apply an [`OnFetch`] side effect.
 struct RecordingFetcher {
     pool: SqlitePool,
     responses: Mutex<HashMap<i64, Result<RawHtmlFetch, ExtractorError>>>,
     calls: Mutex<Vec<i64>>,
-    /// `(fetched_id, cooled_id)`: fetching `fetched_id` sets `cooled_id`'s
-    /// `next_attempt_at` to the current instant, so its cooldown has expired
-    /// before the run's next claim while still lying after run start, as any
-    /// deadline written during the run does.
-    expire_on_fetch: Option<(i64, i64)>,
+    /// `(fetched_id, effect)`: applied when `fetched_id` is fetched.
+    on_fetch: Option<(i64, OnFetch)>,
 }
 
 #[async_trait]
 impl HtmlFetcher for RecordingFetcher {
     async fn fetch_html(&self, task: &ArticleFetchTask) -> Result<RawHtmlFetch, ExtractorError> {
         self.calls.lock().await.push(task.feed_entry_id);
-        if let Some((fetched, cooled)) = self.expire_on_fetch
-            && fetched == task.feed_entry_id
-        {
-            set_next_attempt_at(&self.pool, cooled, time::OffsetDateTime::now_utc()).await;
+        match self.on_fetch {
+            Some((fetched, OnFetch::ExpireCooldown(id))) if fetched == task.feed_entry_id => {
+                set_next_attempt_at(&self.pool, id, past()).await;
+            }
+            Some((fetched, OnFetch::ReclaimLease(id))) if fetched == task.feed_entry_id => {
+                sqlx::query(
+                    "UPDATE feed_entries SET state = 'pending_fetch', lease_owner = NULL, \
+                     lease_expires_at = NULL WHERE id = ?",
+                )
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .expect("lease reclaim should apply");
+            }
+            _ => {}
         }
         let response = self.responses.lock().await.remove(&task.feed_entry_id);
         response.unwrap_or(Err(ExtractorError::ConnectionFailed))
@@ -938,13 +956,13 @@ impl HtmlFetcher for RecordingFetcher {
 fn recording_flow(
     pool: &SqlitePool,
     responses: HashMap<i64, Result<RawHtmlFetch, ExtractorError>>,
-    expire_on_fetch: Option<(i64, i64)>,
+    on_fetch: Option<(i64, OnFetch)>,
 ) -> (ExtractFlow, Arc<RecordingFetcher>) {
     let fetcher = Arc::new(RecordingFetcher {
         pool: pool.clone(),
         responses: Mutex::new(responses),
         calls: Mutex::default(),
-        expire_on_fetch,
+        on_fetch,
     });
     let app = Arc::new(app_config(RetentionPolicy::Always, 1));
     let deps = common::extract_deps(
@@ -997,6 +1015,20 @@ async fn entry_row(pool: &SqlitePool, id: i64) -> (String, i64, Option<time::Off
         .expect("entry should be readable")
 }
 
+/// Seed a pending entry discovered `minute` minutes after a fixed instant, so
+/// oldest-first claim order does not depend on wall-clock reads.
+async fn seed_at(pool: &SqlitePool, source_id: i64, uid: &str, minute: i64) -> i64 {
+    let id = seed_pending_fetch_entry(pool, source_id, uid, &format!("hash-{uid}"), None).await;
+    let base = time::OffsetDateTime::from_unix_timestamp(1_795_000_000).expect("valid timestamp");
+    sqlx::query("UPDATE feed_entries SET discovered_at = ? WHERE id = ?")
+        .bind(base + time::Duration::minutes(minute))
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("discovered_at should update");
+    id
+}
+
 fn opts(batch_size: u32, max_batches: u32) -> ExtractOptions {
     ExtractOptions {
         batch_size,
@@ -1011,29 +1043,24 @@ async fn timeout_on_first_entry_does_not_block_later_healthy_entry() {
     // run used to stop there ("deferring re-claim to next run").
     let (_dir, pool) = make_test_pool().await;
     let (_rule_id, source_id) = setup_base(&pool).await;
-    let slow = seed_pending_fetch_entry(&pool, source_id, "uid-slow", "hash-slow", None).await;
-    let healthy = seed_pending_fetch_entry(&pool, source_id, "uid-ok", "hash-ok", None).await;
+    let slow = seed_at(&pool, source_id, "uid-slow", 0).await;
+    let healthy = seed_at(&pool, source_id, "uid-ok", 1).await;
     // When `healthy` is fetched, `slow`'s cooldown has already passed: the run
-    // must still not reclaim `slow`. (SQLite compares these RFC3339 texts
-    // lexically; two instants milliseconds apart can misorder in rare cases
-    // when the trimmed fraction of one is a prefix of the other. The storage
-    // test `retryable_release_sets_deadline_and_claim_honours_it` covers the
-    // same cutoff rule with whole-second timestamps.)
+    // must still not reclaim `slow`.
     let (flow, fetcher) = recording_flow(
         &pool,
         responses([
             (slow, Err(ExtractorError::HttpTimeout)),
             (healthy, Ok(raw(healthy, b"<html>ok</html>"))),
         ]),
-        Some((healthy, slow)),
+        Some((healthy, OnFetch::ExpireCooldown(slow))),
     );
 
     let summary = flow.run(opts(1, 0)).await;
-    let run_ended = time::OffsetDateTime::now_utc();
 
-    // The cooldown did expire before the run ended, yet `slow` was fetched once.
-    let expired_at = entry_row(&pool, slow).await.2.expect("deadline set");
-    assert!(expired_at <= run_ended);
+    assert!(
+        entry_row(&pool, slow).await.2.expect("deadline set") < time::OffsetDateTime::now_utc()
+    );
     assert_eq!(*fetcher.calls.lock().await, [slow, healthy]);
     assert_eq!(summary.claimed, 2);
     assert_eq!(summary.batches_executed, 2);
@@ -1044,6 +1071,35 @@ async fn timeout_on_first_entry_does_not_block_later_healthy_entry() {
     assert_eq!(entry_row(&pool, healthy).await.0, "persisted");
     let (state, attempts, _) = entry_row(&pool, slow).await;
     assert_eq!((state.as_str(), attempts), ("pending_fetch", 1));
+}
+
+#[tokio::test]
+async fn entry_whose_lease_was_reclaimed_is_not_claimed_again_in_the_same_run() {
+    // Another run reclaims `slow`'s lease while it is being fetched, so this
+    // run's retryable release misses (owner guard) and writes no cooldown. The
+    // row is claimable again, but this run must not take it a second time.
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let slow = seed_at(&pool, source_id, "uid-slow", 0).await;
+    let healthy = seed_at(&pool, source_id, "uid-ok", 1).await;
+    let (flow, fetcher) = recording_flow(
+        &pool,
+        responses([
+            (slow, Err(ExtractorError::HttpTimeout)),
+            (healthy, Ok(raw(healthy, b"<html>ok</html>"))),
+        ]),
+        Some((slow, OnFetch::ReclaimLease(slow))),
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+
+    assert_eq!(*fetcher.calls.lock().await, [slow, healthy]);
+    assert_eq!((summary.claimed, summary.persisted), (2, 1));
+    assert_eq!(
+        entry_row(&pool, slow).await,
+        ("pending_fetch".to_string(), 1, None)
+    );
+    assert_eq!(entry_row(&pool, healthy).await.0, "persisted");
 }
 
 #[tokio::test]
@@ -1121,6 +1177,10 @@ async fn queue_of_only_cooling_entries_exits_without_spinning() {
 
     assert_eq!((summary.claimed, summary.batches_executed), (0, 0));
     assert!(!summary.max_batches_reached && !summary.retryable_deferred);
+    assert_eq!(
+        summary.claim_error, None,
+        "ended on an empty claim, not an error"
+    );
     assert!(fetcher.calls.lock().await.is_empty());
 }
 
@@ -1130,9 +1190,7 @@ async fn max_batches_still_caps_a_run_with_retryable_failures() {
     let (_rule_id, source_id) = setup_base(&pool).await;
     let mut ids = Vec::new();
     for i in 0..3 {
-        let uid = format!("uid-t{i}");
-        let hash = format!("hash-t{i}");
-        ids.push(seed_pending_fetch_entry(&pool, source_id, &uid, &hash, None).await);
+        ids.push(seed_at(&pool, source_id, &format!("uid-t{i}"), i).await);
     }
     // No responses: every fetch fails with retryable ConnectionFailed.
     let (flow, fetcher) = recording_flow(&pool, HashMap::new(), None);

@@ -166,10 +166,13 @@ pub trait FeedEntryRepository: Send + Sync {
     /// 领取 `pending_fetch` 行。`retry_cutoff` 是 retry cooldown 截止点：
     /// `next_attempt_at > retry_cutoff` 的行仍在冷却、不被领取。extract 传
     /// run 开始时刻，使本 run 释放的 retryable 行在本 run 内不可再领。
+    /// `exclude_ids` 中的行不被领取；extract 传本 run 已领取过的 id，使每行每
+    /// run 至多被领取一次，即使其 release 因 lease 被他人 reclaim 而落空。
     async fn claim_pending_fetch(
         &self,
         request: &ClaimRequest,
         retry_cutoff: OffsetDateTime,
+        exclude_ids: &[i64],
     ) -> Result<Vec<ClaimedFeedEntry>, StorageError>;
     async fn release_success(
         &self,
