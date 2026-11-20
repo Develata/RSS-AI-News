@@ -141,7 +141,11 @@ LIMIT $4
 ///
 /// lease 过期同理用 `julianday()`：`$4` 与 `$8` 同值（UTC、向下取整到毫秒），
 /// `$2` 写入时转 UTC 并向上取整到毫秒。比较是严格 `<`，而 `julianday()` 的舍入
-/// 单调，故即使是本修复前写入的未取整 lease 也只会晚判过期（≤ 1 ms），不会提前。
+/// 单调，故即使是本修复前写入的未取整 lease 也只会晚判过期（约 ≤ 1.5 ms），不会提前。
+///
+/// `julianday()` 对它解析不了的文本返回 NULL（例如 `+15:00` 这类合法 RFC3339
+/// 偏移），NULL 会让谓词永远不成立、行永远不被领取。四个时间谓词因此都以
+/// `COALESCE(<按时刻>, <按文本>)` 回退到本修复前的文本比较，旧值至少保持旧行为。
 pub(super) const CLAIM_PENDING_FETCH_SQLITE_SQL: &str = r#"
 UPDATE feed_entries
 SET state = 'fetching',
@@ -152,9 +156,11 @@ SET state = 'fetching',
 WHERE id IN (
     SELECT id FROM feed_entries
     WHERE state = 'pending_fetch'
-      AND (lease_expires_at IS NULL OR julianday(lease_expires_at) < julianday($4))
+      AND (lease_expires_at IS NULL
+           OR COALESCE(julianday(lease_expires_at) < julianday($4), lease_expires_at < $4))
       AND attempt_count < $5
-      AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday($8))
+      AND (next_attempt_at IS NULL
+           OR COALESCE(julianday(next_attempt_at) <= julianday($8), next_attempt_at <= $8))
       AND id NOT IN (SELECT value FROM json_each($7))
     ORDER BY discovered_at ASC
     LIMIT $6
@@ -240,7 +246,7 @@ SET state = 'pending_fetch',
     lease_expires_at = NULL,
     updated_at = $1
 WHERE lease_expires_at IS NOT NULL
-  AND julianday(lease_expires_at) < julianday($2)
+  AND COALESCE(julianday(lease_expires_at) < julianday($2), lease_expires_at < $2)
   AND state IN ('fetching', 'extracting')
 "#;
 
@@ -297,7 +303,8 @@ SET state = 'failed',
     updated_at = $1
 WHERE state = 'pending_fetch'
   AND attempt_count >= $2
-  AND (lease_expires_at IS NULL OR julianday(lease_expires_at) < julianday($3))
+  AND (lease_expires_at IS NULL
+       OR COALESCE(julianday(lease_expires_at) < julianday($3), lease_expires_at < $3))
 "#;
 
 pub(super) const COUNT_FEED_ENTRIES_IN_WINDOW_SQL: &str = r#"

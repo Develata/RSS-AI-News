@@ -642,6 +642,10 @@ async fn release_extract_error(
     let message = error.display_user();
     let kind = error.error_kind().to_string();
     if error.is_retryable() {
+        // One instant for the row's `updated_at` and the cooldown: `now` may
+        // predate artifact writes and the strategy chain, which would shorten
+        // the cooldown and misdate the release.
+        let released_at = (ctx.clock)();
         // W15 §3：release SQL 内按预算折叠——耗尽即转 failed 终态。
         let outcome = match ctx
             .feed_entry_repo
@@ -651,10 +655,8 @@ async fn release_extract_error(
                 &message,
                 &kind,
                 retry.max_attempts,
-                // Sample the clock here: `now` may predate artifact writes and
-                // the strategy chain, which would shorten the cooldown.
-                retry.next_attempt_at((ctx.clock)()),
-                now,
+                retry.next_attempt_at(released_at),
+                released_at,
             )
             .await
         {

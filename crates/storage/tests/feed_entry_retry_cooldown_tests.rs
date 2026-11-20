@@ -369,6 +369,11 @@ async fn release_deadline_is_never_early_and_always_parseable() {
     release("worker-a", t0() + us(100_400)).await;
     assert!(!claims(t0() + us(100_100), "worker-b").await);
     assert!(claims(t0() + us(101_000), "worker-b").await);
+    // Deadline .100900 is stored as .101; a claim at .100800 would round up
+    // to .101 too without the claim-side floor and take the row 100 us early.
+    release("worker-b", t0() + us(100_900)).await;
+    assert!(!claims(t0() + us(100_800), "worker-x").await);
+    assert!(claims(t0() + us(101_000), "worker-b").await);
 
     // Valid RFC3339 offset that SQLite's julianday() cannot parse.
     let plus15 = time::UtcOffset::from_hms(15, 0, 0).unwrap();
@@ -377,4 +382,37 @@ async fn release_deadline_is_never_early_and_always_parseable() {
     assert_eq!(row(&pool, id).await.1, Some(deadline));
     assert!(!claims(deadline - Duration::seconds(1), "worker-c").await);
     assert!(claims(deadline, "worker-c").await);
+}
+
+/// Deadlines from before this release are stored as written. Text that
+/// SQLite's `julianday()` cannot parse falls back to the text comparison, so the
+/// row cools for roughly the intended time instead of forever.
+#[tokio::test]
+async fn deadline_julianday_cannot_parse_falls_back_to_text() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let source_id = seed_source(&pool).await;
+    let id = insert_feed_entry(&pool, source_id, "uid-plus15", "hash-plus15").await;
+    set_cooldown(
+        &pool,
+        id,
+        t0().to_offset(time::UtcOffset::from_hms(15, 0, 0).unwrap()),
+    )
+    .await;
+    let repo = FeedEntryRepo::new(pool.clone());
+
+    let before = t0() - Duration::days(2);
+    assert!(
+        repo.claim_pending_fetch(&claim("worker-a", before, 1), &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let after = t0() + Duration::days(2);
+    assert_eq!(
+        repo.claim_pending_fetch(&claim("worker-a", after, 1), &[])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }

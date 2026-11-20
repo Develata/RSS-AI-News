@@ -1206,6 +1206,14 @@ async fn cooldown_is_measured_from_the_release_not_from_the_fetch() {
 
     assert_eq!(flow.run(opts(1, 0)).await.retryable_failed, 1);
     assert_eq!(entry_row(&pool, id).await.2, Some(t0() + 18 * MIN));
+    // The row records the same release instant the cooldown starts from.
+    let updated_at: time::OffsetDateTime =
+        sqlx::query_scalar("SELECT updated_at FROM feed_entries WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("updated_at should be readable");
+    assert_eq!(updated_at, t0() + 8 * MIN);
 }
 
 #[tokio::test]

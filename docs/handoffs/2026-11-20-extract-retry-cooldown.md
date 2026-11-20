@@ -4,7 +4,8 @@
 - 作者 / Agent：Claude Code（Opus）
 - 分支：`fix/extract-retry-cooldown`（基于 `main` a047120）
 - 当前 HEAD：见 `git log -1`
-- 相关 commit：1424931、9856680、384897f（第一轮复审修复），以及第二轮复审修复提交
+- 相关 commit：1424931、9856680、384897f（第一轮复审修复）、4b5f971（第二轮复审修复）、
+  e66206b（SQLite lease 按时刻比较）、第三轮复审修复提交；随 v0.10.4 发布
 - 相关 tag / release：N/A（未发布、未部署）
 - 状态：`validated`（仅本地）
 
@@ -62,8 +63,16 @@ deferring re-claim to next run"）。2026-11-20 18:20 / 18:30（北京时间）�
 
 - 第二轮 Codex 复审 `384897f`：2 个 BLOCKER（毫秒舍入可提前领取；固定 run-start cutoff 漏掉
   run 期间到期的工作）与 SHOULD_FIX（排除列表 O(N²)、`+15:00` 偏移不可解析、
-  `retryable_deferred` 语义、采样时刻测试不够强）已修复。SQLite lease 比较仍是字典序：基线
-  已有缺陷，不在本次范围，单独记录。
+  `retryable_deferred` 语义、采样时刻测试不够强）已在 4b5f971 修复。
+- SQLite lease 比较原为字典序（基线缺陷），已在 e66206b 改为按时刻比较（另一会话完成）。
+- 第三轮 Codex 复审 `384897f..e66206b`：
+  - 采纳：旧数据中 `julianday()` 不可解析的 lease / 截止点改为回退文本比较（否则永久跳过）；
+    亚毫秒测试补上能区分 claim 侧取整的边界，PG 改走 release 写入路径；retryable release 的
+    `updated_at` 与截止点用同一时刻；文档中 SQLite reclaim 示例、误差上界（约 1.5 ms）与
+    fresh-first 提案的窗口上界已更正。
+  - 按计划处理：版本号由 v0.10.4 发版提交对齐。
+  - 不适用：曾运行中间版本 `384897f` 的库——该版本从未推送或部署；"从不提前"针对本版本写入的截止点。
+  - 记录不改：失败密集时排除列表的累计传输约 F(F−1)/2，见 plan/02 §5.3。
 
 ## 结果
 

@@ -263,3 +263,29 @@ async fn claim_writes_a_lease_the_reclaim_compares_by_instant() {
         ("pending_fetch".to_string(), None)
     );
 }
+
+/// Leases written before the instant comparison kept the caller's offset.
+/// SQLite's `julianday()` returns NULL for some valid RFC3339 offsets
+/// (`+15:00`); such a lease must still expire through the text fallback
+/// instead of blocking its row forever, and must not expire early.
+#[tokio::test]
+async fn lease_with_offset_julianday_cannot_parse_falls_back_to_text() {
+    let lease = t0().to_offset(UtcOffset::from_hms(15, 0, 0).unwrap());
+    let (_dir, pool) = common::make_test_pool().await;
+    let parsed: Option<f64> = sqlx::query_scalar("SELECT julianday(?)")
+        .bind(lease)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        parsed, None,
+        "the case only matters if julianday() rejects it"
+    );
+    for op in OPS {
+        assert!(expired(op, lease, t0() + Duration::days(2)).await, "{op:?}");
+        assert!(
+            !expired(op, lease, t0() - Duration::days(2)).await,
+            "{op:?}"
+        );
+    }
+}

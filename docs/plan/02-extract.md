@@ -143,7 +143,10 @@ lease 字段约束见 [./08-state-machines.md](./08-state-machines.md) §2.3 + [
   排除集合只随本 run 的失败数增长。跨 run 的过期 lease 恢复不变。
 - 冷却比较从不提前：截止点存为 UTC 并向上取整到毫秒，claim 的比较时刻向下取整到毫秒
   （最多晚约 2 ms）。SQLite 以小数位数可变的 RFC3339 TEXT 存时间，同一秒内字典序 ≠
-  时刻序，故用 `julianday()`（舍入到毫秒，两侧已对齐故精确）；PG 直接比较 `TIMESTAMPTZ`。
+  时刻序，故用 `julianday()`（舍入到毫秒，两侧已对齐故精确）；`julianday()` 解析不了的
+  文本回退到文本比较。PG 直接比较 `TIMESTAMPTZ`。"从不提前"针对本版本写入的截止点。
+- 排除集合按本 run 的失败数增长；失败密集且 `batch_size = 1`、不限批时，累计发送的 id
+  约为 F(F−1)/2（F 为本 run 失败数）。正常规模（每批 50 × 10 批）可忽略，未做非空列表实测。
 - 循环继续领取其余可领取行，直到 claim 为空或达到 `max_batches`。`retryable_deferred`
   表示本 run 有 retryable 失败、本 run 不再尝试这些行（通常已带冷却；release 落空时
   不带冷却，由其他 run 处理），可与 `max_batches_reached` 同时为 true。
@@ -155,8 +158,9 @@ lease 字段约束见 [./08-state-machines.md](./08-state-machines.md) §2.3 + [
   冷却只保证一篇失败文章不再阻断整轮，不保证新文章能进入发布窗口。
 
 **提案（未实现）：有界 fresh-first claim。** 把可领取行分成两类：fresh =
-`COALESCE(published_at, discovered_at) >= now - 发布窗口`（与发布阶段的 48 h 窗口同口径；
-`published_at` 可为空故回退 `discovered_at`），其余为 backlog。每批 N 行中至少保留
+`now - 发布窗口 <= COALESCE(published_at, discovered_at) <= now`（与发布阶段
+`SELECT_AI_PATH_CANDIDATES_SQL` 的窗口两端同口径；`published_at` 可为空故回退 `discovered_at`；
+源站给出未来时间戳的条目不占 fresh 名额，归入 backlog），其余为 backlog。每批 N 行中至少保留
 `R = max(1, ⌈N/4⌉)` 个名额给 backlog（按 `discovered_at ASC`），其余 `N − R` 给 fresh
 （同样 `ASC`，先救最接近出窗口的）；任一类不足时把名额让给另一类。`batch_size = 1` 时按
 claim 轮次分配（每 4 轮至少 1 轮取 backlog）。总批次上限、冷却、预算与 `claimed_ids` 排除

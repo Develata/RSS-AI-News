@@ -789,3 +789,69 @@ async fn pg_retry_cooldown_is_honoured_by_claim() {
 
     ctx.cleanup().await;
 }
+
+/// PG mirror of the SQLite sub-millisecond case, through the release path: the
+/// stored deadline is rounded up to a millisecond and the claim never takes the
+/// row before it.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_release_deadline_is_never_early() {
+    let ctx = make_pg_test_pool().await;
+    let source_id = seed_feed_source(&ctx, "subms").await;
+    let repo = FeedEntryRepo::new_with_storage(ctx.storage_pool().clone());
+    let request = |owner: &str, now: OffsetDateTime| ClaimRequest {
+        owner: owner.to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+    let us = time::Duration::microseconds;
+    let t0 = parse_timestamp("2026-11-20T10:20:00Z");
+    let id = repo
+        .insert_if_new(&new_feed_entry(source_id, "uid-subms"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        repo.claim_pending_fetch(&request("worker-A", t0), &[])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Deadline .100900: stored as .101000.
+    let deadline = t0 + us(100_900);
+    let outcome = repo
+        .release_retryable_failure(id, "worker-A", "timeout", "http_timeout", 5, deadline, t0)
+        .await
+        .unwrap();
+    assert!(outcome.released && !outcome.exhausted);
+    let stored: Option<OffsetDateTime> =
+        sqlx::query_scalar("SELECT next_attempt_at FROM feed_entries WHERE id = $1")
+            .bind(id)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, Some(t0 + us(101_000)));
+    // 100 us before the deadline, and after it but before the stored value.
+    for now in [t0 + us(100_800), t0 + us(100_950)] {
+        assert!(
+            repo.claim_pending_fetch(&request("worker-B", now), &[])
+                .await
+                .unwrap()
+                .is_empty(),
+            "claimed at {now}"
+        );
+    }
+    assert_eq!(
+        repo.claim_pending_fetch(&request("worker-B", t0 + us(101_000)), &[])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    ctx.cleanup().await;
+}
