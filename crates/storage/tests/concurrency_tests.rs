@@ -35,7 +35,6 @@ async fn parallel_claim_returns_disjoint_rows() {
                     batch_size: 30,
                     max_attempts: 5,
                 },
-                now,
                 &[],
             )
             .await
@@ -68,11 +67,7 @@ async fn release_with_wrong_owner_returns_false() {
     let repo = FeedEntryRepo::new(pool);
 
     let claimed = repo
-        .claim_pending_fetch(
-            &claim_request("worker-a", 1),
-            OffsetDateTime::now_utc(),
-            &[],
-        )
+        .claim_pending_fetch(&claim_request("worker-a", 1), &[])
         .await
         .expect("claim should succeed");
     assert_eq!(claimed.len(), 1);
@@ -93,11 +88,7 @@ async fn reclaim_expired_lease_clears_owner_and_allows_reclaim() {
     let repo = FeedEntryRepo::new(pool.clone());
 
     let claimed = repo
-        .claim_pending_fetch(
-            &claim_request("worker-a", 1),
-            OffsetDateTime::now_utc(),
-            &[],
-        )
+        .claim_pending_fetch(&claim_request("worker-a", 1), &[])
         .await
         .expect("claim should succeed");
     assert_eq!(claimed.len(), 1);
@@ -126,11 +117,7 @@ async fn reclaim_expired_lease_clears_owner_and_allows_reclaim() {
     assert!(owner.is_none());
 
     let claimed_again = repo
-        .claim_pending_fetch(
-            &claim_request("worker-b", 1),
-            OffsetDateTime::now_utc(),
-            &[],
-        )
+        .claim_pending_fetch(&claim_request("worker-b", 1), &[])
         .await
         .expect("second claim should succeed");
     assert_eq!(claimed_again.len(), 1);

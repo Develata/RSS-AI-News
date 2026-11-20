@@ -227,6 +227,7 @@ pub fn extract_deps(
         article_repo: Arc::new(rss_ai_news_storage::ArticleRepo::new(pool.clone())),
         artifact_repo: Arc::new(rss_ai_news_storage::RawArtifactRepo::new(pool.clone())),
         event_repo: Arc::new(rss_ai_news_storage::RunEventRepo::new(pool.clone())),
+        clock: rss_ai_news_runtime::context::system_clock(),
     }
 }
 

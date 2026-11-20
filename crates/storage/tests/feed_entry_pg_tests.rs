@@ -297,7 +297,6 @@ async fn pg_claim_pending_fetch_then_release_success() {
                 batch_size: 4,
                 max_attempts: 3,
             },
-            now,
             &[],
         )
         .await
@@ -378,7 +377,6 @@ async fn pg_claim_pending_fetch_skips_explicitly_locked_row() {
                 batch_size: 1,
                 max_attempts: 3,
             },
-            now,
             &[],
         ),
     )
@@ -668,7 +666,7 @@ async fn pg_retry_cooldown_is_honoured_by_claim() {
 
     // Wrong owner: nothing written, lease kept.
     assert_eq!(
-        repo.claim_pending_fetch(&request("worker-A", t0), t0, &[])
+        repo.claim_pending_fetch(&request("worker-A", t0), &[])
             .await
             .unwrap()[0]
             .id,
@@ -695,28 +693,42 @@ async fn pg_retry_cooldown_is_honoured_by_claim() {
         .await
         .unwrap()
         .unwrap();
-    let late = t0 + time::Duration::minutes(20);
+    let before = deadline - time::Duration::seconds(1);
     let claimed = repo
-        .claim_pending_fetch(&request("worker-A", late), t0, &[])
+        .claim_pending_fetch(&request("worker-A", before), &[])
         .await
         .unwrap();
     assert_eq!(claimed.iter().map(|e| e.id).collect::<Vec<_>>(), [fresh]);
-    // Cutoff at run start: still nothing, although `now` is past the deadline.
+    // Past the deadline but excluded (failed earlier in the same run).
+    let late = t0 + time::Duration::minutes(20);
     assert!(
-        repo.claim_pending_fetch(&request("worker-A", late), t0, &[])
+        repo.claim_pending_fetch(&request("worker-A", late), &[old])
             .await
             .unwrap()
             .is_empty()
     );
-    let before = deadline - time::Duration::seconds(1);
+    // Sub-millisecond gap: a deadline 300 us after `now` still waits.
+    let fractional = deadline + time::Duration::microseconds(100_400);
+    sqlx::query("UPDATE feed_entries SET next_attempt_at = $1 WHERE id = $2")
+        .bind(fractional + time::Duration::microseconds(600))
+        .bind(old)
+        .execute(pg)
+        .await
+        .unwrap();
     assert!(
-        repo.claim_pending_fetch(&request("worker-B", before), before, &[])
+        repo.claim_pending_fetch(&request("worker-B", fractional), &[])
             .await
             .unwrap()
             .is_empty()
     );
+    sqlx::query("UPDATE feed_entries SET next_attempt_at = $1 WHERE id = $2")
+        .bind(deadline)
+        .bind(old)
+        .execute(pg)
+        .await
+        .unwrap();
     let retried = repo
-        .claim_pending_fetch(&request("worker-C", deadline), deadline, &[])
+        .claim_pending_fetch(&request("worker-C", deadline), &[])
         .await
         .unwrap();
     assert_eq!(retried.len(), 1);
@@ -736,7 +748,7 @@ async fn pg_retry_cooldown_is_honoured_by_claim() {
     .await
     .unwrap();
     let last = repo
-        .claim_pending_fetch(&request("worker-D", third_at), third_at, &[])
+        .claim_pending_fetch(&request("worker-D", third_at), &[])
         .await
         .unwrap();
     assert_eq!(last[0].attempt_count, 3);
@@ -764,13 +776,13 @@ async fn pg_retry_cooldown_is_honoured_by_claim() {
     // Exclusion list (BIGINT[]): the now-claimable row is skipped when listed.
     let after_reset = third_at + time::Duration::hours(2);
     assert!(
-        repo.claim_pending_fetch(&request("worker-E", after_reset), after_reset, &[old])
+        repo.claim_pending_fetch(&request("worker-E", after_reset), &[old])
             .await
             .unwrap()
             .is_empty()
     );
     let unlisted = repo
-        .claim_pending_fetch(&request("worker-E", after_reset), after_reset, &[])
+        .claim_pending_fetch(&request("worker-E", after_reset), &[])
         .await
         .unwrap();
     assert_eq!(unlisted.iter().map(|e| e.id).collect::<Vec<_>>(), [old]);

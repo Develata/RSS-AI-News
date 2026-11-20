@@ -13,7 +13,7 @@ SINCE = "2025-12-31T00:00:00Z"
 # Parameter order follows each production constant's numbered placeholders.
 QUERIES = (
     ("feed_entry_sql.rs", "CLAIM_PENDING_FETCH_SQLITE_SQL",
-     ["owner", LEASE_END, NOW, NOW, 5, 50, NOW, "[]"]),
+     ["owner", LEASE_END, NOW, NOW, 5, 50, "[]", NOW]),
     ("article_ai_result_sql.rs", "CLAIM_AI_PENDING_SQLITE_SQL",
      ["owner", LEASE_END, NOW, NOW, NOW, 3, "ai", 20]),
     ("feed_entry_sql.rs", "LIST_RECENT_FEED_ENTRIES_SQLITE_SQL",

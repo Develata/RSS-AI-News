@@ -39,6 +39,27 @@ struct RetryableRelease<'a> {
     now: OffsetDateTime,
 }
 
+/// Retry deadline as stored: UTC, rounded up to a whole millisecond.
+///
+/// UTC keeps every value parseable by SQLite's date functions (`julianday()`
+/// returns NULL for some valid RFC3339 offsets such as `+15:00`). Rounding up,
+/// together with [`cooldown_cutoff`] rounding down, makes the claim's cooldown
+/// comparison exact on both backends: a row is never claimed before
+/// `retry_at`, and at most ~2 ms after it.
+fn stored_deadline(at: OffsetDateTime) -> OffsetDateTime {
+    let at = at.to_offset(UtcOffset::UTC);
+    match at.nanosecond() % 1_000_000 {
+        0 => at,
+        sub_ms => at + Duration::nanoseconds(i64::from(1_000_000 - sub_ms)),
+    }
+}
+
+/// Claim-time cooldown cutoff: UTC, rounded down to a whole millisecond.
+fn cooldown_cutoff(now: OffsetDateTime) -> OffsetDateTime {
+    let now = now.to_offset(UtcOffset::UTC);
+    now - Duration::nanoseconds(i64::from(now.nanosecond() % 1_000_000))
+}
+
 /// `[1,2,3]` for SQLite `json_each`; ids are integers, so no escaping is needed.
 fn json_id_array(ids: &[i64]) -> String {
     let body: Vec<String> = ids.iter().map(i64::to_string).collect();
@@ -96,16 +117,11 @@ impl FeedEntryRepository for FeedEntryRepo {
     async fn claim_pending_fetch(
         &self,
         request: &ClaimRequest,
-        retry_cutoff: OffsetDateTime,
         exclude_ids: &[i64],
     ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
         match &self.pool {
-            StoragePool::Sqlite(p) => {
-                sqlite_claim_pending_fetch(p, request, retry_cutoff, exclude_ids).await
-            }
-            StoragePool::Postgres(p) => {
-                pg_claim_pending_fetch(p, request, retry_cutoff, exclude_ids).await
-            }
+            StoragePool::Sqlite(p) => sqlite_claim_pending_fetch(p, request, exclude_ids).await,
+            StoragePool::Postgres(p) => pg_claim_pending_fetch(p, request, exclude_ids).await,
         }
     }
 
@@ -329,7 +345,6 @@ async fn sqlite_list_recent(
 async fn sqlite_claim_pending_fetch(
     pool: &SqlitePool,
     request: &ClaimRequest,
-    retry_cutoff: OffsetDateTime,
     exclude_ids: &[i64],
 ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
     sqlx::query_as::<_, ClaimedFeedEntry>(CLAIM_PENDING_FETCH_SQLITE_SQL)
@@ -339,8 +354,8 @@ async fn sqlite_claim_pending_fetch(
         .bind(request.now)
         .bind(i64::from(request.max_attempts))
         .bind(i64::from(request.batch_size))
-        .bind(retry_cutoff)
         .bind(json_id_array(exclude_ids))
+        .bind(cooldown_cutoff(request.now))
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)
@@ -410,7 +425,7 @@ async fn sqlite_release_feed_retryable_failure(
         .bind(r.now)
         .bind(r.id)
         .bind(r.owner)
-        .bind(r.retry_at)
+        .bind(stored_deadline(r.retry_at))
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;
@@ -651,7 +666,6 @@ async fn pg_list_recent(
 async fn pg_claim_pending_fetch(
     pool: &PgPool,
     request: &ClaimRequest,
-    retry_cutoff: OffsetDateTime,
     exclude_ids: &[i64],
 ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
     sqlx::query_as::<_, ClaimedFeedEntry>(CLAIM_PENDING_FETCH_PG_SQL)
@@ -661,8 +675,8 @@ async fn pg_claim_pending_fetch(
         .bind(request.now)
         .bind(i64::from(request.max_attempts))
         .bind(i64::from(request.batch_size))
-        .bind(retry_cutoff)
         .bind(exclude_ids)
+        .bind(cooldown_cutoff(request.now))
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)
@@ -732,7 +746,7 @@ async fn pg_release_feed_retryable_failure(
         .bind(r.now)
         .bind(r.id)
         .bind(r.owner)
-        .bind(r.retry_at)
+        .bind(stored_deadline(r.retry_at))
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;

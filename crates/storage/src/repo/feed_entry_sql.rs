@@ -130,14 +130,13 @@ LIMIT $4
 
 /// SQLite claim：子查询无 `FOR UPDATE`（语法不支持，整库写锁兜底）。
 ///
-/// `$7` 是 retry cooldown 截止点（extract 传 run 开始时刻）：`next_attempt_at`
-/// 晚于它的行仍在冷却，不占批次名额。release 写入的截止点严格晚于 run 开始，
-/// 故同一 run 内释放的行在该 run 内不会被再次领取。`$8` 是本 run 已领取过的 id
-/// （JSON 数组），保证每行每 run 至多被领取一次（例如 lease 被他人 reclaim、
-/// release 落空时）。
+/// `$8` 是 claim 时刻向下取整到毫秒：`next_attempt_at` 晚于它的行仍在冷却，
+/// 在 `LIMIT` 前被过滤、不占批次名额。`$7` 是调用方要排除的 id（JSON 数组）；
+/// extract 传本 run 内未确认终态的已领取 id，使失败行不在同一 run 内被重领。
 ///
 /// SQLite 把时间存成小数位数可变的 RFC3339 TEXT，字典序在同一秒内不等于时刻序，
-/// 故冷却比较用 `julianday()`（毫秒精度，识别 `Z` 与 `±HH:MM`）。
+/// 故冷却比较用 `julianday()`。它把时刻舍入到最近的毫秒；release 写入的截止点
+/// 已向上取整到毫秒（UTC），`$8` 已向下取整，两侧都无舍入，比较精确。
 pub(super) const CLAIM_PENDING_FETCH_SQLITE_SQL: &str = r#"
 UPDATE feed_entries
 SET state = 'fetching',
@@ -150,8 +149,8 @@ WHERE id IN (
     WHERE state = 'pending_fetch'
       AND (lease_expires_at IS NULL OR lease_expires_at < $4)
       AND attempt_count < $5
-      AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday($7))
-      AND id NOT IN (SELECT value FROM json_each($8))
+      AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday($8))
+      AND id NOT IN (SELECT value FROM json_each($7))
     ORDER BY discovered_at ASC
     LIMIT $6
 )
@@ -161,7 +160,7 @@ RETURNING id, source_id, normalized_link, link_hash, title_raw,
 
 /// PG claim：§6.4 契约——子查询 `FOR UPDATE SKIP LOCKED`，让 ingest 多 worker
 /// 并发 claim 同一 pending_fetch 池时各自拿到不同候选；否则会序列化等待
-/// row lock，等价单 worker。`$7` / `$8` 语义同 SQLite 版（`$8` 为 BIGINT[]）。
+/// row lock，等价单 worker。`$7` / `$8` 语义同 SQLite 版（`$7` 为 BIGINT[]）。
 pub(super) const CLAIM_PENDING_FETCH_PG_SQL: &str = r#"
 UPDATE feed_entries
 SET state = 'fetching',
@@ -174,8 +173,8 @@ WHERE id IN (
     WHERE state = 'pending_fetch'
       AND (lease_expires_at IS NULL OR lease_expires_at < $4)
       AND attempt_count < $5
-      AND (next_attempt_at IS NULL OR next_attempt_at <= $7)
-      AND id <> ALL($8::BIGINT[])
+      AND (next_attempt_at IS NULL OR next_attempt_at <= $8)
+      AND id <> ALL($7::BIGINT[])
     ORDER BY discovered_at ASC
     LIMIT $6
     FOR UPDATE SKIP LOCKED

@@ -82,7 +82,6 @@ async fn reset_failed_entries_are_reclaimable() {
                 batch_size: 10,
                 max_attempts: 5,
             },
-            now,
             &[],
         )
         .await

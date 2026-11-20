@@ -136,7 +136,7 @@ WHERE id IN (
   WHERE state = 'pending_fetch'
     AND (lease_expires_at IS NULL OR lease_expires_at < $now)
     AND attempt_count < $max_attempts
-    AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday($retry_cutoff))
+    AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday($now_ms_floor))
     AND id NOT IN (SELECT value FROM json_each($exclude_ids))
   ORDER BY discovered_at ASC
   LIMIT $batch_size

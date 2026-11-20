@@ -31,6 +31,16 @@ impl Default for RunMeta {
     }
 }
 
+/// Wall clock for the timestamps a flow compares and writes (claims, leases,
+/// retry deadlines). Production uses [`system_clock`]; tests inject one they
+/// can advance, so time-dependent behaviour is checked without sleeping.
+pub type Clock = Arc<dyn Fn() -> OffsetDateTime + Send + Sync>;
+
+/// The real UTC wall clock.
+pub fn system_clock() -> Clock {
+    Arc::new(OffsetDateTime::now_utc)
+}
+
 pub struct IngestDeps {
     pub run: RunMeta,
     pub http: HttpConfig,
@@ -56,6 +66,7 @@ pub struct ExtractDeps {
     pub article_repo: Arc<dyn ArticleRepository>,
     pub artifact_repo: Arc<dyn RawArtifactRepository>,
     pub event_repo: Arc<dyn RunEventRepository>,
+    pub clock: Clock,
 }
 
 pub struct AiDeps {

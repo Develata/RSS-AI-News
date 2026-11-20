@@ -4,11 +4,11 @@
 //! All instants are explicit whole-second timestamps; nothing sleeps.
 //! - A retryable release writes the deadline in the same owner-guarded UPDATE
 //!   that drops the lease; a wrong owner changes nothing.
-//! - The claim skips rows whose deadline is after the cutoff, before `LIMIT`,
+//! - The claim skips rows whose deadline is after its `now`, before `LIMIT`,
 //!   so cooling rows take no batch slot. The deadline itself is inclusive.
-//! - The cutoff, not the claim's `now`, decides eligibility: with the cutoff at
-//!   run start, a deadline that passes mid-run still does not make the row
-//!   claimable in that run.
+//! - Release stores the deadline in UTC rounded up to a millisecond, so the
+//!   claim is never early, even for sub-millisecond gaps or unusual offsets.
+//! - Excluded ids are skipped even when their deadline has passed.
 //! - Exhaustion sweep and backfill reset are independent of the cooldown.
 
 mod common;
@@ -65,7 +65,7 @@ async fn retryable_release_sets_deadline_and_claim_honours_it() {
     let repo = FeedEntryRepo::new(pool.clone());
 
     let claimed = repo
-        .claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[])
+        .claim_pending_fetch(&claim("worker-a", t0(), 1), &[])
         .await
         .unwrap();
     assert_eq!(claimed.len(), 1);
@@ -88,26 +88,25 @@ async fn retryable_release_sets_deadline_and_claim_honours_it() {
         ("pending_fetch".to_string(), Some(deadline), 1, None)
     );
 
-    // Same run: cutoff stays at run start even though `now` is past the
-    // deadline (the cooldown expired mid-run). The row must stay unclaimed.
+    // Past the deadline but excluded (failed earlier in the same run).
     let late = t0() + Duration::minutes(20);
     assert!(
-        repo.claim_pending_fetch(&claim("worker-a", late, 1), t0(), &[])
+        repo.claim_pending_fetch(&claim("worker-a", late, 1), &[id])
             .await
             .unwrap()
             .is_empty()
     );
-    // Later run that starts one second before the deadline: still cooling.
+    // One second before the deadline: still cooling.
     let just_before = deadline - Duration::seconds(1);
     assert!(
-        repo.claim_pending_fetch(&claim("worker-b", just_before, 1), just_before, &[])
+        repo.claim_pending_fetch(&claim("worker-b", just_before, 1), &[])
             .await
             .unwrap()
             .is_empty()
     );
-    // Run that starts exactly at the deadline: eligible again.
+    // Exactly at the deadline: eligible again.
     let retried = repo
-        .claim_pending_fetch(&claim("worker-c", deadline, 1), deadline, &[])
+        .claim_pending_fetch(&claim("worker-c", deadline, 1), &[])
         .await
         .unwrap();
     assert_eq!(retried.len(), 1);
@@ -126,13 +125,13 @@ async fn cooling_entry_takes_no_batch_slot() {
     let repo = FeedEntryRepo::new(pool.clone());
 
     let claimed = repo
-        .claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[])
+        .claim_pending_fetch(&claim("worker-a", t0(), 1), &[])
         .await
         .unwrap();
     assert_eq!(claimed.iter().map(|e| e.id).collect::<Vec<_>>(), [fresh]);
     // Only cooling rows left: the claim is empty, not a spin.
     assert!(
-        repo.claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[])
+        repo.claim_pending_fetch(&claim("worker-a", t0(), 1), &[])
             .await
             .unwrap()
             .is_empty()
@@ -146,7 +145,7 @@ async fn wrong_owner_release_writes_no_deadline() {
     let source_id = seed_source(&pool).await;
     let id = insert_feed_entry(&pool, source_id, "uid-owner", "hash-owner").await;
     let repo = FeedEntryRepo::new(pool.clone());
-    repo.claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[])
+    repo.claim_pending_fetch(&claim("worker-a", t0(), 1), &[])
         .await
         .unwrap();
 
@@ -189,7 +188,7 @@ async fn exhaustion_stays_terminal_regardless_of_cooldown() {
         .execute(&pool)
         .await
         .unwrap();
-    repo.claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[])
+    repo.claim_pending_fetch(&claim("worker-a", t0(), 1), &[])
         .await
         .unwrap();
     let outcome = repo
@@ -248,7 +247,7 @@ async fn backfill_reset_clears_cooldown() {
         ("pending_fetch".to_string(), None, 0, None)
     );
     assert_eq!(
-        repo.claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[])
+        repo.claim_pending_fetch(&claim("worker-a", t0(), 1), &[])
             .await
             .unwrap()
             .len(),
@@ -283,7 +282,7 @@ async fn cooldown_compares_instants_not_text() {
     for (deadline, cutoff, claimable) in cases {
         set_cooldown(&pool, id, deadline).await;
         let claimed = repo
-            .claim_pending_fetch(&claim("worker-a", cutoff, 1), cutoff, &[])
+            .claim_pending_fetch(&claim("worker-a", cutoff, 1), &[])
             .await
             .unwrap();
         assert_eq!(
@@ -313,15 +312,69 @@ async fn excluded_ids_are_not_claimed() {
     let repo = FeedEntryRepo::new(pool.clone());
 
     let claimed = repo
-        .claim_pending_fetch(&claim("worker-a", t0(), 1), t0(), &[first])
+        .claim_pending_fetch(&claim("worker-a", t0(), 1), &[first])
         .await
         .unwrap();
     assert_eq!(claimed.iter().map(|e| e.id).collect::<Vec<_>>(), [second]);
     assert!(
-        repo.claim_pending_fetch(&claim("worker-a", t0(), 5), t0(), &[first, second])
+        repo.claim_pending_fetch(&claim("worker-a", t0(), 5), &[first, second])
             .await
             .unwrap()
             .is_empty()
     );
     assert_eq!(row(&pool, first).await.2, 0, "excluded row never claimed");
+}
+
+/// Deadlines written by release are exact against the claim: a sub-millisecond
+/// gap never lets a cooling row through, and an offset SQLite's date functions
+/// cannot parse (`+15:00`) is stored as UTC instead of cooling forever.
+#[tokio::test]
+async fn release_deadline_is_never_early_and_always_parseable() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let source_id = seed_source(&pool).await;
+    let id = insert_feed_entry(&pool, source_id, "uid-exact", "hash-exact").await;
+    let repo = FeedEntryRepo::new(pool.clone());
+    let us = Duration::microseconds;
+    let release = |owner: &'static str, retry_at: OffsetDateTime| {
+        let repo = &repo;
+        async move {
+            let outcome = repo
+                .release_retryable_failure(
+                    id,
+                    owner,
+                    "timeout",
+                    "http_timeout",
+                    MAX_ATTEMPTS,
+                    retry_at,
+                    t0(),
+                )
+                .await
+                .unwrap();
+            assert!(outcome.released && !outcome.exhausted);
+        }
+    };
+    let claims = |now: OffsetDateTime, owner: &'static str| {
+        let repo = &repo;
+        async move {
+            !repo
+                .claim_pending_fetch(&claim(owner, now, 1), &[])
+                .await
+                .unwrap()
+                .is_empty()
+        }
+    };
+
+    assert!(claims(t0(), "worker-a").await);
+    // Deadline .100400, claim at .100100: 300 microseconds early, must wait.
+    release("worker-a", t0() + us(100_400)).await;
+    assert!(!claims(t0() + us(100_100), "worker-b").await);
+    assert!(claims(t0() + us(101_000), "worker-b").await);
+
+    // Valid RFC3339 offset that SQLite's julianday() cannot parse.
+    let plus15 = time::UtcOffset::from_hms(15, 0, 0).unwrap();
+    let deadline = t0() + Duration::minutes(10);
+    release("worker-b", deadline.to_offset(plus15)).await;
+    assert_eq!(row(&pool, id).await.1, Some(deadline));
+    assert!(!claims(deadline - Duration::seconds(1), "worker-c").await);
+    assert!(claims(deadline, "worker-c").await);
 }

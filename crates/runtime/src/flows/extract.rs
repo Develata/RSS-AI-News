@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -46,9 +47,10 @@ pub struct ExtractSummary {
     /// 配合一条 INFO 日志（cli-semantics §4.4 line 198）让运维知晓本次 run
     /// 是否需要后续调度兜底。
     pub max_batches_reached: bool,
-    /// `true` 表示本 run 至少有一行 retryable 失败被放回 `pending_fetch` 并进入
-    /// cooldown，重试推迟到之后的 run。它不再终止循环（retryable 失败后继续
-    /// 领取其余可领取行），因此可与 `max_batches_reached` 同时为 `true`。
+    /// `true` 表示本 run 至少有一行 retryable 失败；本 run 不再尝试这些行，重试
+    /// 推迟到之后的 run。通常该行已带 cooldown 回到 `pending_fetch`；若 release
+    /// 落空（lease 已被并发 run reclaim），该行不带 cooldown，由其他 run 处理。
+    /// 它不终止循环，因此可与 `max_batches_reached` 同时为 `true`。
     pub retryable_deferred: bool,
     /// `error_kind` when claiming a batch failed; the loop stopped there.
     pub claim_error: Option<String>,
@@ -100,21 +102,21 @@ impl ExtractFlow {
 
         let owner = build_owner_id();
         let mut summary = ExtractSummary::default();
-        // Retry cooldown cutoff for every claim in this run. Each retryable
-        // release writes `next_attempt_at > run_started_at`, so an entry that
-        // failed in this run is not reclaimed by it, however long it runs.
-        let run_started_at = OffsetDateTime::now_utc();
-        // Every id claimed so far in this run; later claims exclude them, so an
-        // entry is claimed at most once per run even when its release did not
-        // land (another run reclaimed the expired lease) or a backfill reset it.
-        let mut claimed_ids: Vec<i64> = Vec::new();
+        // Ids claimed in this run whose outcome is not a confirmed terminal
+        // success (failed, release missed, task panicked). Later claims exclude
+        // them, so this run never retries an entry it already tried, even when
+        // the release did not land (another run reclaimed the expired lease) or
+        // a backfill reset the row. Confirmed successes leave the set: their
+        // rows are terminal and can never be claimed again, so the list stays
+        // proportional to this run's failures rather than to its total work.
+        let mut excluded: HashSet<i64> = HashSet::new();
         // W15 §3.3：claim 过滤与 release 折叠必须用同一预算值，hoist 一处计算。
         let max_attempts = opts
             .max_attempts
             .max(self.ctx.retry.feed_entry_max_attempts);
 
         // W15 §5：首次 claim 前执行一次 ① reclaim + ② sweep（顺序固定，best-effort）。
-        let maintenance_now = OffsetDateTime::now_utc();
+        let maintenance_now = (self.ctx.clock)();
         let reclaimed = self
             .ctx
             .feed_entry_repo
@@ -148,7 +150,7 @@ impl ExtractFlow {
                 break;
             }
 
-            let now = OffsetDateTime::now_utc();
+            let now = (self.ctx.clock)();
             let request = ClaimRequest {
                 owner: owner.clone(),
                 now,
@@ -162,7 +164,7 @@ impl ExtractFlow {
             let claimed = match self
                 .ctx
                 .feed_entry_repo
-                .claim_pending_fetch(&request, run_started_at, &claimed_ids)
+                .claim_pending_fetch(&request, &excluded.iter().copied().collect::<Vec<_>>())
                 .await
             {
                 Ok(claimed) => claimed,
@@ -182,7 +184,7 @@ impl ExtractFlow {
 
             summary.claimed += claimed.len() as u32;
             summary.batches_executed += 1;
-            claimed_ids.extend(claimed.iter().map(|entry| entry.id));
+            excluded.extend(claimed.iter().map(|entry| entry.id));
 
             let concurrency = self.ctx.http.concurrent_fetches.max(1) as usize;
             let mut join_set = JoinSet::new();
@@ -193,35 +195,34 @@ impl ExtractFlow {
                     let Some(entry) = pending.next() else { break };
                     let ctx = Arc::clone(&self.ctx);
                     let owner = owner.clone();
-                    join_set.spawn(Self::process_entry(
-                        ctx,
-                        owner,
-                        entry,
-                        max_attempts,
-                        run_started_at,
-                    ));
+                    join_set.spawn(Self::process_entry(ctx, owner, entry, max_attempts));
                 }
                 let Some(result) = join_set.join_next().await else {
                     break;
                 };
                 match result {
-                    Ok(outcome) => summary.record(outcome),
+                    Ok(outcome) => {
+                        if outcome.status.is_terminal_success() {
+                            excluded.remove(&outcome.feed_entry_id);
+                        }
+                        summary.record(outcome);
+                    }
                     Err(error) => {
                         tracing::error!("extract entry task panicked or was cancelled: {error}");
                         summary.tasks_panicked += 1;
                     }
                 }
             }
-            // Retryable failures do not stop the loop: their rows went back to
-            // pending_fetch with a cooldown past `run_started_at` and are in
-            // `claimed_ids`, so the next claim only takes other claimable work.
+            // Retryable failures do not stop the loop: their rows are cooling
+            // down and excluded, so the next claim only takes other claimable
+            // work.
         }
         if summary.retryable_deferred {
             tracing::info!(
                 stage = "extract",
                 retryable_failed = summary.retryable_failed,
                 batches_executed = summary.batches_executed,
-                "retryable failures are cooling down; retries deferred to later runs"
+                "retryable failures; retries deferred to later runs"
             );
         }
 
@@ -256,7 +257,6 @@ impl ExtractFlow {
         owner: String,
         claimed: ClaimedFeedEntry,
         max_attempts: u32,
-        run_started_at: OffsetDateTime,
     ) -> ExtractEntryOutcome {
         let emitter = RunEventEmitter {
             run_id: &ctx.run.run_id,
@@ -266,7 +266,6 @@ impl ExtractFlow {
         let retry = RetrySchedule {
             max_attempts,
             attempt_count: claimed.attempt_count,
-            run_started_at,
         };
         let fetch_task = ArticleFetchTask {
             feed_entry_id: claimed.id,
@@ -279,7 +278,7 @@ impl ExtractFlow {
         let raw = match ctx.html_fetcher.fetch_html(&fetch_task).await {
             Ok(raw) => raw,
             Err(error) => {
-                let now = OffsetDateTime::now_utc();
+                let now = (ctx.clock)();
                 // W18（plan/17）：永久性抓取失败（403 付费墙 / 404 / too_large）
                 // 且 feed 摘要可用时降级成文，与下方解析链失败分支对称。
                 // 可重试错误（超时/5xx）不消费摘要——重试仍有机会拿到全文，
@@ -304,7 +303,7 @@ impl ExtractFlow {
             }
         };
 
-        let now = OffsetDateTime::now_utc();
+        let now = (ctx.clock)();
         let artifact_writer = ArtifactWriter {
             config: &ctx.artifact,
             repo: ctx.artifact_repo.as_ref(),
@@ -654,7 +653,7 @@ async fn release_extract_error(
                 retry.max_attempts,
                 // Sample the clock here: `now` may predate artifact writes and
                 // the strategy chain, which would shorten the cooldown.
-                retry.next_attempt_at(OffsetDateTime::now_utc()),
+                retry.next_attempt_at((ctx.clock)()),
                 now,
             )
             .await
@@ -769,17 +768,13 @@ struct RetrySchedule {
     max_attempts: u32,
     /// `attempt_count` after the claim's increment (the current attempt, ≥ 1).
     attempt_count: i64,
-    run_started_at: OffsetDateTime,
 }
 
 impl RetrySchedule {
     /// When a retryable failure released at `now` becomes claimable again.
-    ///
-    /// Post: the result is strictly after `run_started_at` (the claim cutoff),
-    /// even if the wall clock stepped back during the run, so the releasing run
-    /// never reclaims the entry.
+    /// The releasing run itself never retries the entry (it stays excluded).
     fn next_attempt_at(&self, now: OffsetDateTime) -> OffsetDateTime {
-        now.max(self.run_started_at) + retry_backoff(self.attempt_count)
+        now + retry_backoff(self.attempt_count)
     }
 }
 
@@ -805,6 +800,18 @@ fn quality_to_str(quality: ContentQuality) -> &'static str {
         ContentQuality::High => "high",
         ContentQuality::Medium => "medium",
         ContentQuality::Fallback => "fallback",
+    }
+}
+
+impl ExtractEntryStatus {
+    /// `true` only when the row's terminal release landed: these statuses are
+    /// produced exclusively after `release_*` returned `Ok(true)`. Conflicts and
+    /// release errors are reported as `RetryableFailed` / `PermanentFailed`.
+    fn is_terminal_success(&self) -> bool {
+        matches!(
+            self,
+            Self::Persisted | Self::FallbackPersisted | Self::DedupSkipped
+        )
     }
 }
 
@@ -849,22 +856,25 @@ mod tests {
     }
 
     #[test]
-    fn next_attempt_is_strictly_after_run_start() {
-        let run_started_at = OffsetDateTime::from_unix_timestamp(1_000_000).unwrap();
-        let retry = RetrySchedule {
+    fn next_attempt_adds_backoff_for_the_failed_attempt() {
+        let now = OffsetDateTime::from_unix_timestamp(1_000_000).unwrap();
+        let retry = |attempt_count| RetrySchedule {
             max_attempts: 5,
-            attempt_count: 1,
-            run_started_at,
+            attempt_count,
         };
-        // Normal case: failure after run start.
-        let later = run_started_at + Duration::seconds(30);
-        assert_eq!(retry.next_attempt_at(later), later + Duration::minutes(10));
-        // Wall clock stepped back below run start: still after the cutoff.
-        let earlier = run_started_at - Duration::hours(1);
-        assert_eq!(
-            retry.next_attempt_at(earlier),
-            run_started_at + Duration::minutes(10)
-        );
+        assert_eq!(retry(1).next_attempt_at(now), now + Duration::minutes(10));
+        assert_eq!(retry(3).next_attempt_at(now), now + Duration::minutes(40));
+    }
+
+    #[test]
+    fn only_landed_terminal_outcomes_leave_the_exclusion_set() {
+        use ExtractEntryStatus::*;
+        assert!(Persisted.is_terminal_success());
+        assert!(FallbackPersisted.is_terminal_success());
+        assert!(DedupSkipped.is_terminal_success());
+        // Includes lease conflicts and failed releases, which also map here.
+        assert!(!RetryableFailed.is_terminal_success());
+        assert!(!PermanentFailed.is_terminal_success());
     }
 
     #[test]

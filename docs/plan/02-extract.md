@@ -91,14 +91,13 @@ quality 由 strategy 自己决定。AI 阶段会跳过 `Fallback` 行（避免�
 由 `ExtractFlow` 在 [`crates/runtime/src/flows/extract.rs`](../../crates/runtime/src/flows/extract.rs) 编排：
 
 ```text
-run_started_at = now()                      -- 本 run 的 cooldown 截止点
-claimed_ids = []                            -- 本 run 已领取过的 id
+excluded = {}                               -- 本 run 已领取、未确认终态成功的 id
 loop:
-  1. claim_pending_fetch(batch_size, run_started_at, claimed_ids) → 最多 N 行 feed_entries
+  1. claim_pending_fetch(batch_size, excluded) → 最多 N 行 feed_entries
      UPDATE feed_entries SET state='fetching', lease_owner=?, attempt_count += 1
      WHERE state='pending_fetch' AND (lease_expires_at IS NULL OR lease_expires_at < now)
-       AND (next_attempt_at IS NULL OR next_attempt_at <= run_started_at)
-       AND id NOT IN claimed_ids
+       AND (next_attempt_at IS NULL OR next_attempt_at <= now)
+       AND id NOT IN excluded
      ORDER BY discovered_at ASC LIMIT N RETURNING *
   2. 对每行：
      a. HTTP GET → raw HTML（超时/大小边界）
@@ -131,20 +130,24 @@ lease 字段约束见 [./08-state-machines.md](./08-state-machines.md) §2.3 + [
 ### 5.3 retryable 失败冷却（2026-11-20）
 
 - retryable 失败（超时 / 5xx / 连接失败，且预算未尽）回 `pending_fetch`，并在同一条
-  owner-guarded release UPDATE 内写 `next_attempt_at = max(release 时刻, run_started_at) + backoff`
-  （时刻在 release 前采样，策略链耗时不缩短冷却）。
+  owner-guarded release UPDATE 内写 `next_attempt_at = release 时刻 + backoff`
+  （时刻在 release 前采样，策略链耗时不缩短冷却；存为 UTC 并向上取整到毫秒）。
 - backoff 按刚失败的 attempt 有界指数增长：10 / 20 / 40 / 80 min，上限 2 h
   （`RETRY_BACKOFF_BASE` / `RETRY_BACKOFF_CAP`，`flows/extract.rs`）。
-- claim 用 run 开始时刻作 cutoff，且 deadline 总晚于 run 开始，所以本 run 释放的行在本 run 内
-  不会再被领取（即使其冷却在 run 结束前到期）；冷却行在 `LIMIT` 前被过滤，不占批次名额。
-  上一 run 写下、在本 run 开始后才到期的 deadline 同样留到下一 run。
-- claim 另外排除本 run 已领取过的 id：每行每 run 至多被领取一次。这覆盖 release 落空的情形
-  （lease 过期被并发 run reclaim，owner guard 拦下 release，行回到 `pending_fetch` 且无冷却）
-  以及并发 backfill reset。跨 run 的过期 lease 恢复不变。
-- SQLite 以小数位数可变的 RFC3339 TEXT 存时间，同一秒内字典序 ≠ 时刻序，冷却比较用
-  `julianday()`（毫秒精度）；PG 直接比较 `TIMESTAMPTZ`。
+- 每次 claim 按该次 claim 的时刻判断是否到期：冷却行在 `LIMIT` 前被过滤、不占批次名额；
+  run 期间到期的行（包括上一 run 留下的冷却）在同一 run 内即可被领取。
+- 本 run 尝试过的行不会被本 run 再次领取：claim 排除本 run 已领取、且未确认终态成功
+  （persisted / fallback_persisted / dedup_skipped 的 release 已落库）的 id。失败行即使在
+  run 结束前冷却到期、或 release 落空（lease 过期被并发 run reclaim，owner guard 拦下
+  release，行回到 `pending_fetch` 且无冷却）、或被并发 backfill reset，也留给之后的 run。
+  排除集合只随本 run 的失败数增长。跨 run 的过期 lease 恢复不变。
+- 冷却比较从不提前：截止点存为 UTC 并向上取整到毫秒，claim 的比较时刻向下取整到毫秒
+  （最多晚约 2 ms）。SQLite 以小数位数可变的 RFC3339 TEXT 存时间，同一秒内字典序 ≠
+  时刻序，故用 `julianday()`（舍入到毫秒，两侧已对齐故精确）；PG 直接比较 `TIMESTAMPTZ`。
 - 循环继续领取其余可领取行，直到 claim 为空或达到 `max_batches`。`retryable_deferred`
-  表示本 run 有行进入冷却，可与 `max_batches_reached` 同时为 true。
+  表示本 run 有 retryable 失败、本 run 不再尝试这些行（通常已带冷却；release 落空时
+  不带冷却，由其他 run 处理），可与 `max_batches_reached` 同时为 true。
+- extract 的时间来自 `ExtractDeps::clock`（生产为系统时钟），测试注入可推进的时钟。
 - 预算、最后一次尝试折叠为 `failed`、`terminalize_exhausted` sweep、过期 lease reclaim、
   永久失败与 summary fallback 均不变；backfill reset 清空 `next_attempt_at`。
 - claim 仍按 `discovered_at ASC`：可领取的旧积压大于 `batch_size × max_batches` 时，新条目
