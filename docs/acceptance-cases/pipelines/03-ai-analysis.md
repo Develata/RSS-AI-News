@@ -46,6 +46,8 @@ AI-off 直通模式跳过整段。
 | `task_gen_reconciles_conflicting_pending_row_and_reaches_newer_articles_with_batch_one` | 同上 | 冲突对账 + 不饥饿 |
 | `task_gen_moves_past_permanently_failed_rows_within_one_pass` | 同上 | 游标越过失败行 |
 | `task_gen_reconciles_finished_rows_to_the_post_ai_state` | 同上 | 成功派生态对账 |
+| `reconcile_uses_another_identitys_success_when_this_one_was_filtered` | 同上 | R2-S3 双身份对账离开 persisted |
+| `reconcile_with_another_low_score_success_reaches_ai_done` | 同上 | R2-S3 低分 → ai_done |
 | `fresh_article_gets_a_task_despite_a_backlog_larger_than_one_batch` | 同上 | C9 fresh 不饥饿 |
 | `fresh_share_prefers_articles_that_leave_the_window_first` | 同上 | C9 fresh 排序 |
 | `older_backlog_keeps_advancing_while_fresh_inflow_continues` | 同上 | C9 旧积压仍推进 |

@@ -1720,3 +1720,52 @@ async fn future_dated_tasks_are_not_fresh_for_the_claim() {
         Some("backlog")
     );
 }
+// === R2-S3: reconciling a persisted article whose own identity is filtered
+// while another identity already succeeded ===
+
+#[tokio::test]
+async fn reconcile_uses_another_identitys_success_when_this_one_was_filtered() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "s3-two-ids", "title", "body").await;
+    // This run's identity filtered the article ...
+    seed_identity_row(&pool, article_id, "filtered", Some((0, false))).await;
+    // ... while another identity already kept it with score 90.
+    sqlx::query(
+        "INSERT INTO article_ai_results (article_id, prompt_version, output_schema_version, \
+         model_id, state, importance_score, keep_decision, summary, tags_json) \
+         VALUES (?, 1, 1, 'other-model', 'succeeded', 90, 1, 'summary', '[\"ai\"]')",
+    )
+    .bind(article_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+
+    let summary = flow.task_gen(&opts()).await;
+
+    assert_eq!(summary.reconciled, 1);
+    // Both identities finished: the article leaves `persisted` for the state
+    // the kept result implies (score 90 ≥ 30).
+    assert_eq!(article_state(&pool, article_id).await, "ready_for_publish");
+}
+
+#[tokio::test]
+async fn reconcile_with_another_low_score_success_reaches_ai_done() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "s3-low", "title", "body").await;
+    seed_identity_row(&pool, article_id, "filtered", Some((0, false))).await;
+    sqlx::query(
+        "INSERT INTO article_ai_results (article_id, prompt_version, output_schema_version, \
+         model_id, state, importance_score, keep_decision, summary, tags_json) \
+         VALUES (?, 1, 1, 'other-model', 'succeeded', 10, 1, 'summary', '[\"ai\"]')",
+    )
+    .bind(article_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+
+    flow.task_gen(&opts()).await;
+
+    assert_eq!(article_state(&pool, article_id).await, "ai_done");
+}

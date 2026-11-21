@@ -626,6 +626,48 @@ async fn pg_insert_conflict_reconciles_persisted_article_with_existing_row() {
         assert_eq!(state, expected, "{tag}");
     }
 
+    // R2-S3: this identity filtered, another identity kept it with score 90.
+    let two = seed_article(&ctx, "rc-two-ids", "persisted").await;
+    for (model, row_state, keep, score) in [
+        ("gpt-4", "filtered", 0, 0),
+        ("other-model", "succeeded", 1, 90),
+    ] {
+        sqlx::query(
+            "INSERT INTO article_ai_results (article_id, prompt_version, output_schema_version, \
+             model_id, state, keep_decision, importance_score) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(two)
+        .bind(prompt_id)
+        .bind(schema_id)
+        .bind(model)
+        .bind(row_state)
+        .bind(keep)
+        .bind(score)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    }
+    let outcome = repo
+        .insert_pending_and_advance_article(
+            &NewAiResult {
+                article_id: two,
+                prompt_version: prompt_id,
+                output_schema_version: schema_id,
+                model_id: "gpt-4".to_string(),
+            },
+            30,
+            now,
+        )
+        .await
+        .expect("pg reconcile with another success");
+    assert!(outcome.reconciled);
+    let state: String = sqlx::query_scalar("SELECT state FROM articles WHERE id = $1")
+        .bind(two)
+        .fetch_one(ctx.pg_pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "ready_for_publish");
+
     // backfill：新插入推进 persisted，已发布 article 保持不变且插入保留。
     let persisted = seed_article(&ctx, "bf-persisted", "persisted").await;
     let published = seed_article(&ctx, "bf-published", "published").await;

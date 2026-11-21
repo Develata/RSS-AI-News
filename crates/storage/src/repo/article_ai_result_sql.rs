@@ -334,3 +334,12 @@ SELECT CASE WHEN EXISTS (
     WHERE article_id = $1 AND state = 'succeeded' AND id != $2
 ) THEN 1 ELSE 0 END
 "#;
+
+/// R2-S3 reconcile: the best score among the article's *other* kept
+/// (`succeeded`, `keep_decision = 1`) results; NULL when there is none. A
+/// missing score counts as 0, as in a success release.
+pub(super) const BEST_OTHER_KEPT_SCORE_SQL: &str = r#"
+SELECT MAX(COALESCE(importance_score, 0))
+FROM article_ai_results
+WHERE article_id = $1 AND state = 'succeeded' AND keep_decision = 1 AND id != $2
+"#;

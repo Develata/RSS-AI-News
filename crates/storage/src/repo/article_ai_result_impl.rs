@@ -19,11 +19,11 @@ use super::article_ai_result::{
 };
 use super::article_ai_result_sql::{
     ADVANCE_ARTICLE_FROM_AI_PHASE_SQL, ADVANCE_ARTICLE_TO_AI_PENDING_SQL,
-    ADVANCE_PERSISTED_ARTICLE_SQL, CLAIM_AI_BY_ID_SQL, CLAIM_AI_PENDING_PG_SQL,
-    CLAIM_AI_PENDING_SQLITE_SQL, INSERT_AI_PENDING_SQL, OTHER_SUCCEEDED_AI_EXISTS_SQL,
-    RECLAIM_AI_LEASES_SQL, RECLAIM_AI_LEASES_SQLITE_SQL, RELEASE_AI_FAILURE_SQL,
-    RELEASE_AI_RETRYABLE_FAILURE_SQL, RELEASE_AI_SUCCESS_SQL, SELECT_AI_IDENTITY_ROW_PG_SQL,
-    SELECT_AI_IDENTITY_ROW_SQLITE_SQL, SELECT_ARTICLE_STATE_SQL,
+    ADVANCE_PERSISTED_ARTICLE_SQL, BEST_OTHER_KEPT_SCORE_SQL, CLAIM_AI_BY_ID_SQL,
+    CLAIM_AI_PENDING_PG_SQL, CLAIM_AI_PENDING_SQLITE_SQL, INSERT_AI_PENDING_SQL,
+    OTHER_SUCCEEDED_AI_EXISTS_SQL, RECLAIM_AI_LEASES_SQL, RECLAIM_AI_LEASES_SQLITE_SQL,
+    RELEASE_AI_FAILURE_SQL, RELEASE_AI_RETRYABLE_FAILURE_SQL, RELEASE_AI_SUCCESS_SQL,
+    SELECT_AI_IDENTITY_ROW_PG_SQL, SELECT_AI_IDENTITY_ROW_SQLITE_SQL, SELECT_ARTICLE_STATE_SQL,
     SELECT_BACKLOG_CLAIM_CANDIDATES_PG_SQL, SELECT_BACKLOG_CLAIM_CANDIDATES_SQLITE_SQL,
     SELECT_FRESH_CLAIM_CANDIDATES_PG_SQL, SELECT_FRESH_CLAIM_CANDIDATES_SQLITE_SQL,
     SELECT_SHARE_SIDE_SQL, TERMINALIZE_EXHAUSTED_AI_SQL, TERMINALIZE_EXHAUSTED_AI_SQLITE_SQL,
@@ -65,6 +65,19 @@ fn conflict_target(row: Option<IdentityRow>, min_importance_score: Option<i32>) 
             }
         }
         _ => ConflictTarget::Leave,
+    }
+}
+
+/// The post-AI state a kept result with score `best` implies (`None`: no
+/// kept result, leave the article).
+fn advance_from_kept_score(
+    best: Option<i32>,
+    min_importance_score: i32,
+) -> AiCompleteArticleAdvance {
+    match best {
+        Some(score) if score >= min_importance_score => AiCompleteArticleAdvance::ReadyForPublish,
+        Some(_) => AiCompleteArticleAdvance::AiDone,
+        None => AiCompleteArticleAdvance::NoChange,
     }
 }
 
@@ -731,16 +744,34 @@ async fn sqlite_reconcile_conflict(
             keep_decision,
             importance_score,
             min_importance_score,
-        } => sqlite_compute_article_advance(
-            tx,
-            id,
-            item.article_id,
-            keep_decision,
-            importance_score,
-            min_importance_score,
-        )
-        .await?
-        .as_article_state_str(),
+        } => {
+            let advance = sqlite_compute_article_advance(
+                tx,
+                id,
+                item.article_id,
+                keep_decision,
+                importance_score,
+                min_importance_score,
+            )
+            .await?;
+            // R2-S3: this identity filtered the article but another one
+            // succeeded. A success release leaves the article where that
+            // success put it (`NoChange`); a still-`persisted` article was
+            // never put anywhere, so derive the state from the kept result.
+            let advance =
+                if advance == AiCompleteArticleAdvance::NoChange && keep_decision == Some(false) {
+                    let best = sqlx::query_scalar::<_, Option<i32>>(BEST_OTHER_KEPT_SCORE_SQL)
+                        .bind(item.article_id)
+                        .bind(id)
+                        .fetch_one(&mut **tx)
+                        .await
+                        .map_err(StorageError::from)?;
+                    advance_from_kept_score(best, min_importance_score)
+                } else {
+                    advance
+                };
+            advance.as_article_state_str()
+        }
         ConflictTarget::Leave => None,
     };
     let Some(next_state) = next_state else {
@@ -1225,16 +1256,34 @@ async fn pg_reconcile_conflict(
             keep_decision,
             importance_score,
             min_importance_score,
-        } => pg_compute_article_advance(
-            tx,
-            id,
-            item.article_id,
-            keep_decision,
-            importance_score,
-            min_importance_score,
-        )
-        .await?
-        .as_article_state_str(),
+        } => {
+            let advance = pg_compute_article_advance(
+                tx,
+                id,
+                item.article_id,
+                keep_decision,
+                importance_score,
+                min_importance_score,
+            )
+            .await?;
+            // R2-S3: this identity filtered the article but another one
+            // succeeded. A success release leaves the article where that
+            // success put it (`NoChange`); a still-`persisted` article was
+            // never put anywhere, so derive the state from the kept result.
+            let advance =
+                if advance == AiCompleteArticleAdvance::NoChange && keep_decision == Some(false) {
+                    let best = sqlx::query_scalar::<_, Option<i32>>(BEST_OTHER_KEPT_SCORE_SQL)
+                        .bind(item.article_id)
+                        .bind(id)
+                        .fetch_one(&mut **tx)
+                        .await
+                        .map_err(StorageError::from)?;
+                    advance_from_kept_score(best, min_importance_score)
+                } else {
+                    advance
+                };
+            advance.as_article_state_str()
+        }
         ConflictTarget::Leave => None,
     };
     let Some(next_state) = next_state else {
