@@ -44,6 +44,7 @@ pub(crate) fn sqlite_utc_seconds(value: time::OffsetDateTime) -> String {
     )
 }
 
+pub use article::EntryPersistOutcome;
 pub use article::{
     ArticleAiTaskCandidate, ArticleContentHash, ArticleInsertOutcome, ArticleRepo,
     ArticleRepository, BackfillArticleCandidate, ContentHashReindexCandidate, NewArticle,

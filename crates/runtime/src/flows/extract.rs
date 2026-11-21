@@ -7,7 +7,7 @@ use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_domain::state::{ContentQuality, ExtractorStrategy};
 use rss_ai_news_extractor::{ExtractorError, RawHtmlFetch, decode_html, summary_fallback};
 use rss_ai_news_storage::{
-    ArticleInsertOutcome, ClaimRequest, ClaimedFeedEntry, NewArticle, StorageError, build_owner_id,
+    ClaimRequest, ClaimedFeedEntry, EntryPersistOutcome, NewArticle, StorageError, build_owner_id,
     lease_expires_at,
 };
 use serde_json::json;
@@ -551,17 +551,20 @@ impl EntryRelease<'_> {
         self.persist_article(new_article, true, now).await
     }
 
+    /// Article insert-or-get and the entry advance commit in one repository
+    /// transaction (A12): a crash can no longer leave an article whose entry
+    /// is still claimable, and a retry that finds its own article is persisted.
     async fn persist_article(
         &self,
         article: NewArticle,
         fallback_path: bool,
         now: OffsetDateTime,
     ) -> ExtractEntryOutcome {
-        let ctx = self.ctx;
         let feed_entry_id = self.feed_entry_id;
-        let insert = match ctx
+        let outcome = match self
+            .ctx
             .article_repo
-            .insert_or_get_by_content_hash(&article)
+            .persist_for_entry(&article, self.owner, fallback_path, now)
             .await
         {
             Ok(outcome) => outcome,
@@ -573,34 +576,20 @@ impl EntryRelease<'_> {
             }
         };
 
-        if !insert.newly_created {
-            return self.release_dedup_skipped(insert, now).await;
-        }
-
-        let released = if fallback_path {
-            ctx.feed_entry_repo
-                .release_fallback_persisted(feed_entry_id, self.owner, insert.article_id, now)
-                .await
-        } else {
-            ctx.feed_entry_repo
-                .release_success(feed_entry_id, self.owner, insert.article_id, now)
-                .await
-        };
-
-        match released {
-            Ok(true) => {
-                let (to, reason, status) = if fallback_path {
-                    (
-                        "fallback_persisted",
-                        "summary_fallback",
-                        ExtractEntryStatus::FallbackPersisted,
-                    )
+        match outcome {
+            EntryPersistOutcome::Persisted {
+                article_id,
+                newly_created,
+            } => {
+                let (to, status) = if fallback_path {
+                    ("fallback_persisted", ExtractEntryStatus::FallbackPersisted)
                 } else {
-                    (
-                        "persisted",
-                        "extract_success",
-                        ExtractEntryStatus::Persisted,
-                    )
+                    ("persisted", ExtractEntryStatus::Persisted)
+                };
+                let reason = match (fallback_path, newly_created) {
+                    (_, false) => "own_article_recovered",
+                    (true, true) => "summary_fallback",
+                    (false, true) => "extract_success",
                 };
                 tracing::info!(
                     target = "feed_entry.transition",
@@ -609,38 +598,9 @@ impl EntryRelease<'_> {
                     to,
                     reason
                 );
-                ExtractEntryOutcome::new(feed_entry_id, status, Some(insert.article_id), None)
+                ExtractEntryOutcome::new(feed_entry_id, status, Some(article_id), None)
             }
-            Ok(false) => {
-                tracing::warn!(feed_entry_id, "feed entry release conflicted");
-                ExtractEntryOutcome::lease_lost(feed_entry_id, Some(insert.article_id))
-            }
-            Err(error) => {
-                tracing::error!(feed_entry_id, "feed entry release failed: {error}");
-                ExtractEntryOutcome::release_failed(feed_entry_id, Some(insert.article_id), &error)
-            }
-        }
-    }
-
-    async fn release_dedup_skipped(
-        &self,
-        insert: ArticleInsertOutcome,
-        now: OffsetDateTime,
-    ) -> ExtractEntryOutcome {
-        let feed_entry_id = self.feed_entry_id;
-        let released = self
-            .ctx
-            .feed_entry_repo
-            .release_dedup_skipped(
-                feed_entry_id,
-                self.owner,
-                insert.article_id,
-                "hash_dup",
-                now,
-            )
-            .await;
-        match released {
-            Ok(true) => {
+            EntryPersistOutcome::DedupSkipped { article_id } => {
                 self.emitter
                     .emit(
                         "entry_dedup_skipped",
@@ -649,7 +609,7 @@ impl EntryRelease<'_> {
                         Some(feed_entry_id),
                         "feed entry skipped by content hash dedup",
                         Some(json!({
-                            "existing_article_id": insert.article_id,
+                            "existing_article_id": article_id,
                             "decision": "hash_dup",
                         })),
                     )
@@ -664,21 +624,17 @@ impl EntryRelease<'_> {
                 ExtractEntryOutcome::new(
                     feed_entry_id,
                     ExtractEntryStatus::DedupSkipped,
-                    Some(insert.article_id),
+                    Some(article_id),
                     None,
                 )
             }
-            Ok(false) => {
-                tracing::warn!(feed_entry_id, "dedup release conflicted");
-                ExtractEntryOutcome::lease_lost(feed_entry_id, Some(insert.article_id))
-            }
-            Err(error) => {
-                tracing::error!(feed_entry_id, "dedup release failed: {error}");
-                ExtractEntryOutcome::release_failed(feed_entry_id, Some(insert.article_id), &error)
+            EntryPersistOutcome::LeaseLost => {
+                // Rolled back: no article was created for this attempt.
+                tracing::warn!(feed_entry_id, "feed entry release conflicted");
+                ExtractEntryOutcome::lease_lost(feed_entry_id, None)
             }
         }
     }
-
     /// [`Self::release_failure`] for a failure of our own storage: the outcome
     /// is flagged `storage_failed` whatever release it ends in.
     async fn release_storage_failure(

@@ -19,10 +19,10 @@ use rss_ai_news_runtime::{ExtractFlow, ExtractOptions};
 use rss_ai_news_storage::{
     ArticleAiTaskCandidate, ArticleContentHash, ArticleInsertOutcome, ArticleRepo,
     ArticleRepository, BackfillArticleCandidate, ClaimRequest, ClaimedFeedEntry,
-    ContentHashReindexCandidate, FeedEntry, FeedEntryInsertOutcome, FeedEntryRepo,
-    FeedEntryRepository, LinkHashReindexCandidate, NewArticle, NewFeedEntry, RecentFeedEntry,
-    RecentFeedEntryFilter, ReleaseFailureOutcome, ResetFailedFilter, ResetFailedOutcome,
-    StorageError, UpdateContentHashOutcome, UpdateLinkHashOutcome,
+    ContentHashReindexCandidate, EntryPersistOutcome, FeedEntry, FeedEntryInsertOutcome,
+    FeedEntryRepo, FeedEntryRepository, LinkHashReindexCandidate, NewArticle, NewFeedEntry,
+    RecentFeedEntry, RecentFeedEntryFilter, ReleaseFailureOutcome, ResetFailedFilter,
+    ResetFailedOutcome, StorageError, UpdateContentHashOutcome, UpdateLinkHashOutcome,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -82,6 +82,20 @@ impl ArticleRepository for FlakyArticleRepo {
             return Err(error);
         }
         self.inner.insert_or_get_by_content_hash(article).await
+    }
+    async fn persist_for_entry(
+        &self,
+        article: &NewArticle,
+        owner: &str,
+        fallback: bool,
+        now: OffsetDateTime,
+    ) -> Result<EntryPersistOutcome, StorageError> {
+        if let Some(error) = self.insert.take() {
+            return Err(error);
+        }
+        self.inner
+            .persist_for_entry(article, owner, fallback, now)
+            .await
     }
     async fn find_by_id(&self, id: i64) -> Result<Option<Article>, StorageError> {
         self.inner.find_by_id(id).await

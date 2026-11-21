@@ -14,7 +14,9 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 
 - 抓取成功 + Readability 抽出正文 → 写 `articles`，state=`Persisted`
 - 非 UTF-8 页面（BOM / `Content-Type` charset / `<meta>` 声明）先解码再提取；未声明且非 UTF-8 → `ParseFailed`
-- 同 content_hash 已存在 → 跳过插入，FeedEntry → `DedupSkipped`（第三层去重）
+- 同 content_hash 已存在 → 跳过插入，FeedEntry → `DedupSkipped`（第三层去重）；若该 article 源自本条目
+  （上次尝试在 release 前中断），FeedEntry → `Persisted`，不算去重
+- article 写入与 entry 推进同一事务提交；lease 落空时回滚，不留孤儿 article
 - Readability 失败但 summary 非空 → SummaryFallback 兜底写入，state=`FallbackPersisted`
 - 抓取**永久失败**（4xx/too_large/invalid_url）但 summary 非空 → SummaryFallback
   兜底写入（无 html artifact），state=`FallbackPersisted`（W18，[../../plan/17-extract-fetch-fallback.md](../../plan/17-extract-fetch-fallback.md)）
@@ -66,6 +68,13 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `pg_claim_is_scoped_to_category_and_active_sources` | `crates/storage/tests/feed_entry_pg_tests.rs` | 同上（PG，需 docker） |
 | `extract_lease_budget_over_the_lease_fails_fast` | `crates/cli/tests/ingest_cmd_tests.rs` | 批次可能超出 lease → 启动即配置错误；`--skip-fetch` 不校验 |
 | `lease_budget_counts_waves_times_timeout_plus_margin` | `crates/runtime/src/flows/extract.rs`（单元测试） | 预算公式 |
+| `retry_that_finds_its_own_article_is_persisted_not_dedup` | `crates/runtime/tests/extract_tests.rs` | 自命中记 persisted |
+| `new_article_and_entry_advance_commit_together` | `crates/storage/tests/article_entry_persist_tests.rs` | 同事务提交（SQLite） |
+| `lost_lease_rolls_back_the_article_insert` | 同上 | lease 落空回滚 article |
+| `own_article_from_an_earlier_attempt_counts_as_persisted_not_dedup` | 同上 | 自命中 |
+| `another_entrys_article_is_a_dedup` | 同上 | 他人 article 仍去重 |
+| `fallback_flag_selects_fallback_persisted` | 同上 | fallback 终态 |
+| `pg_persist_for_entry_is_atomic_and_recognises_own_article` | `crates/storage/tests/article_pg_tests.rs` | 同上（PG，需 docker） |
 | `extract_writes_html_artifact_before_strategy` | 同上 | artifact 顺序 |
 | `max_batches_caps_loop_and_reports_reached_flag` | 同上 | 限批生效 |
 | `max_batches_zero_means_unlimited_until_queue_drained` | 同上 | 0 = 不限 |

@@ -1476,6 +1476,10 @@ async fn success_release_that_misses_reports_lease_lost() {
     );
 
     let summary = flow.run(opts(1, 0)).await;
+    let articles: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM articles")
+        .fetch_one(&pool)
+        .await
+        .expect("article count");
 
     assert_eq!(
         (summary.persisted, summary.lease_lost),
@@ -1483,6 +1487,8 @@ async fn success_release_that_misses_reports_lease_lost() {
         "{summary:?}"
     );
     assert_eq!(entry_row(&pool, entry).await.0, "pending_fetch");
+    // A12: the insert rolled back with the missed release (no orphan article).
+    assert_eq!(articles, 0);
 }
 
 /// A10：`ingest -C ai` 的 extract 只领取 `ai` 分类的条目；其他分类的积压
@@ -1530,4 +1536,52 @@ async fn category_scoped_extract_leaves_other_category_backlog_untouched() {
         ("pending_fetch".to_string(), 0),
         "category B untouched"
     );
+}
+
+/// A12：上一次尝试已提交 article（release 前崩溃）后，重试命中的是本条目自己
+/// 的 article → 记为 persisted，而不是 dedup_skipped 指向自己。
+#[tokio::test]
+async fn retry_that_finds_its_own_article_is_persisted_not_dedup() {
+    let (_dir, pool) = make_test_pool().await;
+    let (rule_id, source_id) = setup_base(&pool).await;
+    let entry_id = seed_pending_fetch_entry(&pool, source_id, "uid-self", "hash-self", None).await;
+    let own = ArticleRepo::new(pool.clone())
+        .insert_or_get_by_content_hash(&new_article("content-hash-self", entry_id, rule_id))
+        .await
+        .expect("earlier attempt's article")
+        .article_id;
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Ok(raw(entry_id, b"<html>self</html>")))]),
+        vec![success_strategy("content-hash-self")],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+    let row: (String, Option<i64>, Option<String>) =
+        sqlx::query_as("SELECT state, article_id, dedup_decision FROM feed_entries WHERE id = ?")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .expect("entry should be readable");
+    let dedup_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM run_events WHERE event_kind = 'entry_dedup_skipped'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("event count");
+
+    assert_eq!(
+        (summary.persisted, summary.dedup_skipped),
+        (1, 0),
+        "{summary:?}"
+    );
+    assert_eq!(
+        row,
+        (
+            "persisted".to_string(),
+            Some(own),
+            Some("fresh".to_string())
+        )
+    );
+    assert_eq!(dedup_events, 0);
 }

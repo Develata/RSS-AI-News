@@ -18,6 +18,7 @@ pub use pool::{
     PG_HOSTADDR_UNSUPPORTED, StoragePool, build_pg_pool, build_sqlite_pool,
     build_sqlite_read_only_pool, pg_hostaddr_in_use, pghostaddr_set,
 };
+pub use repo::EntryPersistOutcome;
 pub use repo::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
     ArticleAiTaskCandidate, ArticleContentHash, ArticleInsertOutcome, ArticleRepo,

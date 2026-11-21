@@ -96,6 +96,12 @@ quality 由 strategy 自己决定。AI 阶段会跳过 `Fallback` 行（避免�
 依靠数据库唯一约束原子插入或返回已有 article，禁止 SELECT-exists 再 INSERT。
 命中后 feed_entry 进入 dedup_skipped 并关联已有 article；schema/claim 状态由 storage 负责。
 
+原子性（2026-11-21）：extract 调 `ArticleRepository::persist_for_entry`，在**一个事务**内完成
+insert-or-get article 与 owner-guarded 的 entry 推进（persisted / fallback_persisted / dedup_skipped）；
+owner guard 落空则整体回滚（不留孤儿 article），报 `LeaseLost`。命中的已有 article 若
+`origin_feed_entry_id` 就是本条目（旧版本在 article 提交后、release 前崩溃留下的），记为本条目的
+`persisted`（`newly_created = false`），不再误判为 `dedup_skipped` 指向自己。
+
 命中时已有 article 的字段保持不变（先写者为准，`ON CONFLICT DO NOTHING`）：这次提取新写入的 html artifact
 **不会**补到已有 article 的 `body_html_artifact_id`。已有 article 可能本来就没有 artifact（`on_failure` 下提取成功、
 `off`、采样未命中、写入失败，或被 TTL 清理后置 NULL），即便如此也不补挂。新 artifact 以 feed entry id 为 key，
@@ -128,8 +134,8 @@ loop:
      c. `always` / `sampled`：写入 raw_artifact
      d. 执行配置的提取策略；`on_failure` 且无策略成功时才写 raw_artifact
      e. 策略链尝试 → ExtractedArticle 或 fallback
-     f. 计算 content_hash，原子 insert-or-get
-     g. 命中 → feed_entries='dedup_skipped'，关联 article_id
+     f. 计算 content_hash；同一事务内 insert-or-get + owner-guarded entry 推进（§4）
+     g. 命中他人 article → feed_entries='dedup_skipped'，关联 article_id；命中自己的 → 'persisted'
      h. 未命中 → INSERT articles，feed_entries='persisted'
      i. fallback 命中 → INSERT articles (quality='fallback')，feed_entries='fallback_persisted'
   3. claim 为空 → break；达到 max_batches → break；否则继续
