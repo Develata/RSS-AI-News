@@ -74,8 +74,10 @@ builder  →  runtime  →  debug
 
 ### 3.5 Rust 工具链
 
-`RUST_TOOLCHAIN=1.97.0` 在 Dockerfile 与 `.github/workflows/{ci,release}.yml` 三处保持一致。
-升级时三处同步改一次，避免 CI 通过但镜像构建失败的版本错位。
+唯一真相源是 `rust-toolchain.toml` 的 `channel`（当前 1.97.0）。同一版本另写在 `.github/workflows/` 的
+`ci.yml`、`release.yml`（`RUST_TOOLCHAIN`）、`audit.yml`、`maintenance.yml`（×2，`toolchain:`）与
+`docker/Dockerfile`（`FROM rust:<版本>-slim-bookworm@sha256:…`）共 6 处。升级时一次改全部；static acceptance lane 的
+`toolchain-pins` 检查逐处比对 channel（并要求每个文件的 pin 数量不变），任一处漂移即失败。
 
 ## 4. scheduler 入口
 

@@ -47,7 +47,7 @@ cargo acceptance run --lane release --expected-version 0.10.4
 
 | Lane | local | full | 责任 |
 |---|---:|---:|---|
-| `static` | ✓ | ✓ | rustfmt、Clippy、rustdoc（`RUSTDOCFLAGS=-D warnings`）、swallowed-error、dependency policy、release 标签晋升脚本测试 |
+| `static` | ✓ | ✓ | rustfmt、Clippy、rustdoc（`RUSTDOCFLAGS=-D warnings`）、swallowed-error、dependency policy、release 标签晋升脚本测试、工具链 pin 一致性（`toolchain-pins`） |
 | `workspace` | ✓ | ✓ | workspace locked build/test |
 | `sqlite` | ✓ | ✓ | release binary、SQLite migrate run/check、CLI contract smokes |
 | `postgres` |  | ✓ | PG ignored tests与 CLI migrate parity；要求 `DATABASE_URL` + Docker |

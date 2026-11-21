@@ -18,7 +18,7 @@ env:
   # to ci.yml so the verify jobs can restore its caches.
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # 与 ci.yml 保持一致；bump 时同步两处。
+  # 与 rust-toolchain.toml 的 channel 一致（static lane `toolchain-pins` 检查全部 pin）。
   RUST_TOOLCHAIN: "1.97.0"
   # GHCR 镜像名：ghcr.io/<owner>/<repo>。docker/metadata-action 会自动 lowercase
   # github.repository（`Develata/RSS-AI-News` -> `develata/rss-ai-news`）。

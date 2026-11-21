@@ -20,8 +20,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Pin once. Bumping is a deliberate single-line change; keeps Dockerfile,
-  # every job here and release.yml in lockstep.
+  # rust-toolchain.toml's channel is the source of truth. The same version is
+  # also written here, in release.yml, audit.yml, maintenance.yml (x2) and
+  # docker/Dockerfile; a bump changes all of them, and the static acceptance
+  # lane (`toolchain-pins`) fails if any one drifts.
   RUST_TOOLCHAIN: "1.97.0"
 
 # Three independent jobs, grouped by what they compile: `test` runs the static
