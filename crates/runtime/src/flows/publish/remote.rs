@@ -90,7 +90,9 @@ const MAX_RATE_LIMIT_WAIT: Duration = Duration::hours(1);
 
 /// R1-P-S12: GitHub asks to wait until `reset_at` (Retry-After or quota
 /// reset) before trying again; persisted so the next claim honours it.
-/// Clamped to `[now, now + MAX_RATE_LIMIT_WAIT]`; `None` for other errors.
+/// Capped at `now + MAX_RATE_LIMIT_WAIT`; `None` for other errors and for a
+/// reset that is not in the future (no wait to honour — persisting `now`
+/// would only make a same-millisecond re-claim miss on SQLite's rounding).
 fn rate_limit_retry_not_before(
     error: &PublishError,
     now: OffsetDateTime,
@@ -98,8 +100,11 @@ fn rate_limit_retry_not_before(
     let PublishError::GitHubRateLimit { reset_at, .. } = error else {
         return None;
     };
+    if *reset_at <= now {
+        return None;
+    }
     let latest = now.checked_add(MAX_RATE_LIMIT_WAIT).unwrap_or(now);
-    Some((*reset_at).clamp(now, latest))
+    Some((*reset_at).min(latest))
 }
 
 enum RemotePreparationError {
