@@ -13,7 +13,8 @@
 对 v0.10.4 做全仓审计（Claude 初审 + Codex 盲审 + 对抗核查），按用户批准的设计修复全部经核实的发现，
 并修复 2026-11-21 的两起线上事故：单报告 GitHub Contents API 对中文路径返回 400（路径未逐段百分号编码），
 以及四个分类在 08:30 发布前没有任何 AI 任务（task_gen / AI claim 按最小 id 服务、无视发布窗口）。
-修复后又经三轮 Codex 复审收敛；最后一轮之外的发现记入下方遗留风险。
+修复后又经三轮 Codex 复审；每轮都还有新发现，**没有一轮给出"通过"**。最后一轮（H1–H3，`26b2282..88d544f`）
+只做了一次只出报告的审查，其 2 个 BLOCKER、4 个 SHOULD_FIX 未修，记入下方遗留风险。
 
 ## 影响范围
 
@@ -78,10 +79,31 @@
 
 ## 结果
 
-- 可合并到 main，前提是 Develata 审阅；未推送。首次真实发布前先在 tag 上观察新 release.yml。
+- 全部门禁通过，但**最后一次审查未通过**（见遗留风险前两条）；是否合并由 Develata 审阅后决定。未推送。
+- 事故 2 的修复保证新文章有份额，不保证覆盖：默认批大小下每分类每次 ai-run 只生成约 10 个窗口内任务；
+  积压量远大于此时，不调整调度频率或 task_gen 容量，08:30 前无 AI 任务的现象仍可能复现。
+- 首次真实发布前先在 tag 上观察新 release.yml。
+
+### 升级影响（对现有部署）
+
+- 未知时区（含 `Etc/Unknown`）→ 配置错误退出 78；RSSHub 展开结果必须是 http(s) 且带 host
+- lease 连一整波 extract 都放不下 → 跳过 extract、退出 1；extract / ai-run 自身存储失败 → 退出 1
+- 暂停 / 归档源的待抓取条目不再被 extract 领取
+- 第一次写命令自动应用迁移 0008、0009；版本号仍是 0.10.4
+- 部署前建议先用新二进制对生产配置跑一次 `validate-config`
 
 ## 风险与后续事项
 
+最后一次审查（Codex，未修，未经本会话独立复现）：
+- BLOCKER：歧义写入核对失败后的下一次 remote 尝试，若首个 GET 又失败，按普通失败扣预算，末次预算下转 `failed`
+  并释放文章归属（远端内容可能已存在）。修复方向：claim 带回 `remote_write_unverified`，先只读核对 HEAD 再写。
+- BLOCKER：`release-registry.sh` 以 `imagetools inspect --raw` 的 stderr "not found" 判定 tag 缺失；tag 已解析、按 digest
+  取 manifest 的内部 404 也会命中，release 重跑可能重建并覆盖已有版本。修复方向：只以精确 tag 的 manifest HEAD 404 判缺失。
+- SHOULD_FIX：fresh 份额里待对账行排在新插入之前，破坏"先处理最早出窗者"；`Retry-After: 0` 的 429 仍扣预算；
+  ADR 0012 人工恢复 SQL 未匹配核对时的 `state` / `updated_at`；路径键对 `ß` / `ẞ` 的折叠不一致（相对基线回归）。
+- NICE：`attempt_refunded` 事件字段在零行更新时仍为 true；docker lane 截止时刻的 10 ms 边界。
+
+既有：
 - 记录若反复以"未核实"或"限流等待"结束，永不进入 failed 并持有文章（ADR 0012 §3/§3a）
 - 限流等待上限 1 h、extract Retry-After 上限 1 天：超出的服务器期限会被提前重试
 - 旧端点的 200 响应在过期判定前仍可能写入 entries
@@ -94,4 +116,9 @@
 ## 给下一位 Agent 的备注
 
 - 入口：`docs/adr/0012-*.md`、`docs/plan/03-ai.md §5.1/§5.2`、`docs/plan/04-publish.md`、`docs/plan/02-extract.md §5`
-- 发现与处置记录在会话 scratchpad（不入库）；提交消息里的 `[ID]` 可回溯到对应发现
+- 提交消息里的 `[ID]` 对应会话内的审计 / 处置清单，该清单未入库（含生产细节，仓库公开）；每个提交本身已写明修复内容
+- 事故 1 相关提交：c83c1e8、06fa4d0、d7c1e87、4ab654f、8aab7d0、7cfd822、15751b0、9a01405；锁定测试在
+  `crates/publish/tests/github_{contents_path,ref_route,write_once,batch_idempotency,classify}_tests.rs`
+- 事故 2 相关提交：4ca3347、31b2d3b、79b7919、3ce4ece、9577bba、b48657a、13301b0；锁定测试为
+  `crates/runtime/tests/ai_run_tests.rs` 中的 `fresh_*` / `batch_size_*` / `older_backlog_*` 用例
+- 两起事故的修复分散在本分支多个提交中，不是两个独立的最小补丁；如需先单独热修，可按上面的提交挑选
