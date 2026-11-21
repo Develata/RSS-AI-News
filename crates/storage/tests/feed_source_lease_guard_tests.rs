@@ -351,12 +351,21 @@ async fn guarded_config_writes_renew_the_job_lease() {
     let (job_id, owner) = seed_running_job(&pool).await;
     let jobs = ReindexJobRepo::new(pool.clone());
     let repo = FeedSourceRepo::new(pool.clone());
-    let initial = jobs.find_by_id(job_id).await.unwrap().unwrap().lease_expires_at.unwrap();
+    let initial = jobs
+        .find_by_id(job_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .lease_expires_at
+        .unwrap();
 
     // Two writes, the second after the initial lease would have expired.
-    for (i, at) in [initial - Duration::seconds(10), initial + Duration::seconds(30)]
-        .into_iter()
-        .enumerate()
+    for (i, at) in [
+        initial - Duration::seconds(10),
+        initial + Duration::seconds(30),
+    ]
+    .into_iter()
+    .enumerate()
     {
         assert_eq!(
             repo.upsert_config_with_lease_guard(
@@ -384,7 +393,11 @@ async fn guarded_config_writes_renew_the_job_lease() {
     assert_eq!(job.lease_expires_at, Some(initial + Duration::seconds(90)));
     assert_eq!(
         repo.mark_archived_with_lease_guard(
-            repo.find_by_keys("ai", "renew-0").await.unwrap().unwrap().id,
+            repo.find_by_keys("ai", "renew-0")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
             job_id,
             &owner,
             initial + Duration::seconds(80),

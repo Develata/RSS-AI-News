@@ -16,12 +16,11 @@ use super::decision_result::{
 };
 use super::decision_result_sql::{
     CLAIM_PG_SQL, CLAIM_SQLITE_SQL, COUNT_OTHER_IDENTITY_PENDING_SQL, EXPIRED_RAW_EXISTS_PG_SQL,
-    EXPIRED_RAW_EXISTS_SQLITE_SQL, GENERATE_PAGE_END_PG_SQL, GENERATE_PAGE_END_SQLITE_SQL,
-    GENERATE_PENDING_PG_SQL, GENERATE_PENDING_SQLITE_SQL, INSERT_RUN_EVENT_SQL,
-    LOAD_ARTICLE_TEXT_SQL, LOCK_DECISION_RESULTS_SQLITE_SQL, PURGE_EXPIRED_RAW_PG_SQL,
-    PURGE_EXPIRED_RAW_SQLITE_SQL, RECLAIM_EXPIRED_SQL, RECLAIM_EXPIRED_SQLITE_SQL,
-    RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL, TERMINALIZE_EXHAUSTED_SQL,
-    TERMINALIZE_EXHAUSTED_SQLITE_SQL, UPSERT_POLICY_SQL,
+    EXPIRED_RAW_EXISTS_SQLITE_SQL, GENERATE_PAGE_END_SQLITE_SQL, GENERATE_PAGE_PG_SQL,
+    GENERATE_PENDING_SQLITE_SQL, INSERT_RUN_EVENT_SQL, LOAD_ARTICLE_TEXT_SQL,
+    LOCK_DECISION_RESULTS_SQLITE_SQL, PURGE_EXPIRED_RAW_PG_SQL, PURGE_EXPIRED_RAW_SQLITE_SQL,
+    RECLAIM_EXPIRED_SQL, RECLAIM_EXPIRED_SQLITE_SQL, RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL,
+    TERMINALIZE_EXHAUSTED_SQL, TERMINALIZE_EXHAUSTED_SQLITE_SQL, UPSERT_POLICY_SQL,
 };
 use super::{sqlite_instant_cutoff, sqlite_stored_deadline};
 
@@ -289,18 +288,27 @@ impl DecisionResultRepository for DecisionResultRepo {
             }
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
-                let page = match page_end!(GENERATE_PAGE_END_PG_SQL, cutoff, tx) {
-                    None => GeneratedPage {
-                        inserted: 0,
-                        last_scanned_id: None,
-                    },
-                    Some(end) => GeneratedPage {
-                        inserted: insert!(GENERATE_PENDING_PG_SQL, cutoff, end, tx),
-                        last_scanned_id: Some(end),
-                    },
-                };
+                let (page_end, inserted) =
+                    sqlx::query_as::<_, (Option<i64>, i64)>(GENERATE_PAGE_PG_SQL)
+                        .bind(&identity.category_key)
+                        .bind(&identity.policy_version)
+                        .bind(&identity.execution_key)
+                        .bind(&execution.provider)
+                        .bind(&execution.requested_model)
+                        .bind(laya_max_len)
+                        .bind(cutoff)
+                        .bind(after_id)
+                        .bind(i64::from(limit))
+                        .bind(now)
+                        .fetch_one(&mut *tx)
+                        .await
+                        .map_err(classify)?;
                 tx.commit().await.map_err(bounded)?;
-                page
+                GeneratedPage {
+                    // COUNT(*) of at most `limit` rows.
+                    inserted: u64::try_from(inserted).unwrap_or(0),
+                    last_scanned_id: page_end,
+                }
             }
         };
         Ok(page)
