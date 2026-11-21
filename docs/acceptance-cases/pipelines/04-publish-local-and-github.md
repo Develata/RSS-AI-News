@@ -45,7 +45,8 @@
 - 单报告 Contents API：路径按段百分号编码、`ref` 编码为查询参数（中文 / 空格 / 保留字符路径可发布）；任何 GitHub 失败的消息含操作、状态、message 的固定词表摘要与 `x-github-request-id`（整值符合 GitHub 形状且不含 token 时）；服务端回显的自由文本不落库、不进事件
 - 远端 403 且 `x-ratelimit-remaining: 0` / 带 `retry-after` / message 提到 rate limit → `GithubRateLimit`（可重试）
 - 远端 429 → `GithubRateLimit`，state 保持、article 不晋升；GitHub 要求的重试时刻（钳制 1 h）写入 `next_attempt_at`，到点前的运行 `NothingToClaim`
-- 远端 422 重试达上限 → 仍报错，record 保持 `StoredLocal`
+- 远端 422 non-fast-forward：同一次尝试内重试一次；第二次 422 为永久错误 → record `failed`（`github_api_error`），文章不晋升
+- 远端 5xx / 传输失败 / 远端超时 / 409 → retryable：保持 `StoredLocal`、计本阶段预算（耗尽 → `failed`）
 - 多报告批次重试：HEAD 已逐字节包含整批内容（上次 ref 更新落地、响应丢失）→ 不新建 commit，回执指向该 HEAD
 - 单报告重试：分支上既有 blob 与本地内容一致且在固定 HEAD commit 复核一致 → 不发 PUT，回执指向该 HEAD
 - 歧义写入（PATCH ref / PUT contents 后传输失败、5xx，或远端 deadline 切断）：释放前只读核对 HEAD，已含全部内容 → 记成功；
@@ -118,6 +119,7 @@
 | `publish_many_creates_one_commit_for_multiple_reports` | `crates/publish/tests/github_target_tests.rs` | target 层 batch |
 | `publish_many_retries_once_after_non_fast_forward_then_succeeds` | 同上 | 422 重试 |
 | `publish_many_surfaces_422_after_max_retries` | 同上 | 422 超限 |
+| `publish_remote_batch_second_non_fast_forward_fails_the_records` | `crates/runtime/tests/publish_remote_tests.rs` | 第二次 422 → 记录 `failed`（持久状态断言），PATCH 恰 2 次 |
 | `retry_after_lost_ref_update_response_records_existing_head_without_new_commit` | `crates/publish/tests/github_batch_idempotency_tests.rs` | ref 更新已落地但响应丢失：重试不新建 commit，按 HEAD 记回执 |
 | `one_differing_blob_still_creates_a_commit` | 同上 | 任一 blob 不一致照常提交 |
 | `blob_lookup_error_is_not_treated_as_already_published` | 同上 | 查询出错不当作已发布 |

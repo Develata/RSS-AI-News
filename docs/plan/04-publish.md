@@ -306,11 +306,12 @@ PATCH refs/heads 时如果 base SHA 不再是 HEAD（并发 push 了别的 commi
 1. freeze(category) → publish_record_id（state='snapshot_frozen'）
 2. render(record_id) → markdown string（state='rendered'）
 3. store_local(markdown) → 写文件（state='stored_local'）
-   - 失败 → state='failed'
+   - 可重试失败 → 保持 'rendered'，计本阶段预算（耗尽 → 'failed'）；不可重试 → 'failed'（§7）
 4. publish_remote(markdown) → GitHub atomic commit
-   - 422 → retry 1 次
+   - 422 non-fast-forward → 同一次尝试内 retry 1 次；第二次 422 → 永久错误 → 'failed'
    - 成功 → state='published_remote'
-   - 最终失败 → state='failed'（本地文件保留）
+   - 可重试失败（5xx / 传输失败 / 超时 / 限流 / 409）→ 保持 'stored_local'，计本阶段预算（耗尽 → 'failed'）；
+     不可重试 → 'failed'（本地文件保留）
 5. UPDATE articles SET state='published' WHERE id IN (...) AND state='ready_for_publish'
 ```
 
@@ -346,20 +347,28 @@ Markdown **byte-equal**；跨渲染器版本（例如 YAML 引号规则调整）
 
 ## 7. 失败路径速查
 
+与代码对齐（2026-11-22，R1-P-S16；分类见 `crates/publish/src/error.rs` 的 `is_retryable`）。"计预算"= 维持当前阶段态、
+释放 lease，`stage_attempt_count` 达 `retry.publish_max_attempts` 时同一 release 折叠为 `failed`（ADR 0012 §1）。
+
 | 失败点 | 错误变体 | 处理 |
 |---|---|---|
-| freeze 时 UNIQUE 冲突 | `PublishError::AlreadyExists` | 返 idempotent outcome，不视为失败 |
+| init 时 `(category, date, render_version)` 已存在 | `PublishInitOutcome::AlreadyExists` | 返 idempotent outcome，不视为失败（终态 `failed` 记录由 CLI 报 `PublishConflict`） |
 | 阶段内读库 / 冻结写入失败 | `ReportError::Storage` / `StorageError`（保留类型） | 按 `is_retryable()`：可重试 → 维持阶段态 + 计预算（耗尽 → `failed`）；否则 `failed` |
-| 本地落盘失败 | `PublishError::LocalStoreFailed` | state='failed'，无 retry |
-| GitHub 401；无限流信号的 403 | `PublishError::GitHubAuthFailed` | state='failed' |
+| 本地落盘失败 | `PublishError::LocalIoError` | `Interrupted` / `WouldBlock` / `TimedOut` → 保持 `rendered` + 计预算；其它 IO 错误（权限、空间等）→ `failed` |
+| 路径越界 / 非法 | `PublishError::InvalidPath` | `failed` |
+| GitHub 401；无限流信号的 403 | `PublishError::GitHubAuthFailed`（`context.http_status` 区分 401 / 403） | `failed` |
 | GitHub 429；带限流信号的 403（`x-ratelimit-remaining: 0`、存在 `retry-after`，或 message 含 "rate limit" / "secondary rate limit"，见 GitHub REST 文档 "Exceeding the rate limit"） | `PublishError::GitHubRateLimit { reset_at }`（`retry-after` > `x-ratelimit-reset` > now+60s；`retry-after` 接受秒数与 IMF-fixdate HTTP 日期两种形式（RFC 9110 §10.2.3），秒数封顶 24 h、受检加法，过去的日期视为 now；只要有 `retry-after` 头（即使无法解析）403 就算限流；message 中的 "rate limit" 从完整文本提取，R1-P-S11） | retryable：维持阶段态 + 计预算；`reset_at`（钳制到 1 h 内）写入 `next_attempt_at`，claim 到点前不领取（R1-P-S12） |
-| GitHub 422 lost-update | `is_branch_concurrently_updated` | retry 1 次，仍失败 → state='failed' |
-| GitHub 5xx | `PublishError::GitHubApiError {5xx}` | state='failed'，本地文件保留 |
-| GitHub timeout | `PublishError::GitHubApiError` | state='failed' |
+| GitHub 422 lost-update | `GitHubApiError { status: 422 }`（`is_branch_concurrently_updated`） | 同一次尝试内重新取 HEAD 再试 1 次；第二次 422 为永久错误 → `failed`（不保持 `stored_local`） |
+| 其它 GitHub 4xx（如 400 / 404 / 其它 422） | `GitHubApiError { status }` | `failed` |
+| GitHub 409 | `GitHubApiError { status: 409 }` | 保持 `stored_local` + 计预算 |
+| GitHub 5xx / 传输失败 / 响应读取失败 | `GitHubApiError { status: 5xx }`（传输类归为 503） | 写请求之后的歧义失败先只读核对 HEAD（已落地 → 成功，ADR 0012 §3）；否则保持 `stored_local` + 计预算，本地文件保留 |
+| 远端 deadline（lease 的 80%）超时 | `PublishError::RemoteTimeout` | 先只读核对 HEAD；否则保持 `stored_local` + 计预算 |
+| 2xx 但超过 16 MiB / 缺必需字段 | `ResponseTooLarge` / `GitHubApiError { status: 502 }` | 前者 `failed`；后者按 5xx 计预算 |
 | 目标漂移：record 的 `remote_target`（init 时写入的 `owner/repo:branch`）≠ 当前配置目标 | `PublishError::RemoteTargetMismatch`（`PublishRemoteStatus::TargetMismatch { stored, current }`） | 发请求前拦截，不重试，state='failed'，`last_error` 含两个目标；恢复配置或 `--force` 由运维决定 |
 
-**本地落盘成功 + GitHub 失败**：record 转 `failed`，但本地文件保留。下次 publish 触发同
-`(category, date, version)` 走 idempotent 路径。
+**本地落盘成功 + GitHub 失败**：可重试错误时 record 保持 `stored_local`，同日再跑 `publish` / `publish-all` 续跑远端阶段；
+永久错误（或预算耗尽）时转 `failed`，本地文件保留，同 `(category, date, version)` 再跑报 `PublishConflict`，需 `--force`
+（新 render version）重发。
 
 ## 8. 当前实现入口
 

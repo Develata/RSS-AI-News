@@ -657,6 +657,96 @@ async fn publish_remote_batch_skips_only_the_mismatched_record() {
     assert_record_state(&pool, matching, "published_remote").await;
 }
 
+// === P-S16: the documented recovery for a second 422 matches the code ===
+
+/// The batch retries a non-fast-forward 422 once; a second 422 is a
+/// permanent `github_api_error`, so both records end `failed` (not
+/// `stored_local`) and their articles stay unpromoted.
+#[tokio::test]
+async fn publish_remote_batch_second_non_fast_forward_fails_the_records() {
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let (_dir, pool) = make_test_pool().await;
+    let first = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let second = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/git/ref/heads/main$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"object": {"sha": "head"}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/git/commits/head$"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"tree": {"sha": "tree"}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(serde_json::json!({"message": "Not Found"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex("^/repos/owner/repo/git/(trees|commits)$"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"sha": "new"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .respond_with(
+            ResponseTemplate::new(422)
+                .set_body_json(serde_json::json!({"message": "Update is not a fast forward"})),
+        )
+        .mount(&server)
+        .await;
+    let target = rss_ai_news_publish::GitHubTarget::with_base_uri(
+        rss_ai_news_publish::GitHubTargetConfig {
+            token: rss_ai_news_domain::SecretString::from("t"),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            branch: "main".to_string(),
+            path_prefix: "reports".to_string(),
+            commit_message_prefix: "auto: publish".to_string(),
+        },
+        &server.uri(),
+    )
+    .unwrap();
+    let flow = flow(pool.clone(), Some(Arc::new(target)));
+
+    let outcome = flow
+        .publish_remote_batch(PublishRemoteBatchOptions {
+            items: vec![
+                batch_item(first, "AI", "Daily AI"),
+                batch_item(second, "ML", "Daily ML"),
+            ],
+        })
+        .await;
+
+    let patches = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.method.as_str() == "PATCH")
+        .count();
+    assert_eq!(patches, 2, "one retry after the first 422");
+    for item in outcome.items {
+        assert!(
+            matches!(&item.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "github_api_error"),
+            "{:?}",
+            item.status
+        );
+        assert_record_state(&pool, item.publish_record_id, "failed").await;
+        assert_last_error_kind(&pool, item.publish_record_id, "github_api_error").await;
+        assert_referenced_articles_state(&pool, item.publish_record_id, "ready_for_publish").await;
+    }
+}
+
 // === P-S12: a rate limit's reset time gates the next claim ===
 
 /// Rate-limited until `reset_at` on the first call, succeeds afterwards.
