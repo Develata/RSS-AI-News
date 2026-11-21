@@ -571,3 +571,20 @@ async fn the_repo_reads_article_text_and_writes_run_events() {
         .unwrap();
     assert_eq!(stage, "decision_run");
 }
+
+/// R2-S20: SQLite TEXT may hold NUL; `substr` stops at it. A body with an
+/// embedded NUL still yields its real character prefix.
+#[tokio::test]
+async fn a_body_with_an_embedded_nul_keeps_its_character_prefix() {
+    let (pool, repo, ids) = setup(1).await;
+    sqlx::query("UPDATE articles SET body_text = ? WHERE id = ?")
+        .bind("A\0中文B")
+        .bind(ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (max, expected) in [(6, "A\0中文B"), (3, "A\0中"), (1, "A")] {
+        let article = repo.load_article(ids[0], max).await.unwrap().unwrap();
+        assert_eq!(article.body_text, expected, "max {max}");
+    }
+}

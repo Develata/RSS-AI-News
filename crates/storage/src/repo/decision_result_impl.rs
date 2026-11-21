@@ -17,9 +17,10 @@ use super::decision_result::{
 use super::decision_result_sql::{
     CLAIM_PG_SQL, CLAIM_SQLITE_SQL, COUNT_OTHER_IDENTITY_PENDING_SQL, EXPIRED_RAW_EXISTS_PG_SQL,
     EXPIRED_RAW_EXISTS_SQLITE_SQL, GENERATE_PAGE_END_SQLITE_SQL, GENERATE_PAGE_PG_SQL,
-    GENERATE_PENDING_SQLITE_SQL, INSERT_RUN_EVENT_SQL, LOAD_ARTICLE_TEXT_SQL,
-    LOCK_DECISION_RESULTS_SQLITE_SQL, PURGE_EXPIRED_RAW_PG_SQL, PURGE_EXPIRED_RAW_SQLITE_SQL,
-    RECLAIM_EXPIRED_SQL, RECLAIM_EXPIRED_SQLITE_SQL, RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL,
+    GENERATE_PENDING_SQLITE_SQL, INSERT_RUN_EVENT_SQL, LOAD_ARTICLE_FULL_TEXT_SQLITE_SQL,
+    LOAD_ARTICLE_TEXT_SQL, LOAD_ARTICLE_TEXT_SQLITE_SQL, LOCK_DECISION_RESULTS_SQLITE_SQL,
+    PURGE_EXPIRED_RAW_PG_SQL, PURGE_EXPIRED_RAW_SQLITE_SQL, RECLAIM_EXPIRED_SQL,
+    RECLAIM_EXPIRED_SQLITE_SQL, RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL,
     TERMINALIZE_EXHAUSTED_SQL, TERMINALIZE_EXHAUSTED_SQLITE_SQL, UPSERT_POLICY_SQL,
 };
 use super::{sqlite_instant_cutoff, sqlite_stored_deadline};
@@ -537,7 +538,39 @@ impl DecisionResultRepository for DecisionResultRepo {
         }
         match &self.pool {
             StoragePool::Sqlite(pool) => {
-                Ok(query!().fetch_optional(pool).await.map_err(bounded)?)
+                let prefix =
+                    sqlx::query_as::<_, (String, String, bool)>(LOAD_ARTICLE_TEXT_SQLITE_SQL)
+                        .bind(article_id)
+                        .bind(i32::try_from(max_body_chars).unwrap_or(i32::MAX))
+                        .fetch_optional(pool)
+                        .await
+                        .map_err(bounded)?;
+                match prefix {
+                    None => Ok(None),
+                    Some((title, body_text, false)) => {
+                        Ok(Some(DecisionArticle { title, body_text }))
+                    }
+                    // Rare legacy rows: read the whole text once and cut it
+                    // at a character boundary like the SQL prefix would.
+                    Some((_, _, true)) => {
+                        let article =
+                            sqlx::query_as::<_, DecisionArticle>(LOAD_ARTICLE_FULL_TEXT_SQLITE_SQL)
+                                .bind(article_id)
+                                .fetch_optional(pool)
+                                .await
+                                .map_err(bounded)?;
+                        Ok(article.map(|mut article| {
+                            if let Some((cut, _)) = article
+                                .body_text
+                                .char_indices()
+                                .nth(max_body_chars as usize)
+                            {
+                                article.body_text.truncate(cut);
+                            }
+                            article
+                        }))
+                    }
+                }
             }
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;

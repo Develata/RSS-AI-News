@@ -209,7 +209,8 @@
 - 存储超时包括客户端 5 s 期限，以及 PostgreSQL 报告的 `statement_timeout`（57014）/ `lock_timeout`（55P03）、
   SQLite 的 busy / locked、连接池等待超时：repo 统一映射为 `StorageError::Timeout`，flow 一律按"结果未知"处理。
 - 单行：核对身份 → 读文章（只读标题与正文前 `max_state_chars + 1` 个字符——字符边界前缀，SQLite / PG 的
-  `substr` 都按字符计；多读一个字符足以让 `body_truncated` 与 state 哈希与截断全文时完全一致；存储期限 5 s；出错则退还并计 `storage_errors`，超时则不再写、留给 lease 回收）
+  `substr` 都按字符计；SQLite TEXT 可含 NUL 而 `substr` 遇 NUL 即止，故 SQLite 同时探测字节中是否有 NUL，有则读全文后在 Rust
+  里按字符截断（R2-S20，PG TEXT 不能含 NUL）；多读一个字符足以让 `body_truncated` 与 state 哈希与截断全文时完全一致；存储期限 5 s；出错则退还并计 `storage_errors`，超时则不再写、留给 lease 回收）
   → 最后一次 lease 检查（剩余 ≥ 请求超时 + 5 s，否则退还并暂停该板块）→ 调用 → 按 ADR 0011 §10 的类别释放。
   行截止时间从 claim 语句之前算起（`lease_expires_at` 也在那时计算），释放不再额外放宽。
 - 用量：provider 报告的 `input_tokens` / `state_tokens_dropped` 在解码时限定 ≤ 2³²，超出按

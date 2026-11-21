@@ -301,6 +301,20 @@ pub(super) const LOAD_ARTICLE_TEXT_SQL: &str = r#"
 SELECT title, substr(body_text, 1, $2) AS body_text FROM articles WHERE id = $1
 "#;
 
+/// SQLite (R2-S20): TEXT may hold an embedded NUL and `substr` stops there,
+/// so the prefix also reports whether the stored bytes contain a NUL
+/// (`instr` on the BLOB cast compares bytes). PostgreSQL TEXT cannot hold NUL.
+pub(super) const LOAD_ARTICLE_TEXT_SQLITE_SQL: &str = r#"
+SELECT title, substr(body_text, 1, $2) AS body_text,
+       instr(CAST(body_text AS BLOB), x'00') > 0 AS has_nul
+FROM articles WHERE id = $1
+"#;
+
+/// SQLite fallback for a NUL-containing body: the whole text, cut to a
+/// character prefix in Rust.
+pub(super) const LOAD_ARTICLE_FULL_TEXT_SQLITE_SQL: &str =
+    "SELECT title, body_text FROM articles WHERE id = $1";
+
 /// Whether any stored raw response has expired (one-row probe).
 pub(super) const EXPIRED_RAW_EXISTS_SQLITE_SQL: &str = r#"
 SELECT EXISTS (
