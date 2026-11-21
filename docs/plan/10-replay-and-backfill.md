@@ -105,8 +105,11 @@ rss-ai-news replay --kind feed   --id 678
 
 副作用：**无**。`replay` 以只读连接打开数据库，不写任何表，在内存中重做，打印 `ReplayCommandSummary`（pretty 或 JSON，
 顶层字段 `kind` / `artifact_id` / `artifact_key` / `byte_size` / `parsed` / `diff`）。读取范围：`raw_artifacts`；`html`
-另经只读 projection（`ReplayProjectionRepository`）读该 artifact key 对应的 `feed_entries` 行（取 base URI 与 `title_raw`，
-**不带** `--diff` 也读）以及 `--diff` 时它指向的 `articles` 行。`feed` / `ai` 不读业务表（R3-19）。
+另经只读 projection（`ReplayProjectionRepository`）用**同一条**查询读该 artifact key 对应的 `feed_entries` 行（取 base URI 与
+`title_raw`）并 `LEFT JOIN` 它指向的 `articles` 行：artifact key 能解析为整数（feed entry id）时，`html` replay **总是**读这两张
+表，不带 `--diff` 也一样；
+`--diff` 只决定是否输出与该文章的差异（R3G-S19）。因此执行普通 `html` replay 的数据库角色需要 `feed_entries` 与 `articles`
+两张表的读权限。`feed` / `ai` 不读业务表（R3-19）。
 
 `--id` 直查 `raw_artifacts.id`，`--key` 走 `(kind, key)` 联合索引。两者必给其一，
 否则 CLI 报 `replay requires either --id or --key`。
