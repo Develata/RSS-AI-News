@@ -332,7 +332,9 @@ async fn pg_persist_for_entry_is_atomic_and_recognises_own_article() {
         outcome,
         EntryPersistOutcome::Persisted {
             article_id: earlier.article_id,
-            newly_created: false
+            newly_created: false,
+            // R3E-S6: the outcome reports the stored state too.
+            fallback: false,
         }
     );
     // R2-S6: the entry state follows the stored (readability) article, not

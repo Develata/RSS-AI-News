@@ -30,6 +30,21 @@ use super::reindex_job_sql::{
 };
 use crate::{UpdateContentHashOutcome, UpdateLinkHashOutcome};
 
+/// The articles `UNIQUE (content_hash)` constraint (migrations/postgres
+/// 0001, PostgreSQL's default name for it).
+const ARTICLES_CONTENT_HASH_CONSTRAINT: &str = "articles_content_hash_key";
+
+/// `23505` on [`ARTICLES_CONTENT_HASH_CONSTRAINT`] (R3E-S16).
+fn is_content_hash_unique_violation(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(db_error) => {
+            db_error.code().as_deref() == Some("23505")
+                && db_error.constraint() == Some(ARTICLES_CONTENT_HASH_CONSTRAINT)
+        }
+        _ => false,
+    }
+}
+
 pub(super) async fn pg_start_reindex_tx(
     pool: &PgPool,
     rule_kind: &str,
@@ -481,14 +496,16 @@ pub(super) async fn pg_apply_content_hash_batch(
                             savepoint.commit().await.map_err(StorageError::from)?;
                             UpdateContentHashOutcome::Updated
                         }
+                        // R3E-S16: only the articles content_hash unique
+                        // violation is this row's conflict; any other error
+                        // (another unique constraint included) fails the
+                        // batch and rolls back the outer transaction.
+                        Err(error) if is_content_hash_unique_violation(&error) => {
+                            savepoint.rollback().await.map_err(StorageError::from)?;
+                            UpdateContentHashOutcome::Conflict
+                        }
                         Err(error) => {
-                            match classify_db_error(error, "articles", new_content_hash) {
-                                StorageError::Conflict { .. } => {
-                                    savepoint.rollback().await.map_err(StorageError::from)?;
-                                    UpdateContentHashOutcome::Conflict
-                                }
-                                other => return Err(other),
-                            }
+                            return Err(classify_db_error(error, "articles", new_content_hash));
                         }
                     }
                 }

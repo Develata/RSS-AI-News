@@ -9,12 +9,15 @@ pub enum ExtractorError {
     HttpTimeout,
     #[error("HTTP status {code}")]
     HttpStatus { code: u16 },
-    /// HTTP 429 (R2-S10). `retry_after_seconds` is the response's
-    /// `Retry-After` as a delay from the fetch (seconds form, or an HTTP-date
-    /// minus now; a past date is 0), capped at [`MAX_RETRY_AFTER_SECONDS`];
-    /// `None` when absent or invalid.
+    /// HTTP 429 (R2-S10, R3E-S10). `retry_at` is the response's
+    /// `Retry-After` as an absolute instant fixed when the response was
+    /// received (seconds form: receipt + delay; HTTP-date: that date, a past
+    /// date stays in the past), capped at receipt +
+    /// [`MAX_RETRY_AFTER_SECONDS`]; `None` when absent or invalid.
     #[error("HTTP status 429")]
-    RateLimited { retry_after_seconds: Option<u64> },
+    RateLimited {
+        retry_at: Option<std::time::SystemTime>,
+    },
     #[error("connection failed")]
     ConnectionFailed,
     #[error("response too large: {bytes} bytes")]
@@ -62,38 +65,43 @@ impl ClassifiedError for ExtractorError {
     }
 }
 
-/// Longest server-requested wait honoured (one day): a larger `Retry-After`
-/// is clamped so a misbehaving server cannot park an entry indefinitely.
+/// Longest server-requested wait honoured (one day after the response was
+/// received): a later `Retry-After` is clamped so a misbehaving server cannot
+/// park an entry indefinitely. A legitimately longer wait (e.g. 48 h) is
+/// therefore cut to one day; the early retry may meet another 429 and spends
+/// one attempt of the retry budget (R3E-S10, plan/02 §8).
 pub const MAX_RETRY_AFTER_SECONDS: u64 = 24 * 60 * 60;
 
 impl ExtractorError {
-    /// The server-requested wait before retrying (R2-S10), if any.
-    pub fn retry_after(&self) -> Option<std::time::Duration> {
+    /// The server-requested earliest retry instant (R2-S10, R3E-S10), if any.
+    pub fn retry_at(&self) -> Option<std::time::SystemTime> {
         match self {
-            Self::RateLimited {
-                retry_after_seconds: Some(seconds),
-            } => Some(std::time::Duration::from_secs(*seconds)),
+            Self::RateLimited { retry_at } => *retry_at,
             _ => None,
         }
     }
 }
 
-/// `Retry-After` (RFC 9110 §10.2.3) as seconds from `now`: a non-negative
-/// integer, or an HTTP-date (a past date is 0). `None` when unparsable.
-pub(crate) fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<u64> {
+/// `Retry-After` (RFC 9110 §10.2.3) as an absolute instant, anchored at the
+/// response's receipt `received_at`: a non-negative integer of seconds, or an
+/// HTTP-date. The result never exceeds `received_at +
+/// MAX_RETRY_AFTER_SECONDS`. `None` when unparsable (or not representable).
+pub(crate) fn parse_retry_at(
+    value: &str,
+    received_at: std::time::SystemTime,
+) -> Option<std::time::SystemTime> {
+    let cap = received_at.checked_add(std::time::Duration::from_secs(MAX_RETRY_AFTER_SECONDS))?;
     let value = value.trim();
-    let seconds = if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
-        // Too many digits to fit is still "a very long wait".
-        value.parse::<u64>().unwrap_or(u64::MAX)
-    } else {
-        let at = httpdate::parse_http_date(value).ok()?;
-        match at.duration_since(now) {
-            // Round a partial second up: never retry before the date.
-            Ok(delay) => delay.as_secs() + u64::from(delay.subsec_nanos() > 0),
-            Err(_) => 0,
-        }
-    };
-    Some(seconds.min(MAX_RETRY_AFTER_SECONDS))
+    if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
+        // Too many digits to fit is still "a very long wait": the cap.
+        let seconds = value
+            .parse::<u64>()
+            .unwrap_or(u64::MAX)
+            .min(MAX_RETRY_AFTER_SECONDS);
+        return received_at.checked_add(std::time::Duration::from_secs(seconds));
+    }
+    let at = httpdate::parse_http_date(value).ok()?;
+    Some(at.min(cap))
 }
 
 impl From<reqwest::Error> for ExtractorError {

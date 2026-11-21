@@ -926,3 +926,56 @@ async fn a_response_for_a_moved_endpoint_is_stale_not_recorded() {
         .unwrap();
     assert_eq!(etag, None);
 }
+
+/// R3E-S12: the same move, but A answers 500. The failure write-back misses
+/// (endpoint guard) and is reported as `endpoint_changed`, like the 200 / 304
+/// branches — not as `http_5xx` — and B's row keeps no failure of A's.
+#[tokio::test]
+async fn a_failure_for_a_moved_endpoint_is_stale_not_recorded() {
+    let (_dir, pool) = make_test_pool().await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
+    let flow = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&["s1"]),
+        responses([(
+            source_id,
+            MockResponse {
+                delay: Duration::from_millis(300),
+                result: Err(FeedError::HttpStatus { code: 500 }),
+            },
+        )]),
+    );
+    let mover = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            sqlx::query(
+                "UPDATE feed_sources SET feed_url = 'https://example.com/b.xml' WHERE id = ?",
+            )
+            .bind(source_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        })
+    };
+
+    let summary = flow.run(IngestOptions::default()).await;
+    mover.await.unwrap();
+
+    assert_eq!(summary.sources_failed, 1);
+    assert_eq!(summary.sources_storage_failed, 0);
+    assert_eq!(
+        summary.failure_samples[0].error_kind.as_deref(),
+        Some("endpoint_changed")
+    );
+    let last_error_kind: Option<String> =
+        sqlx::query_scalar("SELECT last_error_kind FROM feed_sources WHERE id = ?")
+            .bind(source_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(last_error_kind, None);
+}

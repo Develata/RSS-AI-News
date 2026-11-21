@@ -169,7 +169,7 @@ pub(crate) fn preflight(loaded: &LoadedConfig) -> Result<(), CliError> {
 }
 
 /// The extract batch size for this run: `requested`, shrunk to whole waves
-/// when one batch could outlive its lease (the batch size is a CLI argument,
+/// when its estimated budget exceeds the lease (R3E-S9) (the batch size is a CLI argument,
 /// so this is decided per run, like the AI lease budget). Shrinking instead of
 /// failing keeps configs that ran before the budget existed running. `None`
 /// when not even one wave fits (R2-S9): extract is skipped for the run.
@@ -194,7 +194,7 @@ fn extract_batch_size(loaded: &LoadedConfig, requested: u32) -> Option<u32> {
             requested_batch_size = requested,
             batch_size = fitted,
             lease_seconds = lease,
-            "extract batch shrunk so one batch cannot outlive lease.fetch_duration_seconds \
+            "extract batch shrunk so its estimated budget fits lease.fetch_duration_seconds \
              (ceil(batch / concurrent_fetches) x (http.timeout_seconds + margin))"
         );
     }

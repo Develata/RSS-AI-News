@@ -109,7 +109,8 @@ owner guard 落空则整体回滚（不留孤儿 article），报 `LeaseLost`。
 恢复优先（R2-S6）：同一事务内**先**按 `origin_feed_entry_id` 查本条目已拥有的 article（`idx_articles_origin_feed_entry`，
 migration 0009）。恰有一篇时直接复用它，**不**插入本次提取的正文（重试可能得到不同正文哈希 H2，旧做法会再建一篇，
 使同一 entry 拥有两篇 article、task_gen 两篇都处理），entry 状态按已存 article 推导（`extractor_strategy =
-summary_fallback` → `fallback_persisted`，否则 `persisted`），与本次是否走摘要路径无关。拥有多篇时无法判定，
+summary_fallback` → `fallback_persisted`，否则 `persisted`），与本次是否走摘要路径无关；`EntryPersistOutcome::Persisted.fallback`
+报告实际落库的状态，运行摘要计数（`persisted` / `fallback_persisted`）与 transition 日志据此生成（R3E-S6）。拥有多篇时无法判定，
 返回 `StorageError::Integrity`（不可重试，事务回滚，entry 不动），由 extract 按存储故障如实上报。SQLite 该事务改用
 `BEGIN IMMEDIATE`（先读后写，避免升级写锁时 busy）。
 
@@ -181,7 +182,9 @@ lease 预算（2026-11-21）：一批 claim 共用一个 `lease.fetch_duration_s
 的整波数（`fit_extract_batch_to_lease`）并写 WARN。连一波都放不下时（`timeout + 5 > lease`）本次**不领取**
 extract（任何一批都可能在处理中途被另一 run 回收），ingest 照常运行，命令报 `extract_lease_too_short` 运行错误
 并退出 1（R2-S9，旧做法仍按一波领取）。这样升级前能运行的配置（如 lease 300 s + 默认批 50 → 本次按 40）继续运行，
-且一批不会超出自己的 lease。`+5` 秒是解析 / 写库耗时的估算余量，不是数据库与解析时间的硬上界。
+且一批的**估算预算**（上式）不超过自己的 lease（R3E-S9：这是对估算值的保证，不是对实际耗时的保证——
+`+5` 秒是解析 / 写库耗时的估算余量，不是数据库与解析时间的硬上界；解析或写库比估算慢时，实际批次仍可能超过 lease、
+被另一 run 回收并重复抓取）。
 示例配置的 lease 改为 600 s，默认批大小不再被缩小。
 
 滚动 JoinSet 将存活任务数限制在 `http.concurrent_fetches.max(1)`，不为整个 claim 批次预建等待任务。
@@ -262,7 +265,7 @@ rss-ai-news replay --kind html --key <feed_entry_id> --diff
 | 失败点 | 错误变体 | retryable | 处理 |
 |---|---|---|---|
 | HTML fetch 超时 | `ExtractorError::HttpTimeout` | true | 回 `pending_fetch` + 冷却（§5.3） |
-| HTML 429 | `ExtractorError::RateLimited { retry_after_seconds }`（`http_429`） | true | 回 `pending_fetch` + 冷却（§5.3），不消费摘要；`next_attempt_at = max(本地退避, 释放时刻 + Retry-After)`——Retry-After 取秒数或 HTTP-date（三种 RFC 9110 格式，过去的日期 = 0），缺失 / 无效则只用本地退避，上限 1 天（R2-S10） |
+| HTML 429 | `ExtractorError::RateLimited { retry_at }`（`http_429`） | true | 回 `pending_fetch` + 冷却（§5.3），不消费摘要；`next_attempt_at = max(释放时刻 + 本地退避, retry_at)`。`retry_at` 是**收到响应时**确定的绝对时刻（R3E-S10）：秒数形式 = 收包时刻 + 秒数，HTTP-date（三种 RFC 9110 格式）= 该日期本身（过去的日期即不额外等待）；释放晚于收包不会平移它。上限：`retry_at ≤ 收包时刻 + 1 天`（`MAX_RETRY_AFTER_SECONDS`，防止异常服务器无限期停放条目）——合法的更长等待（如 48 h）因此会被截到 1 天，提前的重试可能再遇 429 并消耗一次重试预算（已知取舍）。缺失 / 无效则只用本地退避（R2-S10） |
 | HTML 其余 4xx | `ExtractorError::HttpStatus { 4xx }` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | HTML 5xx | `ExtractorError::HttpStatus { 5xx }` | true | 回 `pending_fetch` + 冷却（§5.3） |
 | payload 过大 | `ExtractorError::TooLarge` | false | 尝试 fallback（W18）；无摘要则 `failed` |

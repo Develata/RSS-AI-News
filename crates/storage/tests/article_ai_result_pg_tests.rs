@@ -513,6 +513,8 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
             .unwrap()
             .is_empty()
     );
+    // R3E-B1: the in-window reconciliations belong to the fresh share's
+    // id-ordered list; the backlog keeps only out-of-window articles.
     let backlog = articles
         .list_backlog_for_ai_task_gen("ai", &identity, window, 10, 0)
         .await
@@ -522,12 +524,27 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
             .iter()
             .map(|c| (c.article_id, c.in_window))
             .collect::<Vec<_>>(),
-        [
-            (ids[0], false),
-            (ids[1], true),
-            (ids[2], true),
-            (ids[3], false)
-        ]
+        [(ids[0], false), (ids[3], false)]
+    );
+    let reconcile = articles
+        .list_fresh_reconcile_for_ai_task_gen("ai", &identity, window, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        reconcile
+            .iter()
+            .map(|c| (c.article_id, c.in_window))
+            .collect::<Vec<_>>(),
+        [(ids[1], true), (ids[2], true)]
+    );
+    let after_first = articles
+        .list_fresh_reconcile_for_ai_task_gen("ai", &identity, window, 10, ids[1])
+        .await
+        .unwrap();
+    assert_eq!(
+        after_first.iter().map(|c| c.article_id).collect::<Vec<_>>(),
+        [ids[2]],
+        "keyset cursor"
     );
 
     let request = ClaimRequest {

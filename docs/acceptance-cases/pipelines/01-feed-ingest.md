@@ -40,6 +40,7 @@
 | `parse_failure_keeps_artifact_marks_failed` | 同上 | 解析失败 + artifact |
 | `not_modified_without_validators_keeps_them_for_the_next_request` | `crates/runtime/tests/ingest_tests.rs` | 304 无验证器保留旧值，下次仍条件请求 |
 | `a_response_for_a_moved_endpoint_is_stale_not_recorded` | 同上 | R2-S12 端点变更后的旧响应记为过期 |
+| `a_failure_for_a_moved_endpoint_is_stale_not_recorded` | 同上 | R3E-S12 端点变更后旧端点的失败也记为过期 |
 | `write_backs_for_a_moved_endpoint_match_no_row` | `crates/storage/tests/feed_source_update_tests.rs` | R2-S12 三种写回按端点保护 |
 | `not_modified_update_keeps_validators_the_304_omits` | `crates/storage/tests/feed_source_update_tests.rs` | COALESCE 写回（SQLite）；200 仍替换 |
 | `pg_not_modified_update_keeps_validators_the_304_omits` | `crates/storage/tests/feed_source_pg_tests.rs` | 同上（PG，需 docker） |

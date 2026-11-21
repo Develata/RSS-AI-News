@@ -187,6 +187,9 @@ reclaim / `terminalize_exhausted` / 原始响应 TTL 清理的 `raw_response_exp
 采用同一规则（`repo::sqlite_stored_deadline` 写入、`repo::sqlite_instant_cutoff` 比较，
 测试 `ai_decision_lease_instant_tests.rs`）。`reindex_jobs` 的 claim / claim_by_id / 续跑领取 / reclaim 与 checkpoint
 续租同样改用此规则（R2-S14，测试 `reindex_job_lease_instant_tests.rs`）。doctor 的同类谓词仍是字典序比较，待单独修复。
+C9 publish 窗口（AI task_gen 列表与 fresh claim）在 SQLite 上同样按 `julianday()` 毫秒比较来源时间，窗口两端向内取整到整毫秒；
+亚毫秒边界（同一毫秒内的未来来源时间可入窗、同毫秒内的先后改由 article id 决定、与 freeze 的 TEXT 比较在亚秒边界不一致）
+是已接受的已知行为，见 [03-ai §5.1](./03-ai.md)。
 
 **`attempt_count` 不重置**，作为重试预算的硬约束。publish_records 例外：预算读 `stage_attempt_count`（阶段推进清零），`attempt_count` 只累计审计（[11 §4.1](./11-error-and-recovery.md)）。
 
@@ -299,7 +302,9 @@ prompt：`prompt_version` 语义见 [./03-ai.md](./03-ai.md) §3.2，历史文�
   `conflict_skipped`，collision chain 不留下 shadow-only group
 - `content_hash` — 重算所有 articles.content_hash（升级正文规范化算法时）。PG 上预检与 UPDATE 之间另一事务提交同一 hash
   （READ COMMITTED）时，该行的 UPDATE 在 savepoint 内执行，唯一约束冲突只回滚这一行并记 `conflict_skipped`，
-  批次与 checkpoint 照常提交（R2-S16）
+  批次与 checkpoint 照常提交（R2-S16）。只吸收 SQLSTATE `23505` 且约束名为 `articles_content_hash_key` 的冲突；其它错误（含
+  别的唯一约束，例如触发器报告的 `23505`）使整批失败、外层事务回滚、checkpoint 不前进（R3E-S16）。SQLite 写路径串行，
+  UPDATE 的任何错误本来就整批失败
 - `categories` — 重算 article→category 关联（升级分类规则时）。每次 owner-guarded 的配置写入（upsert / archive）
   在同一事务内把 job 的 `lease_expires_at` 续到 `now + lease`（R2-S18），与 hash target 的 checkpoint 续租一致；
   此前只刷新 `updated_at`，而 reclaim 只看 `lease_expires_at`，同步总时长超过初始租期即可被另一 worker 接手
@@ -318,8 +323,9 @@ active rule resolver 保证 reindex 中途 `active_rule(kind)` 仍返回旧 acti
   （`start_reindex_tx`）。`version_tag` 只是 CLI 每次自动生成的标签（`reindex-<target>-<unix-ts>`），
   不参与匹配，否则普通重跑永远无法续跑。`payload_sha256` 由 CLI 生成（`reindex_rule_fingerprint`，R2-S17）：
   对 target、该 target 的算法版本常量（`LINK_HASH_RULE_VERSION` / `CONTENT_HASH_RULE_VERSION` /
-  `CATEGORIES_RULE_VERSION`，改算法时递增）与决定改写结果的配置（`link_hash`：`dedup.link_normalizer_version`；
-  `categories`：全部 source 的分类、key、显示名、feed URL、kind、enabled、priority，排序后）做规范 JSON 的 SHA-256。
+  `CATEGORIES_RULE_VERSION`，改算法时递增）与决定改写结果的配置（`categories`：全部 source 的分类、key、显示名、feed URL、kind、enabled、
+  priority，排序后）做规范 JSON 的 SHA-256。不影响执行的配置不参与（R3E-S17）：`dedup.link_normalizer_version` 是保留字段、
+  不选择任何算法（只有一个内置 normalizer），故 `link_hash` 只由算法版本常量决定，仅改该字段仍可续跑。
   此前只散列 target 名，算法或配置变化后旧 checkpoint 仍会被续跑、同一作业混用两套规则。升级前崩溃留下的
   活动 job 用的是旧身份，续跑会被拒绝，需 `reindex --abort <id>` 后重跑。规则不一致或另一 worker 持有存活 lease → 显式
   `StorageError::Conflict { table: "reindex_jobs" }`，信息含 `reindex --abort <id>`，不改任何行。

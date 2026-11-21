@@ -112,6 +112,24 @@ impl ArticleRepository for FlakyArticleRepo {
             .list_backlog_for_ai_task_gen(category_key, identity, window, batch_size, after_id)
             .await
     }
+    async fn list_fresh_reconcile_for_ai_task_gen(
+        &self,
+        category_key: &str,
+        identity: &rss_ai_news_storage::NewAiResult,
+        window: rss_ai_news_storage::FreshWindow,
+        batch_size: u32,
+        after_id: i64,
+    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
+        self.inner
+            .list_fresh_reconcile_for_ai_task_gen(
+                category_key,
+                identity,
+                window,
+                batch_size,
+                after_id,
+            )
+            .await
+    }
     async fn list_fresh_for_ai_task_gen(
         &self,
         category_key: &str,

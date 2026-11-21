@@ -740,6 +740,24 @@ impl rss_ai_news_storage::ArticleRepository for FlakyArticleRepo {
             .list_backlog_for_ai_task_gen(category_key, identity, window, batch_size, after_id)
             .await
     }
+    async fn list_fresh_reconcile_for_ai_task_gen(
+        &self,
+        category_key: &str,
+        identity: &rss_ai_news_storage::NewAiResult,
+        window: rss_ai_news_storage::FreshWindow,
+        batch_size: u32,
+        after_id: i64,
+    ) -> Result<Vec<rss_ai_news_storage::ArticleAiTaskCandidate>, StorageError> {
+        self.inner
+            .list_fresh_reconcile_for_ai_task_gen(
+                category_key,
+                identity,
+                window,
+                batch_size,
+                after_id,
+            )
+            .await
+    }
     async fn list_fresh_for_ai_task_gen(
         &self,
         category_key: &str,
@@ -1554,6 +1572,83 @@ async fn batch_size_two_task_gen_backlog_slot_is_not_taken_by_fresh_articles() {
 
     assert_eq!(article_state(&pool, old[0]).await, "ai_pending");
     assert_eq!(with_task(&pool, &fresh).await, 1);
+}
+
+/// R3E-B1 fixture: #1 in the window with a pending row of the identity (a
+/// C3 reconciliation), #2 in the window without a task, #3 outside the
+/// window without a task.
+async fn seed_reconcile_fixture(pool: &SqlitePool, tag: &str) -> [i64; 3] {
+    let first = seed_aged(pool, &format!("{tag}-1"), 1, hours_ago(2)).await[0];
+    let second = seed_aged(pool, &format!("{tag}-2"), 1, hours_ago(1)).await[0];
+    let third = seed_aged(pool, &format!("{tag}-3"), 1, days_ago(10)).await[0];
+    seed_identity_row(pool, first, "pending", None).await;
+    [first, second, third]
+}
+
+/// Batch 2: the in-window reconciliation of #1 counts against the fresh
+/// share, so the backlog slot goes to the out-of-window #3 (R3E-B1).
+#[tokio::test]
+async fn batch_size_two_in_window_reconciliation_does_not_take_the_backlog_slot() {
+    let (_dir, pool) = make_test_pool().await;
+    let [first, second, third] = seed_reconcile_fixture(&pool, "r3b1-2").await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 2;
+
+    let summary = flow.task_gen(&opts).await;
+
+    assert_eq!(article_state(&pool, third).await, "ai_pending");
+    assert_eq!(summary.fresh_advanced, 1);
+    // Inside the fresh share, reconciliation goes first (each row advances at
+    // most once, so it cannot starve new fresh inserts).
+    assert_eq!(article_state(&pool, first).await, "ai_pending");
+    assert_eq!(article_state(&pool, second).await, "persisted");
+    assert_eq!((summary.reconciled, summary.inserted), (1, 1));
+}
+
+/// Batch 1: the backlog turn serves #3, not the in-window reconciliation of
+/// #1; the recorded side matches the article actually served (R3E-B1).
+#[tokio::test]
+async fn batch_size_one_in_window_reconciliation_is_a_fresh_turn() {
+    let (_dir, pool) = make_test_pool().await;
+    let [first, second, third] = seed_reconcile_fixture(&pool, "r3b1-1").await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 1;
+    let mut runs = Vec::new();
+    for _ in 0..3 {
+        let summary = flow.task_gen(&opts).await;
+        runs.push((
+            summary.fresh_advanced,
+            share_state(&pool, "task_gen").await,
+            [
+                article_state(&pool, first).await,
+                article_state(&pool, second).await,
+                article_state(&pool, third).await,
+            ],
+        ));
+    }
+    let state = |s: [&str; 3]| s.map(str::to_string);
+    assert_eq!(
+        runs,
+        [
+            (
+                1,
+                Some("fresh".to_string()),
+                state(["ai_pending", "persisted", "persisted"])
+            ),
+            (
+                0,
+                Some("backlog".to_string()),
+                state(["ai_pending", "persisted", "ai_pending"])
+            ),
+            (
+                1,
+                Some("fresh".to_string()),
+                state(["ai_pending", "ai_pending", "ai_pending"])
+            ),
+        ]
+    );
 }
 
 #[tokio::test]
