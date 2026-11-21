@@ -82,6 +82,8 @@ builder  →  runtime  →  debug
 唯一真相源是 `rust-toolchain.toml` 的 `channel`（当前 1.97.0）。同一版本另写在 `.github/workflows/` 的
 `ci.yml`、`release.yml`（`RUST_TOOLCHAIN`）、`audit.yml`、`maintenance.yml`（×2，`toolchain:`）与
 `docker/Dockerfile`（`FROM rust:<版本>-slim-bookworm@sha256:…`）共 6 处。升级时一次改全部；static acceptance lane 的
+Rust builder 镜像的 patch tag 在官方支持列表里只停留到下一个 Rust 版本发布，之后不再重建，所以它的 digest 随工具链升级一起
+刷新（Dependabot 只持续刷新 Debian 运行时镜像，见 [../operations/ci-and-release.md](../operations/ci-and-release.md)）。
 `toolchain-pins` 检查遍历 `.github/workflows/` 下全部 `*.yml` / `*.yaml`（不是固定清单）：每个 `RUST_TOOLCHAIN:` 必须是该
 literal，每个 `toolchain:` 输入只能是同一 literal 或恰好 `${{ env.RUST_TOOLCHAIN }}`（且同文件定义了它），其他表达式一律失败
 （可能解析成别的编译器，R3-9）；每个 `dtolnay/rust-toolchain` 步骤对应一个 `toolchain:` 输入；Dockerfile 恰有一个

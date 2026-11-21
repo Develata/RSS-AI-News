@@ -72,7 +72,11 @@ CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks �
 - `docker/Dockerfile` 的基础镜像按 index digest 固定（`rust:<toolchain>-slim-bookworm@sha256:…`、`debian:bookworm-slim@sha256:…`）。
 - [`.github/dependabot.yml`](../../.github/dependabot.yml) 覆盖 `cargo`、`github-actions` 与 `docker`（`/docker`），三者同样每月、
   最多 2 个 PR、单组合并、不自动 rebase、忽略 major。`rust` 镜像的版本更新被忽略（工具链升级要同时改全部 pin，见
-  static lane 的 `toolchain-pins` 检查），digest 更新照常提出。
+  static lane 的 `toolchain-pins` 检查）。Docker Official Images 只为仍在支持列表中的 tag 跟随基础镜像重建；`1.97.0-slim-bookworm`
+  这类 patch tag 在更新的 Rust 发布后即退出该列表（2026-11-22 核对 `library/rust`：只剩 1.100.x），之后不会再有新 digest，
+  Dependabot 也就不会为它提 digest PR。builder 镜像的安全更新因此随**工具链升级**一起做（同一次受控变更里改 channel、
+  workflow、Dockerfile 的版本与 digest）；它只是构建阶段，不进入运行时镜像。`debian:bookworm-slim` 运行时镜像的 digest 更新
+  照常由 Dependabot 提出（R3-13）。
 - composite action `.github/actions/cargo-audit` 不引用第三方 action；它下载的 cargo-audit 二进制按 SHA-256 校验。
 
 ## Release workflow

@@ -12,8 +12,10 @@
 # Base images are pinned by multi-platform index digest (resolved with
 # `docker buildx imagetools inspect`), so a rebuild of the same commit uses the
 # same bytes on amd64 (CI / GHCR) and arm64 (local). Dependabot's docker
-# ecosystem proposes digest refreshes; the Rust version itself is the
-# toolchain pin owned by rust-toolchain.toml (static lane `toolchain-pins`).
+# ecosystem proposes digest refreshes of the Debian runtime image; the Rust
+# builder's version is the toolchain pin owned by rust-toolchain.toml (static
+# lane `toolchain-pins`), and its retired patch tag gets no upstream rebuilds,
+# so it is refreshed together with the toolchain (.github/dependabot.yml).
 # Debian 12 (bookworm) is in LTS until 2028-06-30, so the distro stays.
 FROM rust:1.97.0-slim-bookworm@sha256:6d220bf85c74e842a79da63997af8d2e74455c0b8847d8bb3a5888572334991d AS chef
 
