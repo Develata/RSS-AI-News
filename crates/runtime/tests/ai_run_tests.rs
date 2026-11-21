@@ -1818,3 +1818,26 @@ async fn an_insert_error_before_the_quota_is_met_stops_the_pass() {
     assert_eq!(article_state(&pool, next[0]).await, "ai_pending");
     assert_eq!(article_state(&pool, old[0]).await, "persisted");
 }
+// === R2-S5: the run's own storage failures are counted, whatever release ===
+
+#[tokio::test]
+async fn own_storage_read_failures_are_counted_with_budget_left_and_on_the_last_attempt() {
+    for (max_attempts, released) in [(3, "pending"), (1, "permanent_failed")] {
+        let (_dir, pool) = make_test_pool().await;
+        let article_id =
+            seed_persisted_article(&pool, &format!("s5-{max_attempts}"), "title", "body").await;
+        let flow = flaky_flow(pool.clone(), Arc::new(MockAiClient::default()), 1, || {
+            StorageError::Timeout
+        });
+        let mut opts = opts();
+        opts.max_attempts = max_attempts;
+        flow.task_gen(&opts).await;
+        let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+
+        let summary = flow.process_ai_tasks(&opts).await;
+
+        assert_eq!(summary.storage_failed, 1, "max_attempts={max_attempts}");
+        // The release state is kept as it landed.
+        assert_eq!(ai_result_state(&pool, ai_result_id).await, released);
+    }
+}

@@ -47,11 +47,14 @@ pub(super) async fn process_one(
         // A transient read error (pool timeout, busy, serialization failure)
         // says nothing about the task: it goes back through the budgeted
         // retryable release like a 5xx. Only non-retryable errors are final.
+        // Either way the run's own database failed (R2-S5): the outcome is
+        // flagged so the run reports it, while the release state stays as
+        // it landed.
         Err(error) => {
             let message = error.display_user();
             let kind = error.error_kind().to_string();
             let now = (ctx.clock)();
-            return if error.is_retryable() {
+            let mut outcome = if error.is_retryable() {
                 release_retryable_ai_failure(
                     &ctx,
                     &emitter,
@@ -67,6 +70,8 @@ pub(super) async fn process_one(
                 release_permanent_ai_failure(&ctx, &emitter, &owner, &claimed, &message, &kind, now)
                     .await
             };
+            outcome.storage_failed = true;
+            return outcome;
         }
     };
 

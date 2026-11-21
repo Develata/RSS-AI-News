@@ -36,6 +36,8 @@ pub struct AiRunCommandSummary {
     pub process_lease_lost: u32,
     /// Releases that failed with a storage error (rows recover via reclaim).
     pub process_release_failed: u32,
+    /// Tasks whose own storage read failed (R2-S5), whatever release followed.
+    pub process_storage_failed: u32,
     /// Pending-row inserts that failed with a storage error.
     pub task_gen_insert_failed: u32,
     /// `error_kind` when listing task-gen candidates failed.
@@ -70,6 +72,7 @@ impl AiRunCommandSummary {
         self.process_tasks_panicked += other.process_tasks_panicked;
         self.process_lease_lost += other.process_lease_lost;
         self.process_release_failed += other.process_release_failed;
+        self.process_storage_failed += other.process_storage_failed;
         self.task_gen_insert_failed += other.task_gen_insert_failed;
         self.task_gen_error = self.task_gen_error.take().or(other.task_gen_error);
         self.process_claim_error = self
@@ -103,6 +106,15 @@ impl AiRunCommandSummary {
                 message: format!("{} AI result releases failed", self.process_release_failed),
             });
         }
+        if self.process_storage_failed > 0 {
+            errors.push(RenderedError {
+                kind: "ai_storage_failed".to_string(),
+                message: format!(
+                    "{} AI tasks hit a storage error reading their article",
+                    self.process_storage_failed
+                ),
+            });
+        }
         if let Some(kind) = &self.process_claim_error {
             errors.push(RenderedError {
                 kind: format!("ai_claim_{kind}"),
@@ -124,6 +136,7 @@ impl CommandSummary for AiRunCommandSummary {
         let storage = (self.task_gen_error.is_some()
             || self.task_gen_insert_failed > 0
             || self.process_release_failed > 0
+            || self.process_storage_failed > 0
             || self.process_claim_error.is_some())
         .then_some(ExitCode::RuntimeError.as_i32());
         storage
@@ -386,6 +399,7 @@ async fn run_category(
         process_tasks_panicked: summary.process.tasks_panicked,
         process_lease_lost: summary.process.lease_lost,
         process_release_failed: summary.process.release_failed,
+        process_storage_failed: summary.process.storage_failed,
         task_gen_insert_failed: summary.task_gen.insert_failed,
         task_gen_error: summary.task_gen.list_error,
         process_claim_error: summary.process.claim_error,
@@ -416,4 +430,34 @@ pub(crate) fn select_category<'a>(
             "category is required when multiple or zero categories are configured".to_string(),
         ),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn own_storage_failures_fail_the_run_whatever_the_release() {
+        // R2-S5: zero model calls and every task failing on the run's own
+        // database must not exit 0.
+        let summary = AiRunCommandSummary {
+            process_claimed: 2,
+            process_retryable_failed: 1,
+            process_permanent_failed: 1,
+            process_storage_failed: 2,
+            ..Default::default()
+        };
+        assert_eq!(summary.exit_code(), ExitCode::RuntimeError);
+        assert!(
+            summary
+                .errors()
+                .iter()
+                .any(|error| error.kind == "ai_storage_failed")
+        );
+        let ok = AiRunCommandSummary {
+            process_retryable_failed: 1,
+            ..Default::default()
+        };
+        assert_eq!(ok.exit_code(), ExitCode::Success);
+    }
 }

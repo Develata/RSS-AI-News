@@ -469,6 +469,7 @@ impl AiRunFlow {
                     "lease_lost": summary.lease_lost,
                     "release_failed": summary.release_failed,
                     "tasks_panicked": summary.tasks_panicked,
+                    "storage_failed": summary.storage_failed,
                     "batches_executed": summary.batches_executed,
                     "max_batches_reached": summary.max_batches_reached,
                     "retryable_deferred": summary.retryable_deferred,
@@ -520,6 +521,9 @@ fn ai_fresh_since(now: OffsetDateTime, candidate_window_hours: u32) -> OffsetDat
 impl AiProcessSummary {
     /// Count every outcome; retain only the first 32 failures for diagnostics.
     fn record(&mut self, outcome: AiTaskOutcome) {
+        if outcome.storage_failed {
+            self.storage_failed += 1;
+        }
         match outcome.status {
             AiTaskStatus::Succeeded => self.succeeded += 1,
             AiTaskStatus::Filtered => self.filtered += 1,
@@ -608,6 +612,7 @@ mod tests {
         };
         for _ in 0..10_000 {
             summary.record(AiTaskOutcome {
+                storage_failed: false,
                 article_ai_result_id: 1,
                 article_id: 1,
                 article_advance: None,
@@ -615,6 +620,7 @@ mod tests {
                 error_kind: None,
             });
             summary.record(AiTaskOutcome {
+                storage_failed: false,
                 article_ai_result_id: 1,
                 article_id: 1,
                 article_advance: None,
@@ -623,6 +629,7 @@ mod tests {
             });
         }
         summary.record(AiTaskOutcome {
+            storage_failed: false,
             article_ai_result_id: 1,
             article_id: 1,
             article_advance: None,
