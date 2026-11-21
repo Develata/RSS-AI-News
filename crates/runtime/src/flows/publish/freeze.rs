@@ -18,6 +18,8 @@ use super::PublishFlow;
 use super::dto::{PublishFreezeOptions, PublishFreezeOutcome, PublishFreezeStatus};
 use crate::events::RunEventEmitter;
 
+const PHASE: &str = "freeze";
+
 impl PublishFlow {
     pub async fn freeze(&self, opts: PublishFreezeOptions) -> PublishFreezeOutcome {
         self.freeze_record_inner(None, opts).await
@@ -136,7 +138,7 @@ impl PublishFlow {
         {
             Ok(candidates) => candidates,
             Err(error) => {
-                self.fail_claimed(claimed.id, &owner, &error, now, &emitter)
+                self.fail_claimed(claimed.id, &owner, &error, PHASE, now, &emitter)
                     .await;
                 return PublishFreezeOutcome {
                     publish_record_id: claimed.id,
@@ -210,7 +212,7 @@ impl PublishFlow {
         ) {
             Ok(frozen) => frozen,
             Err(error) => {
-                self.fail_claimed(claimed.id, &owner, &error, now, &emitter)
+                self.fail_claimed(claimed.id, &owner, &error, PHASE, now, &emitter)
                     .await;
                 return PublishFreezeOutcome {
                     publish_record_id: claimed.id,
@@ -274,34 +276,9 @@ impl PublishFlow {
                 item_count: 0,
             },
             Err(error) => {
-                if let Err(persist_err) = self
-                    .ctx
-                    .publish_record_repo
-                    .release_permanent_failure(
-                        claimed.id,
-                        &owner,
-                        &error.to_string(),
-                        error.error_kind(),
-                        now,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        publish_record_id = claimed.id,
-                        phase = "freeze",
-                        ?persist_err,
-                        "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
-                    );
-                }
-                emitter
-                    .emit(
-                        "publish_failed",
-                        "error",
-                        Some("publish_record"),
-                        Some(claimed.id),
-                        &error.to_string(),
-                        Some(json!({ "phase": "freeze", "error_kind": error.error_kind() })),
-                    )
+                // The freeze transaction rolled back; a transient storage error
+                // keeps the record `pending` (budgeted retry), not `failed`.
+                self.release_classified_failure(claimed.id, &owner, &error, PHASE, now, &emitter)
                     .await;
                 PublishFreezeOutcome {
                     publish_record_id: claimed.id,

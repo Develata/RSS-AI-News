@@ -5,8 +5,43 @@
 //! `FOR UPDATE SKIP LOCKED`（§6.4 契约），故按 backend 分裂。
 
 use sqlx::{PgPool, SqlitePool};
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::{ClaimRequest, StorageError};
+
+// ── SQLite instant-correct lease comparisons ───────────────────────────
+//
+// SQLite stores OffsetDateTime as RFC3339 TEXT with a variable-length
+// fraction, so a lexicographic `<` is not an instant `<` within one second
+// (`'…20.5Z' < '…20Z'`). Lease predicates therefore compare `julianday()`
+// values, as feed_entries does (feed_entry_sql.rs, plan/02 §5.3).
+// `julianday()` rounds to the nearest millisecond, so the stored deadline is
+// written in UTC rounded *up* to a whole millisecond and the compared `now` is
+// rounded *down*: both sides are then exact and a lease is never treated as
+// expired before its instant. `julianday()` returns NULL for text it cannot
+// parse (e.g. some valid offsets such as `+15:00`), so each predicate falls
+// back to the previous text comparison via `COALESCE`.
+//
+// These two helpers duplicate the private ones in feed_entry_impl.rs
+// (`stored_deadline` / `cooldown_cutoff`); kept local to avoid cross-module
+// coupling — consolidate when those modules are next touched.
+// PostgreSQL compares `timestamptz` by instant and needs no change.
+
+/// Lease deadline as SQLite stores it: UTC, rounded up to a whole millisecond.
+pub(super) fn sqlite_stored_deadline(at: OffsetDateTime) -> OffsetDateTime {
+    let at = at.to_offset(UtcOffset::UTC);
+    match at.nanosecond() % 1_000_000 {
+        0 => at,
+        sub_ms => at + Duration::nanoseconds(i64::from(1_000_000 - sub_ms)),
+    }
+}
+
+/// The `now` SQLite lease predicates compare against: UTC, rounded down to a
+/// whole millisecond.
+pub(super) fn sqlite_lease_cutoff(now: OffsetDateTime) -> OffsetDateTime {
+    let now = now.to_offset(UtcOffset::UTC);
+    now - Duration::nanoseconds(i64::from(now.nanosecond() % 1_000_000))
+}
 
 use super::publish_record::ClaimedPublishRecord;
 
@@ -17,10 +52,10 @@ pub(super) async fn claim_publish_sqlite(
 ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
     sqlx::query_as::<_, ClaimedPublishRecord>(CLAIM_PUBLISH_SQLITE_SQL)
         .bind(&request.owner)
-        .bind(request.lease_expires_at)
+        .bind(sqlite_stored_deadline(request.lease_expires_at))
         .bind(request.now)
         .bind(from)
-        .bind(request.now)
+        .bind(sqlite_lease_cutoff(request.now))
         .bind(i64::from(request.max_attempts))
         .bind(i64::from(request.batch_size))
         .fetch_all(pool)
@@ -77,6 +112,7 @@ RETURNING id
 "#;
 
 /// SQLite claim：子查询无 `FOR UPDATE`（语法不支持，整库写锁兜底）。
+/// lease 过期按时刻比较（见上方 julianday 说明）：`$2` 向上、`$5` 向下取整到毫秒。
 const CLAIM_PUBLISH_SQLITE_SQL: &str = r#"
 UPDATE publish_records
 SET lease_owner = $1, lease_expires_at = $2,
@@ -84,14 +120,15 @@ SET lease_owner = $1, lease_expires_at = $2,
 WHERE id IN (
     SELECT id FROM publish_records
     WHERE state = $4
-      AND (lease_expires_at IS NULL OR lease_expires_at < $5)
+      AND (lease_expires_at IS NULL
+           OR COALESCE(julianday(lease_expires_at) < julianday($5), lease_expires_at < $5))
       AND attempt_count < $6
     ORDER BY id ASC
     LIMIT $7
 )
 RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           render_version, selection_policy_version, state, remote_target,
-          attempt_count
+          attempt_count, rendered_at
 "#;
 
 /// PG claim：§6.4 契约——子查询 `FOR UPDATE SKIP LOCKED`，让 publish flow
@@ -112,7 +149,7 @@ WHERE id IN (
 )
 RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           render_version, selection_policy_version, state, remote_target,
-          attempt_count
+          attempt_count, rendered_at
 "#;
 
 pub(super) const ADVANCE_SNAPSHOT_SQL: &str = "UPDATE publish_records SET state = $1, snapshot_frozen_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
@@ -144,6 +181,15 @@ WHERE lease_expires_at IS NOT NULL
   AND state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local')
 "#;
 
+/// SQLite 变体：按时刻比较 lease（julianday，`$2` 为向下取整到毫秒的 now）。
+pub(super) const RECLAIM_PUBLISH_LEASES_SQLITE_SQL: &str = r#"
+UPDATE publish_records
+SET lease_owner = NULL, lease_expires_at = NULL, updated_at = $1
+WHERE lease_expires_at IS NOT NULL
+  AND COALESCE(julianday(lease_expires_at) < julianday($2), lease_expires_at < $2)
+  AND state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local')
+"#;
+
 /// W15 §4 sweep：预算耗尽且 claim 永远不会再领取的阶段态行 → 终态。
 /// 预算横跨 freeze/render/store_local/remote 四阶段共享（与 claim 行为一致）。
 /// COALESCE 保留行上既有真实错误，仅对从未留过错误的行落兜底文案。
@@ -158,6 +204,21 @@ SET state = 'failed',
 WHERE state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local')
   AND attempt_count >= $2
   AND (lease_expires_at IS NULL OR lease_expires_at < $3)
+"#;
+
+/// SQLite 变体：lease 过期按时刻比较（julianday，`$3` 为向下取整到毫秒的 now）。
+pub(super) const TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL: &str = r#"
+UPDATE publish_records
+SET state = 'failed',
+    last_error = COALESCE(last_error, 'retry budget exhausted'),
+    last_error_kind = COALESCE(last_error_kind, 'retry_budget_exhausted'),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = $1
+WHERE state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local')
+  AND attempt_count >= $2
+  AND (lease_expires_at IS NULL
+       OR COALESCE(julianday(lease_expires_at) < julianday($3), lease_expires_at < $3))
 "#;
 pub(super) const PROMOTE_ARTICLE_PUBLISHED_SQL: &str = "UPDATE articles SET state = 'published', updated_at = $1 WHERE id = $2 AND state = 'ready_for_publish'";
 

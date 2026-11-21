@@ -519,3 +519,140 @@ async fn publish_remote_batch_deadline_releases_all_retryable_claims() {
         assert!(owner.is_none());
     }
 }
+
+// === B4: the configured target must match the record's stored target ===
+
+/// A remote target that declares an identity (like `GitHubTarget`) and counts
+/// how many reports were actually sent.
+struct IdentifiedTarget {
+    identity: &'static str,
+    sent: std::sync::atomic::AtomicUsize,
+}
+
+impl IdentifiedTarget {
+    fn new(identity: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            identity,
+            sent: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn sent(&self) -> usize {
+        self.sent.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl PublishTarget for IdentifiedTarget {
+    async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(PublishedArtifact {
+            local_path: None,
+            commit_sha: Some("identified-sha".to_string()),
+            remote_target: Some(format!(
+                "github://{}/{}",
+                self.identity, report.relative_path
+            )),
+        })
+    }
+
+    fn target_identity(&self) -> Option<String> {
+        Some(self.identity.to_string())
+    }
+}
+
+async fn seed_stored_local_for_target(pool: &SqlitePool, remote_target: &str) -> i64 {
+    let id = seed_stored_local_publish_record(pool).await;
+    sqlx::query("UPDATE publish_records SET remote_target = ? WHERE id = ?")
+        .bind(remote_target)
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn publish_remote_rejects_record_frozen_for_another_target_without_sending() {
+    let (_dir, pool) = make_test_pool().await;
+    let record_id = seed_stored_local_for_target(&pool, "old-owner/old-repo:main").await;
+    let target = IdentifiedTarget::new("new-owner/new-repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow.publish_remote_record(record_id, remote_opts()).await;
+
+    assert_eq!(
+        outcome.status,
+        PublishRemoteStatus::TargetMismatch {
+            stored: Some("old-owner/old-repo:main".to_string()),
+            current: "new-owner/new-repo:main".to_string(),
+        }
+    );
+    assert_eq!(target.sent(), 0, "no request may reach the new target");
+    assert_record_state(&pool, record_id, "failed").await;
+    assert_last_error_kind(&pool, record_id, "remote_target_mismatch").await;
+    let last_error: String =
+        sqlx::query_scalar("SELECT last_error FROM publish_records WHERE id = ?")
+            .bind(record_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        last_error.contains("old-owner/old-repo:main"),
+        "{last_error}"
+    );
+    assert!(
+        last_error.contains("new-owner/new-repo:main"),
+        "{last_error}"
+    );
+    assert_referenced_articles_state(&pool, record_id, "ready_for_publish").await;
+}
+
+#[tokio::test]
+async fn publish_remote_sends_record_whose_stored_target_matches() {
+    let (_dir, pool) = make_test_pool().await;
+    let record_id = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow.publish_remote_record(record_id, remote_opts()).await;
+
+    assert_eq!(outcome.status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(target.sent(), 1);
+    assert_record_state(&pool, record_id, "published_remote").await;
+}
+
+#[tokio::test]
+async fn publish_remote_batch_skips_only_the_mismatched_record() {
+    let (_dir, pool) = make_test_pool().await;
+    let drifted = seed_stored_local_for_target(&pool, "owner/repo:old-branch").await;
+    let matching = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow
+        .publish_remote_batch(PublishRemoteBatchOptions {
+            items: vec![
+                batch_item(drifted, "AI", "Daily AI"),
+                batch_item(matching, "ML", "Daily ML"),
+            ],
+        })
+        .await;
+
+    let status_of = |id: i64| {
+        outcome
+            .items
+            .iter()
+            .find(|item| item.publish_record_id == id)
+            .map(|item| item.status.clone())
+            .unwrap()
+    };
+    assert!(matches!(
+        status_of(drifted),
+        PublishRemoteStatus::TargetMismatch { .. }
+    ));
+    assert_eq!(status_of(matching), PublishRemoteStatus::PublishedRemote);
+    assert_eq!(target.sent(), 1, "only the matching report is sent");
+    assert_record_state(&pool, drifted, "failed").await;
+    assert_record_state(&pool, matching, "published_remote").await;
+}

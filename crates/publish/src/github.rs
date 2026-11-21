@@ -88,6 +88,12 @@ impl GitHubTarget {
         }
     }
 
+    /// `owner/repo:branch`, the form recorded in `publish_records.remote_target`
+    /// at init. The path prefix is not part of it (see plan/04 §4.2).
+    pub fn identity(&self) -> String {
+        format!("{}/{}:{}", self.cfg.owner, self.cfg.repo, self.cfg.branch)
+    }
+
     fn remote_target_url(&self, final_path: &str) -> String {
         format!(
             "github://{}/{}/{}/{}",
@@ -98,6 +104,10 @@ impl GitHubTarget {
 
 #[async_trait]
 impl PublishTarget for GitHubTarget {
+    fn target_identity(&self) -> Option<String> {
+        Some(self.identity())
+    }
+
     async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
         let final_path = self.join_path(&report.relative_path)?;
         let existing_sha = self.existing_sha(&final_path).await?;
@@ -229,79 +239,66 @@ impl GitHubTarget {
         })
     }
 
-    async fn get_json(&self, route: &str) -> Result<Value, PublishError> {
-        let response = self
-            .client
-            ._get(route)
-            .await
-            .map_err(classify::classify_octocrab_error)?;
-        let status = response.status().as_u16();
-        let reset_epoch = response
-            .headers()
-            .get("X-RateLimit-Reset")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<i64>().ok());
-        let body = read_response_body(response).await?;
-
-        if !(200..300).contains(&status) {
-            return Err(classify::classify_github_status(
-                status,
-                response_message(status, &body, self.cfg.token.expose_secret()),
-                reset_epoch,
-            ));
-        }
-
-        parse_json_value(status, &body)
+    async fn get_json(&self, operation: &'static str, route: &str) -> Result<Value, PublishError> {
+        let response = self.client._get(route).await;
+        self.json_response(operation, response).await
     }
 
-    async fn post_json(&self, route: &str, body: &Value) -> Result<Value, PublishError> {
-        let response = self
-            .client
-            ._post(route, Some(body))
-            .await
-            .map_err(classify::classify_octocrab_error)?;
-        let status = response.status().as_u16();
-        let reset_epoch = response
-            .headers()
-            .get("X-RateLimit-Reset")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<i64>().ok());
-        let body = read_response_body(response).await?;
-
-        if !(200..300).contains(&status) {
-            return Err(classify::classify_github_status(
-                status,
-                response_message(status, &body, self.cfg.token.expose_secret()),
-                reset_epoch,
-            ));
-        }
-
-        parse_json_value(status, &body)
+    async fn post_json(
+        &self,
+        operation: &'static str,
+        route: &str,
+        body: &Value,
+    ) -> Result<Value, PublishError> {
+        let response = self.client._post(route, Some(body)).await;
+        self.json_response(operation, response).await
     }
 
-    async fn patch_json(&self, route: &str, body: &Value) -> Result<Value, PublishError> {
-        let response = self
-            .client
-            ._patch(route, Some(body))
-            .await
-            .map_err(classify::classify_octocrab_error)?;
-        let status = response.status().as_u16();
-        let reset_epoch = response
-            .headers()
-            .get("X-RateLimit-Reset")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<i64>().ok());
-        let body = read_response_body(response).await?;
+    async fn patch_json(
+        &self,
+        operation: &'static str,
+        route: &str,
+        body: &Value,
+    ) -> Result<Value, PublishError> {
+        let response = self.client._patch(route, Some(body)).await;
+        self.json_response(operation, response).await
+    }
 
+    async fn json_response(
+        &self,
+        operation: &'static str,
+        response: Result<GitHubResponse, octocrab::Error>,
+    ) -> Result<Value, PublishError> {
+        let (status, body, request_id) = self.finish(operation, response).await?;
+        parse_json_value(status, &body)
+            .map_err(|error| with_request_context(error, operation, request_id.as_deref()))
+    }
+
+    /// Reads and classifies one GitHub REST response. Every failure (transport,
+    /// oversized body, non-2xx) carries `operation` and the response's
+    /// `x-github-request-id`, so a persisted publish failure says which call
+    /// failed and can be traced on GitHub's side (incident 2026-11-21).
+    async fn finish(
+        &self,
+        operation: &'static str,
+        response: Result<GitHubResponse, octocrab::Error>,
+    ) -> Result<(u16, Bytes, Option<String>), PublishError> {
+        let response = response.map_err(|error| {
+            with_request_context(classify::classify_octocrab_error(error), operation, None)
+        })?;
+        let status = response.status().as_u16();
+        let rate_limit = classify::RateLimitHints::from_headers(response.headers());
+        let request_id = github_request_id(response.headers());
+        let context = |error| with_request_context(error, operation, request_id.as_deref());
+        let body = read_response_body(response).await.map_err(context)?;
         if !(200..300).contains(&status) {
-            return Err(classify::classify_github_status(
+            return Err(context(classify::classify_github_response(
                 status,
                 response_message(status, &body, self.cfg.token.expose_secret()),
-                reset_epoch,
-            ));
+                &rate_limit,
+            )));
         }
-
-        parse_json_value(status, &body)
+        Ok((status, body, request_id))
     }
 
     async fn head_commit_and_tree(&self) -> Result<(String, String), PublishError> {
@@ -309,7 +306,7 @@ impl GitHubTarget {
             "/repos/{}/{}/git/ref/heads/{}",
             self.cfg.owner, self.cfg.repo, self.cfg.branch
         );
-        let head = self.get_json(&ref_route).await?;
+        let head = self.get_json("GET ref", &ref_route).await?;
         let head_commit_sha = head
             .get("object")
             .and_then(|object| object.get("sha"))
@@ -324,7 +321,7 @@ impl GitHubTarget {
             "/repos/{}/{}/git/commits/{}",
             self.cfg.owner, self.cfg.repo, head_commit_sha
         );
-        let commit = self.get_json(&commit_route).await?;
+        let commit = self.get_json("GET commit", &commit_route).await?;
         let base_tree_sha = commit
             .get("tree")
             .and_then(|tree| tree.get("sha"))
@@ -345,7 +342,7 @@ impl GitHubTarget {
         let route = format!("/repos/{}/{}/git/trees", self.cfg.owner, self.cfg.repo);
         let mut body = json!({ "base_tree": base_tree_sha });
         body["tree"] = Value::Array(tree_entries);
-        let value = self.post_json(&route, &body).await?;
+        let value = self.post_json("POST tree", &route, &body).await?;
         value
             .get("sha")
             .and_then(|sha| sha.as_str())
@@ -368,7 +365,7 @@ impl GitHubTarget {
             "tree": tree_sha,
             "parents": [parent_commit_sha],
         });
-        let value = self.post_json(&route, &body).await?;
+        let value = self.post_json("POST commit", &route, &body).await?;
         value
             .get("sha")
             .and_then(|sha| sha.as_str())
@@ -388,39 +385,36 @@ impl GitHubTarget {
             "sha": commit_sha,
             "force": false,
         });
-        self.patch_json(&route, &body).await?;
+        self.patch_json("PATCH ref", &route, &body).await?;
         Ok(())
     }
 
+    /// `/repos/{owner}/{repo}/contents/{path}` with each path segment
+    /// percent-encoded once; `final_path` stays the logical repository path.
+    fn contents_route(&self, final_path: &str) -> String {
+        format!(
+            "/repos/{}/{}/contents/{}",
+            self.cfg.owner,
+            self.cfg.repo,
+            encode_repo_path(final_path)
+        )
+    }
+
     async fn existing_sha(&self, final_path: &str) -> Result<Option<String>, PublishError> {
+        const OPERATION: &str = "GET contents";
         let route = format!(
-            "/repos/{}/{}/contents/{}?ref={}",
-            self.cfg.owner, self.cfg.repo, final_path, self.cfg.branch
+            "{}?ref={}",
+            self.contents_route(final_path),
+            encode_component(&self.cfg.branch)
         );
-        let response = self
-            .client
-            ._get(route.as_str())
-            .await
-            .map_err(classify::classify_octocrab_error)?;
-        let status = response.status().as_u16();
-        let reset_epoch = response
-            .headers()
-            .get("X-RateLimit-Reset")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<i64>().ok());
-        if status == 404 {
+        let response = self.client._get(route.as_str()).await;
+        if matches!(&response, Ok(response) if response.status().as_u16() == 404) {
             return Ok(None);
         }
-        let body = read_response_body(response).await?;
-        if !(200..300).contains(&status) {
-            return Err(classify::classify_github_status(
-                status,
-                response_message(status, &body, self.cfg.token.expose_secret()),
-                reset_epoch,
-            ));
-        }
+        let (status, body, request_id) = self.finish(OPERATION, response).await?;
 
-        let value = parse_json_value(status, &body)?;
+        let value = parse_json_value(status, &body)
+            .map_err(|error| with_request_context(error, OPERATION, request_id.as_deref()))?;
         Ok(value
             .get("sha")
             .and_then(|sha| sha.as_str())
@@ -442,32 +436,13 @@ impl GitHubTarget {
             body["sha"] = Value::String(sha.to_owned());
         }
 
-        let route = format!(
-            "/repos/{}/{}/contents/{}",
-            self.cfg.owner, self.cfg.repo, final_path
-        );
-        let response = self
-            .client
-            ._put(route.as_str(), Some(&body))
-            .await
-            .map_err(classify::classify_octocrab_error)?;
-        let status = response.status().as_u16();
-        let reset_epoch = response
-            .headers()
-            .get("X-RateLimit-Reset")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<i64>().ok());
-        let body = read_response_body(response).await?;
+        const OPERATION: &str = "PUT contents";
+        let route = self.contents_route(final_path);
+        let response = self.client._put(route.as_str(), Some(&body)).await;
+        let (status, body, request_id) = self.finish(OPERATION, response).await?;
 
-        if !(200..300).contains(&status) {
-            return Err(classify::classify_github_status(
-                status,
-                response_message(status, &body, self.cfg.token.expose_secret()),
-                reset_epoch,
-            ));
-        }
-
-        let value = parse_json_value(status, &body)?;
+        let value = parse_json_value(status, &body)
+            .map_err(|error| with_request_context(error, OPERATION, request_id.as_deref()))?;
         value
             .get("commit")
             .and_then(|commit| commit.get("sha"))
@@ -480,29 +455,90 @@ impl GitHubTarget {
     }
 }
 
+type GitHubResponse = http::Response<BoxBody<Bytes, octocrab::Error>>;
+
+/// RFC 3986 `unreserved` bytes stay literal; every other byte of the UTF-8
+/// text (including `/`, space, `%`, `#`, `?`) becomes `%XX`. Applied exactly
+/// once, to a logical (never pre-encoded) value.
+fn encode_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// Encodes each `/`-separated segment of a repository path, keeping the
+/// separators. GitHub resolves the Contents API path segment by segment; a
+/// literal UTF-8 or reserved character in the request target was rejected
+/// with HTTP 400 in production (incident 2026-11-21).
+fn encode_repo_path(path: &str) -> String {
+    path.split('/')
+        .map(encode_component)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `x-github-request-id`, restricted to the characters GitHub uses so a
+/// hostile intermediary cannot inject text into persisted diagnostics.
+fn github_request_id(headers: &http::HeaderMap) -> Option<String> {
+    let value = headers.get("x-github-request-id")?.to_str().ok()?;
+    let id: String = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '.'))
+        .take(128)
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Prefixes the (already sanitized) diagnostic with the failed operation and
+/// appends GitHub's request id. Classification is unchanged: the variant and
+/// status are kept, and the signals the retry logic matches on (`fast forward`,
+/// `rate limit`) were evaluated before and survive the prefix.
+fn with_request_context(
+    error: PublishError,
+    operation: &str,
+    request_id: Option<&str>,
+) -> PublishError {
+    let annotate = |message: String| match request_id {
+        Some(id) => format!("{operation}: {message} (x-github-request-id: {id})"),
+        None => format!("{operation}: {message}"),
+    };
+    match error {
+        PublishError::GitHubApiError { status, message } => PublishError::GitHubApiError {
+            status,
+            message: annotate(message),
+        },
+        PublishError::GitHubAuthFailed(message) => {
+            PublishError::GitHubAuthFailed(annotate(message))
+        }
+        other => other,
+    }
+}
+
 /// Includes base64 content returned by GitHub's Contents API. The cap is on
 /// received body bytes and applies even without a Content-Length header.
 const MAX_RESPONSE_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-async fn read_response_body(
-    response: http::Response<BoxBody<Bytes, octocrab::Error>>,
-) -> Result<Bytes, PublishError> {
+async fn read_response_body(response: GitHubResponse) -> Result<Bytes, PublishError> {
     let status = response.status().as_u16();
-    let reset_epoch = response
-        .headers()
-        .get("X-RateLimit-Reset")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<i64>().ok());
+    let rate_limit = classify::RateLimitHints::from_headers(response.headers());
     let too_large = || {
         if (200..300).contains(&status) {
             PublishError::ResponseTooLarge {
                 limit: MAX_RESPONSE_BODY_BYTES,
             }
         } else {
-            classify::classify_github_status(
+            // The oversized body is never read, so a 403 rate limit can only
+            // be recognised from its headers here.
+            classify::classify_github_response(
                 status,
                 format!("response body exceeded {MAX_RESPONSE_BODY_BYTES} bytes"),
-                reset_epoch,
+                &rate_limit,
             )
         }
     };
@@ -617,20 +653,86 @@ pub mod classify {
         }
     }
 
+    /// Rate-limit headers of a GitHub REST response (GitHub docs, "Rate
+    /// limits for the REST API" → "Exceeding the rate limit"): a primary limit
+    /// answers 403/429 with `x-ratelimit-remaining: 0` and `x-ratelimit-reset`;
+    /// a secondary limit may send `retry-after` (seconds).
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct RateLimitHints {
+        pub reset_epoch_seconds: Option<i64>,
+        pub remaining: Option<i64>,
+        pub retry_after_seconds: Option<i64>,
+    }
+
+    impl RateLimitHints {
+        pub fn from_headers(headers: &http::HeaderMap) -> Self {
+            let number = |name: &str| {
+                headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.trim().parse::<i64>().ok())
+            };
+            Self {
+                reset_epoch_seconds: number("x-ratelimit-reset"),
+                remaining: number("x-ratelimit-remaining"),
+                retry_after_seconds: number("retry-after"),
+            }
+        }
+
+        fn reset_at(&self) -> OffsetDateTime {
+            let now = OffsetDateTime::now_utc();
+            self.retry_after_seconds
+                .filter(|seconds| *seconds >= 0)
+                .map(|seconds| now + Duration::seconds(seconds))
+                .or_else(|| {
+                    self.reset_epoch_seconds
+                        .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
+                })
+                .unwrap_or_else(|| now + Duration::seconds(60))
+        }
+    }
+
+    /// A 403 is a rate limit (retryable) rather than a permission failure when
+    /// the quota is exhausted, a `retry-after` is present, or GitHub's message
+    /// names a (secondary) rate limit.
+    fn is_rate_limited_403(message: &str, hints: &RateLimitHints) -> bool {
+        hints.remaining == Some(0)
+            || hints.retry_after_seconds.is_some()
+            || message.to_ascii_lowercase().contains("rate limit")
+    }
+
+    pub fn classify_github_response(
+        status: u16,
+        message: String,
+        hints: &RateLimitHints,
+    ) -> PublishError {
+        match status {
+            403 if is_rate_limited_403(&message, hints) => PublishError::GitHubRateLimit {
+                reset_at: hints.reset_at(),
+            },
+            401 | 403 => PublishError::GitHubAuthFailed(message),
+            429 => PublishError::GitHubRateLimit {
+                reset_at: hints.reset_at(),
+            },
+            _ => PublishError::GitHubApiError { status, message },
+        }
+    }
+
+    /// Status + message + `x-ratelimit-reset` only; see
+    /// [`classify_github_response`] for the header-aware variant.
     pub fn classify_github_status(
         status: u16,
         message: String,
         reset_epoch_seconds: Option<i64>,
     ) -> PublishError {
-        match status {
-            401 | 403 => PublishError::GitHubAuthFailed(message),
-            429 => PublishError::GitHubRateLimit {
-                reset_at: reset_epoch_seconds
-                    .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
-                    .unwrap_or_else(|| OffsetDateTime::now_utc() + Duration::seconds(60)),
+        classify_github_response(
+            status,
+            message,
+            &RateLimitHints {
+                reset_epoch_seconds,
+                ..RateLimitHints::default()
             },
-            _ => PublishError::GitHubApiError { status, message },
-        }
+        )
     }
 }
 
@@ -649,6 +751,21 @@ mod tests {
             let error = classify::classify_github_status(422, message, None);
             assert_eq!(is_branch_concurrently_updated(&error), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn target_identity_uses_the_publish_record_remote_target_format() {
+        let target = GitHubTarget::new(GitHubTargetConfig {
+            token: SecretString::from("token"),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            branch: "main".to_string(),
+            path_prefix: "archive".to_string(),
+            commit_message_prefix: "rss-ai-news".to_string(),
+        })
+        .expect("target");
+        // Must equal what `publish` init stores in `publish_records.remote_target`.
+        assert_eq!(target.target_identity().as_deref(), Some("owner/repo:main"));
     }
 
     #[test]

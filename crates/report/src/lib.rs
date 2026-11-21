@@ -12,6 +12,6 @@ pub use error::ReportError;
 pub use excerpt::generate_excerpt;
 pub use frontmatter::build_frontmatter;
 pub use rebuild::{load_frozen_items, rebuild_markdown};
-pub use render::{RenderConfig, RenderTemplates, render_markdown};
+pub use render::{RenderConfig, RenderTemplates, render_markdown, render_relative_path};
 pub use selection::{SelectionConfig, load_candidates};
 pub use snapshot::{SnapshotConfig, freeze, to_storage_items};

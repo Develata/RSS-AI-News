@@ -24,7 +24,7 @@ tokio = { workspace = true, features = ["fs", "io-util"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 wiremock = "0.6"
 
 [lints]

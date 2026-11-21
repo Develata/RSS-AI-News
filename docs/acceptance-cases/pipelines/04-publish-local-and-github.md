@@ -20,19 +20,31 @@
 - **store-local**：写本地文件 + 推进 article 到 `Published`（无远端目标时）/ 保持文章不动（有远端目标待 push）；
   - 分类 `path_template` override 生效
 - **publish-remote**：批量提交一个 commit 覆盖多 publish_records；422 lost-update 自动重试一次；429 保持状态可重试
+- **本地原子写**：临时文件 fsync 后 rename 覆盖；越出输出根的符号链接（父目录或目标）被拒绝
+- **跨分类路径碰撞（运行时）**：`publish-all` 在首次写入前按本次报告日期渲染全部分类真实路径并查重；碰撞 → 报错退出，不建 record、不登记规则版本、不落盘
+- **--force**：每次调用新建唯一的 `pending` render trace 行与新记录；force 行永不成为 active
 - **path 防穿越**：含 `..` / 反斜杠 / 无日期 token 的模板在 validate 阶段就报错（详见 [./06-config-loading.md](./06-config-loading.md)）
 - 远端 publish 成功后 article → `Published`；批次成功后 record → `PublishedRemote`
+- **lease 按时刻判定**：SQLite 上 publish_records 的 claim / reclaim / sweep 用 `julianday()` 比较（lease 写入向上、now 向下取整到毫秒），lease 绝不提前过期；PG 用 `timestamptz`
 - **record 隔离**：`publish` 与 `publish-all` 的每个阶段（freeze / render / store-local / publish-remote）都只 claim init 得到的 `publish_record_id`；
   单分类 `publish` 不得领取或推进其他分类残留的记录。例外：每阶段 claim 前的全局 maintenance
   （lease 过期 reclaim + 预算耗尽 sweep → `failed`）按设计作用于全表，不区分分类
 
 ### 失败条件（failure path）
 
+- 任一阶段读库（候选读取、快照读取、冻结写入）遇可重试存储错误（pool timeout、SQLite busy、PG 40001/40P01 等）
+  → 保持当前阶段态、释放 lease、计入重试预算（耗尽才转 `failed`），`last_error_kind` 为存储错误类别；
+  下一次运行可继续推进。不可重试的存储错误 → `failed`
 - store-local 目录不可写 → record → `Failed`，errors 表登记；命令 summary 该阶段 `verdict=failed`、`status=fail`、exit 1
-- 远端 401 → `GithubAuthFailed`（终态，不重试）
+- 远端 401，或无限流信号的 403 → `GithubAuthFailed`（终态，不重试）
+- 单报告 Contents API：路径按段百分号编码、`ref` 编码为查询参数（中文 / 空格 / 保留字符路径可发布）；任何 GitHub 失败的消息含操作、状态、脱敏 message 与 `x-github-request-id`
+- 远端 403 且 `x-ratelimit-remaining: 0` / 带 `retry-after` / message 提到 rate limit → `GithubRateLimit`（可重试）
 - 远端 429 → `GithubRateLimit`，state 保持、article 不晋升
 - 远端 422 重试达上限 → 仍报错，record 保持 `StoredLocal`
 - promote target article 已被其它流转推进 → `ArticleConflict`
+- 目标漂移：`stored_local` 记录的 `remote_target`（`owner/repo:branch`）与当前配置的远端目标不同 →
+  不发任何请求，`TargetMismatch { stored, current }`，record → `failed`（`last_error_kind=remote_target_mismatch`）；
+  批量发布中只跳过该记录，其余照常提交
 
 ## 测试覆盖
 
@@ -48,6 +60,8 @@
 | `freeze_after_empty_snapshot_publishes_articles_that_arrive_later` | 同上 | 空跑不耗预算、后到文章可发布 |
 | `freeze_returns_nothing_to_claim_when_no_pending_records` | 同上 | 空闲 |
 | `freeze_skips_articles_without_correct_category_key` | 同上 | category 隔离 |
+| `freeze_transient_candidate_load_error_keeps_record_pending_and_next_run_freezes` | 同上 | 瞬时存储错误保态、下轮继续 |
+| `freeze_permanent_candidate_load_error_fails_record` | 同上 | 不可重试存储错误 → failed |
 | `render_advances_snapshot_frozen_to_rendered_when_items_exist` | `crates/runtime/tests/publish_render_tests.rs` | render happy |
 | `render_returns_failed_when_publish_record_has_no_items` | 同上 | 空 items 失败 |
 | `store_local_with_no_remote_target_publishes_locally_and_promotes_articles` | `crates/runtime/tests/publish_store_local_tests.rs` | 本地 + promote |
@@ -61,14 +75,42 @@
 | `publish_remote_batch_succeeds_with_one_commit_for_multiple_records` | 同上 | 多 record 单 commit |
 | `publish_remote_rate_limit_keeps_state_and_articles` | 同上 | 429 |
 | `publish_remote_auth_failed_is_terminal_without_promoting_articles` | 同上 | 401 终态 |
+| `publish_remote_rejects_record_frozen_for_another_target_without_sending` | 同上 | 目标漂移拦截 |
+| `publish_remote_sends_record_whose_stored_target_matches` | 同上 | 目标一致照常发布 |
+| `publish_remote_batch_skips_only_the_mismatched_record` | 同上 | 批量中只跳过漂移记录 |
+| `target_identity_uses_the_publish_record_remote_target_format` | `crates/publish/src/github.rs` | 目标身份格式 |
 | `publish_many_creates_one_commit_for_multiple_reports` | `crates/publish/tests/github_target_tests.rs` | target 层 batch |
 | `publish_many_retries_once_after_non_fast_forward_then_succeeds` | 同上 | 422 重试 |
 | `publish_many_surfaces_422_after_max_retries` | 同上 | 422 超限 |
 | `auth_failure_maps_to_github_auth_failed` | 同上 | 401 映射 |
+| `chinese_path_leaves_the_client_percent_encoded_on_get_and_put` | `crates/publish/tests/github_contents_path_tests.rs` | 中文路径请求行按段编码（原始字节） |
+| `create_chinese_path_sends_encoded_get_then_put_without_sha` | 同上 | 新建：GET 404 → PUT 无 sha；ref 编码 |
+| `update_chinese_path_sends_encoded_get_then_put_with_existing_sha` | 同上 | 更新：GET 200 → PUT 带 sha |
+| `space_and_reserved_characters_are_encoded_exactly_once_per_segment` | 同上 | 空格 / `%#?` 只编码一次 |
+| `ascii_path_request_target_is_unchanged` | 同上 | ASCII 路径回归 |
+| `contents_get_failure_keeps_operation_status_message_and_request_id` | 同上 | 失败保留操作、状态、脱敏消息、request id |
+| `contents_put_failure_keeps_operation_and_request_id` | 同上 | PUT 失败上下文 |
+| `contents_rate_limited_403_is_still_retryable_with_request_context` | 同上 | 403 限流分类不变 |
 | `rate_limit_maps_to_github_rate_limit` | 同上 | 429 映射 |
+| `forbidden_with_exhausted_quota_maps_to_retryable_rate_limit` | 同上 | 403 + remaining=0 → 限流 |
+| `forbidden_with_retry_after_maps_to_retryable_rate_limit` | 同上 | 403 + retry-after → 限流 |
+| `forbidden_without_rate_limit_signals_maps_to_auth_failed` | 同上 | 普通 403 → 认证失败 |
+| `status_403_naming_a_rate_limit_maps_to_rate_limit` | `crates/publish/tests/github_classify_tests.rs` | message 含 (secondary) rate limit |
+| `status_403_without_rate_limit_signal_maps_to_auth_failed` | 同上 | 普通 403 |
 | `local_fs_target_rejects_path_with_parent_traversal` | `crates/publish/tests/local_target_tests.rs` | 路径穿越拒绝 |
 | `local_fs_target_creates_parent_directories` | 同上 | 父目录自建 |
+| `local_fs_target_replaces_existing_report_without_truncating_it_in_place` | 同上 | 临时文件 + rename，不原地截断 |
+| `local_fs_target_rejects_parent_symlink_escaping_the_root` | 同上 | 越界父目录链接拒绝 |
+| `local_fs_target_rejects_destination_symlink_escaping_the_root` | 同上 | 越界目标链接拒绝 |
+| `local_fs_target_follows_symlinks_that_stay_inside_the_root` | 同上 | 根内链接照常 |
+| `interrupted_write_before_commit_leaves_old_report_intact` | `crates/publish/src/local.rs` | 中断写保留旧报告 |
+| `publish_force_creates_unique_non_active_render_versions_on_a_fresh_db` | `crates/cli/tests/publish_cmd_tests.rs` | --force 每次唯一且非 active |
+| `publish_all_refuses_categories_whose_paths_collide_on_the_report_date` | `crates/cli/tests/publish_cmd_tests.rs` | 真实日期路径碰撞在写入前拦截 |
+| `month_day_and_day_month_templates_collide_on_eleven_eleven` | `crates/runtime/src/flows/publish/paths.rs` | 11-11 碰撞 / 其它日期不碰撞 |
 | `publish_category_never_claims_another_categorys_pending_record` | `crates/cli/tests/publish_cmd_tests.rs` | 命令层跨分类 record 隔离 |
+| `sqlite_lease_predicates_compare_instants_not_rfc3339_text` | `crates/storage/tests/publish_stage_recovery_tests.rs` | SQLite lease 谓词按时刻（.5Z vs 整秒 now） |
+| `sqlite_claim_lease_is_not_expired_before_its_instant` | 同上 | claim 写入的 lease 不提前过期 |
+| `pg_lease_predicates_treat_subsecond_lease_as_live` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 同语义 |
 | `pg_claim_by_ids_skips_row_locked_by_another_transaction` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 按 ID claim `SKIP LOCKED` 不阻塞 |
 | `publish_store_local_failure_is_reported_as_failure` | 同上 | 本地写失败 → exit 1 |
 

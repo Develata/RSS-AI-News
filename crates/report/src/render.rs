@@ -87,19 +87,7 @@ pub fn render_markdown(
             ("generated_at", generated_at),
         ],
     );
-    let category_dir = category_key.to_ascii_uppercase();
-    let relative_path = apply_template(
-        &config.templates.path_template,
-        &[
-            ("category_key", category_key.to_string()),
-            ("CATEGORY_KEY", category_dir),
-            ("date", report_date.to_string()),
-            ("YYYY", parts.year.to_string()),
-            ("MM", parts.month.to_string()),
-            ("DD", parts.day.to_string()),
-            ("YYYYMMDD", parts.compact),
-        ],
-    );
+    let relative_path = path_from_parts(&config.templates.path_template, category_key, &parts);
     Ok(RenderedReport {
         publish_record_id,
         category_key: category_key.to_string(),
@@ -107,6 +95,33 @@ pub fn render_markdown(
         markdown_content: out,
         relative_path,
     })
+}
+
+/// The relative report path `render_markdown` would produce for
+/// `(category_key, report_date)` under `path_template`. Shared with the
+/// pre-publish cross-category collision check so both use the same renderer.
+pub fn render_relative_path(
+    path_template: &str,
+    category_key: &str,
+    report_date: &str,
+) -> Result<String, ReportError> {
+    let parts = DateParts::parse(report_date)?;
+    Ok(path_from_parts(path_template, category_key, &parts))
+}
+
+fn path_from_parts(path_template: &str, category_key: &str, parts: &DateParts) -> String {
+    apply_template(
+        path_template,
+        &[
+            ("category_key", category_key.to_string()),
+            ("CATEGORY_KEY", category_key.to_ascii_uppercase()),
+            ("date", parts.date()),
+            ("YYYY", parts.year.clone()),
+            ("MM", parts.month.clone()),
+            ("DD", parts.day.clone()),
+            ("YYYYMMDD", parts.compact.clone()),
+        ],
+    )
 }
 
 fn render_frontmatter(
@@ -266,6 +281,11 @@ struct DateParts {
 }
 
 impl DateParts {
+    /// `YYYY-MM-DD`; equals the parsed `report_date`, whose shape `parse` validates.
+    fn date(&self) -> String {
+        format!("{}-{}-{}", self.year, self.month, self.day)
+    }
+
     fn parse(report_date: &str) -> Result<Self, ReportError> {
         let mut parts = report_date.split('-');
         let (Some(year), Some(month), Some(day), None) =

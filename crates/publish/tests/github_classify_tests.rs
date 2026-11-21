@@ -59,3 +59,48 @@ fn status_422_maps_to_permanent_api_error() {
     ));
     assert!(!error.is_retryable());
 }
+
+#[test]
+fn status_403_naming_a_rate_limit_maps_to_rate_limit() {
+    for message in [
+        "API rate limit exceeded for user ID 1.",
+        "You have exceeded a secondary rate limit. Please wait a few minutes.",
+    ] {
+        let error = classify_github_status(403, message.to_string(), Some(1_800));
+
+        assert!(
+            matches!(
+                error,
+                PublishError::GitHubRateLimit { reset_at }
+                    if reset_at == OffsetDateTime::from_unix_timestamp(1_800).unwrap()
+            ),
+            "{message}: {error:?}"
+        );
+        assert!(error.is_retryable());
+    }
+}
+
+#[test]
+fn status_403_without_rate_limit_signal_maps_to_auth_failed() {
+    let error = classify_github_status(403, "Must have admin rights".to_string(), None);
+
+    assert!(matches!(
+        &error,
+        PublishError::GitHubAuthFailed(reason) if reason == "Must have admin rights"
+    ));
+    assert!(!error.is_retryable());
+}
+
+#[test]
+fn status_401_stays_auth_failed_even_when_quota_is_exhausted() {
+    let error = rss_ai_news_publish::github::classify::classify_github_response(
+        401,
+        "Bad credentials".to_string(),
+        &rss_ai_news_publish::github::classify::RateLimitHints {
+            remaining: Some(0),
+            ..Default::default()
+        },
+    );
+
+    assert!(matches!(error, PublishError::GitHubAuthFailed(_)));
+}

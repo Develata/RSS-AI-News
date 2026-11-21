@@ -20,6 +20,15 @@ pub struct PublishedBatchArtifact {
 pub trait PublishTarget: Send + Sync {
     async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError>;
 
+    /// Stable identity of the destination this target writes to, in the form
+    /// stored in `publish_records.remote_target` at init (`owner/repo:branch`
+    /// for GitHub). The remote stage refuses to send a record whose stored
+    /// identity differs. `None` = the target declares no identity (local
+    /// targets, test doubles); no comparison is made.
+    fn target_identity(&self) -> Option<String> {
+        None
+    }
+
     async fn publish_many(
         &self,
         reports: &[RenderedReport],

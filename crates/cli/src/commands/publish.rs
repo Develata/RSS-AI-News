@@ -1,4 +1,3 @@
-use rss_ai_news_storage::RuleVersionRepository;
 use std::io::{self, Write};
 
 use rss_ai_news_config::{self as config, CategoryConfig};
@@ -6,6 +5,7 @@ use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishFreezeStatus, PublishInitOptions, PublishInitOutcome,
     PublishRemoteOptions, PublishRemoteStatus, PublishRenderOptions, PublishRenderStatus,
     PublishStoreLocalOptions, PublishStoreLocalStatus, RuntimeError,
+    flows::publish::{ForceRenderTrace, PublishRuleVersions, bootstrap_publish_rule_versions},
 };
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -96,6 +96,7 @@ impl StageVerdict {
             PublishRemoteStatus::NothingToClaim | PublishRemoteStatus::Conflicted => Self::Skipped,
             PublishRemoteStatus::ArticleConflict { .. }
             | PublishRemoteStatus::MissingTarget
+            | PublishRemoteStatus::TargetMismatch { .. }
             | PublishRemoteStatus::Failed { .. } => Self::Failed,
         }
     }
@@ -192,33 +193,20 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
     } else {
         "remote"
     };
-    // F15-3: --force 显式制造一条新的 render rule_version 行用于 audit
-    // trace；非 force 分支走 active_rule_or_register 读路径。force 行落
-    // 在 partial unique 之外（status='pending'，由 get_or_create CASE
-    // 自动选择，因为同 kind 已有 active 行）。
-    let render_version = if args.force {
-        let force_tag = format!(
-            "force-{}-{}-{}",
-            category.category.key,
-            date,
-            OffsetDateTime::now_utc().unix_timestamp()
-        );
-        rule_version_repo
-            .get_or_create("render", &force_tag, "force render trace", "v1")
-            .await?
-    } else {
-        rule_version_repo
-            .active_rule_or_register("render", "default", "default render", "v1")
-            .await?
-    };
-    let selection_policy_version = rule_version_repo
-        .active_rule_or_register(
-            "selection_policy",
-            "default",
-            "default selection policy",
-            "v1",
-        )
-        .await?;
+    // F15-3: --force records a fresh pending render trace; otherwise the
+    // active rules are resolved (seeded on first use) in the runtime.
+    let PublishRuleVersions {
+        render_version,
+        selection_policy_version,
+    } = bootstrap_publish_rule_versions(
+        &rule_version_repo,
+        args.force.then_some(ForceRenderTrace {
+            scope: &category.category.key,
+            report_date: &date,
+            run_id: &ctx.run.run_id,
+        }),
+    )
+    .await?;
     let init = flow
         .init(PublishInitOptions {
             category_key: category.category.key.clone(),
@@ -226,14 +214,13 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
             target_timezone: loaded.app.publish.target_timezone.clone(),
             render_version,
             selection_policy_version,
-            remote_target: (mode == "remote").then(|| {
-                format!(
-                    "{}/{}:{}",
-                    loaded.app.publish.github_owner,
-                    loaded.app.publish.github_repo,
-                    loaded.app.publish.github_branch
-                )
-            }),
+            // The target's own identity (`owner/repo:branch`) is what the
+            // remote stage compares against before sending (target drift guard).
+            remote_target: ctx
+                .publish_target_remote
+                .as_ref()
+                .filter(|_| mode == "remote")
+                .and_then(|target| target.target_identity()),
         })
         .await?;
 

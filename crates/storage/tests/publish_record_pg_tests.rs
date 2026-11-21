@@ -499,3 +499,119 @@ async fn pg_select_ai_off_passthrough_handles_null_columns() {
     assert_eq!(rows[0].importance_score, None);
     assert_eq!(rows[0].category_key, "ai");
 }
+
+/// B8: the render timestamp is fixed at microsecond precision so it survives
+/// the PostgreSQL `timestamptz` round trip unchanged; later stages read it
+/// back from the claim to re-render byte-identical reports.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_claim_returns_rendered_at_unchanged_at_microsecond_precision() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "rendered-at").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .create_if_new(&new_record("idem-rendered-at", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE publish_records SET state = 'snapshot_frozen' WHERE id = $1")
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    let request = |owner: &str| ClaimRequest {
+        owner: owner.to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+    let claimed = repo
+        .claim_publish_by_ids(&request("render"), PublishState::SnapshotFrozen, &[id])
+        .await
+        .unwrap();
+    assert_eq!(claimed[0].rendered_at, None);
+    let rendered_at = OffsetDateTime::from_unix_timestamp_nanos(1_763_700_000_123_456_000).unwrap();
+    assert!(
+        repo.release_advance(
+            id,
+            "render",
+            PublishState::SnapshotFrozen,
+            PublishState::Rendered,
+            PublishTimestampField::RenderedAt,
+            rendered_at,
+            PublishAdvanceExtras::default(),
+        )
+        .await
+        .unwrap()
+    );
+
+    let claimed = repo
+        .claim_rendered_for_local_store(&request("store"))
+        .await
+        .unwrap();
+
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].rendered_at, Some(rendered_at));
+}
+
+/// B13 parity: PostgreSQL compares `timestamptz` by instant, so a lease ending
+/// 0.5 s after a whole-second `now` is live for every lease predicate (the
+/// SQLite twin is `sqlite_lease_predicates_compare_instants_not_rfc3339_text`).
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_lease_predicates_treat_subsecond_lease_as_live() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "subsec").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let live = repo
+        .create_if_new(&new_record("idem-subsec-live", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let exhausted = repo
+        .create_if_new(&new_record("idem-subsec-exhausted", "ml", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+    let lease_until = now + time::Duration::milliseconds(500);
+    sqlx::query(
+        "UPDATE publish_records SET state = 'stored_local', lease_owner = 'holder', \
+         lease_expires_at = $1, attempt_count = CASE WHEN id = $2 THEN 5 ELSE 1 END \
+         WHERE id IN ($2, $3)",
+    )
+    .bind(lease_until)
+    .bind(exhausted)
+    .bind(live)
+    .execute(ctx.pg_pool())
+    .await
+    .unwrap();
+    let request = ClaimRequest {
+        owner: "thief".to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 4,
+        max_attempts: 5,
+    };
+
+    assert_eq!(repo.reclaim_expired_leases(now).await.unwrap(), 0);
+    assert!(
+        repo.claim_local_for_remote_publish(&request)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.claim_publish_by_ids(&request, PublishState::StoredLocal, &[live])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(repo.terminalize_exhausted(5, now).await.unwrap(), 0);
+
+    let later = now + time::Duration::seconds(1);
+    assert_eq!(repo.terminalize_exhausted(5, later).await.unwrap(), 1);
+    assert_eq!(repo.reclaim_expired_leases(later).await.unwrap(), 1);
+}

@@ -8,7 +8,7 @@ use std::time::Duration as StdDuration;
 
 use rss_ai_news_domain::dto::publish::RenderedReport;
 use rss_ai_news_domain::error::ClassifiedError;
-use rss_ai_news_publish::PublishError;
+use rss_ai_news_publish::{PublishError, PublishTarget};
 use rss_ai_news_report::{RenderConfig, ReportError, load_frozen_items, render_markdown};
 use rss_ai_news_storage::{
     ClaimRequest, ClaimedPublishRecord, PublishAdvanceExtras, PublishItemRepository, PublishState,
@@ -24,7 +24,7 @@ use super::dto::{
     PublishRemoteBatchOptions, PublishRemoteBatchOutcome, PublishRemoteOptions,
     PublishRemoteOutcome, PublishRemoteStatus,
 };
-use super::render_templates_from_ctx;
+use super::{render_templates_from_ctx, rendered_timestamp};
 use crate::events::RunEventEmitter;
 
 struct PreparedRemote {
@@ -98,6 +98,40 @@ async fn prepare_remote_report(
         return Err(RemotePreparationError::Timeout);
     }
     Ok(prepared)
+}
+
+/// Target drift guard: a `stored_local` record carries the destination it was
+/// initialised for (`owner/repo:branch`). If the configured target now
+/// declares a different identity, sending would publish the frozen snapshot to
+/// a repository/branch nobody chose for it, so the stage refuses before any
+/// request. Targets without an identity are not compared.
+fn target_drift(
+    claimed: &ClaimedPublishRecord,
+    target: &dyn PublishTarget,
+) -> Option<PublishError> {
+    let current = target.target_identity()?;
+    if claimed.remote_target.as_deref() == Some(current.as_str()) {
+        None
+    } else {
+        Some(PublishError::RemoteTargetMismatch {
+            stored: claimed.remote_target.clone(),
+            current,
+        })
+    }
+}
+
+fn mismatch_status(error: &PublishError) -> PublishRemoteStatus {
+    match error {
+        PublishError::RemoteTargetMismatch { stored, current } => {
+            PublishRemoteStatus::TargetMismatch {
+                stored: stored.clone(),
+                current: current.clone(),
+            }
+        }
+        other => PublishRemoteStatus::Failed {
+            error_kind: other.error_kind().to_string(),
+        },
+    }
 }
 
 impl PublishFlow {
@@ -197,10 +231,28 @@ impl PublishFlow {
             }
         };
 
+        if let Some(error) = target_drift(&claimed, target.as_ref()) {
+            self.release_publish_error_for_record(
+                claimed.id,
+                &owner,
+                &error,
+                "publish_remote",
+                &emitter,
+            )
+            .await;
+            return PublishRemoteOutcome {
+                publish_record_id: claimed.id,
+                status: mismatch_status(&error),
+                commit_sha: None,
+                remote_target: None,
+                item_count: 0,
+            };
+        }
+
         let render_config = RenderConfig {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
-            generated_at: opts.generated_at,
+            generated_at: rendered_timestamp(claimed.rendered_at, opts.generated_at),
             templates: render_templates_from_ctx(&self.ctx, opts.path_template.as_deref()),
         };
         let (report, promote_article_ids) = match prepare_remote_report(
@@ -448,10 +500,29 @@ impl PublishFlow {
                 }
             };
 
+            if let Some(error) = target_drift(claimed, target.as_ref()) {
+                self.release_publish_error_for_record(
+                    claimed.id,
+                    &owner,
+                    &error,
+                    "publish_remote_batch",
+                    &emitter,
+                )
+                .await;
+                outcomes.push(PublishRemoteOutcome {
+                    publish_record_id: claimed.id,
+                    status: mismatch_status(&error),
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count: 0,
+                });
+                continue;
+            }
+
             let render_config = RenderConfig {
                 category_display_name: item.category_display_name,
                 report_title: item.report_title,
-                generated_at: item.generated_at,
+                generated_at: rendered_timestamp(claimed.rendered_at, item.generated_at),
                 templates: render_templates_from_ctx(&self.ctx, item.path_template.as_deref()),
             };
             let (report, promote_article_ids) = match prepare_remote_report(
@@ -736,38 +807,16 @@ impl PublishFlow {
         error: &ReportError,
         emitter: &RunEventEmitter<'_>,
     ) {
-        if let Err(persist_err) = self
-            .ctx
-            .publish_record_repo
-            .release_permanent_failure(
-                publish_record_id,
-                owner,
-                &error.display_user(),
-                error.error_kind(),
-                OffsetDateTime::now_utc(),
-            )
-            .await
-        {
-            tracing::warn!(
-                publish_record_id,
-                phase = "publish_remote.report_error",
-                ?persist_err,
-                "release_permanent_failure 持久化失败；保留上游 ReportError 向上抛（F15-fix4）"
-            );
-        }
-        emitter
-            .emit(
-                "publish_failed",
-                "error",
-                Some("publish_record"),
-                Some(publish_record_id),
-                &error.display_user(),
-                Some(json!({
-                    "phase": "publish_remote",
-                    "error_kind": error.error_kind()
-                })),
-            )
-            .await;
+        // A snapshot read that failed transiently stays `stored_local`.
+        self.release_classified_failure(
+            publish_record_id,
+            owner,
+            error,
+            "publish_remote",
+            OffsetDateTime::now_utc(),
+            emitter,
+        )
+        .await;
     }
 }
 
@@ -856,6 +905,7 @@ mod deadline_tests {
             state: "stored_local".into(),
             remote_target: None,
             attempt_count: 1,
+            rendered_at: None,
         };
         let config = RenderConfig {
             category_display_name: "AI".into(),

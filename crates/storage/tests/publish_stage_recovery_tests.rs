@@ -172,3 +172,112 @@ async fn exhausted_stage_states_with_expired_lease_terminalize_after_reclaim() {
         assert_eq!(record_state(&pool, id).await, "failed");
     }
 }
+
+/// B13: SQLite stores leases as RFC3339 TEXT with a variable-length fraction,
+/// so `'…20.5Z' < '…20Z'` holds lexicographically although 20.5 s is later.
+/// Every lease predicate (claim, claim-by-ids, reclaim, terminalize sweep)
+/// must compare instants: a lease ending half a second after `now` is live.
+#[tokio::test]
+async fn sqlite_lease_predicates_compare_instants_not_rfc3339_text() {
+    let (_dir, pool) = make_test_pool().await;
+    let live = seed_record(&pool, "subsec-live", "stored_local", 1, Some(now())).await;
+    let exhausted = seed_record(
+        &pool,
+        "subsec-exhausted",
+        "stored_local",
+        i64::from(MAX_ATTEMPTS),
+        Some(now()),
+    )
+    .await;
+    // `now()` is a whole second; the leases end 0.5 s later, written as text
+    // the way a fractional instant is stored.
+    let half_second_later = "2023-11-14T22:13:20.5Z";
+    assert_eq!(
+        now() + Duration::milliseconds(500),
+        OffsetDateTime::parse(
+            half_second_later,
+            &time::format_description::well_known::Rfc3339
+        )
+        .unwrap()
+    );
+    sqlx::query("UPDATE publish_records SET lease_expires_at = ? WHERE id IN (?, ?)")
+        .bind(half_second_later)
+        .bind(live)
+        .bind(exhausted)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo = PublishRecordRepo::new(pool.clone());
+
+    assert_eq!(repo.reclaim_expired_leases(now()).await.unwrap(), 0);
+    assert!(
+        repo.claim_local_for_remote_publish(&claim_req("thief"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.claim_publish_by_ids(
+            &claim_req("thief"),
+            rss_ai_news_storage::PublishState::StoredLocal,
+            &[live],
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(
+        repo.terminalize_exhausted(MAX_ATTEMPTS, now())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(record_state(&pool, exhausted).await, "stored_local");
+    assert_eq!(attempt_count(&pool, live).await, 1);
+
+    // Once the instant has passed, the same rows are expired.
+    let later = now() + Duration::seconds(1);
+    assert_eq!(
+        repo.terminalize_exhausted(MAX_ATTEMPTS, later)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(record_state(&pool, exhausted).await, "failed");
+    assert_eq!(repo.reclaim_expired_leases(later).await.unwrap(), 1);
+}
+
+/// A claim stores its lease deadline rounded up to a whole millisecond (UTC),
+/// so `julianday()` (millisecond resolution) never treats it as expired
+/// before its instant.
+#[tokio::test]
+async fn sqlite_claim_lease_is_not_expired_before_its_instant() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_record(&pool, "subms", "stored_local", 0, None).await;
+    let repo = PublishRecordRepo::new(pool.clone());
+    let claim_at = now() + Duration::nanoseconds(123_456_789);
+    let lease_until = claim_at + Duration::seconds(30);
+    let claimed = repo
+        .claim_publish_by_ids(
+            &ClaimRequest {
+                owner: "holder".to_string(),
+                now: claim_at,
+                lease_expires_at: lease_until,
+                batch_size: 1,
+                max_attempts: MAX_ATTEMPTS,
+            },
+            rss_ai_news_storage::PublishState::StoredLocal,
+            &[id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    assert_eq!(repo.reclaim_expired_leases(lease_until).await.unwrap(), 0);
+    assert_eq!(
+        repo.reclaim_expired_leases(lease_until + Duration::milliseconds(2))
+            .await
+            .unwrap(),
+        1
+    );
+}

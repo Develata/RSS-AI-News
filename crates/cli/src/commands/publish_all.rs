@@ -1,4 +1,3 @@
-use rss_ai_news_storage::RuleVersionRepository;
 use std::io::{self, Write};
 
 use rss_ai_news_config::{self as config, CategoryConfig, LoadedConfig};
@@ -6,6 +5,10 @@ use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishInitOptions, PublishInitOutcome,
     PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRenderOptions, RuntimeError,
+    flows::publish::{
+        ForceRenderTrace, PublishRuleVersions, ReportPathSpec, bootstrap_publish_rule_versions,
+        check_report_path_collisions,
+    },
 };
 use rss_ai_news_storage::StoragePool;
 use serde::Serialize;
@@ -133,6 +136,35 @@ pub(crate) async fn run_loaded(
         .cloned()
         .collect::<Vec<CategoryConfig>>();
     let date = args.date.clone().unwrap_or_else(today_utc);
+    // validate-config checks path collisions on one sample date only; render
+    // the real paths for this run's date before any DB or file write.
+    let path_templates = categories
+        .iter()
+        .map(|category| {
+            loaded
+                .effective_for_category(&category.category.key)
+                .map(|effective| {
+                    (
+                        category.category.key.as_str(),
+                        effective.path_template.clone(),
+                    )
+                })
+                .ok_or_else(|| {
+                    CliError::Runtime(RuntimeError::Config(format!(
+                        "category {} not found in loaded config",
+                        category.category.key
+                    )))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let path_specs = path_templates
+        .iter()
+        .map(|(category_key, path_template)| ReportPathSpec {
+            category_key,
+            path_template,
+        })
+        .collect::<Vec<_>>();
+    check_report_path_collisions(&path_specs, &date)?;
     let ctx = build_publish_deps(loaded, pool, args.local_only)?;
     let rule_version_repo = rss_ai_news_storage::RuleVersionRepo::new_with_storage(pool.clone());
     let flow = PublishFlow::new(ctx.clone());
@@ -141,28 +173,18 @@ pub(crate) async fn run_loaded(
     } else {
         "remote"
     };
-    let render_version = if args.force {
-        let force_tag = format!(
-            "force-all-{}-{}",
-            date,
-            OffsetDateTime::now_utc().unix_timestamp()
-        );
-        rule_version_repo
-            .get_or_create("render", &force_tag, "force render trace", "v1")
-            .await?
-    } else {
-        rule_version_repo
-            .active_rule_or_register("render", "default", "default render", "v1")
-            .await?
-    };
-    let selection_policy_version = rule_version_repo
-        .active_rule_or_register(
-            "selection_policy",
-            "default",
-            "default selection policy",
-            "v1",
-        )
-        .await?;
+    let PublishRuleVersions {
+        render_version,
+        selection_policy_version,
+    } = bootstrap_publish_rule_versions(
+        &rule_version_repo,
+        args.force.then_some(ForceRenderTrace {
+            scope: "all",
+            report_date: &date,
+            run_id: &ctx.run.run_id,
+        }),
+    )
+    .await?;
 
     let mut summaries = Vec::with_capacity(categories.len());
     let mut remote_items = Vec::new();
@@ -181,14 +203,13 @@ pub(crate) async fn run_loaded(
                 target_timezone: loaded.app.publish.target_timezone.clone(),
                 render_version,
                 selection_policy_version,
-                remote_target: (mode == "remote").then(|| {
-                    format!(
-                        "{}/{}:{}",
-                        loaded.app.publish.github_owner,
-                        loaded.app.publish.github_repo,
-                        loaded.app.publish.github_branch
-                    )
-                }),
+                // The target's own identity (`owner/repo:branch`) is what the
+                // remote stage compares against before sending (target drift guard).
+                remote_target: ctx
+                    .publish_target_remote
+                    .as_ref()
+                    .filter(|_| mode == "remote")
+                    .and_then(|target| target.target_identity()),
             })
             .await
         {

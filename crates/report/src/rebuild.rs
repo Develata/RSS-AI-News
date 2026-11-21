@@ -14,7 +14,7 @@ pub async fn rebuild_markdown(
     let record = record_repo
         .find_by_id(publish_record_id)
         .await
-        .map_err(|error| ReportError::RenderFailed(error.to_string()))?
+        .map_err(ReportError::from)?
         .ok_or_else(|| {
             ReportError::RenderFailed(format!("publish_record {publish_record_id} not found"))
         })?;
@@ -39,7 +39,7 @@ pub async fn load_frozen_items(
     let items = item_repo
         .list_by_publish_record(publish_record_id)
         .await
-        .map_err(|error| ReportError::RenderFailed(error.to_string()))?;
+        .map_err(ReportError::from)?;
     items
         .into_iter()
         .map(item_to_frozen)
