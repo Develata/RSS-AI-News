@@ -226,8 +226,11 @@ validate 只用一个样例日期（`2026-01-03`，ADR 0008）渲染，无法发
 实现：[`crates/runtime/src/flows/publish/paths.rs`](../../crates/runtime/src/flows/publish/paths.rs)。
 
 碰撞规则（2026-11-22，R1-P-B5；validate 与 publish-all 共用 `config::validate::report_path_collisions`）：
-按段比较，且**忽略大小写**（Unicode 小写折叠）——`News/{date}.md` 与 `news/{date}.md` 在 macOS / Windows 默认的
-大小写不敏感卷上是同一文件；一个路径是另一个路径的**整段前缀**（`news/2026-01-03` 与 `news/2026-01-03/ml.md`）也算碰撞，
+按段比较，且**忽略大小写与 Unicode 规范化差异**——`News/{date}.md` 与 `news/{date}.md` 在 macOS / Windows 默认的
+大小写不敏感卷上是同一文件；比较键（2026-11-22，R3F-B3，`path_segment_key`）为 NFD → `to_uppercase().to_lowercase()`
+（近似 Unicode 完整大小写折叠：`ſ` → `s`、`ß` → `ss`，单纯小写会漏掉）→ 再 NFD，即近似 Unicode §3.13 的 canonical caseless
+match，因此 `ſ` 与 `s`、组合与分解的 `é` 也算同名（APFS 实测 `04-publiſh.md` 与 `04-publish.md` 指向同一文件）。这是近似，
+不是某一文件系统（APFS / HFS+ / NTFS 各有自己的折叠表）的精确规则，偏向多报碰撞；一个路径是另一个路径的**整段前缀**（`news/2026-01-03` 与 `news/2026-01-03/ml.md`）也算碰撞，
 一个分类要写文件的位置另一个分类需要目录。Git tree 路径本身区分大小写，但每份报告都先落本地，因此统一用更严格的规则。
 根内目录符号链接造成的别名不在此检查之列。
 

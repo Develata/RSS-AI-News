@@ -23,7 +23,7 @@
 - **publish-remote**：批量提交一个 commit 覆盖多 publish_records；422 lost-update 自动重试一次；429 保持状态可重试
 - **本地原子写**：临时文件 fsync 后 rename 覆盖；越出输出根的符号链接（父目录或目标）被拒绝
 - **跨分类路径碰撞（运行时）**：`publish-all` 在首次写入前按本次报告日期渲染全部分类真实路径并查重；碰撞 → 报错退出，不打开存储（不建库、不迁移、不轮换 config）、不建 record、不登记规则版本、不落盘。
-  比较忽略大小写，且一个路径是另一路径的整段父目录也算碰撞（validate 同规则）
+  比较忽略大小写与 Unicode 规范化差异（`ſ`/`s`、组合/分解 `é`，R3F-B3），且一个路径是另一路径的整段父目录也算碰撞（validate 同规则）
 - **--force**：每次调用新建唯一的 `pending` render trace 行与新记录；force 行永不成为 active
 - **path 防穿越**：含 `..` / 反斜杠 / 无日期 token 的模板在 validate 阶段就报错（详见 [./06-config-loading.md](./06-config-loading.md)）
 - 远端 publish 成功后 article → `Published`；批次成功后 record → `PublishedRemote`
@@ -199,6 +199,9 @@
 | `paths_differing_only_in_case_collide` | 同上 | 仅大小写不同的路径碰撞 |
 | `a_report_path_that_is_another_reports_directory_collides` | 同上 | 文件路径是另一路径的父目录 → 碰撞 |
 | `paths_differing_only_in_letter_case_collide` | `crates/config/src/validate/checks.rs` | 共享碰撞规则：大小写折叠（含非 ASCII）、整段父子、整段前缀才算 |
+| `long_s_and_s_collide` | 同上 | `ſ`（U+017F）与 `s` 同名（R3F-B3） |
+| `composed_and_decomposed_letters_collide` | 同上 | 组合 `é` 与分解 `e`+U+0301（含大写）同名 |
+| `caseless_normalization_also_applies_to_parent_directories` | 同上 | 整段父子判定同样用该比较键 |
 | `publish_default_date_uses_the_effective_timezone_and_rejects_unknown_zones` | `crates/cli/tests/publish_cmd_tests.rs` | 默认日期按目标时区；未知时区写库前报错 |
 | `shanghai_after_midnight_is_the_local_date_not_the_utc_date` | `crates/runtime/src/flows/publish/report_date.rs` | 2026-11-21T00:30+08:00 → 2026-11-21（另含负偏移、夏令时、未知时区用例） |
 | `real_iana_zones_are_accepted_and_made_up_ones_rejected` | `crates/config/src/validate/checks.rs` | validate 按 IANA 库校验 |

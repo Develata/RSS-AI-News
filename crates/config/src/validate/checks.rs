@@ -577,11 +577,27 @@ fn path_segments(path: &str) -> Vec<String> {
         .collect()
 }
 
+/// Comparison key of one path segment (R3F-B3): caseless and
+/// normalization-insensitive, so names one local volume may treat as the
+/// same file compare equal. NFD, then full case folding approximated by
+/// `to_uppercase().to_lowercase()` (maps `ſ` → `S` → `s`, `ß` → `SS` → `ss`,
+/// which a plain `to_lowercase()` misses), then NFD again because case
+/// mapping can yield unnormalized sequences. This approximates Unicode
+/// `toNFD(toCasefold(toNFD(x)))` (the canonical caseless match of Unicode
+/// §3.13), not the exact folding table of any one file system (APFS, HFS+,
+/// NTFS each use their own); it errs toward reporting more collisions.
+fn path_segment_key(segment: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let decomposed = segment.nfd().collect::<String>();
+    decomposed.to_uppercase().to_lowercase().nfd().collect()
+}
+
 /// Cross-category collisions among `(category_key, rendered relative path)`
 /// pairs, shared by validate-config (sample date) and publish-all (real report
-/// date). Paths are compared by segment after normalization and Unicode case
-/// folding, so `News/x.md` and `news/x.md` collide (one file on a
-/// case-insensitive volume), and a path that is a whole-segment prefix of
+/// date). Paths are compared by segment after normalization and a caseless,
+/// normalization-insensitive key ([`path_segment_key`]), so `News/x.md` and
+/// `news/x.md`, `ſ` and `s`, or composed and decomposed `é` collide (one file
+/// on a case-insensitive volume), and a path that is a whole-segment prefix of
 /// another (`a/x` vs `a/x/y.md`) collides because one category needs a
 /// directory where the other writes a file. Git tree paths are case-sensitive,
 /// but every report is also written locally, so the stricter rule applies.
@@ -593,7 +609,7 @@ pub fn report_path_collisions(rendered: &[(String, String)]) -> Vec<PathCollisio
         let segments = path_segments(path);
         let folded = segments
             .iter()
-            .map(|segment| segment.to_lowercase())
+            .map(|segment| path_segment_key(segment))
             .collect::<Vec<_>>();
         let entry = by_folded
             .entry(folded)
@@ -1042,6 +1058,44 @@ mod path_collision_tests {
         let collisions =
             report_path_collisions(&paths(&[("ai", "Ärzte/2026.md"), ("ml", "ärzte/2026.md")]));
         assert_eq!(collisions.len(), 1, "{collisions:?}");
+    }
+
+    /// R3F-B3: APFS / HFS+ treat `ſ` (U+017F) as `s` and composed `é`
+    /// (U+00E9) as decomposed `e` + U+0301, so such pairs are one file there.
+    #[test]
+    fn long_s_and_s_collide() {
+        let collisions = report_path_collisions(&paths(&[
+            ("ai", "docs/04-publish.md"),
+            ("ml", "docs/04-publi\u{017F}h.md"),
+        ]));
+        assert_eq!(collisions.len(), 1, "{collisions:?}");
+    }
+
+    #[test]
+    fn composed_and_decomposed_letters_collide() {
+        let collisions = report_path_collisions(&paths(&[
+            ("ai", "caf\u{e9}/2026.md"),
+            ("ml", "cafe\u{301}/2026.md"),
+            ("tech", "CAFE\u{301}/2026.md"),
+        ]));
+        assert_eq!(collisions.len(), 1, "{collisions:?}");
+        assert!(
+            matches!(&collisions[0], PathCollision::Same { keys, .. } if keys == &["ai", "ml", "tech"]),
+            "{collisions:?}"
+        );
+    }
+
+    #[test]
+    fn caseless_normalization_also_applies_to_parent_directories() {
+        let collisions = report_path_collisions(&paths(&[
+            ("ai", "caf\u{e9}/new\u{017F}"),
+            ("ml", "CAFE\u{301}/NEWS/ml.md"),
+        ]));
+        assert!(
+            matches!(collisions.as_slice(), [PathCollision::Nested { parent_key, child_key, .. }]
+                if parent_key == "ai" && child_key == "ml"),
+            "{collisions:?}"
+        );
     }
 
     #[test]
