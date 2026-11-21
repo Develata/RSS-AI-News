@@ -122,8 +122,8 @@ CMD ["--help"]
 # 在外层套一个 supercronic（github.com/aptible/supercronic）按 crontab
 # 表达式周期触发 `rss-ai-news <subcommand>`。supercronic 相比 cron 的优势：
 #   - 非 root 友好（继承 appuser），不需要 setuid
-#   - cron job 的 stdout/stderr 直接透传到 supercronic 自身的 stdout，
-#     `docker logs` 可见，无需 syslog
+#   - cron job 的 stdout/stderr 被包装成 supercronic 自身的日志行
+#     （0.2.49 默认不 passthrough），`docker logs` 可见，无需 syslog
 #   - 单 binary 部署，零运行时依赖
 FROM runtime AS scheduler
 

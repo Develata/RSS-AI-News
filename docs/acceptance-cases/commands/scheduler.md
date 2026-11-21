@@ -22,7 +22,8 @@
 - env 模式：拼一行 `<RSS_CRON_SCHEDULE> /usr/local/bin/rss-ai-news --config-dir /app/configs <RSS_CRON_COMMAND>`
   给 supercronic；supercronic 以 `/bin/sh -c` 执行命令部分，`RSS_CRON_COMMAND` 只经一次 shell 解析，
   带引号的含空格参数（如 `--output 'daily report.md'`）保持为一个 argv 元素
-- cron job 的 stdout/stderr 透传到容器 stdout，`docker logs` 可见
+- cron job 的 stdout/stderr 经 supercronic 包装为它自己的日志行（0.2.49 默认 `-passthrough-logs=false`，写到 supercronic 的
+  stderr），`docker logs` 可见；不是原样透传（R3-21）
 - entrypoint 自身不 migrate；cron 触发的第一条写命令（`run` / `ingest` / `publish` 等，经 `open_write_storage`）会自动应用
   pending migrations。推荐在首次启动前与每次升级前用一次性 runtime 容器显式执行 `migrate run`
   （见 [../../plan/12-deployment.md](../../plan/12-deployment.md) §5）
@@ -64,7 +65,8 @@ scheduler 镜像与 entrypoint 的验收**没有**专门的 Rust 测试；验收
 已知缺口：
 - env 模式已有 CI e2e（真实执行一个 job）；文件模式、目录 / 悬空链接拒绝与换行拒绝由 static lane 的 shell 测试覆盖
   （stub supercronic），compose 没有自动化 e2e
-- 没有 `--check-only` 子命令用于在 CI 里 lint crontab 表达式（已计入潜在改进）
+- crontab 表达式没有 CI lint；supercronic 自带 `-test <crontab>`（只解析不执行），运维可在部署前手动预检
+  （见 [docker-and-scheduler.md](../../operations/docker-and-scheduler.md) §日志查看）。实际执行 job 的 CI smoke 保留
 
 ## 相关文档
 

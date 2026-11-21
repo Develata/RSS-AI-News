@@ -119,8 +119,8 @@ entrypoint 拼一行 `<RSS_CRON_SCHEDULE> /usr/local/bin/rss-ai-news --config-di
 
 ### 4.3 日志
 
-supercronic 把每个 cron job 的 stdout/stderr 透传到自身 stdout，
-`docker logs <container>` 可见。
+supercronic 0.2.49 默认**不**原样透传（`-passthrough-logs` 默认 `false`，[v0.2.49 main.go](https://github.com/aptible/supercronic/blob/v0.2.49/main.go#L32-L51)）：job 的每行 stdout / stderr 被包装成 supercronic 自己的一条 logrus 日志（带 `channel=stdout|stderr` 与 `job.command` 等字段），默认写到 supercronic 的 stderr；`docker logs` 合并两流，所以照样可见，只是带包装（R3-21）。
+crontab 语法可用 supercronic 自带的 `-test`（只解析、不执行 job）预先检查，例如 `docker run --rm --entrypoint /usr/local/bin/supercronic -v "$(pwd)/crontab:/app/crontab:ro" ghcr.io/develata/rss-ai-news:<tag>-scheduler -test /app/crontab`。
 
 ## 5. compose 部署形态
 

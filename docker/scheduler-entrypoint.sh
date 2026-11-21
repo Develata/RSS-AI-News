@@ -33,8 +33,10 @@
 #    所以 RSS_CRON_COMMAND 只被 shell 解析一次（不再包第二层 `sh -c '...'`，
 #    引号不会被外层截断）。两个变量都不得含换行 / 回车（否则会多出 crontab 行）。
 #
-# log：supercronic 把 cron job 的 stdout/stderr 透传到自身 stdout，
-# `docker logs <container>` 可见。
+# log：supercronic 0.2.49 默认不原样透传（-passthrough-logs 默认 false）：
+# job 的每行输出被包装成 supercronic 自己的一条日志（channel=stdout|stderr），
+# 写到 supercronic 的 stderr，`docker logs <container>` 可见。
+# crontab 语法可用 `supercronic -test <file>` 预检（不执行 job）。
 
 set -eu
 
@@ -81,5 +83,6 @@ printf '%s /usr/local/bin/rss-ai-news --config-dir /app/configs %s\n' \
 
 echo "[scheduler] starting generated schedule"
 
-# `-passthrough-logs` 已是 supercronic 默认（since v0.2.x），无需显式传。
+# 不传 -passthrough-logs：保留 supercronic 的包装日志（带 job.command 与
+# channel，便于在 docker logs 里区分各 job）；CI smoke 在这些行里找标记。
 exec /usr/local/bin/supercronic "$CRONTAB_FILE"
