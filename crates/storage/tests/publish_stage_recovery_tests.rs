@@ -399,6 +399,30 @@ async fn sqlite_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advanc
     assert_eq!(wait, None);
 }
 
+/// R3F-S15: the by-id freeze claim filters the category in SQL — a record of
+/// another category is neither claimed nor touched; its own category claims.
+#[tokio::test]
+async fn sqlite_by_id_freeze_claim_requires_the_category() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_record(&pool, "by-id-category", "pending", 0, None).await;
+    let repo = PublishRecordRepo::new(pool.clone());
+    let before = state_counters_lease(&pool, id).await;
+
+    let other = repo
+        .claim_pending_for_freeze_by_id_in_category(&claim_at(now(), "c1"), id, "ml")
+        .await
+        .unwrap();
+    assert!(other.is_empty());
+    assert_eq!(state_counters_lease(&pool, id).await, before);
+
+    let own = repo
+        .claim_pending_for_freeze_by_id_in_category(&claim_at(now(), "c2"), id, "ai")
+        .await
+        .unwrap();
+    assert_eq!(own.len(), 1);
+    assert_eq!(own[0].category_key, "ai");
+}
+
 async fn state_counters_lease(pool: &SqlitePool, id: i64) -> (String, i64, i64, Option<String>) {
     sqlx::query_as(
         "SELECT state, attempt_count, stage_attempt_count, lease_owner FROM publish_records WHERE id = ?",

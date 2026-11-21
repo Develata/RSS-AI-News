@@ -32,7 +32,7 @@
 - **快照归属**：选稿排除已在其它未失败记录（活动快照）中的文章；freeze 事务内复查，输掉竞争 → 回滚、立即释放 lease、退还 claim，下轮不含该文章；记录 `failed` 释放归属；AI-off 下未被持有的 `ready_for_publish` 遗留文章可直接冻结
 - **record 隔离**：`publish` 与 `publish-all` 的每个阶段（freeze / render / store-local / publish-remote）都只 claim init 得到的 `publish_record_id`；
   单分类 `publish` 不得领取或推进其他分类残留的记录。无 ID 的 `PublishFlow::freeze` 只领取 `category_key` 与选稿分类相同的
-  pending 记录；按 ID 的 `freeze_record` 遇分类不符 → `Failed { category_mismatch }`、退还 claim、不写快照（R1-P-S15）。例外：每阶段 claim 前的全局 maintenance
+  pending 记录；按 ID 的 `freeze_record` 在 claim 的 SQL 中限定分类：分类不符的记录不被领取、不被改动（含被他人租用时），只读判定后 → `Failed { category_mismatch }`、不写快照（R1-P-S15 / R3F-S15）。例外：每阶段 claim 前的全局 maintenance
   （lease 过期 reclaim + 预算耗尽 sweep → `failed`）按设计作用于全表，不区分分类
 
 ### 失败条件（failure path）
@@ -69,7 +69,9 @@
 | `freeze_record_claims_requested_pending_record_not_older_one` | 同上 | claim 指定 record |
 | `freeze_record_isolates_two_concurrent_pending_records_by_id` | 同上 | 并发隔离 |
 | `freeze_without_id_claims_only_its_own_categorys_record` | 同上 | 无 ID freeze 只领本分类记录 |
-| `freeze_record_rejects_a_record_of_another_category` | 同上 | 按 ID freeze 拒绝分类不符（`category_mismatch`，退还 claim） |
+| `freeze_record_rejects_a_record_of_another_category` | 同上 | 按 ID freeze 拒绝分类不符（`category_mismatch`，计数不变） |
+| `freeze_record_of_another_category_is_never_claimed_even_when_leased` | 同上 | 分类不符的记录不被领取 / 改动；被他人租用时仍报 `category_mismatch`；同分类被租用 → `NothingToClaim`（R3F-S15） |
+| `sqlite_by_id_freeze_claim_requires_the_category` | `crates/storage/tests/publish_stage_recovery_tests.rs` | 按 ID freeze claim 的 SQL 限定分类（PG 同名 `pg_…`） |
 | `pg_pending_claim_in_category_skips_other_categories` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 分类限定 claim |
 | `freeze_with_ai_off_passthrough_promotes_persisted_articles_in_same_tx` | 同上 | AI-off 直通 |
 | `freeze_returns_snapshot_empty_when_no_candidates_match` | 同上 | SnapshotEmpty |

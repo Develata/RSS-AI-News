@@ -236,6 +236,67 @@ async fn freeze_record_rejects_a_record_of_another_category() {
     assert_eq!((attempts, owned, owner), (0, 0, None));
 }
 
+/// R3F-S15: the category is part of the by-id claim itself, so a mismatched
+/// call never claims (or touches) the other category's record — an
+/// interruption cannot leave it charged — and a record currently leased by
+/// another worker is still reported as a category mismatch, read-only.
+#[tokio::test]
+async fn freeze_record_of_another_category_is_never_claimed_even_when_leased() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flow(pool.clone());
+    let render = insert_config_rule(&pool).await;
+    let policy = insert_config_rule(&pool).await;
+    let ai = init_for_category(&flow, "ai", "2026-04-28", render, policy).await;
+    let row = |pool: SqlitePool| async move {
+        sqlx::query_as::<_, (i64, i64, Option<String>, String)>(
+            "SELECT attempt_count, stage_attempt_count, lease_owner, updated_at \
+             FROM publish_records WHERE id = ?",
+        )
+        .bind(ai)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let before = row(pool.clone()).await;
+
+    let outcome = flow.freeze_record(ai, freeze_opts_for_category("ml")).await;
+
+    assert!(
+        matches!(&outcome.status, PublishFreezeStatus::Failed { error_kind } if error_kind == "category_mismatch"),
+        "{:?}",
+        outcome.status
+    );
+    assert_eq!(row(pool.clone()).await, before, "the record is not touched");
+
+    // Leased by another worker: still a category mismatch, still untouched.
+    let lease_until = OffsetDateTime::now_utc() + time::Duration::minutes(5);
+    sqlx::query(
+        "UPDATE publish_records SET lease_owner = 'other', lease_expires_at = ? WHERE id = ?",
+    )
+    .bind(lease_until)
+    .bind(ai)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let leased = row(pool.clone()).await;
+
+    let outcome = flow.freeze_record(ai, freeze_opts_for_category("ml")).await;
+
+    assert!(
+        matches!(&outcome.status, PublishFreezeStatus::Failed { error_kind } if error_kind == "category_mismatch"),
+        "{:?}",
+        outcome.status
+    );
+    assert_eq!(row(pool.clone()).await, leased);
+    // A leased record of the right category is simply not claimable.
+    assert_eq!(
+        flow.freeze_record(ai, freeze_opts_for_category("ai"))
+            .await
+            .status,
+        PublishFreezeStatus::NothingToClaim
+    );
+}
+
 #[tokio::test]
 async fn freeze_with_ai_off_passthrough_promotes_persisted_articles_in_same_tx() {
     let (_dir, pool) = make_test_pool().await;

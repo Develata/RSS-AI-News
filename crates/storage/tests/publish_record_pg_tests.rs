@@ -815,6 +815,49 @@ async fn pg_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advance() 
     assert_eq!(wait, None);
 }
 
+/// R3F-S15 on PostgreSQL: the by-id freeze claim filters the category in SQL.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_by_id_freeze_claim_requires_the_category() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "by-id-cat").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .create_if_new(&new_record("idem-by-id-cat", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    let request = |owner: &str| ClaimRequest {
+        owner: owner.to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+
+    assert!(
+        repo.claim_pending_for_freeze_by_id_in_category(&request("c1"), id, "ml")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let (attempts, lease_owner): (i64, Option<String>) =
+        sqlx::query_as("SELECT attempt_count, lease_owner FROM publish_records WHERE id = $1")
+            .bind(id)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+    assert_eq!((attempts, lease_owner), (0, None), "never claimed");
+    assert_eq!(
+        repo.claim_pending_for_freeze_by_id_in_category(&request("c2"), id, "ai")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 /// R3F-B2 / S12 on PostgreSQL: a deferred retry keeps the state, clears the
 /// lease, refunds the claim on both counters and persists the wait; a release
 /// for another state changes nothing; `None` clears the wait.

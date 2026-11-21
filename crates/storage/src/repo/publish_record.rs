@@ -148,6 +148,15 @@ pub trait PublishRecordRepository: Send + Sync {
         state: PublishState,
         ids: &[i64],
     ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
+    /// R3F-S15: claims `pending` record `id` only if it belongs to
+    /// `category_key` — the category is part of the claim's `WHERE`, so a
+    /// mismatched call never claims (or charges) another category's record.
+    async fn claim_pending_for_freeze_by_id_in_category(
+        &self,
+        request: &ClaimRequest,
+        id: i64,
+        category_key: &str,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
     async fn claim_local_for_remote_publish_by_ids(
         &self,
         request: &ClaimRequest,
