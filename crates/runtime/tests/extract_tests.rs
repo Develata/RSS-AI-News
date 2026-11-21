@@ -807,6 +807,81 @@ async fn gbk_page_declared_by_header_is_decoded_before_readability() {
     assert_eq!(artifact, body, "artifact keeps the original bytes");
 }
 
+/// An article an earlier attempt committed for `entry_id` (R2-S6 recovery),
+/// stored with `strategy`.
+async fn seed_owned_article(pool: &SqlitePool, rule_id: i64, entry_id: i64, strategy: &str) {
+    sqlx::query(
+        "INSERT INTO articles (content_hash, canonical_link, title, body_text, \
+         extractor_strategy, extractor_version, content_quality, word_count, \
+         origin_feed_entry_id) VALUES (?, 'https://example.com/a', 't', 'earlier body', ?, ?, \
+         'high', 2, ?)",
+    )
+    .bind(format!("earlier-{entry_id}"))
+    .bind(strategy)
+    .bind(rule_id)
+    .bind(entry_id)
+    .execute(pool)
+    .await
+    .expect("owned article should insert");
+}
+
+async fn entry_state(pool: &SqlitePool, entry_id: i64) -> String {
+    sqlx::query_scalar("SELECT state FROM feed_entries WHERE id = ?")
+        .bind(entry_id)
+        .fetch_one(pool)
+        .await
+        .expect("entry should be readable")
+}
+
+/// R3E-S6: the recovered article was a summary fallback, this attempt
+/// extracted the full text. The stored state is `fallback_persisted`, and
+/// the run summary reports what was stored, not this attempt's path.
+#[tokio::test]
+async fn recovered_fallback_article_is_reported_as_fallback_persisted() {
+    let (_dir, pool) = make_test_pool().await;
+    let (rule_id, source_id) = setup_base(&pool).await;
+    let entry_id =
+        seed_pending_fetch_entry(&pool, source_id, "uid-s6-fb", "hash-s6-fb", None).await;
+    seed_owned_article(&pool, rule_id, entry_id, "summary_fallback").await;
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Ok(raw(entry_id, b"<html>full</html>")))]),
+        vec![success_strategy("s6-full-hash")],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+
+    assert_eq!(entry_state(&pool, entry_id).await, "fallback_persisted");
+    assert_eq!((summary.persisted, summary.fallback_persisted), (0, 1));
+}
+
+/// R3E-S6, the other direction: the recovered article was a full extract,
+/// this attempt fell back to the summary.
+#[tokio::test]
+async fn recovered_full_article_is_reported_as_persisted() {
+    let (_dir, pool) = make_test_pool().await;
+    let (rule_id, source_id) = setup_base(&pool).await;
+    let entry_id = seed_pending_fetch_entry(
+        &pool,
+        source_id,
+        "uid-s6-full",
+        "hash-s6-full",
+        Some("<p>feed summary that would be the fallback body</p>"),
+    )
+    .await;
+    seed_owned_article(&pool, rule_id, entry_id, "readability").await;
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Err(ExtractorError::HttpStatus { code: 403 }))]),
+        vec![success_strategy("unused")],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+
+    assert_eq!(entry_state(&pool, entry_id).await, "persisted");
+    assert_eq!((summary.persisted, summary.fallback_persisted), (1, 0));
+}
+
 async fn setup_base(pool: &SqlitePool) -> (i64, i64) {
     let extractor_rule_id = seed_extractor_rule_version(pool).await;
     let config_id = insert_config_rule(pool).await;

@@ -101,6 +101,7 @@ async fn new_article_and_entry_advance_commit_together() {
     let EntryPersistOutcome::Persisted {
         article_id,
         newly_created: true,
+        fallback: false,
     } = outcome
     else {
         panic!("expected a new article, got {outcome:?}");
@@ -183,7 +184,8 @@ async fn own_article_from_an_earlier_attempt_counts_as_persisted_not_dedup() {
         outcome,
         EntryPersistOutcome::Persisted {
             article_id: first.article_id,
-            newly_created: false
+            newly_created: false,
+            fallback: false,
         }
     );
     let (state, article_id, decision, _) = entry(&f.pool, id).await;
@@ -263,7 +265,8 @@ async fn retry_with_a_changed_body_reuses_the_article_the_entry_owns() {
         outcome,
         EntryPersistOutcome::Persisted {
             article_id: first.article_id,
-            newly_created: false
+            newly_created: false,
+            fallback: false,
         }
     );
     assert_eq!(
@@ -287,7 +290,8 @@ async fn recovery_takes_the_entry_state_from_the_stored_article() {
     f.repo.insert_or_get_by_content_hash(&stored).await.unwrap();
 
     // ... the retry got a full body.
-    f.repo
+    let outcome = f
+        .repo
         .persist_for_entry(
             &article("h-s6-full", id, f.extractor),
             OWNER,
@@ -298,6 +302,14 @@ async fn recovery_takes_the_entry_state_from_the_stored_article() {
         .unwrap();
 
     assert_eq!(entry(&f.pool, id).await.0, "fallback_persisted");
+    // R3E-S6: the outcome reports the stored state, not the call's flag.
+    assert!(
+        matches!(
+            outcome,
+            EntryPersistOutcome::Persisted { fallback: true, .. }
+        ),
+        "{outcome:?}"
+    );
 }
 
 #[tokio::test]

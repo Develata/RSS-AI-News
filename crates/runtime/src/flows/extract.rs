@@ -581,13 +581,16 @@ impl EntryRelease<'_> {
             EntryPersistOutcome::Persisted {
                 article_id,
                 newly_created,
+                fallback,
             } => {
-                let (to, status) = if fallback_path {
+                // R3E-S6: report the state actually stored; a recovered
+                // article keeps its own path whatever this attempt produced.
+                let (to, status) = if fallback {
                     ("fallback_persisted", ExtractEntryStatus::FallbackPersisted)
                 } else {
                     ("persisted", ExtractEntryStatus::Persisted)
                 };
-                let reason = match (fallback_path, newly_created) {
+                let reason = match (fallback, newly_created) {
                     (_, false) => "own_article_recovered",
                     (true, true) => "summary_fallback",
                     (false, true) => "extract_success",

@@ -109,7 +109,8 @@ owner guard 落空则整体回滚（不留孤儿 article），报 `LeaseLost`。
 恢复优先（R2-S6）：同一事务内**先**按 `origin_feed_entry_id` 查本条目已拥有的 article（`idx_articles_origin_feed_entry`，
 migration 0009）。恰有一篇时直接复用它，**不**插入本次提取的正文（重试可能得到不同正文哈希 H2，旧做法会再建一篇，
 使同一 entry 拥有两篇 article、task_gen 两篇都处理），entry 状态按已存 article 推导（`extractor_strategy =
-summary_fallback` → `fallback_persisted`，否则 `persisted`），与本次是否走摘要路径无关。拥有多篇时无法判定，
+summary_fallback` → `fallback_persisted`，否则 `persisted`），与本次是否走摘要路径无关；`EntryPersistOutcome::Persisted.fallback`
+报告实际落库的状态，运行摘要计数（`persisted` / `fallback_persisted`）与 transition 日志据此生成（R3E-S6）。拥有多篇时无法判定，
 返回 `StorageError::Integrity`（不可重试，事务回滚，entry 不动），由 extract 按存储故障如实上报。SQLite 该事务改用
 `BEGIN IMMEDIATE`（先读后写，避免升级写锁时 busy）。
 

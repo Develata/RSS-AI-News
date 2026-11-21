@@ -40,9 +40,13 @@ pub enum EntryPersistOutcome {
     /// article with this content hash was created from this same entry by an
     /// earlier attempt (e.g. a version that committed the article before the
     /// entry release and then crashed); it counts as persisted, not as a dup.
+    /// `fallback` is the state actually stored: `true` = `fallback_persisted`.
+    /// On a self-hit it follows the recovered article's stored strategy, not
+    /// the caller's `fallback` argument (R2-S6, R3E-S6).
     Persisted {
         article_id: i64,
         newly_created: bool,
+        fallback: bool,
     },
     /// Another entry's article has this content hash; the entry is
     /// `dedup_skipped` and points at that article.
@@ -724,7 +728,8 @@ impl EntryAdvance {
         }
     }
 
-    fn outcome(&self) -> EntryPersistOutcome {
+    /// `fallback`: the entry state this transaction stored (R3E-S6).
+    fn outcome(&self, fallback: bool) -> EntryPersistOutcome {
         match *self {
             Self::Own {
                 article_id,
@@ -732,6 +737,7 @@ impl EntryAdvance {
             } => EntryPersistOutcome::Persisted {
                 article_id,
                 newly_created,
+                fallback,
             },
             Self::Dedup { article_id } => EntryPersistOutcome::DedupSkipped { article_id },
         }
@@ -833,7 +839,7 @@ async fn sqlite_persist_for_entry(
         return Ok(EntryPersistOutcome::LeaseLost);
     }
     tx.commit().await.map_err(StorageError::from)?;
-    Ok(advance.outcome())
+    Ok(advance.outcome(fallback))
 }
 
 async fn sqlite_find_by_id(pool: &SqlitePool, id: i64) -> Result<Option<Article>, StorageError> {
@@ -1064,7 +1070,7 @@ async fn pg_persist_for_entry(
         return Ok(EntryPersistOutcome::LeaseLost);
     }
     tx.commit().await.map_err(StorageError::from)?;
-    Ok(advance.outcome())
+    Ok(advance.outcome(fallback))
 }
 
 async fn pg_find_by_id(pool: &PgPool, id: i64) -> Result<Option<Article>, StorageError> {

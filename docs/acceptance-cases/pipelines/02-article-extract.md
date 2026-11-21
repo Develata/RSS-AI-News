@@ -82,6 +82,7 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `own_article_from_an_earlier_attempt_counts_as_persisted_not_dedup` | 同上 | 自命中 |
 | `retry_with_a_changed_body_reuses_the_article_the_entry_owns` | `crates/storage/tests/article_entry_persist_tests.rs` | R2-S6 复用已拥有 article |
 | `recovery_takes_the_entry_state_from_the_stored_article` | 同上 | R2-S6 状态按已存 article |
+| `recovered_fallback_article_is_reported_as_fallback_persisted` / `recovered_full_article_is_reported_as_persisted` | `crates/runtime/tests/extract_tests.rs` | R3E-S6 运行摘要按实际落库状态计数（两个方向） |
 | `an_entry_owning_several_articles_is_reported_not_guessed` | 同上 | R2-S6 歧义显式报告 |
 | `another_entrys_article_is_a_dedup` | 同上 | 他人 article 仍去重 |
 | `fallback_flag_selects_fallback_persisted` | 同上 | fallback 终态 |
