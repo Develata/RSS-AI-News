@@ -61,6 +61,8 @@ AI-off 直通模式跳过整段。
 | `batch_size_one_claim_retries_count_as_served_turns` | 同上 | R2-B1 重试也算一轮 |
 | `a_failed_second_claim_side_leaves_the_first_side_unclaimed` | `crates/runtime/tests/ai_run_tests.rs` | R2-B2 整批同事务回滚 |
 | `pg_fresh_share_lists_claims_and_signals_by_source_time` | `crates/storage/tests/article_ai_result_pg_tests.rs` | C9 PG SQL |
+| `real_sqlite_extended_lock_error_returns_task_to_pending_with_budget_left` | `crates/runtime/tests/ai_run_tests.rs` | R2-B3 真实驱动扩展码 517 可重试 |
+| `sqlite_extended_busy_code_from_the_driver_is_retryable` | `crates/storage/tests/sqlite_error_classification_tests.rs` | R2-B3 分类器（低 8 位） |
 | `process_succeeds_high_score_advances_article_to_ready_for_publish` | 同上 | 高分 happy |
 | `process_succeeds_low_score_advances_article_to_ai_done` | 同上 | 低分跳过候选 |
 | `process_filtered_advances_article_to_publish_skipped` | 同上 | keep=false |

@@ -690,6 +690,8 @@ struct FlakyArticleRepo {
     inner: rss_ai_news_storage::ArticleRepo,
     failures: std::sync::atomic::AtomicUsize,
     error: fn() -> StorageError,
+    /// A one-shot error captured from the real driver (R2-B3); taken first.
+    real: std::sync::Mutex<Option<StorageError>>,
 }
 
 #[async_trait]
@@ -715,6 +717,9 @@ impl rss_ai_news_storage::ArticleRepository for FlakyArticleRepo {
         &self,
         id: i64,
     ) -> Result<Option<rss_ai_news_domain::model::Article>, StorageError> {
+        if let Some(error) = self.real.lock().unwrap().take() {
+            return Err(error);
+        }
         let left = self.failures.load(std::sync::atomic::Ordering::SeqCst);
         if left > 0 {
             self.failures
@@ -809,6 +814,7 @@ fn flaky_flow(
         inner: rss_ai_news_storage::ArticleRepo::new(pool),
         failures: std::sync::atomic::AtomicUsize::new(failures),
         error,
+        real: std::sync::Mutex::new(None),
     });
     AiRunFlow::new(Arc::new(deps))
 }
@@ -1605,5 +1611,65 @@ async fn batch_size_one_claim_retries_count_as_served_turns() {
     assert_eq!(
         ai_result_state_and_attempts(&pool, fresh_task).await,
         ("pending".to_string(), 2)
+    );
+}
+
+// === R2-B3: a real SQLite extended lock code is retryable end to end ===
+
+/// `SQLITE_BUSY_SNAPSHOT` (517) from the real driver: a deferred reader on
+/// connection A cannot become a writer after B committed (WAL).
+async fn real_busy_snapshot_error() -> StorageError {
+    use sqlx::Connection;
+    let (_dir, pool) = common::make_test_pool_with_connections(2).await;
+    sqlx::query("CREATE TABLE b3_probe (id INTEGER PRIMARY KEY, v INTEGER)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut a = pool.acquire().await.unwrap();
+    let mut b = pool.acquire().await.unwrap();
+    let mut tx = a.begin().await.unwrap();
+    let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM b3_probe")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO b3_probe (v) VALUES (1)")
+        .execute(&mut *b)
+        .await
+        .unwrap();
+    let error = sqlx::query("INSERT INTO b3_probe (v) VALUES (2)")
+        .execute(&mut *tx)
+        .await
+        .expect_err("stale snapshot");
+    match &error {
+        sqlx::Error::Database(db) => assert_eq!(db.code().as_deref(), Some("517")),
+        other => panic!("expected a database error, got {other:?}"),
+    }
+    StorageError::from(error)
+}
+
+#[tokio::test]
+async fn real_sqlite_extended_lock_error_returns_task_to_pending_with_budget_left() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "ai-read-517", "title", "body").await;
+    let client = Arc::new(MockAiClient::default());
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let mut deps = common::ai_deps(pool.clone(), app, client);
+    deps.article_repo = Arc::new(FlakyArticleRepo {
+        inner: rss_ai_news_storage::ArticleRepo::new(pool.clone()),
+        failures: std::sync::atomic::AtomicUsize::new(0),
+        error: || StorageError::Timeout,
+        real: std::sync::Mutex::new(Some(real_busy_snapshot_error().await)),
+    });
+    let flow = AiRunFlow::new(Arc::new(deps));
+    flow.task_gen(&opts()).await;
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+
+    let summary = flow.process_ai_tasks(&opts()).await;
+
+    assert_eq!(summary.retryable_failed, 1);
+    assert_eq!(summary.permanent_failed, 0);
+    assert_eq!(
+        ai_result_state_and_attempts(&pool, ai_result_id).await,
+        ("pending".to_string(), 1)
     );
 }
