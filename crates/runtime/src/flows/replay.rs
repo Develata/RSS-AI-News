@@ -37,6 +37,10 @@ pub const REPLAY_HTML_NO_STRATEGY: &str = "html replay needs an HTML extraction 
      extractor.strategy_order enables none (only summary_fallback, which stores the feed summary \
      without parsing the HTML); add \"readability\" to replay the HTML";
 
+/// Title handed to the strategy when the artifact names no feed entry (with
+/// an entry, its `title_raw` is used, as in live extraction).
+pub const REPLAY_PLACEHOLDER_TITLE: &str = "(replay)";
+
 /// Number of parsed feed entries a feed replay returns as samples.
 pub const REPLAY_FEED_SAMPLE_LIMIT: usize = 5;
 
@@ -239,17 +243,25 @@ impl ReplayFlow {
             }
             Err(_) => None,
         };
-        let (feed_entry_id, base_uri) = match &source {
+        // The entry's feed title is the strategy's title fallback, exactly as
+        // in live extraction (`claimed.title_raw`), so a page without its own
+        // title replays to the same title (R3-18).
+        let (feed_entry_id, base_uri, title_raw) = match &source {
             Some(source) => (
                 source.feed_entry_id,
                 ReplayBaseUri::FeedEntryLink(source.normalized_link.clone()),
+                source.title_raw.clone(),
             ),
-            None => (0, ReplayBaseUri::Placeholder),
+            None => (
+                0,
+                ReplayBaseUri::Placeholder,
+                REPLAY_PLACEHOLDER_TITLE.to_string(),
+            ),
         };
         let task = ArticleFetchTask {
             feed_entry_id,
             normalized_link: base_uri.as_str().to_string(),
-            title_raw: "(replay)".to_string(),
+            title_raw,
             summary_raw: None,
             timeout: Duration::from_secs(0),
         };
@@ -584,6 +596,42 @@ mod tests {
                 }
             ));
             assert_eq!(outcome.diff, Some(ReplayDiff::HtmlArticleNotFound));
+        }
+    }
+
+    /// R3-18: a page without a title of its own falls back to the entry's
+    /// feed title, as live extraction does; without an entry the placeholder
+    /// title is used.
+    #[tokio::test]
+    async fn html_replay_falls_back_to_the_feed_entry_title() {
+        let paragraph =
+            "Replay keeps the original bytes so the parse can be re-run offline. ".repeat(20);
+        let untitled =
+            format!("<html><body><div><p>{paragraph}</p><p>{paragraph}</p></div></body></html>")
+                .into_bytes();
+        let fixture = Fixture::new().await;
+        let entry = fixture.entry("untitled").await;
+        fixture
+            .html_artifact(&entry.to_string(), untitled.clone())
+            .await;
+        fixture.html_artifact("no-entry", untitled).await;
+        let flow = fixture.flow(Arc::new(RecordingStrategy::default()));
+        for (key, title) in [
+            (entry.to_string(), "title untitled".to_string()),
+            (
+                "no-entry".to_string(),
+                super::REPLAY_PLACEHOLDER_TITLE.to_string(),
+            ),
+        ] {
+            let outcome = flow
+                .execute(&html(ReplaySelector::Key(key.clone()), false))
+                .await
+                .expect("replay")
+                .expect("artifact found");
+            let ReplayParsed::Html { article, .. } = outcome.parsed else {
+                panic!("html replay must parse as html");
+            };
+            assert_eq!(article.title, title, "key {key}");
         }
     }
 

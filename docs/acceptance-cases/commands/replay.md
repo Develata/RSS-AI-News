@@ -52,6 +52,7 @@
 | `replay_failures_keep_their_error_kinds` | 同上 | not-found / 缺 selector / storage 错误分类 |
 | `html_replay_without_an_html_strategy_reports_the_contract_error` | `crates/runtime/src/flows/replay.rs` | 仅 summary_fallback → 契约错误，feed 不受影响 |
 | `html_replay_runs_the_configured_chain_in_order` | 同上 | 策略链顺序与失败回退 |
+| `html_replay_falls_back_to_the_feed_entry_title` | 同上 | 无 HTML 标题时用 entry `title_raw`，无 entry 用占位标题 |
 | `html_replay_follows_the_configured_strategy_order` | `crates/cli/tests/replay_cmd_tests.rs` | 真实 CLI 装配，两种 strategy_order |
 | `missing_selector_is_reported_before_the_database_is_opened` | 同上 | 缺 selector 先于打开数据库报错 |
 | `sqlite_html_replay_source_reaches_entry_link_and_article` / `pg_…`（ignored） | `crates/storage/tests/replay_projection_tests.rs` | 双方言 projection |

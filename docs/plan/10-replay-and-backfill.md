@@ -112,6 +112,9 @@ rss-ai-news replay --kind feed   --id 678
 replay 因此不换用别的策略解析，而是在读取任何 artifact 之前返回契约错误 `REPLAY_HTML_NO_STRATEGY`
 （`RuntimeError::Config`，exit 1），提示加回 `"readability"`。`feed` / `ai` 不受策略配置影响。
 
+`html` 的标题回退（R3-18）：策略在页面没有标题时用 `task.title_raw`。有对应 feed entry 时 replay 传该 entry 的
+`title_raw`（线上抽取传的就是它），否则传占位 `(replay)`（`REPLAY_PLACEHOLDER_TITLE`）；只读 projection 一并返回该列。
+
 `html` 的 base URI：`html_payload` 的 artifact key 是 feed entry id，replay 用该 entry 的
 `normalized_link`（线上抽取开始抓取的链接）作为传给策略的 `final_url` 与 `task.normalized_link`；
 key 不是数字或对应 entry 不存在时用占位符 `about:blank`（`REPLAY_PLACEHOLDER_BASE_URI`，合法 URL 但不能作 base，

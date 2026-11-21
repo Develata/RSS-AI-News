@@ -3,7 +3,9 @@
 //! An `html_payload` artifact is keyed by the feed entry id (see
 //! `runtime/src/flows/extract.rs::write_html_artifact`). Replay needs that
 //! entry's link (the base URI the live extraction started from) and, for
-//! `--diff`, the article the entry points at. The article is reached through
+//! `--diff`, the article the entry points at. It also returns the entry's
+//! `title_raw`, which live extraction hands to the strategy as the title
+//! fallback (R3-18). The article is reached through
 //! `feed_entries.article_id`, which also covers a content-dedup hit whose
 //! entry points at an earlier article.
 
@@ -26,6 +28,8 @@ pub struct ReplayArticleDigest {
 pub struct HtmlReplaySource {
     pub feed_entry_id: i64,
     pub normalized_link: String,
+    /// The feed title live extraction passes as `ArticleFetchTask::title_raw`.
+    pub title_raw: String,
     /// `None` while the entry has not produced (or linked) an article.
     pub article: Option<ReplayArticleDigest>,
 }
@@ -57,6 +61,7 @@ impl ReplayProjectionRepo {
 const HTML_REPLAY_SOURCE_SQL: &str = r#"
 SELECT fe.id AS feed_entry_id,
        fe.normalized_link,
+       fe.title_raw,
        a.id AS article_id,
        a.title AS article_title,
        a.word_count AS article_word_count,
@@ -70,6 +75,7 @@ WHERE fe.id = $1
 struct HtmlReplaySourceRow {
     feed_entry_id: i64,
     normalized_link: String,
+    title_raw: String,
     article_id: Option<i64>,
     article_title: Option<String>,
     article_word_count: Option<i64>,
@@ -99,6 +105,7 @@ impl From<HtmlReplaySourceRow> for HtmlReplaySource {
         Self {
             feed_entry_id: row.feed_entry_id,
             normalized_link: row.normalized_link,
+            title_raw: row.title_raw,
             article,
         }
     }

@@ -152,6 +152,7 @@ async fn assert_projection(pool: StoragePool) {
             Some(HtmlReplaySource {
                 feed_entry_id: entry,
                 normalized_link: format!("https://example.com/posts/{uid}/"),
+                title_raw: "title".to_string(),
                 article: Some(digest.clone()),
             }),
         );
@@ -161,6 +162,7 @@ async fn assert_projection(pool: StoragePool) {
         Some(HtmlReplaySource {
             feed_entry_id: orphan,
             normalized_link: "https://example.com/posts/orphan/".to_string(),
+            title_raw: "title".to_string(),
             article: None,
         }),
     );
