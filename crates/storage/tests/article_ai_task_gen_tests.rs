@@ -1,8 +1,23 @@
 mod common;
 
-use rss_ai_news_storage::{ArticleRepo, ArticleRepository};
+use rss_ai_news_storage::{ArticleRepo, ArticleRepository, NewAiResult};
+use time::{Duration, OffsetDateTime};
 
 use common::{insert_article, insert_feed_entry, insert_rule, make_test_pool, seed_source};
+
+fn identity() -> NewAiResult {
+    NewAiResult {
+        article_id: 0,
+        prompt_version: 1,
+        output_schema_version: 1,
+        model_id: "model".to_string(),
+    }
+}
+
+/// A window start after every seeded article: all of them are backlog.
+fn after_everything() -> OffsetDateTime {
+    OffsetDateTime::now_utc() + Duration::days(365)
+}
 
 #[tokio::test]
 async fn list_persisted_filters_state_persisted_orders_by_id() {
@@ -29,7 +44,7 @@ async fn list_persisted_filters_state_persisted_orders_by_id() {
 
     let repo = ArticleRepo::new(pool);
     let candidates = repo
-        .list_persisted_for_ai_task_gen("ai", 10, 0)
+        .list_backlog_for_ai_task_gen("ai", &identity(), after_everything(), 10, 0)
         .await
         .expect("list should succeed");
 
@@ -60,7 +75,7 @@ async fn list_persisted_paginates_by_after_id() {
 
     let repo = ArticleRepo::new(pool);
     let candidates = repo
-        .list_persisted_for_ai_task_gen("ai", 1, first)
+        .list_backlog_for_ai_task_gen("ai", &identity(), after_everything(), 1, first)
         .await
         .expect("list should succeed");
 
@@ -68,7 +83,7 @@ async fn list_persisted_paginates_by_after_id() {
     assert_eq!(candidates[0].article_id, second);
 
     let candidates = repo
-        .list_persisted_for_ai_task_gen("ai", 10, second)
+        .list_backlog_for_ai_task_gen("ai", &identity(), after_everything(), 10, second)
         .await
         .expect("list should succeed");
     assert_eq!(
@@ -97,7 +112,7 @@ async fn list_persisted_returns_empty_when_no_candidates() {
 
     let repo = ArticleRepo::new(pool);
     let candidates = repo
-        .list_persisted_for_ai_task_gen("ai", 10, 0)
+        .list_backlog_for_ai_task_gen("ai", &identity(), after_everything(), 10, 0)
         .await
         .expect("list should succeed");
 
@@ -126,7 +141,7 @@ async fn list_persisted_filters_by_category_key() {
 
     let repo = ArticleRepo::new(pool);
     let candidates = repo
-        .list_persisted_for_ai_task_gen("math", 10, 0)
+        .list_backlog_for_ai_task_gen("math", &identity(), after_everything(), 10, 0)
         .await
         .expect("list should succeed");
 

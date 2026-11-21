@@ -19,7 +19,8 @@ AI-off 直通模式跳过整段。
 - task_gen 遇身份行冲突时按已有行对账仍为 `Persisted` 的 article（pending/running → `AiPending`，
   succeeded/filtered → 成功派生态，permanent_failed → 保持并被游标越过）；batch=1 时新文章不饥饿
 - publish 窗口份额（C9）：积压大于一批时窗口内文章仍得到任务并被领取；旧积压每 run 仍推进；
-  batch=1 时 task_gen 与 claim 跨 run 交替；窗口 0 = 全部 fresh
+  batch=1 时 task_gen 与 claim 跨 run 交替（按持久记录的实际服务侧，窗口移动与重试都不打断）；fresh / backlog
+  两侧不相交；窗口 0 = 全部 fresh
 - task_gen 仅扫描 `--category` 指定分类（其它分类不动）
 - AI 成功 + 高分 → article → `ReadyForPublish`、ai_result → `Succeeded`
 - AI 成功 + 低分 → article → `AiDone`（不入发布候选）
@@ -53,6 +54,11 @@ AI-off 直通模式跳过整段。
 | `window_zero_treats_every_article_as_fresh` | 同上 | C9 窗口 0 |
 | `claim_gives_fresh_tasks_a_share_when_older_tasks_fill_the_queue` | 同上 | C9 claim 份额 |
 | `batch_size_one_claims_alternate_between_fresh_and_older_tasks_across_runs` | 同上 | C9 claim 交替 |
+| `batch_size_one_task_gen_alternation_survives_a_moving_window` | `crates/runtime/tests/ai_run_tests.rs` | R2-B1 task_gen 窗口移动后仍交替 |
+| `batch_size_one_claim_alternation_survives_a_moving_window` | 同上 | R2-B1 claim 窗口移动后仍交替 |
+| `batch_size_two_task_gen_backlog_slot_is_not_taken_by_fresh_articles` | 同上 | R2-B1 task_gen 两侧不相交 |
+| `batch_size_two_claim_backlog_slot_is_not_taken_by_fresh_tasks` | 同上 | R2-B1 claim 两侧不相交 |
+| `batch_size_one_claim_retries_count_as_served_turns` | 同上 | R2-B1 重试也算一轮 |
 | `a_failed_second_claim_side_leaves_the_first_side_unclaimed` | `crates/runtime/tests/ai_run_tests.rs` | R2-B2 整批同事务回滚 |
 | `pg_fresh_share_lists_claims_and_signals_by_source_time` | `crates/storage/tests/article_ai_result_pg_tests.rs` | C9 PG SQL |
 | `process_succeeds_high_score_advances_article_to_ready_for_publish` | 同上 | 高分 happy |

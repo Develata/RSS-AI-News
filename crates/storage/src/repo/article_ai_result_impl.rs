@@ -14,18 +14,19 @@ use super::{sqlite_instant_cutoff, sqlite_stored_deadline};
 
 use super::article_ai_result::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
-    ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome,
+    ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome, ShareMark,
+    ShareSide, ShareStage,
 };
 use super::article_ai_result_sql::{
     ADVANCE_ARTICLE_FROM_AI_PHASE_SQL, ADVANCE_ARTICLE_TO_AI_PENDING_SQL,
-    ADVANCE_PERSISTED_ARTICLE_SQL, CLAIM_AI_PENDING_FRESH_PG_SQL,
+    ADVANCE_PERSISTED_ARTICLE_SQL, CLAIM_AI_PENDING_BACKLOG_PG_SQL,
+    CLAIM_AI_PENDING_BACKLOG_SQLITE_SQL, CLAIM_AI_PENDING_FRESH_PG_SQL,
     CLAIM_AI_PENDING_FRESH_SQLITE_SQL, CLAIM_AI_PENDING_PG_SQL, CLAIM_AI_PENDING_SQLITE_SQL,
-    INSERT_AI_PENDING_SQL, LAST_CLAIM_IS_FRESH_PG_SQL, LAST_CLAIM_IS_FRESH_SQLITE_SQL,
-    NEWEST_TASK_IS_FRESH_PG_SQL, NEWEST_TASK_IS_FRESH_SQLITE_SQL, OTHER_SUCCEEDED_AI_EXISTS_SQL,
-    RECLAIM_AI_LEASES_SQL, RECLAIM_AI_LEASES_SQLITE_SQL, RELEASE_AI_FAILURE_SQL,
-    RELEASE_AI_RETRYABLE_FAILURE_SQL, RELEASE_AI_SUCCESS_SQL, SELECT_AI_IDENTITY_ROW_PG_SQL,
-    SELECT_AI_IDENTITY_ROW_SQLITE_SQL, SELECT_ARTICLE_STATE_SQL, TERMINALIZE_EXHAUSTED_AI_SQL,
-    TERMINALIZE_EXHAUSTED_AI_SQLITE_SQL,
+    INSERT_AI_PENDING_SQL, OTHER_SUCCEEDED_AI_EXISTS_SQL, RECLAIM_AI_LEASES_SQL,
+    RECLAIM_AI_LEASES_SQLITE_SQL, RELEASE_AI_FAILURE_SQL, RELEASE_AI_RETRYABLE_FAILURE_SQL,
+    RELEASE_AI_SUCCESS_SQL, SELECT_AI_IDENTITY_ROW_PG_SQL, SELECT_AI_IDENTITY_ROW_SQLITE_SQL,
+    SELECT_ARTICLE_STATE_SQL, SELECT_SHARE_SIDE_SQL, TERMINALIZE_EXHAUSTED_AI_SQL,
+    TERMINALIZE_EXHAUSTED_AI_SQLITE_SQL, UPSERT_SHARE_SIDE_SQL,
 };
 
 /// `(id, state, keep_decision, importance_score)` of an existing identity row.
@@ -75,6 +76,46 @@ fn conflict_outcome(article_state: Option<&str>, advanced: bool) -> InsertPendin
     }
 }
 
+fn parse_share_side(value: &str) -> Result<ShareSide, StorageError> {
+    ShareSide::parse(value).ok_or_else(|| {
+        StorageError::Corruption(format!("ai_fresh_share_state.last_side = {value:?}"))
+    })
+}
+
+/// Records `mark` inside the caller's SQLite transaction (R2-B1).
+async fn sqlite_upsert_share_side(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    mark: &ShareMark<'_>,
+    now: OffsetDateTime,
+) -> Result<(), StorageError> {
+    sqlx::query(UPSERT_SHARE_SIDE_SQL)
+        .bind(mark.category_key)
+        .bind(mark.stage.as_str())
+        .bind(mark.side.as_str())
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(())
+}
+
+/// Records `mark` inside the caller's PostgreSQL transaction (R2-B1).
+async fn pg_upsert_share_side(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    mark: &ShareMark<'_>,
+    now: OffsetDateTime,
+) -> Result<(), StorageError> {
+    sqlx::query(UPSERT_SHARE_SIDE_SQL)
+        .bind(mark.category_key)
+        .bind(mark.stage.as_str())
+        .bind(mark.side.as_str())
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(())
+}
+
 /// Quota bookkeeping of one shared claim batch (C9, plan/03 §5.2).
 ///
 /// Steps: ① the leading side gets `ceil(n/2)`; ② the other side gets what
@@ -110,16 +151,12 @@ impl SharedClaimPlan {
                 0 => (self.fresh_first, lead_quota),
                 1 => (!self.fresh_first, self.n - self.got[0]),
                 _ => {
-                    let rest = self.n - self.got[0];
-                    let left = rest - self.got[1];
-                    let lead_short = self.got[0] < lead_quota;
-                    // "All pending" short means nothing is left at all; fresh
-                    // short means no fresh task is left.
-                    let other_exhausted = self.got[1] < rest && self.fresh_first;
-                    if lead_short || other_exhausted {
+                    // The sides are disjoint (R2-B1): a short leading side is
+                    // exhausted, a full one may still hold rows.
+                    if self.got[0] < lead_quota {
                         continue;
                     }
-                    (self.fresh_first, left)
+                    (self.fresh_first, self.n - self.got[0] - self.got[1])
                 }
             };
             if query.1 > 0 {
@@ -157,46 +194,6 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
         }
     }
 
-    async fn claim_pending_fresh(
-        &self,
-        request: &ClaimRequest,
-        category_key: &str,
-        published_since: OffsetDateTime,
-    ) -> Result<Vec<ClaimedAiResult>, StorageError> {
-        match &self.pool {
-            StoragePool::Sqlite(p) => {
-                sqlx::query_as::<_, ClaimedAiResult>(CLAIM_AI_PENDING_FRESH_SQLITE_SQL)
-                    .bind(&request.owner)
-                    .bind(sqlite_stored_deadline(request.lease_expires_at))
-                    .bind(request.now)
-                    .bind(request.now)
-                    .bind(sqlite_instant_cutoff(request.now))
-                    .bind(i64::from(request.max_attempts))
-                    .bind(category_key)
-                    .bind(i64::from(request.batch_size))
-                    .bind(sqlite_instant_cutoff(published_since))
-                    .fetch_all(p)
-                    .await
-                    .map_err(StorageError::from)
-            }
-            StoragePool::Postgres(p) => {
-                sqlx::query_as::<_, ClaimedAiResult>(CLAIM_AI_PENDING_FRESH_PG_SQL)
-                    .bind(&request.owner)
-                    .bind(request.lease_expires_at)
-                    .bind(request.now)
-                    .bind(request.now)
-                    .bind(request.now)
-                    .bind(i64::from(request.max_attempts))
-                    .bind(category_key)
-                    .bind(i64::from(request.batch_size))
-                    .bind(published_since)
-                    .fetch_all(p)
-                    .await
-                    .map_err(StorageError::from)
-            }
-        }
-    }
-
     async fn claim_pending_shared(
         &self,
         request: &ClaimRequest,
@@ -213,58 +210,29 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
         }
     }
 
-    async fn newest_task_is_fresh(
+    async fn last_served_side(
         &self,
         category_key: &str,
-        published_since: OffsetDateTime,
-    ) -> Result<Option<bool>, StorageError> {
-        match &self.pool {
+        stage: ShareStage,
+    ) -> Result<Option<ShareSide>, StorageError> {
+        let side = match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlx::query_scalar::<_, Option<bool>>(NEWEST_TASK_IS_FRESH_SQLITE_SQL)
+                sqlx::query_scalar::<_, String>(SELECT_SHARE_SIDE_SQL)
                     .bind(category_key)
-                    .bind(sqlite_instant_cutoff(published_since))
+                    .bind(stage.as_str())
                     .fetch_optional(p)
                     .await
-                    .map(Option::flatten)
-                    .map_err(StorageError::from)
             }
             StoragePool::Postgres(p) => {
-                sqlx::query_scalar::<_, Option<bool>>(NEWEST_TASK_IS_FRESH_PG_SQL)
+                sqlx::query_scalar::<_, String>(SELECT_SHARE_SIDE_SQL)
                     .bind(category_key)
-                    .bind(published_since)
+                    .bind(stage.as_str())
                     .fetch_optional(p)
                     .await
-                    .map(Option::flatten)
-                    .map_err(StorageError::from)
             }
         }
-    }
-
-    async fn last_claim_is_fresh(
-        &self,
-        category_key: &str,
-        published_since: OffsetDateTime,
-    ) -> Result<Option<bool>, StorageError> {
-        match &self.pool {
-            StoragePool::Sqlite(p) => {
-                sqlx::query_scalar::<_, Option<bool>>(LAST_CLAIM_IS_FRESH_SQLITE_SQL)
-                    .bind(category_key)
-                    .bind(sqlite_instant_cutoff(published_since))
-                    .fetch_optional(p)
-                    .await
-                    .map(Option::flatten)
-                    .map_err(StorageError::from)
-            }
-            StoragePool::Postgres(p) => {
-                sqlx::query_scalar::<_, Option<bool>>(LAST_CLAIM_IS_FRESH_PG_SQL)
-                    .bind(category_key)
-                    .bind(published_since)
-                    .fetch_optional(p)
-                    .await
-                    .map(Option::flatten)
-                    .map_err(StorageError::from)
-            }
-        }
+        .map_err(StorageError::from)?;
+        side.map(|value| parse_share_side(&value)).transpose()
     }
 
     async fn release_success(
@@ -349,10 +317,28 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
     ) -> Result<InsertPendingOutcome, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlite_insert_pending_and_advance(p, item, min_importance_score, now).await
+                sqlite_insert_pending_and_advance(p, item, min_importance_score, now, None).await
             }
             StoragePool::Postgres(p) => {
-                pg_insert_pending_and_advance(p, item, min_importance_score, now).await
+                pg_insert_pending_and_advance(p, item, min_importance_score, now, None).await
+            }
+        }
+    }
+
+    async fn insert_pending_advance_and_mark(
+        &self,
+        item: &NewAiResult,
+        min_importance_score: i32,
+        now: OffsetDateTime,
+        mark: &ShareMark<'_>,
+    ) -> Result<InsertPendingOutcome, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_insert_pending_and_advance(p, item, min_importance_score, now, Some(mark))
+                    .await
+            }
+            StoragePool::Postgres(p) => {
+                pg_insert_pending_and_advance(p, item, min_importance_score, now, Some(mark)).await
             }
         }
     }
@@ -473,24 +459,27 @@ async fn sqlite_claim_pending_shared(
         .await
         .map_err(StorageError::from)?;
     let since = sqlite_instant_cutoff(published_since);
-    let fresh_first = n > 1
-        || !sqlx::query_scalar::<_, Option<bool>>(LAST_CLAIM_IS_FRESH_SQLITE_SQL)
+    let fresh_first = if n == 1 {
+        let last = sqlx::query_scalar::<_, String>(SELECT_SHARE_SIDE_SQL)
             .bind(category_key)
-            .bind(since)
+            .bind(ShareStage::Claim.as_str())
             .fetch_optional(&mut *tx)
             .await
-            .map_err(StorageError::from)?
-            .flatten()
-            .unwrap_or(false);
+            .map_err(StorageError::from)?;
+        last.map(|value| parse_share_side(&value)).transpose()? != Some(ShareSide::Fresh)
+    } else {
+        true
+    };
     let mut plan = SharedClaimPlan::new(n, fresh_first);
     let mut claimed = Vec::new();
+    let mut served = None;
     while let Some((fresh, limit)) = plan.next_query() {
         let sql = if fresh {
             CLAIM_AI_PENDING_FRESH_SQLITE_SQL
         } else {
-            CLAIM_AI_PENDING_SQLITE_SQL
+            CLAIM_AI_PENDING_BACKLOG_SQLITE_SQL
         };
-        let mut query = sqlx::query_as::<_, ClaimedAiResult>(sql)
+        let rows = sqlx::query_as::<_, ClaimedAiResult>(sql)
             .bind(&request.owner)
             .bind(sqlite_stored_deadline(request.lease_expires_at))
             .bind(request.now)
@@ -498,19 +487,35 @@ async fn sqlite_claim_pending_shared(
             .bind(sqlite_instant_cutoff(request.now))
             .bind(i64::from(request.max_attempts))
             .bind(category_key)
-            .bind(i64::from(limit));
-        if fresh {
-            query = query.bind(since);
-        }
-        let rows = query
+            .bind(i64::from(limit))
+            .bind(since)
             .fetch_all(&mut *tx)
             .await
             .map_err(StorageError::from)?;
         plan.record(rows.len());
+        if !rows.is_empty() {
+            served = Some(side_of(fresh));
+        }
         claimed.extend(rows);
+    }
+    if let (1, Some(side)) = (n, served) {
+        let mark = ShareMark {
+            category_key,
+            stage: ShareStage::Claim,
+            side,
+        };
+        sqlite_upsert_share_side(&mut tx, &mark, request.now).await?;
     }
     tx.commit().await.map_err(StorageError::from)?;
     Ok(claimed)
+}
+
+fn side_of(fresh: bool) -> ShareSide {
+    if fresh {
+        ShareSide::Fresh
+    } else {
+        ShareSide::Backlog
+    }
 }
 
 async fn sqlite_release_success(
@@ -629,6 +634,7 @@ async fn sqlite_insert_pending_and_advance(
     item: &NewAiResult,
     min_importance_score: i32,
     now: OffsetDateTime,
+    mark: Option<&ShareMark<'_>>,
 ) -> Result<InsertPendingOutcome, StorageError> {
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
     let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_AI_PENDING_SQL)
@@ -643,6 +649,9 @@ async fn sqlite_insert_pending_and_advance(
     let Some(ai_result_id) = inserted_id else {
         let outcome =
             sqlite_reconcile_conflict(&mut tx, item, Some(min_importance_score), now).await?;
+        if let (true, Some(mark)) = (outcome.article_advanced, mark) {
+            sqlite_upsert_share_side(&mut tx, mark, now).await?;
+        }
         tx.commit().await.map_err(StorageError::from)?;
         return Ok(outcome);
     };
@@ -664,6 +673,9 @@ async fn sqlite_insert_pending_and_advance(
         });
     }
 
+    if let Some(mark) = mark {
+        sqlite_upsert_share_side(&mut tx, mark, now).await?;
+    }
     tx.commit().await.map_err(StorageError::from)?;
     Ok(InsertPendingOutcome {
         ai_result_id: Some(ai_result_id),
@@ -937,24 +949,30 @@ async fn pg_claim_pending_shared(
         return Ok(Vec::new());
     }
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
-    let fresh_first = n > 1
-        || !sqlx::query_scalar::<_, Option<bool>>(LAST_CLAIM_IS_FRESH_PG_SQL)
+    let fresh_first = if n == 1 {
+        // Concurrent batch-size-1 workers of one category may both read the
+        // same side; the upsert below keeps the last writer (best effort,
+        // each still serves a real task).
+        let last = sqlx::query_scalar::<_, String>(SELECT_SHARE_SIDE_SQL)
             .bind(category_key)
-            .bind(published_since)
+            .bind(ShareStage::Claim.as_str())
             .fetch_optional(&mut *tx)
             .await
-            .map_err(StorageError::from)?
-            .flatten()
-            .unwrap_or(false);
+            .map_err(StorageError::from)?;
+        last.map(|value| parse_share_side(&value)).transpose()? != Some(ShareSide::Fresh)
+    } else {
+        true
+    };
     let mut plan = SharedClaimPlan::new(n, fresh_first);
     let mut claimed = Vec::new();
+    let mut served = None;
     while let Some((fresh, limit)) = plan.next_query() {
         let sql = if fresh {
             CLAIM_AI_PENDING_FRESH_PG_SQL
         } else {
-            CLAIM_AI_PENDING_PG_SQL
+            CLAIM_AI_PENDING_BACKLOG_PG_SQL
         };
-        let mut query = sqlx::query_as::<_, ClaimedAiResult>(sql)
+        let rows = sqlx::query_as::<_, ClaimedAiResult>(sql)
             .bind(&request.owner)
             .bind(request.lease_expires_at)
             .bind(request.now)
@@ -962,16 +980,24 @@ async fn pg_claim_pending_shared(
             .bind(request.now)
             .bind(i64::from(request.max_attempts))
             .bind(category_key)
-            .bind(i64::from(limit));
-        if fresh {
-            query = query.bind(published_since);
-        }
-        let rows = query
+            .bind(i64::from(limit))
+            .bind(published_since)
             .fetch_all(&mut *tx)
             .await
             .map_err(StorageError::from)?;
         plan.record(rows.len());
+        if !rows.is_empty() {
+            served = Some(side_of(fresh));
+        }
         claimed.extend(rows);
+    }
+    if let (1, Some(side)) = (n, served) {
+        let mark = ShareMark {
+            category_key,
+            stage: ShareStage::Claim,
+            side,
+        };
+        pg_upsert_share_side(&mut tx, &mark, request.now).await?;
     }
     tx.commit().await.map_err(StorageError::from)?;
     Ok(claimed)
@@ -1093,6 +1119,7 @@ async fn pg_insert_pending_and_advance(
     item: &NewAiResult,
     min_importance_score: i32,
     now: OffsetDateTime,
+    mark: Option<&ShareMark<'_>>,
 ) -> Result<InsertPendingOutcome, StorageError> {
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
     let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_AI_PENDING_SQL)
@@ -1106,6 +1133,9 @@ async fn pg_insert_pending_and_advance(
 
     let Some(ai_result_id) = inserted_id else {
         let outcome = pg_reconcile_conflict(&mut tx, item, Some(min_importance_score), now).await?;
+        if let (true, Some(mark)) = (outcome.article_advanced, mark) {
+            pg_upsert_share_side(&mut tx, mark, now).await?;
+        }
         tx.commit().await.map_err(StorageError::from)?;
         return Ok(outcome);
     };
@@ -1127,6 +1157,9 @@ async fn pg_insert_pending_and_advance(
         });
     }
 
+    if let Some(mark) = mark {
+        pg_upsert_share_side(&mut tx, mark, now).await?;
+    }
     tx.commit().await.map_err(StorageError::from)?;
     Ok(InsertPendingOutcome {
         ai_result_id: Some(ai_result_id),

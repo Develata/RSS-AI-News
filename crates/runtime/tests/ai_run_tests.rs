@@ -723,14 +723,22 @@ impl rss_ai_news_storage::ArticleRepository for FlakyArticleRepo {
         }
         self.inner.find_by_id(id).await
     }
-    async fn list_persisted_for_ai_task_gen(
+    async fn list_backlog_for_ai_task_gen(
         &self,
         category_key: &str,
+        identity: &rss_ai_news_storage::NewAiResult,
+        published_since: OffsetDateTime,
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<rss_ai_news_storage::ArticleAiTaskCandidate>, StorageError> {
         self.inner
-            .list_persisted_for_ai_task_gen(category_key, batch_size, after_id)
+            .list_backlog_for_ai_task_gen(
+                category_key,
+                identity,
+                published_since,
+                batch_size,
+                after_id,
+            )
             .await
     }
     async fn list_fresh_for_ai_task_gen(
@@ -1464,4 +1472,138 @@ async fn a_failed_second_claim_side_leaves_the_first_side_unclaimed() {
         .unwrap();
     let summary = flow.process_ai_tasks(&opts).await;
     assert_eq!(summary.succeeded, 2);
+}
+// === R2-B1: the share survives a moving window, retries and batch 2 ===
+
+/// A flow whose clock the test moves (`clock` is read on every call).
+fn clocked_flow(
+    pool: SqlitePool,
+    client: Arc<MockAiClient>,
+    clock: Arc<std::sync::Mutex<OffsetDateTime>>,
+) -> AiRunFlow {
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let mut deps = common::ai_deps(pool, app, client);
+    deps.clock = Arc::new(move || *clock.lock().unwrap());
+    AiRunFlow::new(Arc::new(deps))
+}
+
+/// Batch 1, one arrival per hourly run whose source time is 47h59m old: the
+/// previous run's article has slid out of the window by the next run. The
+/// backlog article must still be served on the second run.
+#[tokio::test]
+async fn batch_size_one_task_gen_alternation_survives_a_moving_window() {
+    let (_dir, pool) = make_test_pool().await;
+    let t0 = OffsetDateTime::now_utc().replace_nanosecond(0).unwrap();
+    let backlog = seed_aged(&pool, "b1-tg-old", 1, t0 - Duration::days(10)).await[0];
+    let clock = Arc::new(std::sync::Mutex::new(t0));
+    let flow = clocked_flow(
+        pool.clone(),
+        Arc::new(MockAiClient::default()),
+        Arc::clone(&clock),
+    );
+    let mut opts = opts();
+    opts.task_gen_batch_size = 1;
+    for run in 0..4_i64 {
+        let now = t0 + Duration::hours(run);
+        *clock.lock().unwrap() = now;
+        let arrival = seed_persisted_article(&pool, &format!("b1-tg-new-{run}"), "t", "b").await;
+        set_source_time(&pool, arrival, now - Duration::minutes(47 * 60 + 59)).await;
+        flow.task_gen(&opts).await;
+    }
+    assert_eq!(article_state(&pool, backlog).await, "ai_pending");
+}
+
+#[tokio::test]
+async fn batch_size_one_claim_alternation_survives_a_moving_window() {
+    let (_dir, pool) = make_test_pool().await;
+    let t0 = OffsetDateTime::now_utc().replace_nanosecond(0).unwrap();
+    let backlog = seed_aged(&pool, "b1-c-old", 1, t0 - Duration::days(10)).await;
+    let backlog_task = pending_tasks(&pool, &backlog).await[0];
+    let client = Arc::new(MockAiClient::default());
+    client.insert_success(backlog_task, output_json(80)).await;
+    let clock = Arc::new(std::sync::Mutex::new(t0));
+    let flow = clocked_flow(pool.clone(), Arc::clone(&client), Arc::clone(&clock));
+    let mut opts = opts();
+    opts.process_batch_size = 1;
+    opts.max_batches = 1;
+    for run in 0..4_i64 {
+        let now = t0 + Duration::hours(run);
+        *clock.lock().unwrap() = now;
+        let arrival = seed_aged(&pool, &format!("b1-c-new-{run}"), 1, now).await;
+        set_source_time(&pool, arrival[0], now - Duration::minutes(47 * 60 + 59)).await;
+        let task = pending_tasks(&pool, &arrival).await[0];
+        client.insert_success(task, output_json(80)).await;
+        flow.process_ai_tasks(&opts).await;
+    }
+    assert_eq!(ai_result_state(&pool, backlog_task).await, "succeeded");
+}
+
+/// Batch 2: the backlog slot is not handed to a second in-window article
+/// that merely has a lower id.
+#[tokio::test]
+async fn batch_size_two_task_gen_backlog_slot_is_not_taken_by_fresh_articles() {
+    let (_dir, pool) = make_test_pool().await;
+    let fresh = seed_aged(&pool, "b1-tg2-fresh", 2, hours_ago(1)).await;
+    let old = seed_aged(&pool, "b1-tg2-old", 1, days_ago(10)).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 2;
+
+    flow.task_gen(&opts).await;
+
+    assert_eq!(article_state(&pool, old[0]).await, "ai_pending");
+    assert_eq!(with_task(&pool, &fresh).await, 1);
+}
+
+#[tokio::test]
+async fn batch_size_two_claim_backlog_slot_is_not_taken_by_fresh_tasks() {
+    let (_dir, pool) = make_test_pool().await;
+    let fresh = seed_aged(&pool, "b1-c2-fresh", 2, hours_ago(1)).await;
+    let old = seed_aged(&pool, "b1-c2-old", 1, days_ago(10)).await;
+    let fresh_tasks = pending_tasks(&pool, &fresh).await;
+    let old_task = pending_tasks(&pool, &old).await[0];
+    let client = Arc::new(MockAiClient::default());
+    for id in fresh_tasks.iter().chain([&old_task]) {
+        client.insert_success(*id, output_json(80)).await;
+    }
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.process_batch_size = 2;
+    opts.max_batches = 1;
+
+    let summary = flow.process_ai_tasks(&opts).await;
+
+    assert_eq!(summary.claimed, 2);
+    assert_eq!(ai_result_state(&pool, old_task).await, "succeeded");
+}
+
+/// A fresh task that keeps failing retryably is re-claimed on every other
+/// run, so each retry counts as a fresh turn and the backlog keeps moving.
+#[tokio::test]
+async fn batch_size_one_claim_retries_count_as_served_turns() {
+    let (_dir, pool) = make_test_pool().await;
+    let fresh = seed_aged(&pool, "b1-r-fresh", 1, hours_ago(1)).await;
+    let old = seed_aged(&pool, "b1-r-old", 2, days_ago(10)).await;
+    let fresh_task = pending_tasks(&pool, &fresh).await[0];
+    let old_tasks = pending_tasks(&pool, &old).await;
+    // No response for the fresh task: every attempt fails retryably.
+    let client = Arc::new(MockAiClient::default());
+    for id in &old_tasks {
+        client.insert_success(*id, output_json(80)).await;
+    }
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.process_batch_size = 1;
+    opts.max_batches = 1;
+    opts.max_attempts = 10;
+    for _ in 0..4 {
+        flow.process_ai_tasks(&opts).await;
+    }
+    // Runs: fresh, backlog, fresh (retry), backlog.
+    assert_eq!(ai_result_state(&pool, old_tasks[0]).await, "succeeded");
+    assert_eq!(ai_result_state(&pool, old_tasks[1]).await, "succeeded");
+    assert_eq!(
+        ai_result_state_and_attempts(&pool, fresh_task).await,
+        ("pending".to_string(), 2)
+    );
 }

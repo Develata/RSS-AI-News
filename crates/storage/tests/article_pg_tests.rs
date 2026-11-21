@@ -192,6 +192,15 @@ async fn pg_update_content_hash_then_find_returns_new_hash() {
     assert_eq!(after.content_hash, "hash-new");
 }
 
+fn backlog_identity() -> rss_ai_news_storage::NewAiResult {
+    rss_ai_news_storage::NewAiResult {
+        article_id: 0,
+        prompt_version: 1,
+        output_schema_version: 1,
+        model_id: "model".to_string(),
+    }
+}
+
 #[tokio::test]
 #[ignore = "需要 docker daemon"]
 async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
@@ -217,7 +226,13 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
 
     // batch_size=2 + after_id=0 → 拿 ids[0..2]
     let page1 = repo
-        .list_persisted_for_ai_task_gen("ai", 2, 0)
+        .list_backlog_for_ai_task_gen(
+            "ai",
+            &backlog_identity(),
+            OffsetDateTime::now_utc() + time::Duration::days(365),
+            2,
+            0,
+        )
         .await
         .expect("pg list page1");
     assert_eq!(page1.len(), 2);
@@ -226,7 +241,13 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
 
     // after_id=ids[1] → 拿 ids[2..]
     let page2 = repo
-        .list_persisted_for_ai_task_gen("ai", 2, ids[1])
+        .list_backlog_for_ai_task_gen(
+            "ai",
+            &backlog_identity(),
+            OffsetDateTime::now_utc() + time::Duration::days(365),
+            2,
+            ids[1],
+        )
         .await
         .expect("pg list page2");
     assert_eq!(page2.len(), 1);

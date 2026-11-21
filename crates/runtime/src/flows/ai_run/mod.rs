@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_storage::{
-    ClaimRequest, ClaimedAiResult, NewAiResult, build_owner_id, lease_expires_at,
+    ClaimRequest, ClaimedAiResult, NewAiResult, ShareMark, ShareSide, ShareStage, build_owner_id,
+    lease_expires_at,
 };
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
@@ -34,15 +35,16 @@ impl AiRunFlow {
     /// Phase 1：为 `articles.state='persisted'` 的文章创建 pending AI 任务。
     ///
     /// 一次 pass 推进至多 `task_gen_batch_size` 篇 article（新插入 + 冲突对账，
-    /// 记 `article_advanced`），由两个列表分享（C9，plan/03 §5.1）：
+    /// 记 `article_advanced`），由两个不相交的列表分享（C9，plan/03 §5.1）：
     /// - fresh：publish 窗口内（若此刻 freeze 即可入选）且尚无本身份任务的文章，
     ///   来源时间最早者优先（最先掉出窗口）；
-    /// - backlog：全部 `persisted`，按 id 升序 + keyset 游标（C3：越过冲突后仍留在
-    ///   `persisted` 的行，并对账已有任务行）。
+    /// - backlog：其余 `persisted`（窗口外，或窗口内但已有本身份任务行），按 id
+    ///   升序 + keyset 游标（C3：越过冲突后仍留在 `persisted` 的行，并对账已有任务行）。
     ///
     /// 先行一侧得 `ceil(n/2)`，另一侧得余下，某侧不足时名额转给另一侧（两侧都扫完
-    /// 才少于 n）。n ≥ 2 时 fresh 先行；n = 1 时按该分类最新任务是否 fresh 轮换先行侧，
-    /// 跨 run 交替而不引入新状态。某页出现插入存储错误时本 pass 停止。
+    /// 才少于 n）。n ≥ 2 时 fresh 先行；n = 1 时先行侧是该分类上一次 task_gen
+    /// **实际推进**的文章所属侧的另一侧（`ai_fresh_share_state`，与推进同事务写入，
+    /// R2-B1）。某页出现插入存储错误时本 pass 停止。
     pub async fn task_gen(&self, opts: &AiRunOptions) -> TaskGenSummary {
         let emitter = RunEventEmitter {
             run_id: &self.ctx.run.run_id,
@@ -73,12 +75,12 @@ impl AiRunFlow {
             match self
                 .ctx
                 .ai_result_repo
-                .newest_task_is_fresh(&opts.category_key, since)
+                .last_served_side(&opts.category_key, ShareStage::TaskGen)
                 .await
             {
-                Ok(newest_fresh) => !newest_fresh.unwrap_or(false),
+                Ok(last) => last != Some(ShareSide::Fresh),
                 Err(error) => {
-                    tracing::error!("failed to read the task_gen alternation signal: {error}");
+                    tracing::error!("failed to read the task_gen alternation state: {error}");
                     summary.list_error = Some(error.error_kind().to_string());
                     pass.stopped = true;
                     true
@@ -171,8 +173,10 @@ impl AiRunFlow {
                 TaskGenSide::Backlog => {
                     self.ctx
                         .article_repo
-                        .list_persisted_for_ai_task_gen(
+                        .list_backlog_for_ai_task_gen(
                             &opts.category_key,
+                            &identity,
+                            pass.since,
                             pass.page_size,
                             pass.backlog_cursor,
                         )
@@ -200,16 +204,33 @@ impl AiRunFlow {
                     article_id: candidate.article_id,
                     ..identity.clone()
                 };
-                match self
-                    .ctx
-                    .ai_result_repo
-                    .insert_pending_and_advance_article(
-                        &item,
-                        i32::from(opts.min_importance_score.get()),
-                        (self.ctx.clock)(),
-                    )
-                    .await
-                {
+                let min_score = i32::from(opts.min_importance_score.get());
+                let now = (self.ctx.clock)();
+                // Batch size 1 records which side the advanced article belongs
+                // to (its own window membership: a backlog reconciliation of
+                // an in-window row counts as fresh), atomically with the
+                // advance (R2-B1).
+                let inserted = if pass.page_size == 1 {
+                    let mark = ShareMark {
+                        category_key: &opts.category_key,
+                        stage: ShareStage::TaskGen,
+                        side: if candidate.in_window {
+                            ShareSide::Fresh
+                        } else {
+                            ShareSide::Backlog
+                        },
+                    };
+                    self.ctx
+                        .ai_result_repo
+                        .insert_pending_advance_and_mark(&item, min_score, now, &mark)
+                        .await
+                } else {
+                    self.ctx
+                        .ai_result_repo
+                        .insert_pending_and_advance_article(&item, min_score, now)
+                        .await
+                };
+                match inserted {
                     Ok(insert) => {
                         if insert.ai_result_id.is_some() {
                             summary.inserted += 1;
@@ -224,7 +245,7 @@ impl AiRunFlow {
                         }
                         if insert.article_advanced {
                             outcome.handled += 1;
-                            if side == TaskGenSide::Fresh {
+                            if candidate.in_window {
                                 summary.fresh_advanced += 1;
                             }
                         }

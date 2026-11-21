@@ -266,6 +266,7 @@ schema 变更只能新增迁移，且 SQLite / PostgreSQL 两个方言同时提�
 | 0006 | `0006_decision_results` | decision_policies / decision_results（typed-decision shadow，[ADR 0011](../adr/0011-decision-run-shadow-runner.md)） |
 | 0007 | `0007_feed_entry_retry_cooldown` | `feed_entries.next_attempt_at`：extract retryable 失败的冷却截止点（[02-extract §5.3](./02-extract.md)） |
 | 0008 | `0008_publish_stage_budget_and_item_article_index` | `publish_records.stage_attempt_count`（按阶段计的发布重试预算，存量行为 0）+ `idx_publish_items_article`（快照归属查询）；[ADR 0012](../adr/0012-per-stage-publish-budget-and-snapshot-ownership.md) |
+| 0009 | `0009_ai_fresh_share_state` | `ai_fresh_share_state(category_key, stage, last_side)`：C9 batch=1 时 task_gen / claim 上一次实际服务的一侧（fresh / backlog），与推进或领取同事务写入（[03-ai §5.1/§5.2](./03-ai.md)，R2-B1） |
 
 ### 7.2 migrate 子命令
 

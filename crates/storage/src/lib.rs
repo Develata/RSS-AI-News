@@ -44,3 +44,4 @@ pub use repo::{
 pub use repo::{
     HtmlReplaySource, ReplayArticleDigest, ReplayProjectionRepo, ReplayProjectionRepository,
 };
+pub use repo::{ShareMark, ShareSide, ShareStage};

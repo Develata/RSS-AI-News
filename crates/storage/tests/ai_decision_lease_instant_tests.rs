@@ -148,7 +148,7 @@ async fn expired(op: Op, deadline: OffsetDateTime, now: OffsetDateTime) -> bool 
                 max_attempts: MAX_ATTEMPTS,
             };
             // The seeded article was discovered just now: inside any window.
-            ai.claim_pending_fresh(&request, "ai", t0() - Duration::hours(48))
+            ai.claim_pending_shared(&request, "ai", t0() - Duration::hours(48))
                 .await
                 .unwrap()
                 .len()

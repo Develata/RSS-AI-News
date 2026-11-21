@@ -15,7 +15,7 @@ mod common;
 use common::pg::{PgTestContext, make_pg_test_pool};
 use rss_ai_news_storage::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
-    ClaimRequest, NewAiResult,
+    ClaimRequest, NewAiResult, ShareSide, ShareStage,
 };
 use time::OffsetDateTime;
 
@@ -472,7 +472,22 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
         [ids[2], ids[1]],
         "in-window only, earliest source time first"
     );
-    assert_eq!(ai.newest_task_is_fresh("ai", since).await.unwrap(), None);
+    // R2-B1: the backlog list is the complement (here: the old article only).
+    let backlog = articles
+        .list_backlog_for_ai_task_gen("ai", &identity, since, 10, 0)
+        .await
+        .expect("pg backlog list");
+    assert_eq!(
+        backlog
+            .iter()
+            .map(|c| (c.article_id, c.in_window))
+            .collect::<Vec<_>>(),
+        [(ids[0], false)]
+    );
+    assert_eq!(
+        ai.last_served_side("ai", ShareStage::Claim).await.unwrap(),
+        None
+    );
 
     let mut tasks = Vec::new();
     for id in &ids {
@@ -486,7 +501,8 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
             .unwrap(),
         );
     }
-    // The anti-join drops articles that already have a task of the identity.
+    // The anti-join drops articles that already have a task of the identity;
+    // the backlog list then reconciles them (in-window rows flagged).
     assert!(
         articles
             .list_fresh_for_ai_task_gen("ai", &identity, since, 10)
@@ -494,11 +510,17 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
             .unwrap()
             .is_empty()
     );
+    let backlog = articles
+        .list_backlog_for_ai_task_gen("ai", &identity, since, 10, 0)
+        .await
+        .unwrap();
     assert_eq!(
-        ai.newest_task_is_fresh("ai", since).await.unwrap(),
-        Some(true)
+        backlog
+            .iter()
+            .map(|c| (c.article_id, c.in_window))
+            .collect::<Vec<_>>(),
+        [(ids[0], false), (ids[1], true), (ids[2], true)]
     );
-    assert_eq!(ai.last_claim_is_fresh("ai", since).await.unwrap(), None);
 
     let request = ClaimRequest {
         owner: "w".to_string(),
@@ -507,22 +529,32 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
         batch_size: 1,
         max_attempts: 3,
     };
-    let fresh = ai.claim_pending_fresh(&request, "ai", since).await.unwrap();
+    // Batch size 1: no state → fresh first; the served side is recorded.
+    let fresh = ai
+        .claim_pending_shared(&request, "ai", since)
+        .await
+        .unwrap();
     assert_eq!(fresh.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[2]]);
     assert_eq!(
-        ai.last_claim_is_fresh("ai", since).await.unwrap(),
-        Some(true)
+        ai.last_served_side("ai", ShareStage::Claim).await.unwrap(),
+        Some(ShareSide::Fresh)
     );
-    let later = ClaimRequest {
-        now: now + time::Duration::seconds(1),
-        ..request.clone()
-    };
-    let oldest = ai.claim_pending(&later, "ai").await.unwrap();
+    // Next batch leads with the backlog: the out-of-window task.
+    let oldest = ai
+        .claim_pending_shared(&request, "ai", since)
+        .await
+        .unwrap();
     assert_eq!(oldest.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[0]]);
     assert_eq!(
-        ai.last_claim_is_fresh("ai", since).await.unwrap(),
-        Some(false)
+        ai.last_served_side("ai", ShareStage::Claim).await.unwrap(),
+        Some(ShareSide::Backlog)
     );
+    // Backlog exhausted: its slot passes to the remaining fresh task.
+    let rest = ai
+        .claim_pending_shared(&request, "ai", since)
+        .await
+        .unwrap();
+    assert_eq!(rest.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[1]]);
     ctx.cleanup().await;
 }
 

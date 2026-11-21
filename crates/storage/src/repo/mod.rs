@@ -74,7 +74,8 @@ pub use article::{
 };
 pub use article_ai_result::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
-    ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome,
+    ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome, ShareMark,
+    ShareSide, ShareStage,
 };
 pub use decision_result::{
     ClaimedDecision, DecisionArticle, DecisionAttemptRecord, DecisionExecution, DecisionFailure,
