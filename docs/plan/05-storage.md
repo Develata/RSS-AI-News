@@ -187,6 +187,9 @@ reclaim / `terminalize_exhausted` / 原始响应 TTL 清理的 `raw_response_exp
 采用同一规则（`repo::sqlite_stored_deadline` 写入、`repo::sqlite_instant_cutoff` 比较，
 测试 `ai_decision_lease_instant_tests.rs`）。`reindex_jobs` 的 claim / claim_by_id / 续跑领取 / reclaim 与 checkpoint
 续租同样改用此规则（R2-S14，测试 `reindex_job_lease_instant_tests.rs`）。doctor 的同类谓词仍是字典序比较，待单独修复。
+C9 publish 窗口（AI task_gen 列表与 fresh claim）在 SQLite 上同样按 `julianday()` 毫秒比较来源时间，窗口两端向内取整到整毫秒；
+亚毫秒边界（同一毫秒内的未来来源时间可入窗、同毫秒内的先后改由 article id 决定、与 freeze 的 TEXT 比较在亚秒边界不一致）
+是已接受的已知行为，见 [03-ai §5.1](./03-ai.md)。
 
 **`attempt_count` 不重置**，作为重试预算的硬约束。publish_records 例外：预算读 `stage_attempt_count`（阶段推进清零），`attempt_count` 只累计审计（[11 §4.1](./11-error-and-recovery.md)）。
 
