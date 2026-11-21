@@ -47,8 +47,9 @@ docker compose run --rm rss-ai-news --config-dir /app/configs doctor
 ### 形态 1：外挂 crontab 文件（推荐）
 
 scheduler 容器入口由环境变量 `RSS_CRONTAB_FILE` 控制（默认 `/app/crontab`）。
-**只要该路径存在且非空**，entrypoint 直接交给 supercronic 跑，**跳过**形态 2 的 env 模式。
-若文件不存在或为空，则自动降级到形态 2。
+**只要该路径是非空普通文件**，entrypoint 直接交给 supercronic 跑，**跳过**形态 2 的 env 模式。
+若文件不存在或为空，则自动降级到形态 2。若该路径存在但不是普通文件——最常见的是 compose 挂载了一个宿主上
+不存在的 `./crontab`，Docker 在容器里建出了同名目录——entrypoint 报错退出，而不是悄悄改用默认调度。
 
 ```bash
 # 1. 准备 crontab 文件（supercronic 兼容格式）
@@ -75,7 +76,9 @@ RSS_CRON_SCHEDULE="0 */6 * * *"
 RSS_CRON_COMMAND="run --max-batches 3"
 ```
 
-entrypoint 在内存里拼一行 crontab 给 supercronic。适合简单场景。
+entrypoint 拼一行 `<RSS_CRON_SCHEDULE> /usr/local/bin/rss-ai-news --config-dir /app/configs <RSS_CRON_COMMAND>`
+给 supercronic（它用 `/bin/sh -c` 执行命令部分）。`RSS_CRON_COMMAND` 按 shell 命令行书写，含空格的参数照常加引号，
+例如 `RSS_CRON_COMMAND="rebuild-report --output 'daily report.md'"`；两个变量都不能含换行或回车。适合简单场景。
 
 ## 首次 migrate
 

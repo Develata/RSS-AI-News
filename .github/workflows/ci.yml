@@ -152,22 +152,36 @@ jobs:
         run: docker run --rm rss-ai-news:runtime --help
       - name: smoke run --help (debug)
         run: docker run --rm rss-ai-news:debug --help
-      # scheduler 入口是 supercronic 长驻；smoke 用一个永不到期的 cron
-      # 表达式启动 5s 后强制停。能起即视为通过（验证 supercronic 安装 +
-      # entrypoint script 解析 + USER appuser 权限正常）。
-      - name: smoke scheduler boot
+      # scheduler: supercronic must actually run one job from the env-mode
+      # line. The 7-field schedule (seconds first) fires every 2 s. The job is
+      # side-effect free: clap rejects the extra positional before any config
+      # or database access. Its argument contains a space, so the logged
+      # "unexpected argument 'spaced arg'" proves the generated line kept it
+      # as one argv element (nested quoting used to split it into `spaced`).
+      # Polls for up to 75 s; fails early if the container exits.
+      - name: smoke scheduler runs a job
         run: |
-          docker run --rm -d --name scheduler-smoke \
-            -e RSS_CRON_SCHEDULE='0 0 1 1 *' \
-            -e RSS_CRON_COMMAND='--help' \
+          docker run -d --name scheduler-smoke \
+            -e RSS_CRON_SCHEDULE='*/2 * * * * * *' \
+            -e "RSS_CRON_COMMAND=validate-config 'spaced arg'" \
             rss-ai-news:scheduler
-          sleep 3
+          ran=""
+          for _ in $(seq 1 75); do
+            if docker logs scheduler-smoke 2>&1 | grep -qF "unexpected argument 'spaced arg'"; then
+              ran=1
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' scheduler-smoke)" != true ]; then
+              break
+            fi
+            sleep 1
+          done
           docker logs scheduler-smoke
-          if ! docker ps --filter name=scheduler-smoke --filter status=running -q | grep -q .; then
-            echo "::error::scheduler container exited unexpectedly"
+          docker rm -f scheduler-smoke >/dev/null
+          if [ -z "$ran" ]; then
+            echo "::error::scheduler did not run the job with its argv intact"
             exit 1
           fi
-          docker stop scheduler-smoke
       # validate-config 不需要外部凭据；只需要示例 config 触发 W3 fail-fast 校验。
       # 容器启动 + 配置加载 + 错误退出码 78 (ConfigError) 一并被 smoke 覆盖。
       - name: prepare smoke config

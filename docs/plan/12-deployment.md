@@ -92,7 +92,8 @@ builder  →  runtime  →  debug
 30 21 * * *  /usr/local/bin/rss-ai-news --config-dir /app/configs publish
 ```
 
-文件存在且非空 → 直接交给 supercronic，跳过 env 模式。
+文件是非空普通文件 → 直接交给 supercronic，跳过 env 模式；不存在或为空 → env 模式。
+路径存在但不是普通文件（bind-mount 的宿主文件不存在时 Docker 会建出目录）→ entrypoint 报错退出。
 适合需要分离 ingest 节奏与 publish 节奏的场景。
 
 ### 4.2 单行 env 模式（向后兼容）
@@ -102,7 +103,9 @@ RSS_CRON_SCHEDULE="0 */6 * * *"
 RSS_CRON_COMMAND="run --max-batches 3"
 ```
 
-entrypoint 在内存里拼一行 crontab 给 supercronic。适合简单场景。
+entrypoint 拼一行 `<RSS_CRON_SCHEDULE> /usr/local/bin/rss-ai-news --config-dir /app/configs <RSS_CRON_COMMAND>`
+给 supercronic。supercronic 用 `/bin/sh -c` 执行命令部分，所以 `RSS_CRON_COMMAND` 按 shell 命令行书写、只被解析一次
+（含空格的参数照常加引号）；两个变量含换行或回车时 entrypoint 拒绝启动。适合简单场景。
 
 ### 4.3 日志
 
