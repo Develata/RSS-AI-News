@@ -83,6 +83,12 @@ SET status = 'active'
 WHERE id = $1 AND kind = $2 AND status = 'pending'
 "#;
 
+// R2-S14: SQLite lease predicates compare `julianday()` instants (text order
+// is not instant order within a second); `$cutoff` is
+// `sqlite_instant_cutoff(now)` and stored deadlines go through
+// `sqlite_stored_deadline`, the shared repo rule (C5). Unparseable legacy
+// text falls back to the text comparison.
+
 /// SQLite `claim_pending`：子查询无 `FOR UPDATE SKIP LOCKED`（语法不支持，
 /// 整库写锁本身串行化并发）。
 pub(super) const CLAIM_PENDING_SQLITE_SQL: &str = r#"
@@ -96,7 +102,7 @@ SET state = 'running',
 WHERE id = (
     SELECT id FROM reindex_jobs
     WHERE state = 'pending'
-      AND (lease_expires_at IS NULL OR lease_expires_at < $5)
+      AND (lease_expires_at IS NULL OR COALESCE(julianday(lease_expires_at) < julianday($5), lease_expires_at < $5))
     ORDER BY created_at ASC, id ASC
     LIMIT 1
 )
@@ -137,7 +143,7 @@ SET state = 'running',
     updated_at = $4
 WHERE id = $5
   AND state = 'pending'
-  AND (lease_expires_at IS NULL OR lease_expires_at < $6)
+  AND (lease_expires_at IS NULL OR COALESCE(julianday(lease_expires_at) < julianday($6), lease_expires_at < $6))
 RETURNING id, target, rule_version_id, last_processed_id, attempt_count
 "#;
 
@@ -210,6 +216,25 @@ WHERE id = $4
 RETURNING id, target, rule_version_id, last_processed_id, attempt_count
 "#;
 
+/// SQLite [`CLAIM_RESUMABLE_SQL`]: instant comparisons; `$5` is
+/// `sqlite_instant_cutoff(now)`.
+pub(super) const CLAIM_RESUMABLE_SQLITE_SQL: &str = r#"
+UPDATE reindex_jobs
+SET state = 'running',
+    lease_owner = $1,
+    lease_expires_at = $2,
+    started_at = COALESCE(started_at, $3),
+    attempt_count = attempt_count + 1,
+    updated_at = $3
+WHERE id = $4
+  AND (
+      (state = 'pending' AND (lease_expires_at IS NULL OR COALESCE(julianday(lease_expires_at) < julianday($5), lease_expires_at < $5)))
+      OR (state = 'running' AND lease_expires_at IS NOT NULL
+          AND COALESCE(julianday(lease_expires_at) < julianday($5), lease_expires_at < $5))
+  )
+RETURNING id, target, rule_version_id, last_processed_id, attempt_count
+"#;
+
 pub(super) const ASSERT_LEASE_HELD_SQL: &str = r#"
 UPDATE reindex_jobs
 SET updated_at = $1
@@ -257,4 +282,17 @@ SET state = 'pending',
 WHERE state = 'running'
   AND lease_expires_at IS NOT NULL
   AND lease_expires_at < $2
+"#;
+
+/// SQLite [`RECLAIM_EXPIRED_LEASES_SQL`]: instant comparison; `$2` is
+/// `sqlite_instant_cutoff(now)`.
+pub(super) const RECLAIM_EXPIRED_LEASES_SQLITE_SQL: &str = r#"
+UPDATE reindex_jobs
+SET state = 'pending',
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = $1
+WHERE state = 'running'
+  AND lease_expires_at IS NOT NULL
+  AND COALESCE(julianday(lease_expires_at) < julianday($2), lease_expires_at < $2)
 "#;

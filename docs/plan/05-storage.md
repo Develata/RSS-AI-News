@@ -185,8 +185,8 @@ lease 绝不提前判过期（最多晚约 2 ms）。`julianday()` 解析不了�
 `article_ai_results`（claim / reclaim / `terminalize_exhausted`）与 `decision_results`（claim /
 reclaim / `terminalize_exhausted` / 原始响应 TTL 清理的 `raw_response_expires_at`）2026-11-21 起
 采用同一规则（`repo::sqlite_stored_deadline` 写入、`repo::sqlite_instant_cutoff` 比较，
-测试 `ai_decision_lease_instant_tests.rs`）。其余 lease 表（`reindex_jobs`）与 doctor 的同类谓词仍是
-字典序比较，待单独修复。
+测试 `ai_decision_lease_instant_tests.rs`）。`reindex_jobs` 的 claim / claim_by_id / 续跑领取 / reclaim 与 checkpoint
+续租同样改用此规则（R2-S14，测试 `reindex_job_lease_instant_tests.rs`）。doctor 的同类谓词仍是字典序比较，待单独修复。
 
 **`attempt_count` 不重置**，作为重试预算的硬约束。publish_records 例外：预算读 `stage_attempt_count`（阶段推进清零），`attempt_count` 只累计审计（[11 §4.1](./11-error-and-recovery.md)）。
 
