@@ -75,6 +75,125 @@ WHERE id IN (
 RETURNING id, article_id, prompt_version, output_schema_version, model_id
 "#;
 
+// ── C9: publish-window ("fresh") share ────────────────────────────────
+// "Fresh" = the article would be eligible if publish froze now:
+// `COALESCE(fe.published_at, fe.discovered_at) >= published_since` (the
+// freeze rule, `flows/publish/freeze.rs::published_since`; no upper bound, so
+// future-dated articles count as fresh). SQLite compares and orders that
+// source time by `julianday()` instant with a text fallback; `$9` is
+// `sqlite_instant_cutoff(published_since)`.
+
+/// SQLite fresh claim: pending tasks of in-window articles, oldest source
+/// time first (they leave the window first), ties by task id. Lease,
+/// attempt and category predicates are those of [`CLAIM_AI_PENDING_SQLITE_SQL`].
+pub(super) const CLAIM_AI_PENDING_FRESH_SQLITE_SQL: &str = r#"
+UPDATE article_ai_results
+SET state = 'running',
+    lease_owner = $1,
+    lease_expires_at = $2,
+    attempt_count = attempt_count + 1,
+    started_at = COALESCE(started_at, $3),
+    updated_at = $4
+WHERE id IN (
+    SELECT aar.id
+    FROM article_ai_results aar
+    JOIN articles a ON a.id = aar.article_id
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE aar.state = 'pending'
+      AND (aar.lease_expires_at IS NULL
+           OR COALESCE(julianday(aar.lease_expires_at) < julianday($5),
+                       aar.lease_expires_at < $5))
+      AND aar.attempt_count < $6
+      AND fs.category_key = $7
+      AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($9),
+                   COALESCE(fe.published_at, fe.discovered_at) >= $9)
+    ORDER BY julianday(COALESCE(fe.published_at, fe.discovered_at)) ASC,
+             COALESCE(fe.published_at, fe.discovered_at) ASC,
+             aar.id ASC
+    LIMIT $8
+)
+RETURNING id, article_id, prompt_version, output_schema_version, model_id
+"#;
+
+/// PG fresh claim; `FOR UPDATE OF aar` as in [`CLAIM_AI_PENDING_PG_SQL`].
+pub(super) const CLAIM_AI_PENDING_FRESH_PG_SQL: &str = r#"
+UPDATE article_ai_results
+SET state = 'running',
+    lease_owner = $1,
+    lease_expires_at = $2,
+    attempt_count = attempt_count + 1,
+    started_at = COALESCE(started_at, $3),
+    updated_at = $4
+WHERE id IN (
+    SELECT aar.id
+    FROM article_ai_results aar
+    JOIN articles a ON a.id = aar.article_id
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE aar.state = 'pending'
+      AND (aar.lease_expires_at IS NULL OR aar.lease_expires_at < $5)
+      AND aar.attempt_count < $6
+      AND fs.category_key = $7
+      AND COALESCE(fe.published_at, fe.discovered_at) >= $9
+    ORDER BY COALESCE(fe.published_at, fe.discovered_at) ASC, aar.id ASC
+    LIMIT $8
+    FOR UPDATE OF aar SKIP LOCKED
+)
+RETURNING id, article_id, prompt_version, output_schema_version, model_id
+"#;
+
+/// Batch-size-1 alternation signal for task_gen: is the category's newest AI
+/// task (highest id) for an in-window article? No row → NULL.
+pub(super) const NEWEST_TASK_IS_FRESH_SQLITE_SQL: &str = r#"
+SELECT COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($2),
+                COALESCE(fe.published_at, fe.discovered_at) >= $2)
+FROM article_ai_results aar
+JOIN articles a ON a.id = aar.article_id
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE fs.category_key = $1
+ORDER BY aar.id DESC
+LIMIT 1
+"#;
+
+pub(super) const NEWEST_TASK_IS_FRESH_PG_SQL: &str = r#"
+SELECT COALESCE(fe.published_at, fe.discovered_at) >= $2
+FROM article_ai_results aar
+JOIN articles a ON a.id = aar.article_id
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE fs.category_key = $1
+ORDER BY aar.id DESC
+LIMIT 1
+"#;
+
+/// Batch-size-1 alternation signal for the claim: is the category's most
+/// recently first-claimed task (latest `started_at`) for an in-window
+/// article? Never claimed → NULL.
+pub(super) const LAST_CLAIM_IS_FRESH_SQLITE_SQL: &str = r#"
+SELECT COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($2),
+                COALESCE(fe.published_at, fe.discovered_at) >= $2)
+FROM article_ai_results aar
+JOIN articles a ON a.id = aar.article_id
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE fs.category_key = $1 AND aar.started_at IS NOT NULL
+ORDER BY julianday(aar.started_at) DESC, aar.started_at DESC, aar.id DESC
+LIMIT 1
+"#;
+
+pub(super) const LAST_CLAIM_IS_FRESH_PG_SQL: &str = r#"
+SELECT COALESCE(fe.published_at, fe.discovered_at) >= $2
+FROM article_ai_results aar
+JOIN articles a ON a.id = aar.article_id
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE fs.category_key = $1 AND aar.started_at IS NOT NULL
+ORDER BY aar.started_at DESC, aar.id DESC
+LIMIT 1
+"#;
+
 pub(super) const RELEASE_AI_SUCCESS_SQL: &str = r#"
 UPDATE article_ai_results
 SET state = $1, summary = $2, tags_json = $3, importance_score = $4,

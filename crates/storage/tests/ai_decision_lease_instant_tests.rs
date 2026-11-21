@@ -34,6 +34,8 @@ fn ms(n: i64) -> Duration {
 #[derive(Clone, Copy, Debug)]
 enum Op {
     AiClaim,
+    /// C9 fresh-share claim: same lease predicate.
+    AiClaimFresh,
     AiReclaim,
     AiTerminalize,
     DecisionClaim,
@@ -42,8 +44,9 @@ enum Op {
     DecisionPurgeRaw,
 }
 
-const OPS: [Op; 7] = [
+const OPS: [Op; 8] = [
     Op::AiClaim,
+    Op::AiClaimFresh,
     Op::AiReclaim,
     Op::AiTerminalize,
     Op::DecisionClaim,
@@ -120,7 +123,7 @@ async fn expired(op: Op, deadline: OffsetDateTime, now: OffsetDateTime) -> bool 
     let ai = ArticleAiResultRepo::new(pool.clone());
     let decision = DecisionResultRepo::new_with_storage(StoragePool::Sqlite(pool.clone()));
     match op {
-        Op::AiClaim => seed_ai(&pool, "pending", 0, deadline).await,
+        Op::AiClaim | Op::AiClaimFresh => seed_ai(&pool, "pending", 0, deadline).await,
         Op::AiReclaim => seed_ai(&pool, "running", 1, deadline).await,
         Op::AiTerminalize => seed_ai(&pool, "pending", MAX_ATTEMPTS, deadline).await,
         _ => seed_decision(&pool, op, deadline).await,
@@ -135,6 +138,21 @@ async fn expired(op: Op, deadline: OffsetDateTime, now: OffsetDateTime) -> bool 
                 max_attempts: MAX_ATTEMPTS,
             };
             ai.claim_pending(&request, "ai").await.unwrap().len() == 1
+        }
+        Op::AiClaimFresh => {
+            let request = ClaimRequest {
+                owner: "worker-new".to_string(),
+                now,
+                lease_expires_at: now + Duration::minutes(5),
+                batch_size: 10,
+                max_attempts: MAX_ATTEMPTS,
+            };
+            // The seeded article was discovered just now: inside any window.
+            ai.claim_pending_fresh(&request, "ai", t0() - Duration::hours(48))
+                .await
+                .unwrap()
+                .len()
+                == 1
         }
         Op::AiReclaim => ai.reclaim_expired_leases(now).await.unwrap() == 1,
         Op::AiTerminalize => ai.terminalize_exhausted(MAX_ATTEMPTS, now).await.unwrap() == 1,

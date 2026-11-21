@@ -368,6 +368,8 @@ async fn run_category(
             category_key: category.category.key.clone(),
             prompt_version,
             output_schema_version,
+            // C9: the publish window decides which articles are "fresh".
+            candidate_window_hours: loaded.app.publish.candidate_window_hours,
         })
         .await;
 

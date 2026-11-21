@@ -91,6 +91,32 @@ pub trait ArticleAiResultRepository: Send + Sync {
         request: &ClaimRequest,
         category_key: &str,
     ) -> Result<Vec<ClaimedAiResult>, StorageError>;
+    /// C9：同 [`Self::claim_pending`]，但只领取 publish 窗口内（"fresh"）文章的
+    /// pending 任务：`COALESCE(fe.published_at, fe.discovered_at) >=
+    /// published_since`，按该来源时间升序（最先掉出窗口的先领）、任务 id 次序。
+    async fn claim_pending_fresh(
+        &self,
+        request: &ClaimRequest,
+        category_key: &str,
+        published_since: OffsetDateTime,
+    ) -> Result<Vec<ClaimedAiResult>, StorageError>;
+
+    /// C9 batch=1 轮换信号（task_gen）：该分类最新（id 最大）的 AI 任务是否属于
+    /// 窗口内文章；分类尚无任务 → `None`。
+    async fn newest_task_is_fresh(
+        &self,
+        category_key: &str,
+        published_since: OffsetDateTime,
+    ) -> Result<Option<bool>, StorageError>;
+
+    /// C9 batch=1 轮换信号（claim）：该分类最近一次首次领取（`started_at` 最大）
+    /// 的任务是否属于窗口内文章；从未领取 → `None`。
+    async fn last_claim_is_fresh(
+        &self,
+        category_key: &str,
+        published_since: OffsetDateTime,
+    ) -> Result<Option<bool>, StorageError>;
+
     async fn release_success(
         &self,
         id: i64,

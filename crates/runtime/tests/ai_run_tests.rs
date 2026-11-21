@@ -457,6 +457,7 @@ fn opts_for_category(category_key: &str) -> AiRunOptions {
         category_key: category_key.to_string(),
         prompt_version: 1,
         output_schema_version: 1,
+        candidate_window_hours: 48,
     }
 }
 
@@ -719,6 +720,17 @@ impl rss_ai_news_storage::ArticleRepository for FlakyArticleRepo {
     ) -> Result<Vec<rss_ai_news_storage::ArticleAiTaskCandidate>, StorageError> {
         self.inner
             .list_persisted_for_ai_task_gen(category_key, batch_size, after_id)
+            .await
+    }
+    async fn list_fresh_for_ai_task_gen(
+        &self,
+        category_key: &str,
+        identity: &rss_ai_news_storage::NewAiResult,
+        published_since: OffsetDateTime,
+        batch_size: u32,
+    ) -> Result<Vec<rss_ai_news_storage::ArticleAiTaskCandidate>, StorageError> {
+        self.inner
+            .list_fresh_for_ai_task_gen(category_key, identity, published_since, batch_size)
             .await
     }
     async fn list_in_window_for_backfill(
@@ -1058,6 +1070,9 @@ async fn task_gen_reconciles_conflicting_pending_row_and_reaches_newer_articles_
     let (_dir, pool) = make_test_pool().await;
     let first = seed_persisted_article(&pool, "starve-first", "title", "body").await;
     let second = seed_persisted_article(&pool, "starve-second", "title", "body").await;
+    // Outside the publish window: this is the id-ordered (backlog) list.
+    set_source_time(&pool, first, days_ago(10)).await;
+    set_source_time(&pool, second, days_ago(10)).await;
     seed_identity_row(&pool, first, "pending", None).await;
     let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
     let mut opts = opts();
@@ -1079,6 +1094,8 @@ async fn task_gen_moves_past_permanently_failed_rows_within_one_pass() {
     let (_dir, pool) = make_test_pool().await;
     let failed = seed_persisted_article(&pool, "starve-failed", "title", "body").await;
     let fresh = seed_persisted_article(&pool, "starve-fresh", "title", "body").await;
+    set_source_time(&pool, failed, days_ago(10)).await;
+    set_source_time(&pool, fresh, days_ago(10)).await;
     seed_identity_row(&pool, failed, "permanent_failed", None).await;
     let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
     let mut opts = opts();
@@ -1150,4 +1167,242 @@ async fn backfilled_persisted_article_becomes_publishable_after_ai_success() {
     assert_eq!(summary.task_gen.scanned, 0);
     assert_eq!(summary.process.succeeded, 1);
     assert_eq!(article_state(&pool, article_id).await, "ready_for_publish");
+}
+
+// === C9: publish-window share of task_gen and claim capacity ===
+
+fn days_ago(days: i64) -> OffsetDateTime {
+    OffsetDateTime::now_utc().replace_nanosecond(0).unwrap() - Duration::days(days)
+}
+
+fn hours_ago(hours: i64) -> OffsetDateTime {
+    OffsetDateTime::now_utc().replace_nanosecond(0).unwrap() - Duration::hours(hours)
+}
+
+/// Sets the article's source time (`feed_entries.published_at`).
+async fn set_source_time(pool: &SqlitePool, article_id: i64, at: OffsetDateTime) {
+    sqlx::query(
+        "UPDATE feed_entries SET published_at = ? \
+         WHERE id = (SELECT origin_feed_entry_id FROM articles WHERE id = ?)",
+    )
+    .bind(at)
+    .bind(article_id)
+    .execute(pool)
+    .await
+    .expect("source time should update");
+}
+
+/// `count` persisted articles whose source time is `at` (minus i seconds).
+async fn seed_aged(pool: &SqlitePool, tag: &str, count: usize, at: OffsetDateTime) -> Vec<i64> {
+    let mut ids = Vec::new();
+    for i in 0..count {
+        let id = seed_persisted_article(pool, &format!("{tag}-{i}"), "title", "body").await;
+        set_source_time(pool, id, at - Duration::seconds(i as i64)).await;
+        ids.push(id);
+    }
+    ids
+}
+
+async fn with_task(pool: &SqlitePool, ids: &[i64]) -> usize {
+    let mut count = 0;
+    for id in ids {
+        if ai_result_count_by_article(pool, *id).await > 0 {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[tokio::test]
+async fn fresh_article_gets_a_task_despite_a_backlog_larger_than_one_batch() {
+    let (_dir, pool) = make_test_pool().await;
+    let old = seed_aged(&pool, "c9-old", 6, days_ago(10)).await;
+    let fresh = seed_aged(&pool, "c9-fresh", 1, hours_ago(1)).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 2;
+
+    let summary = flow.task_gen(&opts).await;
+
+    assert_eq!(summary.inserted, 2, "the batch limit holds");
+    assert_eq!(summary.fresh_advanced, 1);
+    assert_eq!(article_state(&pool, fresh[0]).await, "ai_pending");
+    // Older work advances in the same pass (oldest id first).
+    assert_eq!(article_state(&pool, old[0]).await, "ai_pending");
+    assert_eq!(with_task(&pool, &old).await, 1);
+}
+
+#[tokio::test]
+async fn fresh_share_prefers_articles_that_leave_the_window_first() {
+    let (_dir, pool) = make_test_pool().await;
+    let late = seed_aged(&pool, "c9-late", 1, hours_ago(1)).await;
+    let future = seed_aged(&pool, "c9-future", 1, hours_ago(-2)).await;
+    // Highest id, but the first to leave the window.
+    let early = seed_aged(&pool, "c9-early", 1, hours_ago(40)).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 2; // fresh share 1, backlog share 1
+
+    flow.task_gen(&opts).await;
+
+    // Fresh share: the article closest to leaving the window. The backlog
+    // share then takes the lowest id among the rest.
+    assert_eq!(article_state(&pool, early[0]).await, "ai_pending");
+    assert_eq!(article_state(&pool, late[0]).await, "ai_pending");
+    assert_eq!(article_state(&pool, future[0]).await, "persisted");
+}
+
+#[tokio::test]
+async fn older_backlog_keeps_advancing_while_fresh_inflow_continues() {
+    let (_dir, pool) = make_test_pool().await;
+    let old = seed_aged(&pool, "c9-backlog", 4, days_ago(10)).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 2;
+    let mut fresh = Vec::new();
+    for run in 0..3 {
+        // New in-window articles keep arriving, more than the fresh share.
+        fresh.extend(seed_aged(&pool, &format!("c9-inflow-{run}"), 2, hours_ago(1)).await);
+        flow.task_gen(&opts).await;
+    }
+    assert_eq!(
+        with_task(&pool, &old).await,
+        3,
+        "one backlog article per run"
+    );
+    assert_eq!(
+        with_task(&pool, &fresh).await,
+        3,
+        "one fresh article per run"
+    );
+}
+
+#[tokio::test]
+async fn batch_size_one_task_gen_alternates_between_fresh_and_backlog() {
+    let (_dir, pool) = make_test_pool().await;
+    let old = seed_aged(&pool, "c9-alt-old", 3, days_ago(10)).await;
+    let fresh = seed_aged(&pool, "c9-alt-fresh", 3, hours_ago(1)).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 1;
+    let mut served = Vec::new();
+    for _ in 0..4 {
+        let summary = flow.task_gen(&opts).await;
+        assert_eq!(summary.inserted, 1);
+        served.push(summary.fresh_advanced == 1);
+    }
+    assert_eq!(served, [true, false, true, false]);
+    assert_eq!(with_task(&pool, &old).await, 2);
+    assert_eq!(with_task(&pool, &fresh).await, 2);
+}
+
+#[tokio::test]
+async fn a_stuck_fresh_row_does_not_block_batch_size_one() {
+    let (_dir, pool) = make_test_pool().await;
+    let stuck = seed_aged(&pool, "c9-stuck", 1, hours_ago(40)).await;
+    let next = seed_aged(&pool, "c9-next", 1, hours_ago(1)).await;
+    seed_identity_row(&pool, stuck[0], "permanent_failed", None).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 1;
+
+    let first = flow.task_gen(&opts).await;
+    let second = flow.task_gen(&opts).await;
+
+    assert_eq!(first.inserted + second.inserted, 1);
+    assert_eq!(article_state(&pool, stuck[0]).await, "persisted");
+    assert_eq!(article_state(&pool, next[0]).await, "ai_pending");
+}
+
+#[tokio::test]
+async fn window_zero_treats_every_article_as_fresh() {
+    let (_dir, pool) = make_test_pool().await;
+    let old = seed_aged(&pool, "c9-zero", 2, days_ago(400)).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.candidate_window_hours = 0;
+    opts.task_gen_batch_size = 4;
+
+    let summary = flow.task_gen(&opts).await;
+
+    assert_eq!(summary.fresh_advanced, 2);
+    assert_eq!(with_task(&pool, &old).await, 2);
+}
+
+/// Pending tasks for `ids`, created through task_gen so they carry the
+/// identity of `opts()`; returns their AI result ids in article order.
+async fn pending_tasks(pool: &SqlitePool, ids: &[i64]) -> Vec<i64> {
+    let mut result_ids = Vec::new();
+    for id in ids {
+        seed_identity_row(pool, *id, "pending", None).await;
+        sqlx::query("UPDATE articles SET state = 'ai_pending' WHERE id = ?")
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        result_ids.push(ai_result_id_by_article(pool, *id).await);
+    }
+    result_ids
+}
+
+#[tokio::test]
+async fn claim_gives_fresh_tasks_a_share_when_older_tasks_fill_the_queue() {
+    let (_dir, pool) = make_test_pool().await;
+    let old = seed_aged(&pool, "c9-q-old", 4, days_ago(10)).await;
+    let fresh = seed_aged(&pool, "c9-q-fresh", 1, hours_ago(1)).await;
+    let old_tasks = pending_tasks(&pool, &old).await;
+    let fresh_task = pending_tasks(&pool, &fresh).await[0];
+    let client = Arc::new(MockAiClient::default());
+    for id in old_tasks.iter().chain([&fresh_task]) {
+        client.insert_success(*id, output_json(80)).await;
+    }
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.process_batch_size = 2;
+    opts.max_batches = 1;
+
+    let summary = flow.process_ai_tasks(&opts).await;
+
+    assert_eq!(summary.claimed, 2, "the batch limit holds");
+    assert_eq!(ai_result_state(&pool, fresh_task).await, "succeeded");
+    assert_eq!(ai_result_state(&pool, old_tasks[0]).await, "succeeded");
+    assert_eq!(ai_result_state(&pool, old_tasks[1]).await, "pending");
+}
+
+#[tokio::test]
+async fn batch_size_one_claims_alternate_between_fresh_and_older_tasks_across_runs() {
+    let (_dir, pool) = make_test_pool().await;
+    let old = seed_aged(&pool, "c9-c-old", 3, days_ago(10)).await;
+    let fresh = seed_aged(&pool, "c9-c-fresh", 3, hours_ago(1)).await;
+    let old_tasks = pending_tasks(&pool, &old).await;
+    let fresh_tasks = pending_tasks(&pool, &fresh).await;
+    let client = Arc::new(MockAiClient::default());
+    for id in old_tasks.iter().chain(fresh_tasks.iter()) {
+        client.insert_success(*id, output_json(80)).await;
+    }
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.process_batch_size = 1;
+    opts.max_batches = 1;
+    let done = |ids: Vec<i64>| {
+        let pool = pool.clone();
+        async move {
+            let mut count = 0;
+            for id in ids {
+                if ai_result_state(&pool, id).await == "succeeded" {
+                    count += 1;
+                }
+            }
+            count
+        }
+    };
+    let mut served = Vec::new();
+    for _ in 0..4 {
+        let before = done(fresh_tasks.clone()).await;
+        let summary = flow.process_ai_tasks(&opts).await;
+        assert_eq!(summary.claimed, 1);
+        served.push(done(fresh_tasks.clone()).await > before);
+    }
+    assert_eq!(served, [true, false, true, false]);
+    assert_eq!(done(old_tasks).await, 2);
 }

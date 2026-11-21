@@ -41,6 +41,10 @@ pub struct AiRunOptions {
     /// version_tag)` 行后得到的 `rule_versions.id`，写入
     /// `article_ai_results.output_schema_version`。
     pub output_schema_version: i64,
+    /// `[publish].candidate_window_hours`: articles inside the publish window
+    /// get a bounded share of task_gen and claim capacity (C9). `0` = no
+    /// window (every article counts as fresh), as for the freeze.
+    pub candidate_window_hours: u32,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -57,6 +61,8 @@ pub struct TaskGenSummary {
     /// Conflicts whose still-`persisted` article was moved to the state the
     /// existing task row implies (C3). Counted in `conflict_skipped` too.
     pub reconciled: u32,
+    /// Articles advanced from the publish-window (fresh) list (C9).
+    pub fresh_advanced: u32,
     pub article_already_advanced: u32,
     /// Pending-row inserts that failed with a storage error (not conflicts).
     pub insert_failed: u32,

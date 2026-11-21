@@ -18,11 +18,14 @@ use super::article_ai_result::{
 };
 use super::article_ai_result_sql::{
     ADVANCE_ARTICLE_FROM_AI_PHASE_SQL, ADVANCE_ARTICLE_TO_AI_PENDING_SQL,
-    ADVANCE_PERSISTED_ARTICLE_SQL, CLAIM_AI_PENDING_PG_SQL, CLAIM_AI_PENDING_SQLITE_SQL,
-    INSERT_AI_PENDING_SQL, OTHER_SUCCEEDED_AI_EXISTS_SQL, RECLAIM_AI_LEASES_SQL,
-    RECLAIM_AI_LEASES_SQLITE_SQL, RELEASE_AI_FAILURE_SQL, RELEASE_AI_RETRYABLE_FAILURE_SQL,
-    RELEASE_AI_SUCCESS_SQL, SELECT_AI_IDENTITY_ROW_PG_SQL, SELECT_AI_IDENTITY_ROW_SQLITE_SQL,
-    SELECT_ARTICLE_STATE_SQL, TERMINALIZE_EXHAUSTED_AI_SQL, TERMINALIZE_EXHAUSTED_AI_SQLITE_SQL,
+    ADVANCE_PERSISTED_ARTICLE_SQL, CLAIM_AI_PENDING_FRESH_PG_SQL,
+    CLAIM_AI_PENDING_FRESH_SQLITE_SQL, CLAIM_AI_PENDING_PG_SQL, CLAIM_AI_PENDING_SQLITE_SQL,
+    INSERT_AI_PENDING_SQL, LAST_CLAIM_IS_FRESH_PG_SQL, LAST_CLAIM_IS_FRESH_SQLITE_SQL,
+    NEWEST_TASK_IS_FRESH_PG_SQL, NEWEST_TASK_IS_FRESH_SQLITE_SQL, OTHER_SUCCEEDED_AI_EXISTS_SQL,
+    RECLAIM_AI_LEASES_SQL, RECLAIM_AI_LEASES_SQLITE_SQL, RELEASE_AI_FAILURE_SQL,
+    RELEASE_AI_RETRYABLE_FAILURE_SQL, RELEASE_AI_SUCCESS_SQL, SELECT_AI_IDENTITY_ROW_PG_SQL,
+    SELECT_AI_IDENTITY_ROW_SQLITE_SQL, SELECT_ARTICLE_STATE_SQL, TERMINALIZE_EXHAUSTED_AI_SQL,
+    TERMINALIZE_EXHAUSTED_AI_SQLITE_SQL,
 };
 
 /// `(id, state, keep_decision, importance_score)` of an existing identity row.
@@ -91,6 +94,100 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
         match &self.pool {
             StoragePool::Sqlite(p) => sqlite_claim_pending(p, request, category_key).await,
             StoragePool::Postgres(p) => pg_claim_pending(p, request, category_key).await,
+        }
+    }
+
+    async fn claim_pending_fresh(
+        &self,
+        request: &ClaimRequest,
+        category_key: &str,
+        published_since: OffsetDateTime,
+    ) -> Result<Vec<ClaimedAiResult>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlx::query_as::<_, ClaimedAiResult>(CLAIM_AI_PENDING_FRESH_SQLITE_SQL)
+                    .bind(&request.owner)
+                    .bind(sqlite_stored_deadline(request.lease_expires_at))
+                    .bind(request.now)
+                    .bind(request.now)
+                    .bind(sqlite_instant_cutoff(request.now))
+                    .bind(i64::from(request.max_attempts))
+                    .bind(category_key)
+                    .bind(i64::from(request.batch_size))
+                    .bind(sqlite_instant_cutoff(published_since))
+                    .fetch_all(p)
+                    .await
+                    .map_err(StorageError::from)
+            }
+            StoragePool::Postgres(p) => {
+                sqlx::query_as::<_, ClaimedAiResult>(CLAIM_AI_PENDING_FRESH_PG_SQL)
+                    .bind(&request.owner)
+                    .bind(request.lease_expires_at)
+                    .bind(request.now)
+                    .bind(request.now)
+                    .bind(request.now)
+                    .bind(i64::from(request.max_attempts))
+                    .bind(category_key)
+                    .bind(i64::from(request.batch_size))
+                    .bind(published_since)
+                    .fetch_all(p)
+                    .await
+                    .map_err(StorageError::from)
+            }
+        }
+    }
+
+    async fn newest_task_is_fresh(
+        &self,
+        category_key: &str,
+        published_since: OffsetDateTime,
+    ) -> Result<Option<bool>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlx::query_scalar::<_, Option<bool>>(NEWEST_TASK_IS_FRESH_SQLITE_SQL)
+                    .bind(category_key)
+                    .bind(sqlite_instant_cutoff(published_since))
+                    .fetch_optional(p)
+                    .await
+                    .map(Option::flatten)
+                    .map_err(StorageError::from)
+            }
+            StoragePool::Postgres(p) => {
+                sqlx::query_scalar::<_, Option<bool>>(NEWEST_TASK_IS_FRESH_PG_SQL)
+                    .bind(category_key)
+                    .bind(published_since)
+                    .fetch_optional(p)
+                    .await
+                    .map(Option::flatten)
+                    .map_err(StorageError::from)
+            }
+        }
+    }
+
+    async fn last_claim_is_fresh(
+        &self,
+        category_key: &str,
+        published_since: OffsetDateTime,
+    ) -> Result<Option<bool>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlx::query_scalar::<_, Option<bool>>(LAST_CLAIM_IS_FRESH_SQLITE_SQL)
+                    .bind(category_key)
+                    .bind(sqlite_instant_cutoff(published_since))
+                    .fetch_optional(p)
+                    .await
+                    .map(Option::flatten)
+                    .map_err(StorageError::from)
+            }
+            StoragePool::Postgres(p) => {
+                sqlx::query_scalar::<_, Option<bool>>(LAST_CLAIM_IS_FRESH_PG_SQL)
+                    .bind(category_key)
+                    .bind(published_since)
+                    .fetch_optional(p)
+                    .await
+                    .map(Option::flatten)
+                    .map_err(StorageError::from)
+            }
         }
     }
 

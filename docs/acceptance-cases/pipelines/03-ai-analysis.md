@@ -18,6 +18,8 @@ AI-off 直通模式跳过整段。
 - task_gen 跳过已推进的 article（重入幂等）
 - task_gen 遇身份行冲突时按已有行对账仍为 `Persisted` 的 article（pending/running → `AiPending`，
   succeeded/filtered → 成功派生态，permanent_failed → 保持并被游标越过）；batch=1 时新文章不饥饿
+- publish 窗口份额（C9）：积压大于一批时窗口内文章仍得到任务并被领取；旧积压每 run 仍推进；
+  batch=1 时 task_gen 与 claim 跨 run 交替；窗口 0 = 全部 fresh
 - task_gen 仅扫描 `--category` 指定分类（其它分类不动）
 - AI 成功 + 高分 → article → `ReadyForPublish`、ai_result → `Succeeded`
 - AI 成功 + 低分 → article → `AiDone`（不入发布候选）
@@ -43,6 +45,15 @@ AI-off 直通模式跳过整段。
 | `task_gen_reconciles_conflicting_pending_row_and_reaches_newer_articles_with_batch_one` | 同上 | 冲突对账 + 不饥饿 |
 | `task_gen_moves_past_permanently_failed_rows_within_one_pass` | 同上 | 游标越过失败行 |
 | `task_gen_reconciles_finished_rows_to_the_post_ai_state` | 同上 | 成功派生态对账 |
+| `fresh_article_gets_a_task_despite_a_backlog_larger_than_one_batch` | 同上 | C9 fresh 不饥饿 |
+| `fresh_share_prefers_articles_that_leave_the_window_first` | 同上 | C9 fresh 排序 |
+| `older_backlog_keeps_advancing_while_fresh_inflow_continues` | 同上 | C9 旧积压仍推进 |
+| `batch_size_one_task_gen_alternates_between_fresh_and_backlog` | 同上 | C9 batch=1 交替 |
+| `a_stuck_fresh_row_does_not_block_batch_size_one` | 同上 | C9 卡住行不挡 |
+| `window_zero_treats_every_article_as_fresh` | 同上 | C9 窗口 0 |
+| `claim_gives_fresh_tasks_a_share_when_older_tasks_fill_the_queue` | 同上 | C9 claim 份额 |
+| `batch_size_one_claims_alternate_between_fresh_and_older_tasks_across_runs` | 同上 | C9 claim 交替 |
+| `pg_fresh_share_lists_claims_and_signals_by_source_time` | `crates/storage/tests/article_ai_result_pg_tests.rs` | C9 PG SQL |
 | `process_succeeds_high_score_advances_article_to_ready_for_publish` | 同上 | 高分 happy |
 | `process_succeeds_low_score_advances_article_to_ai_done` | 同上 | 低分跳过候选 |
 | `process_filtered_advances_article_to_publish_skipped` | 同上 | keep=false |

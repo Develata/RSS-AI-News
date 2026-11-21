@@ -425,6 +425,107 @@ async fn pg_claim_is_not_hidden_by_locked_source_or_article_rows() {
     ctx.cleanup().await;
 }
 
+/// C9：PG 的 publish 窗口份额 SQL——fresh 列表（反连接 + 来源时间升序）、
+/// fresh claim（来源时间升序，`FOR UPDATE OF aar`）与两个 batch=1 轮换信号。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
+    use rss_ai_news_storage::{ArticleRepo, ArticleRepository};
+
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "fresh").await;
+    let ai = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let articles = ArticleRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let since = now - time::Duration::hours(48);
+    let mut ids = Vec::new();
+    // (tag, source time): old backlog, late fresh, early fresh.
+    for (tag, at) in [
+        ("f-old", now - time::Duration::days(10)),
+        ("f-late", now - time::Duration::hours(1)),
+        ("f-early", now - time::Duration::hours(40)),
+    ] {
+        let id = seed_article(&ctx, tag, "persisted").await;
+        sqlx::query(
+            "UPDATE feed_entries SET published_at = $1 \
+             WHERE id = (SELECT origin_feed_entry_id FROM articles WHERE id = $2)",
+        )
+        .bind(at)
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    let identity = NewAiResult {
+        article_id: 0,
+        prompt_version: prompt_id,
+        output_schema_version: schema_id,
+        model_id: "gpt-4".to_string(),
+    };
+    let listed = articles
+        .list_fresh_for_ai_task_gen("ai", &identity, since, 10)
+        .await
+        .expect("pg fresh list");
+    assert_eq!(
+        listed.iter().map(|c| c.article_id).collect::<Vec<_>>(),
+        [ids[2], ids[1]],
+        "in-window only, earliest source time first"
+    );
+    assert_eq!(ai.newest_task_is_fresh("ai", since).await.unwrap(), None);
+
+    let mut tasks = Vec::new();
+    for id in &ids {
+        tasks.push(
+            ai.insert_pending(&NewAiResult {
+                article_id: *id,
+                ..identity.clone()
+            })
+            .await
+            .unwrap()
+            .unwrap(),
+        );
+    }
+    // The anti-join drops articles that already have a task of the identity.
+    assert!(
+        articles
+            .list_fresh_for_ai_task_gen("ai", &identity, since, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        ai.newest_task_is_fresh("ai", since).await.unwrap(),
+        Some(true)
+    );
+    assert_eq!(ai.last_claim_is_fresh("ai", since).await.unwrap(), None);
+
+    let request = ClaimRequest {
+        owner: "w".to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 3,
+    };
+    let fresh = ai.claim_pending_fresh(&request, "ai", since).await.unwrap();
+    assert_eq!(fresh.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[2]]);
+    assert_eq!(
+        ai.last_claim_is_fresh("ai", since).await.unwrap(),
+        Some(true)
+    );
+    let later = ClaimRequest {
+        now: now + time::Duration::seconds(1),
+        ..request.clone()
+    };
+    let oldest = ai.claim_pending(&later, "ai").await.unwrap();
+    assert_eq!(oldest.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[0]]);
+    assert_eq!(
+        ai.last_claim_is_fresh("ai", since).await.unwrap(),
+        Some(false)
+    );
+    ctx.cleanup().await;
+}
+
 /// C3：身份冲突时按已有行对账仍为 persisted 的 article（PG 加 FOR UPDATE 路径）。
 #[tokio::test]
 #[ignore = "需要 docker daemon"]
