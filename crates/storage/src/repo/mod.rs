@@ -77,7 +77,7 @@ pub use article_ai_result::{
 pub use decision_result::{
     ClaimedDecision, DecisionArticle, DecisionAttemptRecord, DecisionExecution, DecisionFailure,
     DecisionFailureMode, DecisionIdentity, DecisionRawRecord, DecisionResultRepo,
-    DecisionResultRepository, DecisionResultState, DecisionSuccess,
+    DecisionResultRepository, DecisionResultState, DecisionSuccess, GeneratedPage,
 };
 pub use feed_entry::{
     ClaimedFeedEntry, FeedEntry, FeedEntryInsertOutcome, FeedEntryRepo, FeedEntryRepository,

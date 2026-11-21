@@ -120,15 +120,17 @@ async fn pg_window_uses_whole_second_cutoff_and_generation_is_idempotent() {
     let cutoff = time::macros::datetime!(2026-10-31 12:00:00.800 UTC);
     let now = OffsetDateTime::now_utc();
     assert_eq!(
-        repo.generate_pending(&identity(), &laya(), cutoff, 10, now)
+        repo.generate_pending(&identity(), &laya(), cutoff, 0, 10, now)
             .await
-            .unwrap(),
+            .unwrap()
+            .inserted,
         2
     );
     assert_eq!(
-        repo.generate_pending(&identity(), &laya(), cutoff, 10, now)
+        repo.generate_pending(&identity(), &laya(), cutoff, 0, 10, now)
             .await
-            .unwrap(),
+            .unwrap()
+            .inserted,
         0
     );
     ctx.cleanup().await;
@@ -140,7 +142,7 @@ async fn pg_parallel_claims_are_disjoint_and_releases_follow_their_mode() {
     let (ctx, repo, _ids) = setup(12).await;
     let now = OffsetDateTime::now_utc();
     let long_ago = now - Duration::days(3650);
-    repo.generate_pending(&identity(), &laya(), long_ago, 12, now)
+    repo.generate_pending(&identity(), &laya(), long_ago, 0, 12, now)
         .await
         .unwrap();
     let lease = now + Duration::minutes(2);
@@ -231,7 +233,7 @@ async fn pg_parallel_claims_are_disjoint_and_releases_follow_their_mode() {
 async fn pg_maintenance_and_raw_cleanup() {
     let (ctx, repo, _ids) = setup(3).await;
     let now = OffsetDateTime::now_utc();
-    repo.generate_pending(&identity(), &laya(), now - Duration::days(3650), 3, now)
+    repo.generate_pending(&identity(), &laya(), now - Duration::days(3650), 0, 3, now)
         .await
         .unwrap();
     let claimed = repo

@@ -8,8 +8,57 @@ VALUES ($1, $2, $3)
 ON CONFLICT (policy_version) DO NOTHING
 "#;
 
-/// `$8` is `sqlite_utc_seconds(cutoff)`; `created_at` is normalised to the
-/// same whole-second UTC text first (see `repo::sqlite_utc_seconds`).
+// Keyset generation (ADR 0011 §5): one page = the first `$n` candidates with
+// `a.id > cursor`; the cursor advances to the last id *scanned* in the page,
+// so a page whose candidates all conflict still moves forward. Each page is
+// two statements in one transaction: the page end, then the insert of every
+// candidate in `(cursor, page_end]`. The insert has no LIMIT: on PostgreSQL
+// (READ COMMITTED) an article committed into that range meanwhile is
+// inserted too instead of being pushed out and skipped by the cursor.
+
+/// SQLite page end. `$2` is `sqlite_utc_seconds(cutoff)`; `created_at` is
+/// normalised to the same whole-second UTC text (see
+/// `repo::sqlite_utc_seconds`).
+pub(super) const GENERATE_PAGE_END_SQLITE_SQL: &str = r#"
+SELECT MAX(id) FROM (
+    SELECT a.id
+    FROM articles a
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE fs.category_key = $1
+      AND a.state <> 'retired'
+      AND replace(substr(a.created_at, 1, 19), 'T', ' ') >= $2
+      AND a.id > $3
+      AND NOT EXISTS (
+          SELECT 1 FROM decision_results d
+          WHERE d.article_id = a.id AND d.policy_version = $4 AND d.execution_key = $5
+      )
+    ORDER BY a.id ASC
+    LIMIT $6
+) page
+"#;
+
+/// `$2` is the whole-second cutoff as TIMESTAMPTZ.
+pub(super) const GENERATE_PAGE_END_PG_SQL: &str = r#"
+SELECT MAX(id) FROM (
+    SELECT a.id
+    FROM articles a
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE fs.category_key = $1
+      AND a.state <> 'retired'
+      AND a.created_at >= $2
+      AND a.id > $3
+      AND NOT EXISTS (
+          SELECT 1 FROM decision_results d
+          WHERE d.article_id = a.id AND d.policy_version = $4 AND d.execution_key = $5
+      )
+    ORDER BY a.id ASC
+    LIMIT $6
+) page
+"#;
+
+/// SQLite: inserts the page `(cursor $9, page_end $10]`; `$8` as above.
 pub(super) const GENERATE_PENDING_SQLITE_SQL: &str = r#"
 INSERT INTO decision_results (
     article_id, category_key, policy_version, execution_key, provider, requested_model,
@@ -22,16 +71,17 @@ JOIN feed_sources fs ON fs.id = fe.source_id
 WHERE fs.category_key = $1
   AND a.state <> 'retired'
   AND replace(substr(a.created_at, 1, 19), 'T', ' ') >= $8
+  AND a.id > $9
+  AND a.id <= $10
   AND NOT EXISTS (
       SELECT 1 FROM decision_results d
       WHERE d.article_id = a.id AND d.policy_version = $2 AND d.execution_key = $3
   )
 ORDER BY a.id ASC
-LIMIT $9
 ON CONFLICT (article_id, policy_version, execution_key) DO NOTHING
 "#;
 
-/// `$8` is the whole-second cutoff as TIMESTAMPTZ.
+/// PostgreSQL: as above, `$8` is the whole-second cutoff as TIMESTAMPTZ.
 pub(super) const GENERATE_PENDING_PG_SQL: &str = r#"
 INSERT INTO decision_results (
     article_id, category_key, policy_version, execution_key, provider, requested_model,
@@ -44,14 +94,20 @@ JOIN feed_sources fs ON fs.id = fe.source_id
 WHERE fs.category_key = $1
   AND a.state <> 'retired'
   AND a.created_at >= $8
+  AND a.id > $9
+  AND a.id <= $10
   AND NOT EXISTS (
       SELECT 1 FROM decision_results d
       WHERE d.article_id = a.id AND d.policy_version = $2 AND d.execution_key = $3
   )
 ORDER BY a.id ASC
-LIMIT $9
 ON CONFLICT (article_id, policy_version, execution_key) DO NOTHING
 "#;
+
+/// SQLite: take the write lock first so the page-end read and the insert are
+/// one serialised step (no read→write upgrade, no concurrent insert between).
+pub(super) const LOCK_DECISION_RESULTS_SQLITE_SQL: &str =
+    "UPDATE decision_results SET id = id WHERE 0";
 
 /// SQLite: lease expiry compared by instant (`julianday()`), not by RFC3339
 /// text (variable-width fractions sort out of instant order within a

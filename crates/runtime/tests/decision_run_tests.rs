@@ -24,7 +24,7 @@ use rss_ai_news_runtime::{
 use rss_ai_news_storage::{
     ClaimedDecision, DecisionArticle, DecisionExecution, DecisionFailure, DecisionIdentity,
     DecisionResultRepo, DecisionResultRepository, DecisionResultState, DecisionSuccess,
-    RunEventRepo, StorageError, StoragePool,
+    GeneratedPage, RunEventRepo, StorageError, StoragePool,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -193,6 +193,8 @@ struct Faults {
     article_error: bool,
     article_timeout: bool,
     article_hang: bool,
+    /// Records the `after_id` of every generation page.
+    generation_cursors: Option<Arc<Mutex<Vec<i64>>>>,
 }
 
 struct FaultyRepo {
@@ -221,11 +223,15 @@ impl DecisionResultRepository for FaultyRepo {
         identity: &DecisionIdentity,
         execution: &DecisionExecution,
         cutoff: OffsetDateTime,
+        after_id: i64,
         limit: u32,
         now: OffsetDateTime,
-    ) -> Result<u64, StorageError> {
+    ) -> Result<GeneratedPage, StorageError> {
+        if let Some(cursors) = &self.faults.generation_cursors {
+            cursors.lock().unwrap().push(after_id);
+        }
         self.inner
-            .generate_pending(identity, execution, cutoff, limit, now)
+            .generate_pending(identity, execution, cutoff, after_id, limit, now)
             .await
     }
     async fn claim(
@@ -499,6 +505,42 @@ async fn the_request_budget_caps_calls() {
     assert!(summary.budget_exhausted);
     // Generation follows the windows: no backlog of pending rows.
     assert_eq!(states(&pool).await.len(), 3);
+}
+
+/// C7 (ADR 0011 §5): within one run, every generation page continues after
+/// the previous page instead of rescanning from the first article, and no
+/// candidate is skipped.
+#[tokio::test]
+async fn generation_continues_from_the_cursor_within_a_run() {
+    let (_dir, pool) = make_test_pool().await;
+    seed(&pool, "ai", 5).await;
+    let cursors = Arc::new(Mutex::new(Vec::new()));
+    let mut settings = settings();
+    settings.concurrency = 2;
+    let summary = run_with(
+        &pool,
+        ScriptedClient::new([]),
+        settings,
+        vec![plan("ai", questions())],
+        10,
+        Faults {
+            generation_cursors: Some(Arc::clone(&cursors)),
+            ..Faults::default()
+        },
+    )
+    .await;
+    assert_eq!(summary.categories[0].succeeded, 5);
+    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM articles ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    // Pages of two: 0 → ids[1] → ids[3] → ids[4] (empty, the end).
+    assert_eq!(*cursors.lock().unwrap(), vec![0, ids[1], ids[3], ids[4]]);
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM decision_results")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 5);
 }
 
 #[tokio::test]

@@ -407,6 +407,8 @@ impl DecisionRunFlow {
         let calls = Arc::new(AtomicU64::new(0));
         let mut budget = opts.max_requests;
         let mut idle = vec![false; plans.len()];
+        // Per category, per run: the generation keyset cursor (ADR 0011 §5).
+        let mut cursors = vec![0_i64; plans.len()];
         loop {
             let mut progressed = false;
             for (index, plan) in plans.iter().enumerate() {
@@ -419,7 +421,14 @@ impl DecisionRunFlow {
                 }
                 let window = deps.settings.concurrency.min(budget);
                 let claimed = match self
-                    .claim_or_generate(plan, &owner, window, cutoff, &mut summary.categories[index])
+                    .claim_or_generate(
+                        plan,
+                        &owner,
+                        window,
+                        cutoff,
+                        &mut cursors[index],
+                        &mut summary.categories[index],
+                    )
                     .await
                 {
                     Ok(claimed) => claimed,
@@ -447,12 +456,22 @@ impl DecisionRunFlow {
 
     /// Claims a window; when nothing is claimable, generates up to one window
     /// of new rows first (ADR 0011 §5).
+    ///
+    /// Generation pages by `cursor` (`a.id > cursor`, advanced to the last id
+    /// each page scanned) instead of rescanning the articles from the start
+    /// for every window. Invariant: every candidate with `id <= cursor` had a
+    /// row of this identity when its page was scanned (inserted here, or by a
+    /// concurrent run — the unique key keeps those single), so nothing below
+    /// the cursor is left unprocessed. The cursor lives for one run; an article
+    /// with a lower id committed later (PostgreSQL sequences can commit out of
+    /// order) is picked up by the next run.
     async fn claim_or_generate(
         &self,
         plan: &CategoryPlan,
         owner: &str,
         window: u32,
         cutoff: OffsetDateTime,
+        cursor: &mut i64,
         stats: &mut CategoryStats,
     ) -> Result<(Vec<ClaimedDecision>, Instant), Option<String>> {
         let deps = &self.deps;
@@ -478,17 +497,26 @@ impl DecisionRunFlow {
             stats.claimed += claimed.len() as u64;
             return Ok((claimed, started));
         }
-        let generated = Self::storage(deps.decision_repo.generate_pending(
-            &plan.identity,
-            &deps.execution,
-            cutoff,
-            window,
-            OffsetDateTime::now_utc(),
-        ))
-        .await?;
-        stats.generated += generated;
-        if generated == 0 {
-            return Ok((Vec::new(), started));
+        // Pages whose candidates were all taken concurrently insert nothing
+        // but still move the cursor; stop at the first page that inserted.
+        loop {
+            let page = Self::storage(deps.decision_repo.generate_pending(
+                &plan.identity,
+                &deps.execution,
+                cutoff,
+                *cursor,
+                window,
+                OffsetDateTime::now_utc(),
+            ))
+            .await?;
+            stats.generated += page.inserted;
+            let Some(last_scanned_id) = page.last_scanned_id else {
+                return Ok((Vec::new(), started));
+            };
+            *cursor = last_scanned_id;
+            if page.inserted > 0 {
+                break;
+            }
         }
         let (claimed, started) = claim().await?;
         stats.claimed += claimed.len() as u64;

@@ -12,11 +12,12 @@ use crate::{NewRunEvent, RunEventRepository, StorageError, StoragePool, classify
 use super::decision_result::{
     ClaimedDecision, DecisionArticle, DecisionAttemptRecord, DecisionExecution, DecisionFailure,
     DecisionFailureMode, DecisionIdentity, DecisionRawRecord, DecisionResultRepo,
-    DecisionResultRepository, DecisionResultState, DecisionSuccess,
+    DecisionResultRepository, DecisionResultState, DecisionSuccess, GeneratedPage,
 };
 use super::decision_result_sql::{
-    CLAIM_PG_SQL, CLAIM_SQLITE_SQL, COUNT_OTHER_IDENTITY_PENDING_SQL, GENERATE_PENDING_PG_SQL,
-    GENERATE_PENDING_SQLITE_SQL, INSERT_RUN_EVENT_SQL, LOAD_ARTICLE_TEXT_SQL,
+    CLAIM_PG_SQL, CLAIM_SQLITE_SQL, COUNT_OTHER_IDENTITY_PENDING_SQL, GENERATE_PAGE_END_PG_SQL,
+    GENERATE_PAGE_END_SQLITE_SQL, GENERATE_PENDING_PG_SQL, GENERATE_PENDING_SQLITE_SQL,
+    INSERT_RUN_EVENT_SQL, LOAD_ARTICLE_TEXT_SQL, LOCK_DECISION_RESULTS_SQLITE_SQL,
     PURGE_EXPIRED_RAW_PG_SQL, PURGE_EXPIRED_RAW_SQLITE_SQL, RECLAIM_EXPIRED_SQL,
     RECLAIM_EXPIRED_SQLITE_SQL, RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL,
     TERMINALIZE_EXHAUSTED_SQL, TERMINALIZE_EXHAUSTED_SQLITE_SQL, UPSERT_POLICY_SQL,
@@ -220,9 +221,10 @@ impl DecisionResultRepository for DecisionResultRepo {
         identity: &DecisionIdentity,
         execution: &DecisionExecution,
         cutoff: OffsetDateTime,
+        after_id: i64,
         limit: u32,
         now: OffsetDateTime,
-    ) -> Result<u64, StorageError> {
+    ) -> Result<GeneratedPage, StorageError> {
         let cutoff = whole_second(cutoff);
         let laya_max_len = execution.laya_max_len.map(i64::from);
         let classify = |error| {
@@ -230,24 +232,23 @@ impl DecisionResultRepository for DecisionResultRepo {
                 classify_db_error(error, "decision_results", &identity.category_key)
             })
         };
-        let count = match &self.pool {
-            StoragePool::Sqlite(pool) => sqlx::query(GENERATE_PENDING_SQLITE_SQL)
-                .bind(&identity.category_key)
-                .bind(&identity.policy_version)
-                .bind(&identity.execution_key)
-                .bind(&execution.provider)
-                .bind(&execution.requested_model)
-                .bind(laya_max_len)
-                .bind(now)
-                .bind(super::sqlite_utc_seconds(cutoff))
-                .bind(i64::from(limit))
-                .execute(pool)
-                .await
-                .map_err(classify)?
-                .rows_affected(),
-            StoragePool::Postgres(pool) => {
-                let mut tx = pg_begin_bounded(pool).await?;
-                let count = sqlx::query(GENERATE_PENDING_PG_SQL)
+        macro_rules! page_end {
+            ($sql:expr, $cutoff:expr, $tx:expr) => {
+                sqlx::query_scalar::<_, Option<i64>>($sql)
+                    .bind(&identity.category_key)
+                    .bind($cutoff)
+                    .bind(after_id)
+                    .bind(&identity.policy_version)
+                    .bind(&identity.execution_key)
+                    .bind(i64::from(limit))
+                    .fetch_one(&mut *$tx)
+                    .await
+                    .map_err(classify)?
+            };
+        }
+        macro_rules! insert {
+            ($sql:expr, $cutoff:expr, $page_end:expr, $tx:expr) => {
+                sqlx::query($sql)
                     .bind(&identity.category_key)
                     .bind(&identity.policy_version)
                     .bind(&identity.execution_key)
@@ -255,17 +256,53 @@ impl DecisionResultRepository for DecisionResultRepo {
                     .bind(&execution.requested_model)
                     .bind(laya_max_len)
                     .bind(now)
-                    .bind(cutoff)
-                    .bind(i64::from(limit))
-                    .execute(&mut *tx)
+                    .bind($cutoff)
+                    .bind(after_id)
+                    .bind($page_end)
+                    .execute(&mut *$tx)
                     .await
                     .map_err(classify)?
-                    .rows_affected();
+                    .rows_affected()
+            };
+        }
+        let page = match &self.pool {
+            StoragePool::Sqlite(pool) => {
+                let cutoff = super::sqlite_utc_seconds(cutoff);
+                let mut tx = pool.begin().await.map_err(bounded)?;
+                sqlx::query(LOCK_DECISION_RESULTS_SQLITE_SQL)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(classify)?;
+                let page = match page_end!(GENERATE_PAGE_END_SQLITE_SQL, &cutoff, tx) {
+                    None => GeneratedPage {
+                        inserted: 0,
+                        last_scanned_id: None,
+                    },
+                    Some(end) => GeneratedPage {
+                        inserted: insert!(GENERATE_PENDING_SQLITE_SQL, &cutoff, end, tx),
+                        last_scanned_id: Some(end),
+                    },
+                };
                 tx.commit().await.map_err(bounded)?;
-                count
+                page
+            }
+            StoragePool::Postgres(pool) => {
+                let mut tx = pg_begin_bounded(pool).await?;
+                let page = match page_end!(GENERATE_PAGE_END_PG_SQL, cutoff, tx) {
+                    None => GeneratedPage {
+                        inserted: 0,
+                        last_scanned_id: None,
+                    },
+                    Some(end) => GeneratedPage {
+                        inserted: insert!(GENERATE_PENDING_PG_SQL, cutoff, end, tx),
+                        last_scanned_id: Some(end),
+                    },
+                };
+                tx.commit().await.map_err(bounded)?;
+                page
             }
         };
-        Ok(count)
+        Ok(page)
     }
 
     async fn claim(
