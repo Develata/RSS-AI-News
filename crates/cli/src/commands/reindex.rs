@@ -235,11 +235,7 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
     let mut outcomes = Vec::with_capacity(domain_targets.len());
     for target in domain_targets {
         let flow = ReindexFlow::new(ctx.clone());
-        let rule_fingerprint = reindex_rule_fingerprint(
-            target,
-            &loaded.app.dedup.link_normalizer_version,
-            &categories,
-        );
+        let rule_fingerprint = reindex_rule_fingerprint(target, &categories);
         let outcome = run_single_target(
             flow,
             target,
@@ -274,21 +270,21 @@ pub const CATEGORIES_RULE_VERSION: u32 = 1;
 
 /// The rule identity (`rule_versions.payload_sha256`) a reindex run resumes
 /// by (R2-S17): SHA-256 of a canonical JSON of the target, its algorithm
-/// version and the configuration that decides the rewritten values —
-/// `dedup.link_normalizer_version` for `link_hash`; every configured source
-/// (category, key, display name, feed URL, kind, enabled, priority; sorted)
-/// for `categories`. The same inputs give the same fingerprint; any change
-/// gives another one.
+/// version and the configuration that decides the rewritten values — every
+/// configured source (category, key, display name, feed URL, kind, enabled,
+/// priority; sorted) for `categories`. The same inputs give the same
+/// fingerprint; any change gives another one. Configuration that does not
+/// change execution stays out (R3E-S17): `dedup.link_normalizer_version`
+/// selects nothing (one built-in normalizer), so `link_hash` depends on
+/// [`LINK_HASH_RULE_VERSION`] alone.
 pub fn reindex_rule_fingerprint(
     target: DomainReindexTarget,
-    link_normalizer_version: &str,
     categories: &[CategoryConfig],
 ) -> String {
     let identity = match target {
         DomainReindexTarget::LinkHash => serde_json::json!({
             "target": "link_hash",
             "algorithm": LINK_HASH_RULE_VERSION,
-            "link_normalizer_version": link_normalizer_version,
         }),
         DomainReindexTarget::ContentHash => serde_json::json!({
             "target": "content_hash",
@@ -454,29 +450,29 @@ mod tests {
         let b = category("b", "https://example.com/b.xml");
         // Stable and order-independent.
         assert_eq!(
-            reindex_rule_fingerprint(Categories, "1", &[a.clone(), b.clone()]),
-            reindex_rule_fingerprint(Categories, "1", &[b.clone(), a.clone()])
+            reindex_rule_fingerprint(Categories, &[a.clone(), b.clone()]),
+            reindex_rule_fingerprint(Categories, &[b.clone(), a.clone()])
         );
         // A config change that alters the rewritten rows changes it.
         let moved = category("a", "https://example.com/moved.xml");
         assert_ne!(
-            reindex_rule_fingerprint(Categories, "1", std::slice::from_ref(&a)),
-            reindex_rule_fingerprint(Categories, "1", &[moved])
-        );
-        assert_ne!(
-            reindex_rule_fingerprint(LinkHash, "1", &[]),
-            reindex_rule_fingerprint(LinkHash, "2", &[])
+            reindex_rule_fingerprint(Categories, std::slice::from_ref(&a)),
+            reindex_rule_fingerprint(Categories, &[moved])
         );
         // Unrelated inputs do not.
         assert_eq!(
-            reindex_rule_fingerprint(ContentHash, "1", std::slice::from_ref(&a)),
-            reindex_rule_fingerprint(ContentHash, "2", &[])
+            reindex_rule_fingerprint(ContentHash, std::slice::from_ref(&a)),
+            reindex_rule_fingerprint(ContentHash, &[])
+        );
+        assert_eq!(
+            reindex_rule_fingerprint(LinkHash, std::slice::from_ref(&a)),
+            reindex_rule_fingerprint(LinkHash, &[])
         );
         // Targets never share an identity, and none is the old bare-name hash.
         let all = [
-            reindex_rule_fingerprint(LinkHash, "1", &[]),
-            reindex_rule_fingerprint(ContentHash, "1", &[]),
-            reindex_rule_fingerprint(Categories, "1", &[]),
+            reindex_rule_fingerprint(LinkHash, &[]),
+            reindex_rule_fingerprint(ContentHash, &[]),
+            reindex_rule_fingerprint(Categories, &[]),
         ];
         assert_ne!(all[0], all[1]);
         assert_ne!(all[1], all[2]);

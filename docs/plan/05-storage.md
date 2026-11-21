@@ -320,8 +320,9 @@ active rule resolver 保证 reindex 中途 `active_rule(kind)` 仍返回旧 acti
   （`start_reindex_tx`）。`version_tag` 只是 CLI 每次自动生成的标签（`reindex-<target>-<unix-ts>`），
   不参与匹配，否则普通重跑永远无法续跑。`payload_sha256` 由 CLI 生成（`reindex_rule_fingerprint`，R2-S17）：
   对 target、该 target 的算法版本常量（`LINK_HASH_RULE_VERSION` / `CONTENT_HASH_RULE_VERSION` /
-  `CATEGORIES_RULE_VERSION`，改算法时递增）与决定改写结果的配置（`link_hash`：`dedup.link_normalizer_version`；
-  `categories`：全部 source 的分类、key、显示名、feed URL、kind、enabled、priority，排序后）做规范 JSON 的 SHA-256。
+  `CATEGORIES_RULE_VERSION`，改算法时递增）与决定改写结果的配置（`categories`：全部 source 的分类、key、显示名、feed URL、kind、enabled、
+  priority，排序后）做规范 JSON 的 SHA-256。不影响执行的配置不参与（R3E-S17）：`dedup.link_normalizer_version` 是保留字段、
+  不选择任何算法（只有一个内置 normalizer），故 `link_hash` 只由算法版本常量决定，仅改该字段仍可续跑。
   此前只散列 target 名，算法或配置变化后旧 checkpoint 仍会被续跑、同一作业混用两套规则。升级前崩溃留下的
   活动 job 用的是旧身份，续跑会被拒绝，需 `reindex --abort <id>` 后重跑。规则不一致或另一 worker 持有存活 lease → 显式
   `StorageError::Conflict { table: "reindex_jobs" }`，信息含 `reindex --abort <id>`，不改任何行。
