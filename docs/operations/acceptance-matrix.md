@@ -47,12 +47,14 @@ cargo acceptance run --lane release --expected-version 0.10.4
 
 | Lane | local | full | 责任 |
 |---|---:|---:|---|
-| `static` | ✓ | ✓ | rustfmt、Clippy、rustdoc（`RUSTDOCFLAGS=-D warnings`）、swallowed-error、dependency policy、release 标签晋升脚本测试、工具链 pin 一致性（`toolchain-pins`） |
+| `static` | ✓ | ✓ | rustfmt、Clippy、rustdoc（`RUSTDOCFLAGS=-D warnings`）、swallowed-error、dependency policy、release 镜像策略脚本测试、scheduler entrypoint 测试、工具链 pin 一致性（`toolchain-pins`） |
 | `workspace` | ✓ | ✓ | workspace locked build/test |
 | `sqlite` | ✓ | ✓ | release binary、SQLite migrate run/check、CLI contract smokes |
 | `postgres` |  | ✓ | storage `--ignored`（只跑 PG / Docker 用例，普通用例由 workspace lane 覆盖）与 CLI migrate parity；要求 `DATABASE_URL` + Docker |
 | `docker` |  | ✓ | runtime/debug/scheduler build 与 container smokes |
-| `release` | ✓ | ✓ | workspace/lock/binary/README/version identity、部署镜像版本（compose `RSS_AI_NEWS_VERSION` 默认值与部署文档示例，`deployment-versions`）与 Git diff check |
+| `release` | ✓ | ✓ | workspace/lock/binary/README/version identity、部署镜像版本（compose `RSS_AI_NEWS_VERSION` 默认值与部署文档示例，`deployment-versions`；compose 另单独校验
+`services.rss-ai-news-scheduler.image` 的实际值必须恰为 `ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-<候选>}-scheduler`，
+注释不算数，`0.10.4-rc.1` 之类整段 tag 不再按数字前缀读成 `0.10.4`）与 Git diff check |
 
 ## CLI JSON 输出契约 gate
 
@@ -94,7 +96,8 @@ SQLite lane 必须用真实 release binary 验证两种调用：
   `--step-timeout-secs`（默认 3600），超时即按 POSIX `ps -A -o pid= -o ppid=` 快照自底向上 best-effort 杀掉该 step 的进程树并判失败
   （Linux / macOS；Windows 仅杀直接子进程）。子进程退出后若有遗留后台进程占住输出管道，管道等待在 deadline 后
   另给约 2 秒宽限（清理本身不另设硬上限），随后判 `pipes_held` 失败并保留已读输出；该遗留进程已脱离进程树，
-  不会被杀。子进程与 runner 同一进程组，
+  不会被杀。docker lane 等待 scheduler smoke job 时的每次 `docker logs --tail 200` 轮询也走同一受限执行
+  （上限取 75 秒总期限剩余时间与 `--step-timeout-secs` 的较小者），卡住的轮询不会越过期限与 cleanup（R3-15）。子进程与 runner 同一进程组，
   终端 Ctrl-C 会一并终止正在运行的构建。
 - 产品 CLI smoke 在一次性工作区内运行（`cwd` 为该目录，不读仓库根 `.env`），并清除产品固定读取的环境变量
   （`DATABASE_URL`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`GITHUB_TOKEN`、`RSSHUB_*`、`HTTP(S)_PROXY`）；

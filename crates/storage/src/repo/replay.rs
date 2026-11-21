@@ -3,14 +3,17 @@
 //! An `html_payload` artifact is keyed by the feed entry id (see
 //! `runtime/src/flows/extract.rs::write_html_artifact`). Replay needs that
 //! entry's link (the base URI the live extraction started from) and, for
-//! `--diff`, the article the entry points at. The article is reached through
+//! `--diff`, the article the entry points at. It also returns the entry's
+//! `title_raw`, which live extraction hands to the strategy as the title
+//! fallback (R3-18). The article is reached through
 //! `feed_entries.article_id`, which also covers a content-dedup hit whose
 //! entry points at an earlier article.
 
 use async_trait::async_trait;
+use rss_ai_news_domain::model::RawArtifact;
 use sqlx::FromRow;
 
-use crate::{StorageError, StoragePool};
+use crate::{RawArtifactRepo, RawArtifactRepository, StorageError, StoragePool};
 
 /// The article an HTML replay is diffed against.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,15 +29,28 @@ pub struct ReplayArticleDigest {
 pub struct HtmlReplaySource {
     pub feed_entry_id: i64,
     pub normalized_link: String,
+    /// The feed title live extraction passes as `ArticleFetchTask::title_raw`.
+    pub title_raw: String,
     /// `None` while the entry has not produced (or linked) an article.
     pub article: Option<ReplayArticleDigest>,
 }
 
-/// Read-only: no method of this trait writes. Kept apart from the writer
-/// repositories so the replay flow's side-effect boundary is visible in its
-/// dependency types (as with `RecentFeedEntryRepository`).
+/// Read-only: no method of this trait writes. It is the replay flow's only
+/// storage dependency, so its side-effect boundary is visible in its
+/// dependency types (as with `RecentFeedEntryRepository`); the artifact reads
+/// are offered here instead of the writer `RawArtifactRepository` (R3-20).
 #[async_trait]
 pub trait ReplayProjectionRepository: Send + Sync {
+    /// `raw_artifacts` row by id, of any kind.
+    async fn artifact_by_id(&self, id: i64) -> Result<Option<RawArtifact>, StorageError>;
+
+    /// `raw_artifacts` row by `(kind, artifact_key)`.
+    async fn artifact_by_key(
+        &self,
+        kind: &str,
+        artifact_key: &str,
+    ) -> Result<Option<RawArtifact>, StorageError>;
+
     async fn html_replay_source(
         &self,
         feed_entry_id: i64,
@@ -57,6 +73,7 @@ impl ReplayProjectionRepo {
 const HTML_REPLAY_SOURCE_SQL: &str = r#"
 SELECT fe.id AS feed_entry_id,
        fe.normalized_link,
+       fe.title_raw,
        a.id AS article_id,
        a.title AS article_title,
        a.word_count AS article_word_count,
@@ -70,6 +87,7 @@ WHERE fe.id = $1
 struct HtmlReplaySourceRow {
     feed_entry_id: i64,
     normalized_link: String,
+    title_raw: String,
     article_id: Option<i64>,
     article_title: Option<String>,
     article_word_count: Option<i64>,
@@ -99,6 +117,7 @@ impl From<HtmlReplaySourceRow> for HtmlReplaySource {
         Self {
             feed_entry_id: row.feed_entry_id,
             normalized_link: row.normalized_link,
+            title_raw: row.title_raw,
             article,
         }
     }
@@ -106,6 +125,24 @@ impl From<HtmlReplaySourceRow> for HtmlReplaySource {
 
 #[async_trait]
 impl ReplayProjectionRepository for ReplayProjectionRepo {
+    // The artifact reads reuse the artifact repository's queries (one SQL
+    // source of truth); only its read methods are reachable through here.
+    async fn artifact_by_id(&self, id: i64) -> Result<Option<RawArtifact>, StorageError> {
+        RawArtifactRepo::new_with_storage(self.pool.clone())
+            .find_by_id(id)
+            .await
+    }
+
+    async fn artifact_by_key(
+        &self,
+        kind: &str,
+        artifact_key: &str,
+    ) -> Result<Option<RawArtifact>, StorageError> {
+        RawArtifactRepo::new_with_storage(self.pool.clone())
+            .find_by_key(kind, artifact_key)
+            .await
+    }
+
     async fn html_replay_source(
         &self,
         feed_entry_id: i64,

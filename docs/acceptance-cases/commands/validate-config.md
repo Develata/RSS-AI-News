@@ -31,6 +31,8 @@
 - 重复分类 key → exit 78
 - 非法 `feed_url` → exit 78
 - `{RSSHUB}` / 别名 + 缺 `RSSHUB_BASE_URL` → exit 78
+- `{RSSHUB}` / 别名 + `RSSHUB_BASE_URL` 已设置但展开后非法（如缺协议）→ exit 78（`sources[i].feed_url`）；结构阶段只按探针
+  base 校验模板，不因此失败（`run` / `migrate` 不被阻断，由 ingest preflight 报，见 plan/06 §7）
 - `path_template` 含 `..` / 反斜杠 / 无日期 token → exit 78
 - `report_template` 缺 `{items}` / 未知 placeholder / 大括号不匹配 → exit 78
 - 跨分类 path 冲突 → exit 78

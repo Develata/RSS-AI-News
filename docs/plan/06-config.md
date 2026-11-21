@@ -160,6 +160,16 @@ enabled = true
 校验侧：当 source URL 含任一占位符，必须设置 `RSSHUB_BASE_URL`，否则
 `run_general_checks` 报错（`validate.rs::tests::rsshub_placeholder_without_base_url_fails`）。
 
+结构校验（`run_structural_checks`，`load_skip_env_checks` 使用）只把占位符 URL 当模板检查：用固定探针
+`https://rsshub.invalid` 展开后必须是合法 URL，与环境无关。用环境里的 `RSSHUB_BASE_URL` 展开后是否合法属于
+ingest 的前提（R3-5，2026-11-22）：`config::load` / `validate-config` 在展开前检查（`collect_source_env_checks`），
+ingest preflight 在加载展开后检查每个启用 source 的实际 URL（`collect_effective_feed_url_checks`），两者都只看
+`--category` 范围内的启用 source，报 `sources[i].feed_url` 并提示检查 `RSSHUB_BASE_URL`（不回显 URL）。因此已设置但
+非法的 `RSSHUB_BASE_URL`（如缺协议的 `feeds.internal`）只让 ingest 失败（exit 78），`run` 的 ai-run / publish 与不抓
+feed 的命令（`migrate` 等）照常执行。锁定测试：`validate.rs::tests::structural_checks_ignore_invalid_rsshub_base_url_expansion`、
+`general_checks_reject_an_invalid_rsshub_base_url_expansion`、`ingest_command_checks_reject_a_feed_url_broken_by_expansion`、
+`crates/cli/tests/run_cmd_tests.rs::run_with_invalid_rsshub_base_url_still_publishes_stored_articles`。
+
 设计原因：让 categories/*.toml 可入仓不携带部署信息，部署侧只需在 `.env` 注入一次。
 
 每 source 还可单独配置 `rsshub_access_key`，落到 `SourceSecrets`（`loader::SourceSecrets`），

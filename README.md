@@ -676,7 +676,18 @@ compose 里取消注释 `./crontab:/app/crontab:ro` 那行，`docker compose up 
 
 `publish` 对 `(category, date, render_version)` 是幂等的——同日多次推送只走 `init: already_exists:published_*`，**不会重复 commit 到 GitHub**。但需要注意：第一次 publish 之后新抓的文章不会自动并入当日报告，所以 publish 应安排在最后一次抓取之后。
 
-首次 migrate / 手动 doctor 仍建议用 runtime 镜像一次性跑（避免动 scheduler 容器调度节奏）：
+首次 migrate / 手动 doctor 建议一次性跑（不动 scheduler 容器的调度节奏），并复用 scheduler 的 compose 服务，让版本、挂载与
+网络一致（见 [docs/operations/docker-and-scheduler.md](docs/operations/docker-and-scheduler.md)）：
+
+```bash
+# 与 scheduler 同一个 compose 服务：镜像版本（.env 的 RSS_AI_NEWS_VERSION，经 compose 插值）、挂载、网络与
+# 环境变量都与常驻容器一致；只把 entrypoint 换成 CLI 本身。
+docker compose -f docker-compose.scheduler.yml run --rm --no-deps \
+  --entrypoint /usr/local/bin/rss-ai-news \
+  rss-ai-news-scheduler --config-dir /app/configs migrate run
+```
+
+不用 compose 时直接跑 runtime 镜像，tag 要手动写成与 scheduler 相同的版本：
 
 ```bash
 docker run --rm --env-file .env \

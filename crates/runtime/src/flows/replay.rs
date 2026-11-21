@@ -17,9 +17,9 @@ use rss_ai_news_domain::{
     model::RawArtifact,
     state::{ArtifactKind, FeedKind},
 };
-use rss_ai_news_extractor::ContentStrategy;
+use rss_ai_news_extractor::{ContentStrategy, decode_html};
 use rss_ai_news_feed::parse_feed;
-use rss_ai_news_storage::{HtmlReplaySource, RawArtifactRepository, ReplayProjectionRepository};
+use rss_ai_news_storage::{HtmlReplaySource, ReplayProjectionRepository};
 
 use crate::error::RuntimeError;
 
@@ -28,6 +28,18 @@ use crate::error::RuntimeError;
 /// `about:blank` is a valid URL that cannot be a base, so no relative
 /// reference resolves against it: nothing is invented about the page's host.
 pub const REPLAY_PLACEHOLDER_BASE_URI: &str = "about:blank";
+
+/// Reported by an HTML replay when the configured `extractor.strategy_order`
+/// enables no HTML strategy (only `summary_fallback`): live extraction then
+/// never parses the HTML, so a replay result parsed with some other strategy
+/// would not describe what the pipeline does with these bytes (R3-6).
+pub const REPLAY_HTML_NO_STRATEGY: &str = "html replay needs an HTML extraction strategy, but \
+     extractor.strategy_order enables none (only summary_fallback, which stores the feed summary \
+     without parsing the HTML); add \"readability\" to replay the HTML";
+
+/// Title handed to the strategy when the artifact names no feed entry (with
+/// an entry, its `title_raw` is used, as in live extraction).
+pub const REPLAY_PLACEHOLDER_TITLE: &str = "(replay)";
 
 /// Number of parsed feed entries a feed replay returns as samples.
 pub const REPLAY_FEED_SAMPLE_LIMIT: usize = 5;
@@ -131,11 +143,14 @@ pub struct ReplayOutcome {
 }
 
 pub struct ReplayFlowDeps {
-    pub artifact_repo: Arc<dyn RawArtifactRepository>,
+    /// The flow's only storage access: read-only artifact lookups and the
+    /// HTML projection (no writer repository, R3-20).
     pub projection_repo: Arc<dyn ReplayProjectionRepository>,
-    /// Strategy an HTML replay re-extracts with (the CLI wires Readability,
-    /// per acceptance AC-C-01).
-    pub html_strategy: Arc<dyn ContentStrategy>,
+    /// The HTML strategies live extraction runs, in `extractor.strategy_order`
+    /// (the CLI builds both from one function). An HTML replay uses the first
+    /// that extracts, else reports the last strategy's error. Empty when only
+    /// `summary_fallback` is configured: see [`REPLAY_HTML_NO_STRATEGY`].
+    pub html_strategies: Vec<Arc<dyn ContentStrategy>>,
 }
 
 pub struct ReplayFlow {
@@ -152,12 +167,16 @@ impl ReplayFlow {
         &self,
         options: &ReplayOptions,
     ) -> Result<Option<ReplayOutcome>, RuntimeError> {
+        // A configuration contradiction, reported before any lookup.
+        if options.kind == ReplayKind::Html && self.deps.html_strategies.is_empty() {
+            return Err(RuntimeError::Config(REPLAY_HTML_NO_STRATEGY.to_string()));
+        }
         let artifact = match &options.selector {
-            ReplaySelector::Id(id) => self.deps.artifact_repo.find_by_id(*id).await?,
+            ReplaySelector::Id(id) => self.deps.projection_repo.artifact_by_id(*id).await?,
             ReplaySelector::Key(key) => {
                 self.deps
-                    .artifact_repo
-                    .find_by_key(options.kind.storage_kind(), key)
+                    .projection_repo
+                    .artifact_by_key(options.kind.storage_kind(), key)
                     .await?
             }
         };
@@ -225,24 +244,29 @@ impl ReplayFlow {
             }
             Err(_) => None,
         };
-        let (feed_entry_id, base_uri) = match &source {
+        // The entry's feed title is the strategy's title fallback, exactly as
+        // in live extraction (`claimed.title_raw`), so a page without its own
+        // title replays to the same title (R3-18).
+        let (feed_entry_id, base_uri, title_raw) = match &source {
             Some(source) => (
                 source.feed_entry_id,
                 ReplayBaseUri::FeedEntryLink(source.normalized_link.clone()),
+                source.title_raw.clone(),
             ),
-            None => (0, ReplayBaseUri::Placeholder),
+            None => (
+                0,
+                ReplayBaseUri::Placeholder,
+                REPLAY_PLACEHOLDER_TITLE.to_string(),
+            ),
         };
         let task = ArticleFetchTask {
             feed_entry_id,
             normalized_link: base_uri.as_str().to_string(),
-            title_raw: "(replay)".to_string(),
+            title_raw,
             summary_raw: None,
             timeout: Duration::from_secs(0),
         };
-        let extracted = self
-            .deps
-            .html_strategy
-            .extract(&task, bytes, base_uri.as_str())?;
+        let extracted = self.extract_html(&task, bytes, base_uri.as_str())?;
         let diff = diff.then(|| match source.and_then(|source| source.article) {
             Some(article) => ReplayDiff::Html {
                 article_id: article.id,
@@ -259,6 +283,37 @@ impl ReplayFlow {
                 article: extracted,
             },
             diff,
+        ))
+    }
+}
+
+impl ReplayFlow {
+    /// The configured chain, in order: the first strategy that extracts wins,
+    /// else the last strategy's error (with Readability alone, exactly its
+    /// result). Callers ensure the chain is not empty.
+    ///
+    /// Like live extraction (`run_strategy_chain`), the stored original bytes
+    /// are decoded to UTF-8 first. The response's Content-Type is not kept
+    /// with the artifact, so the charset comes from the BOM or the page's
+    /// `<meta>` declaration, else UTF-8; a page whose charset only its HTTP
+    /// header declared can replay differently (documented in plan/10).
+    fn extract_html(
+        &self,
+        task: &ArticleFetchTask,
+        bytes: &[u8],
+        base_uri: &str,
+    ) -> Result<ExtractedArticle, RuntimeError> {
+        let html = decode_html(bytes, None)?;
+        let mut last_error = None;
+        for strategy in &self.deps.html_strategies {
+            match strategy.extract(task, html.as_bytes(), base_uri) {
+                Ok(article) => return Ok(article),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.map_or_else(
+            || RuntimeError::Config(REPLAY_HTML_NO_STRATEGY.to_string()),
+            RuntimeError::from,
         ))
     }
 }
@@ -290,8 +345,9 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        REPLAY_PLACEHOLDER_BASE_URI, ReplayBaseUri, ReplayDiff, ReplayFlow, ReplayFlowDeps,
-        ReplayKind, ReplayOptions, ReplayParsed, ReplaySelector, of_kind,
+        REPLAY_HTML_NO_STRATEGY, REPLAY_PLACEHOLDER_BASE_URI, ReplayBaseUri, ReplayDiff,
+        ReplayFlow, ReplayFlowDeps, ReplayKind, ReplayOptions, ReplayParsed, ReplaySelector,
+        of_kind,
     };
 
     fn artifact(kind: ArtifactKind) -> RawArtifact {
@@ -470,11 +526,10 @@ mod tests {
 
         fn flow(&self, strategy: Arc<RecordingStrategy>) -> ReplayFlow {
             ReplayFlow::new(ReplayFlowDeps {
-                artifact_repo: self.artifacts.clone(),
                 projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(
                     self.pool.clone(),
                 )),
-                html_strategy: strategy,
+                html_strategies: vec![strategy],
             })
         }
     }
@@ -551,6 +606,77 @@ mod tests {
         }
     }
 
+    /// R3-18: a page without a title of its own falls back to the entry's
+    /// feed title, as live extraction does; without an entry the placeholder
+    /// title is used.
+    #[tokio::test]
+    async fn html_replay_falls_back_to_the_feed_entry_title() {
+        let paragraph =
+            "Replay keeps the original bytes so the parse can be re-run offline. ".repeat(20);
+        let untitled =
+            format!("<html><body><div><p>{paragraph}</p><p>{paragraph}</p></div></body></html>")
+                .into_bytes();
+        let fixture = Fixture::new().await;
+        let entry = fixture.entry("untitled").await;
+        fixture
+            .html_artifact(&entry.to_string(), untitled.clone())
+            .await;
+        fixture.html_artifact("no-entry", untitled).await;
+        let flow = fixture.flow(Arc::new(RecordingStrategy::default()));
+        for (key, title) in [
+            (entry.to_string(), "title untitled".to_string()),
+            (
+                "no-entry".to_string(),
+                super::REPLAY_PLACEHOLDER_TITLE.to_string(),
+            ),
+        ] {
+            let outcome = flow
+                .execute(&html(ReplaySelector::Key(key.clone()), false))
+                .await
+                .expect("replay")
+                .expect("artifact found");
+            let ReplayParsed::Html { article, .. } = outcome.parsed else {
+                panic!("html replay must parse as html");
+            };
+            assert_eq!(article.title, title, "key {key}");
+        }
+    }
+
+    /// A GBK page declared by `<meta charset>` replays to readable text, as
+    /// live extraction decodes it.
+    #[tokio::test]
+    async fn html_replay_decodes_a_meta_declared_gbk_page() {
+        // "中文标题" in GBK.
+        const GBK_TITLE: &[u8] = &[0xD6, 0xD0, 0xCE, 0xC4, 0xB1, 0xEA, 0xCC, 0xE2];
+        let paragraph =
+            "Replay keeps the original bytes so the parse can be re-run offline. ".repeat(20);
+        let mut page = b"<html><head><meta charset=\"gbk\"><title>".to_vec();
+        page.extend_from_slice(GBK_TITLE);
+        page.extend_from_slice(b"</title></head><body><article><h1>");
+        page.extend_from_slice(GBK_TITLE);
+        page.extend_from_slice(
+            format!("</h1><p>{paragraph}</p><p>{paragraph}</p></article></body></html>").as_bytes(),
+        );
+        assert!(
+            std::str::from_utf8(&page).is_err(),
+            "fixture must not be UTF-8"
+        );
+
+        let fixture = Fixture::new().await;
+        let entry = fixture.entry("gbk").await;
+        fixture.html_artifact(&entry.to_string(), page).await;
+        let outcome = fixture
+            .flow(Arc::new(RecordingStrategy::default()))
+            .execute(&html(ReplaySelector::Key(entry.to_string()), false))
+            .await
+            .expect("replay")
+            .expect("artifact found");
+        let ReplayParsed::Html { article, .. } = outcome.parsed else {
+            panic!("html replay must parse as html");
+        };
+        assert_eq!(article.title, "中文标题");
+    }
+
     /// `--diff` reaches the article through the entry, including a dedup
     /// entry pointing at an earlier article; an entry without an article is
     /// reported as not found.
@@ -615,6 +741,94 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// R3-6: with only `summary_fallback` configured, live extraction never
+    /// parses the HTML, so an HTML replay reports the contract error instead
+    /// of parsing with a strategy the pipeline does not run. Other kinds are
+    /// unaffected.
+    #[tokio::test]
+    async fn html_replay_without_an_html_strategy_reports_the_contract_error() {
+        let fixture = Fixture::new().await;
+        let entry = fixture.entry("first").await;
+        fixture
+            .html_artifact(&entry.to_string(), relative_link_html())
+            .await;
+        let flow = ReplayFlow::new(ReplayFlowDeps {
+            projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(fixture.pool.clone())),
+            html_strategies: Vec::new(),
+        });
+        let error = flow
+            .execute(&html(ReplaySelector::Key(entry.to_string()), true))
+            .await
+            .expect_err("no HTML strategy configured");
+        assert_eq!(
+            error.to_string(),
+            format!("config: {REPLAY_HTML_NO_STRATEGY}")
+        );
+
+        let feed = flow
+            .execute(&ReplayOptions {
+                kind: ReplayKind::Feed,
+                selector: ReplaySelector::Key("missing".to_string()),
+                diff: false,
+            })
+            .await
+            .expect("feed replay does not need an HTML strategy");
+        assert!(feed.is_none());
+    }
+
+    /// A strategy that fails is followed by the next one, as in the live
+    /// chain; with every strategy failing the last error is reported.
+    #[tokio::test]
+    async fn html_replay_runs_the_configured_chain_in_order() {
+        struct Failing;
+        impl ContentStrategy for Failing {
+            fn strategy(&self) -> ExtractorStrategy {
+                ExtractorStrategy::Readability
+            }
+            fn extract(
+                &self,
+                _task: &ArticleFetchTask,
+                _html_bytes: &[u8],
+                _final_url: &str,
+            ) -> Result<ExtractedArticle, ExtractorError> {
+                Err(ExtractorError::ParseFailed {
+                    reason: "first strategy fails".to_string(),
+                })
+            }
+        }
+        let fixture = Fixture::new().await;
+        let entry = fixture.entry("first").await;
+        fixture
+            .html_artifact(&entry.to_string(), relative_link_html())
+            .await;
+        let flow = |html_strategies| {
+            ReplayFlow::new(ReplayFlowDeps {
+                projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(
+                    fixture.pool.clone(),
+                )),
+                html_strategies,
+            })
+        };
+        let recording = Arc::new(RecordingStrategy::default());
+        let chain: Vec<Arc<dyn ContentStrategy>> = vec![Arc::new(Failing), recording.clone()];
+        let outcome = flow(chain)
+            .execute(&html(ReplaySelector::Key(entry.to_string()), false))
+            .await
+            .expect("second strategy extracts")
+            .expect("artifact found");
+        assert!(matches!(outcome.parsed, ReplayParsed::Html { .. }));
+        assert_eq!(recording.calls.lock().expect("calls").len(), 1);
+
+        let error = flow(vec![Arc::new(Failing)])
+            .execute(&html(ReplaySelector::Key(entry.to_string()), false))
+            .await
+            .expect_err("every strategy fails");
+        assert!(
+            error.to_string().contains("first strategy fails"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

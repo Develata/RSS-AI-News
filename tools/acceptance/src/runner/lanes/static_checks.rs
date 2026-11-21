@@ -52,12 +52,21 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         &[],
         0,
     );
-    // The release workflow's only locally testable decision: which moving
-    // image tags (latest / X.Y) a tag may promote.
+    // The release workflow's image policy (version-tag reuse and alias
+    // reconciliation), against a file-backed fake registry.
     executor.command(
         "release-promotion",
         "sh",
         &strings([".github/scripts/release-promotion-test.sh"]),
+        &[],
+        0,
+    );
+    // Crontab selection and input rejection of the scheduler entrypoint, with
+    // a stub supercronic (no scheduler is started).
+    executor.command(
+        "scheduler-entrypoint",
+        "sh",
+        &strings(["docker/scheduler-entrypoint-test.sh"]),
         &[],
         0,
     );

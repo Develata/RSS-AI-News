@@ -56,6 +56,11 @@ SHA-256 指纹计算 → 多阶段校验（structural / general / command-specif
 | `rsshub_placeholder_without_base_url_fails` | 同上 | `{RSSHUB}` 缺 base |
 | `rsshub_base_url_placeholder_alias_without_base_url_fails` | 同上 | `{RSSHUB_BASE_URL}` 缺 base |
 | `rsshub_base_url_placeholder_alias_with_base_url_is_valid` | 同上 | 别名展开 |
+| `structural_checks_ignore_invalid_rsshub_base_url_expansion` | 同上 | 结构阶段不看 env 展开（R3-5） |
+| `structural_checks_still_reject_a_malformed_rsshub_template` | 同上 | 模板本身非法仍拒 |
+| `general_checks_reject_an_invalid_rsshub_base_url_expansion` | 同上 | 展开后非法 URL |
+| `ingest_command_checks_reject_a_feed_url_broken_by_expansion` | 同上 | ingest preflight 查实际 URL |
+| `run_with_invalid_rsshub_base_url_still_publishes_stored_articles` | `crates/cli/tests/run_cmd_tests.rs` | `run` 仍发布存量文章 |
 | `duplicate_category_key_fails` | 同上 | 重复 key |
 | `invalid_feed_url_fails` | 同上 | URL 非法 |
 | `unsupported_schema_version_fails` | 同上 | schema 版本 |

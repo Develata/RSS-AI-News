@@ -33,16 +33,21 @@
 #    所以 RSS_CRON_COMMAND 只被 shell 解析一次（不再包第二层 `sh -c '...'`，
 #    引号不会被外层截断）。两个变量都不得含换行 / 回车（否则会多出 crontab 行）。
 #
-# log：supercronic 把 cron job 的 stdout/stderr 透传到自身 stdout，
-# `docker logs <container>` 可见。
+# log：supercronic 0.2.49 默认不原样透传（-passthrough-logs 默认 false）：
+# job 的每行输出被包装成 supercronic 自己的一条日志（channel=stdout|stderr），
+# 写到 supercronic 的 stderr，`docker logs <container>` 可见。
+# crontab 语法可用 `supercronic -test <file>` 预检（不执行 job）。
 
 set -eu
 
 RSS_CRONTAB_FILE="${RSS_CRONTAB_FILE:-/app/crontab}"
 
-if [ -e "$RSS_CRONTAB_FILE" ] && [ ! -f "$RSS_CRONTAB_FILE" ]; then
-    # 典型原因：bind-mount 的宿主文件不存在，Docker 在容器里建了同名目录。
-    echo "[scheduler] $RSS_CRONTAB_FILE exists but is not a regular file (a bind mount of a missing host file?); refusing to start" >&2
+# `-L` as well as `-e`: a dangling symlink fails both `-e` and `-f` and would
+# otherwise fall through to the image's default env schedule (R3-16). A
+# symlink to a regular file passes `-f` and is used as is.
+if { [ -e "$RSS_CRONTAB_FILE" ] || [ -L "$RSS_CRONTAB_FILE" ]; } && [ ! -f "$RSS_CRONTAB_FILE" ]; then
+    # 典型原因：bind-mount 的宿主文件不存在，Docker 在容器里建了同名目录；或悬空符号链接。
+    echo "[scheduler] $RSS_CRONTAB_FILE exists but is not a regular file (a bind mount of a missing host file, or a dangling symlink?); refusing to start" >&2
     exit 1
 fi
 
@@ -78,5 +83,6 @@ printf '%s /usr/local/bin/rss-ai-news --config-dir /app/configs %s\n' \
 
 echo "[scheduler] starting generated schedule"
 
-# `-passthrough-logs` 已是 supercronic 默认（since v0.2.x），无需显式传。
+# 不传 -passthrough-logs：保留 supercronic 的包装日志（带 job.command 与
+# channel，便于在 docker logs 里区分各 job）；CI smoke 在这些行里找标记。
 exec /usr/local/bin/supercronic "$CRONTAB_FILE"

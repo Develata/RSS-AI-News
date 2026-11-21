@@ -84,8 +84,10 @@
 
 入口：[`crates/cli/src/commands/replay.rs`](../../crates/cli/src/commands/replay.rs)（参数、装配与渲染）→
 `ReplayFlow`（[`crates/runtime/src/flows/replay.rs`](../../crates/runtime/src/flows/replay.rs)，只读）→
-`RawArtifactRepository` + `ReplayProjectionRepository`
-（[`crates/storage/src/repo/replay.rs`](../../crates/storage/src/repo/replay.rs)）。CLI 不直接发 SQL。
+`ReplayProjectionRepository`（[`crates/storage/src/repo/replay.rs`](../../crates/storage/src/repo/replay.rs)）。
+CLI 不直接发 SQL。flow 唯一的存储依赖是这个只读 trait：artifact 查询（`artifact_by_id` / `artifact_by_key`，内部复用
+`RawArtifactRepo` 的 SQL）与 HTML projection 都在其上，不再拿到带 `upsert_inline` / `purge_expired` 的写接口；
+工厂在只读连接上装配它，不再构造 replay 不用的 article / feed-entry repo（R3-20）。
 
 ```bash
 rss-ai-news replay --kind ai     --id 12345
@@ -97,15 +99,30 @@ rss-ai-news replay --kind feed   --id 678
 
 | kind | 解析路径 | 输出 |
 |---|---|---|
-| `feed` | `rss_ai_news_feed::parse_feed(bytes, FeedKind::Rss)` | `{ "entry_count": N, "samples": [...] }` |
-| `html` | `ReadabilityStrategy::extract(html_bytes)`，base URI 见下 | 抽取出的 title / word_count / content_quality / body_preview，以及所用 `base_uri` |
+| `feed` | `rss_ai_news_feed::parse_feed(bytes, FeedKind::Rss)` | `parsed = { "entry_count": N, "entries": [{ "uid", "title", "link" }, …] }`（前 5 条，`REPLAY_FEED_SAMPLE_LIMIT`） |
+| `html` | 线上同一条策略链：`extractor.strategy_order` 启用的 HTML 策略（当前只有 Readability），由 `context_factory::configured_html_strategies` 为 extract 与 replay 共同构造；base URI 见下 | 抽取出的 title / word_count / content_quality / body_preview，以及所用 `base_uri` |
 | `ai` | `rss_ai_news_ai::parse_response(raw)` | 解析后的 `ParsedResponse`（含 schema 校验） |
 
-副作用：**无**。`replay` 不写任何业务表，仅查询 `raw_artifacts` 并在内存中重做，
-打印 `ReplayCommandSummary`（pretty 或 JSON）。
+副作用：**无**。`replay` 以只读连接打开数据库，不写任何表，在内存中重做，打印 `ReplayCommandSummary`（pretty 或 JSON，
+顶层字段 `kind` / `artifact_id` / `artifact_key` / `byte_size` / `parsed` / `diff`）。读取范围：`raw_artifacts`；`html`
+另经只读 projection（`ReplayProjectionRepository`）读该 artifact key 对应的 `feed_entries` 行（取 base URI 与 `title_raw`，
+**不带** `--diff` 也读）以及 `--diff` 时它指向的 `articles` 行。`feed` / `ai` 不读业务表（R3-19）。
 
 `--id` 直查 `raw_artifacts.id`，`--key` 走 `(kind, key)` 联合索引。两者必给其一，
 否则 CLI 报 `replay requires either --id or --key`。
+
+`html` 的策略（R3-6，2026-11-22）：按顺序取第一个抽取成功的策略，全部失败报最后一个策略的错误（只配 Readability 时
+即其结果）。`strategy_order = ["summary_fallback"]` 是合法配置，此时线上抽取根本不解析 HTML（直接用 feed 摘要），
+replay 因此不换用别的策略解析，而是在读取任何 artifact 之前返回契约错误 `REPLAY_HTML_NO_STRATEGY`
+（`RuntimeError::Config`，exit 1），提示加回 `"readability"`。`feed` / `ai` 不受策略配置影响。
+
+`html` 的字符集：与线上 `run_strategy_chain` 相同，先用 `decode_html` 把留档的原始字节解码成 UTF-8 再交给策略。artifact
+不保存响应的 Content-Type，所以 replay 只能按 BOM → `<meta charset>` / http-equiv 预扫描 → UTF-8 判定；只在 HTTP 头里声明
+charset 的非 UTF-8 页面在 replay 中可能解码失败或与线上不同（已知限制）。锁定测试：
+`flows::replay::tests::html_replay_decodes_a_meta_declared_gbk_page`（meta 声明 GBK 的页面标题解码为中文）。
+
+`html` 的标题回退（R3-18）：策略在页面没有标题时用 `task.title_raw`。有对应 feed entry 时 replay 传该 entry 的
+`title_raw`（线上抽取传的就是它），否则传占位 `(replay)`（`REPLAY_PLACEHOLDER_TITLE`）；只读 projection 一并返回该列。
 
 `html` 的 base URI：`html_payload` 的 artifact key 是 feed entry id，replay 用该 entry 的
 `normalized_link`（线上抽取开始抓取的链接）作为传给策略的 `final_url` 与 `task.normalized_link`；
@@ -214,14 +231,18 @@ rss-ai-news --category ai rebuild-report --date 2026-05-01
 
 ## 7. 失败语义
 
+exit code 只有 0 / 1 / 2 / 78（`crates/cli/src/exit_code.rs`），此前表里的 3 不存在（R3-19）。`rebuild-report` 不推 GitHub
+（见 §6），所以不存在 422 lost-update 行。
+
 | 场景 | exit code | 行为 |
 |---|---|---|
-| `replay` artifact 找不到 | 3 | `CliError::ReplayArtifactNotFound`，stderr 一行 |
-| `replay` 找到但 inline_body 为空 | 3 | "file-backed artifacts not supported in W9c" |
+| `replay` 既无 `--id` 也无 `--key` | 1 | `replay requires either --id or --key`，在打开数据库之前报出 |
+| `replay` artifact 找不到（含 `--id` 命中其他 kind） | 1 | `CliError::ReplayArtifactNotFound` |
+| `replay` 找到但 inline_body 为空（文件后端） | 1 | `"file-backed artifacts not supported in W9c replay"` |
+| `replay --kind html` 但 `strategy_order` 无 HTML 策略 | 1 | `REPLAY_HTML_NO_STRATEGY` |
 | `backfill --target ai` 范围内无候选 | 0 | `articles_scanned=0`，正常退出 |
-| `backfill` DB 写失败 | 3 | 透传 `RuntimeError::Storage` |
-| `rebuild-report` publish_record 不存在 | 3 | `CliError::PublishRecordNotFound` |
-| `rebuild-report` GitHub 推送 422 lost-update | 3（默认） / 0（带 retry） | 详见 [./04-publish.md](./04-publish.md) §422 |
+| `backfill` DB 写失败 | 1 | 透传 `RuntimeError::Storage` |
+| `rebuild-report` publish_record 不存在 | 1 | `CliError::PublishRecordNotFound` |
 
 exit code 详表见 [./11-error-and-recovery.md](./11-error-and-recovery.md)。
 

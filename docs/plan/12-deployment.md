@@ -82,7 +82,12 @@ builder  →  runtime  →  debug
 唯一真相源是 `rust-toolchain.toml` 的 `channel`（当前 1.97.0）。同一版本另写在 `.github/workflows/` 的
 `ci.yml`、`release.yml`（`RUST_TOOLCHAIN`）、`audit.yml`、`maintenance.yml`（×2，`toolchain:`）与
 `docker/Dockerfile`（`FROM rust:<版本>-slim-bookworm@sha256:…`）共 6 处。升级时一次改全部；static acceptance lane 的
-`toolchain-pins` 检查逐处比对 channel（并要求每个文件的 pin 数量不变），任一处漂移即失败。
+Rust builder 镜像的 patch tag 在官方支持列表里只停留到下一个 Rust 版本发布，之后不再重建，所以它的 digest 随工具链升级一起
+刷新（Dependabot 只持续刷新 Debian 运行时镜像，见 [../operations/ci-and-release.md](../operations/ci-and-release.md)）。
+`toolchain-pins` 检查遍历 `.github/workflows/` 下全部 `*.yml` / `*.yaml`（不是固定清单）：每个 `RUST_TOOLCHAIN:` 必须是该
+literal，每个 `toolchain:` 输入只能是同一 literal 或恰好 `${{ env.RUST_TOOLCHAIN }}`（且同文件定义了它），其他表达式一律失败
+（可能解析成别的编译器，R3-9）；每个 `dtolnay/rust-toolchain` 步骤对应一个 `toolchain:` 输入；Dockerfile 恰有一个
+`FROM rust:` 且版本等于 channel。任一处漂移即失败。
 
 ## 4. scheduler 入口
 
@@ -114,8 +119,8 @@ entrypoint 拼一行 `<RSS_CRON_SCHEDULE> /usr/local/bin/rss-ai-news --config-di
 
 ### 4.3 日志
 
-supercronic 把每个 cron job 的 stdout/stderr 透传到自身 stdout，
-`docker logs <container>` 可见。
+supercronic 0.2.49 默认**不**原样透传（`-passthrough-logs` 默认 `false`，[v0.2.49 main.go](https://github.com/aptible/supercronic/blob/v0.2.49/main.go#L32-L51)）：job 的每行 stdout / stderr 被包装成 supercronic 自己的一条 logrus 日志（带 `channel=stdout|stderr` 与 `job.command` 等字段），默认写到 supercronic 的 stderr；`docker logs` 合并两流，所以照样可见，只是带包装（R3-21）。
+crontab 语法可用 supercronic 自带的 `-test`（只解析、不执行 job）预先检查，例如 `docker run --rm --entrypoint /usr/local/bin/supercronic -v "$(pwd)/crontab:/app/crontab:ro" ghcr.io/develata/rss-ai-news:<tag>-scheduler -test /app/crontab`。
 
 ## 5. compose 部署形态
 
@@ -140,6 +145,17 @@ supercronic 把每个 cron job 的 stdout/stderr 透传到自身 stdout，
 推荐做法：首次启动前与**每次升级镜像前**，用一次性 runtime 容器显式跑 `migrate run`（必要时再跑 `migrate check`），
 让 schema 变更只在一处、带可见输出地发生，而不是混在某个 cron job 的日志里；`migrate run` 在仍有活动 reindex job 时
 会拒绝执行。
+
+```bash
+# 与 scheduler 同一个 compose 服务：镜像版本（.env 的 RSS_AI_NEWS_VERSION，经 compose 插值）、挂载、网络与
+# 环境变量都与常驻容器一致；只把 entrypoint 换成 CLI 本身。
+docker compose -f docker-compose.scheduler.yml run --rm --no-deps \
+  --entrypoint /usr/local/bin/rss-ai-news \
+  rss-ai-news-scheduler --config-dir /app/configs migrate run
+```
+
+不用 compose 的 single-shot 部署才直接跑 runtime 镜像；此时镜像 tag 由宿主 shell 写死，`--env-file` 只把变量传进容器、
+不参与镜像名展开，所以 tag 必须手动写成与 scheduler 相同的版本（R3-11）：
 
 ```bash
 docker run --rm --env-file .env \

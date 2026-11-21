@@ -57,11 +57,29 @@ busy_timeout_ms = 5000
 
 ### 4. 跑 migrate
 
+本地：
+
 ```bash
-cargo run -- migrate run                    # 本地
-docker run --rm --env-file .env \           # 容器
+cargo run -- migrate run
+```
+
+容器（镜像里的 `/app/configs` 是空目录，必须挂载配置；续行反斜杠必须是行尾最后一个字符，后面不能再跟注释，R3-12）：
+
+```bash
+docker run --rm --env-file .env \
+  -v "$(pwd)/configs:/app/configs:ro" \
+  -v "$(pwd)/data:/app/data" \
   ghcr.io/develata/rss-ai-news:0.10.4 \
   --config-dir /app/configs migrate run
+```
+
+用 scheduler compose 部署时改用同一服务一次性运行，版本与挂载自动一致（见
+[docker-and-scheduler.md](./docker-and-scheduler.md) §首次 migrate 与升级）：
+
+```bash
+docker compose -f docker-compose.scheduler.yml run --rm --no-deps \
+  --entrypoint /usr/local/bin/rss-ai-news \
+  rss-ai-news-scheduler --config-dir /app/configs migrate run
 ```
 
 migrate 会自动按 `is_postgres_url` 识别走 `migrations/postgres/*.up.sql` 全量。

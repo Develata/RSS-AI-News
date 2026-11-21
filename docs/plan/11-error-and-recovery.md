@@ -148,7 +148,7 @@ CLI 退出码由 [`crates/cli/src/exit_code.rs`](../../crates/cli/src/exit_code.
 - `doctor`：任一 check `Fail` 或 `--deep` 不变量违规 → exit 1。
 - `run`：子阶段的 `Err` 与子阶段 summary 的非零退出码都记入 `stage_failures`，取最严重者。启动时只做
   结构校验，环境 / 凭证检查归各阶段，因此单个分类缺凭证不会阻断其他阶段。ingest 失败（preflight，例如
-  source 用了 RSSHub 占位符但缺 `RSSHUB_BASE_URL`；或 ingest 本身返回 `Err`）只记为 ingest 阶段失败，
+  source 用了 RSSHub 占位符但缺 `RSSHUB_BASE_URL`，或 `RSSHUB_BASE_URL` 已设置但展开后不是合法 URL；或 ingest 本身返回 `Err`）只记为 ingest 阶段失败，
   ai-run 与 publish 仍在已入库的数据上执行（例如此前已 `stored_local` 的报告照常推进），退出码仍反映 ingest
   失败。只有阶段自身的前提不满足才跳过该阶段：数据库无法打开 / 迁移时（记在 `ingest` 阶段名下）所有阶段都跳过，
   `ai_run_skip_reason = "database unavailable"`。
