@@ -66,7 +66,8 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `claim_is_scoped_to_category_and_active_sources` | `crates/storage/tests/feed_entry_claim_scope_tests.rs` | 分类 + active 源过滤（SQLite） |
 | `unscoped_claim_method_keeps_its_contract` | 同上 | 无分类 claim 仍排除归档源 |
 | `pg_claim_is_scoped_to_category_and_active_sources` | `crates/storage/tests/feed_entry_pg_tests.rs` | 同上（PG，需 docker） |
-| `extract_lease_budget_over_the_lease_fails_fast` | `crates/cli/tests/ingest_cmd_tests.rs` | 批次可能超出 lease → 启动即配置错误；`--skip-fetch` 不校验 |
+| `extract_batch_over_the_lease_is_shrunk_not_rejected` | `crates/cli/tests/ingest_cmd_tests.rs` | 批次可能超出 lease → 本次缩到能放进 lease 的整波数并 WARN，不拒绝启动 |
+| `over_budget_batches_shrink_to_whole_waves_that_fit_the_lease` | `crates/runtime/src/flows/extract.rs` | 缩批算术：300 s lease + 默认 50/5/30 → 40；一波都放不下 → 一波 |
 | `lease_budget_counts_waves_times_timeout_plus_margin` | `crates/runtime/src/flows/extract.rs`（单元测试） | 预算公式 |
 | `retry_that_finds_its_own_article_is_persisted_not_dedup` | `crates/runtime/tests/extract_tests.rs` | 自命中记 persisted |
 | `new_article_and_entry_advance_commit_together` | `crates/storage/tests/article_entry_persist_tests.rs` | 同事务提交（SQLite） |

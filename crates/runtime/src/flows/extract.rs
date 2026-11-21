@@ -802,6 +802,36 @@ pub fn extract_lease_budget_seconds(
     waves.saturating_mul(http_timeout_seconds.saturating_add(EXTRACT_WAVE_MARGIN_SECONDS))
 }
 
+/// Largest batch size `<= requested` whose [`extract_lease_budget_seconds`]
+/// fits `lease_seconds`, but never less than one wave
+/// (`min(requested, concurrent_fetches)`).
+///
+/// `ingest` shrinks an over-budget batch instead of refusing to start, so a
+/// config that ran before the budget existed (e.g. the old 300 s lease with
+/// the default batch of 50) keeps running and no batch outlives its lease.
+/// When even one wave exceeds the lease the result is one wave; the caller
+/// warns, since only an overlapping run could then reclaim the tail.
+pub fn fit_extract_batch_to_lease(
+    requested: u32,
+    concurrent_fetches: u32,
+    http_timeout_seconds: u64,
+    lease_seconds: u64,
+) -> u32 {
+    let requested = requested.max(1);
+    let concurrent = concurrent_fetches.max(1);
+    if extract_lease_budget_seconds(requested, concurrent, http_timeout_seconds) <= lease_seconds {
+        return requested;
+    }
+    let per_wave = http_timeout_seconds
+        .saturating_add(EXTRACT_WAVE_MARGIN_SECONDS)
+        .max(1);
+    let waves = (lease_seconds / per_wave).max(1);
+    u32::try_from(waves)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(concurrent)
+        .min(requested)
+}
+
 /// Shortest retry cooldown, applied after the first failed attempt.
 const RETRY_BACKOFF_BASE: Duration = Duration::minutes(10);
 /// Longest retry cooldown; later attempts stop doubling here.
@@ -900,6 +930,23 @@ mod tests {
             extract_lease_budget_seconds(u32::MAX, 1, u64::MAX),
             u64::MAX
         );
+    }
+
+    #[test]
+    fn over_budget_batches_shrink_to_whole_waves_that_fit_the_lease() {
+        // Fits: unchanged.
+        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 600), 50);
+        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 350), 50);
+        // Old default lease 300 s with the default batch: 8 waves × 35 s = 280 s.
+        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 300), 40);
+        assert!(extract_lease_budget_seconds(40, 5, 30) <= 300);
+        // One concurrent fetch, 5 s timeout, 400 s lease: 40 waves of 10 s.
+        assert_eq!(fit_extract_batch_to_lease(50, 1, 5, 400), 40);
+        // Not even one wave fits: one wave, never zero.
+        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 20), 5);
+        assert_eq!(fit_extract_batch_to_lease(3, 5, 30, 10), 3);
+        // Zero inputs are clamped like the flow does.
+        assert_eq!(fit_extract_batch_to_lease(0, 0, 10, 0), 1);
     }
 
     #[test]

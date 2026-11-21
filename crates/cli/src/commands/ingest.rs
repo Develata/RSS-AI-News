@@ -5,8 +5,8 @@ use std::{
 
 use rss_ai_news_config::{self as config, CategoryConfig, LoadedConfig};
 use rss_ai_news_runtime::{
-    ExtractFlow, ExtractOptions, ExtractSummary, IngestFlow, IngestOptions, RuntimeError,
-    extract_lease_budget_seconds,
+    ExtractFlow, ExtractOptions, ExtractSummary, IngestFlow, IngestOptions,
+    extract_lease_budget_seconds, fit_extract_batch_to_lease,
 };
 use rss_ai_news_storage::StoragePool;
 use serde::Serialize;
@@ -156,28 +156,37 @@ pub(crate) fn preflight(loaded: &LoadedConfig) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Fail fast when one extract batch could outlive its lease (the batch size
-/// is a CLI argument, so this is checked per run rather than in config
-/// validation, like the AI lease budget). Runs before any flow does work.
-fn check_extract_lease_budget(loaded: &LoadedConfig, batch_size: u32) -> Result<(), CliError> {
+/// The extract batch size for this run: `requested`, shrunk to whole waves
+/// when one batch could outlive its lease (the batch size is a CLI argument,
+/// so this is decided per run, like the AI lease budget). Shrinking instead of
+/// failing keeps configs that ran before the budget existed running.
+fn extract_batch_size(loaded: &LoadedConfig, requested: u32) -> u32 {
     let app = &loaded.app;
-    let budget = extract_lease_budget_seconds(
-        batch_size,
-        app.http.concurrent_fetches,
-        app.http.timeout_seconds,
-    );
-    if budget > app.lease.fetch_duration_seconds {
-        return Err(CliError::Runtime(RuntimeError::Config(format!(
-            "extract lease 预算 {budget}s（ceil(batch {batch_size} / concurrent_fetches {}) × \
-             (http.timeout {}s + 余量 {}s)）超过 lease.fetch_duration_seconds {}s；\
-             请减小 --batch-size、调大 http.concurrent_fetches，或调大 lease.fetch_duration_seconds",
-            app.http.concurrent_fetches,
-            app.http.timeout_seconds,
-            rss_ai_news_runtime::EXTRACT_WAVE_MARGIN_SECONDS,
-            app.lease.fetch_duration_seconds,
-        ))));
+    let concurrent = app.http.concurrent_fetches;
+    let timeout = app.http.timeout_seconds;
+    let lease = app.lease.fetch_duration_seconds;
+    let fitted = fit_extract_batch_to_lease(requested, concurrent, timeout, lease);
+    let budget = extract_lease_budget_seconds(fitted, concurrent, timeout);
+    if budget > lease {
+        tracing::warn!(
+            stage = "extract",
+            batch_size = fitted,
+            budget_seconds = budget,
+            lease_seconds = lease,
+            "even one wave of concurrent_fetches can outlive lease.fetch_duration_seconds; \
+             raise the lease or lower http.timeout_seconds"
+        );
+    } else if fitted < requested {
+        tracing::warn!(
+            stage = "extract",
+            requested_batch_size = requested,
+            batch_size = fitted,
+            lease_seconds = lease,
+            "extract batch shrunk so one batch cannot outlive lease.fetch_duration_seconds \
+             (ceil(batch / concurrent_fetches) x (http.timeout_seconds + margin))"
+        );
     }
-    Ok(())
+    fitted
 }
 
 /// Ingest (and extract unless `--skip-fetch`) on an already loaded config and
@@ -187,9 +196,6 @@ pub(crate) async fn run_loaded(
     pool: &StoragePool,
     args: &IngestArgs,
 ) -> Result<IngestCommandSummary, CliError> {
-    if !args.skip_fetch {
-        check_extract_lease_budget(loaded, args.batch_size)?;
-    }
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let started = Instant::now();
     let ctx = build_ingest_deps(loaded, pool)?;
@@ -205,7 +211,7 @@ pub(crate) async fn run_loaded(
             ExtractFlow::new(build_extract_deps(loaded, pool, ctx.run.clone()).await?);
         extract_flow
             .run(ExtractOptions {
-                batch_size: args.batch_size,
+                batch_size: extract_batch_size(loaded, args.batch_size),
                 max_attempts: loaded.app.retry.feed_entry_max_attempts,
                 // F6-3: 从 app.runtime.max_batches_per_run 取生效值。
                 // `--max-batches` 已经由 CliOverrides::apply_to_app

@@ -24,7 +24,7 @@ pub use decision_run::{
 };
 pub use extract::{
     EXTRACT_WAVE_MARGIN_SECONDS, ExtractEntryOutcome, ExtractEntryStatus, ExtractFlow,
-    ExtractOptions, ExtractSummary, extract_lease_budget_seconds,
+    ExtractOptions, ExtractSummary, extract_lease_budget_seconds, fit_extract_batch_to_lease,
 };
 pub use ingest::{
     IngestFlow, IngestOptions, IngestSourceOutcome, IngestSourceStatus, IngestSummary,

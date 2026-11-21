@@ -28,7 +28,7 @@ pub use flows::{
     PublishStoreLocalStatus, RebuildReportFlow, RebuildReportOptions, RecentEntriesFlow,
     RecentEntriesOptions, RecentEntriesResult, RecentSourceHealth, ReindexAbortOutcome,
     ReindexFlow, ReindexOptions, ReindexSummary, ReindexTarget, TaskGenSummary,
-    ai_lease_budget_seconds, extract_lease_budget_seconds,
+    ai_lease_budget_seconds, extract_lease_budget_seconds, fit_extract_batch_to_lease,
 };
 pub use flows::{
     REPLAY_FEED_SAMPLE_LIMIT, REPLAY_PLACEHOLDER_BASE_URI, ReplayBaseUri, ReplayDiff, ReplayFlow,

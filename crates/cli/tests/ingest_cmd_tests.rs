@@ -135,11 +135,12 @@ async fn ingest_cmd_with_failing_feed_records_error() {
     assert_eq!(summary.entries_inserted, 0);
 }
 
-/// A11: one extract batch that could outlive its lease fails fast with a
-/// config error before any feed is fetched; `--skip-fetch` runs no extract and
-/// is not checked.
+/// A11: an extract batch that could outlive its lease no longer refuses to
+/// start (configs that ran before the budget existed keep running); the batch
+/// is shrunk to whole waves instead (arithmetic pinned in the runtime unit test
+/// `over_budget_batches_shrink_to_whole_waves_that_fit_the_lease`).
 #[tokio::test]
-async fn extract_lease_budget_over_the_lease_fails_fast() {
+async fn extract_batch_over_the_lease_is_shrunk_not_rejected() {
     let server = MockServer::start().await;
     let temp = TempDir::new().expect("temp dir");
     write_config(temp.path(), &server.uri());
@@ -156,23 +157,9 @@ async fn extract_lease_budget_over_the_lease_fails_fast() {
         batch_size: 50,
         ..IngestArgs::default()
     };
-    let error = ingest::run(&cli_for(temp.path(), args.clone()), &args)
+    ingest::run(&cli_for(temp.path(), args.clone()), &args)
         .await
-        .expect_err("lease budget must be rejected");
-    let message = error.to_string();
-    assert!(
-        message.contains("lease.fetch_duration_seconds"),
-        "{message}"
-    );
-    assert!(message.contains("500s"), "{message}");
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .is_empty(),
-        "no feed fetched"
-    );
+        .expect("an over-budget batch is shrunk, not rejected");
 
     let skip = IngestArgs {
         skip_fetch: true,
@@ -180,15 +167,7 @@ async fn extract_lease_budget_over_the_lease_fails_fast() {
     };
     ingest::run(&cli_for(temp.path(), skip.clone()), &skip)
         .await
-        .expect("--skip-fetch runs no extract and needs no extract lease budget");
-
-    let small = IngestArgs {
-        batch_size: 40,
-        ..IngestArgs::default()
-    };
-    ingest::run(&cli_for(temp.path(), small.clone()), &small)
-        .await
-        .expect("40 × 10 s = 400 s fits the lease exactly");
+        .expect("--skip-fetch runs no extract");
 }
 
 fn cli_for(config_dir: &Path, args: IngestArgs) -> Cli {
