@@ -84,6 +84,12 @@ SQLite 由此持有写锁、串行化并发 freeze）；② PG 按 id 顺序 `SE
 
 ### 2.3 幂等
 
+报告日期：`--date` 显式给定时按给定值；省略时 `publish` / `publish-all` 取本次运行时刻（每次运行采样一次）在
+**有效目标时区**（`--timezone`，否则 `[publish].target_timezone`）下的日历日期，而不是 UTC 日期
+（`runtime::flows::publish::default_report_date`）。例：`Asia/Shanghai` 下 2026-11-21 00:30 运行 → `2026-11-21`。
+时区须为 IANA 时区库中存在的名称（jiff 查询：有系统 zoneinfo 用系统库，否则用内置库；validate-config、doctor 与运行时同一查询）；
+未知时区在任何写入之前报错，绝不回退到 UTC。
+
 唯一约束 `(category_key, report_date, render_version)`。重复 freeze 同一组合返回
 `PublishInitOutcome::AlreadyExists`。
 

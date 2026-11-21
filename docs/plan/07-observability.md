@@ -205,7 +205,7 @@ check，汇总成 `CheckReport`，按 outcome 染色输出。
 | `openai` | `[ai].enabled` 为 true 时探测 `OPENAI_BASE_URL` 可达 |
 | `github` | 远端 publish 启用时探测 `https://api.github.com/repos/<owner>/<repo>` |
 | `rsshub` | 任一 source 使用占位符时探测 `RSSHUB_BASE_URL` 健康端点 |
-| `Timezone` | `[publish].target_timezone` 是合法 IANA 时区 |
+| `Timezone` | `[publish].target_timezone` 是 IANA 时区库中存在的时区（不存在 → Fail） |
 | `disk` | SQLite 数据库所在文件系统的剩余空间；PostgreSQL 返回 Info/skip，本地路径不能代表数据库磁盘 |
 | `Expired leases` | 无过期未回收的 running AI 租约（与 deep I8 同源） |
 | `Failed backlog` | 终态失败计数（feed/ai/publish 三表），Info |

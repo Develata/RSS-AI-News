@@ -17,7 +17,7 @@
 | `-o, --output-format <pretty\|json>` | `pretty` | 子命令 summary 输出格式 |
 | `-n, --dry-run` | `false` | `reindex` 实装预演；只读命令（validate-config / recent-entries / replay / 无 `--output` 的 rebuild-report）不写业务数据、不调用 feed / AI / GitHub（仍会读取配置的数据库，包括远端 PostgreSQL），视为无操作；其余命令（含会发真实探测请求的 doctor、会以可写连接打开库的 migrate check）以参数错误拒绝（exit 2），且在创建日志文件、启动 metrics 之前拒绝。被接受时，显式给出的 `--log-file` / `--metrics-bind` 照常生效 |
 | `-C, --category <KEY>` | `None` | 仅处理该分类（多分类场景隔离） |
-| `--timezone <IANA>` | `app.toml [publish].target_timezone` | 覆盖发布时区 |
+| `--timezone <IANA>` | `app.toml [publish].target_timezone` | 覆盖发布时区（须为 IANA 时区库中存在的名称；决定 publish / publish-all 的默认报告日期） |
 
 > **`--max-batches`** 不是全局 flag。仅 `ingest` / `ai-run` / `run` 三个子命令本地暴露
 > （F7-1 修复，详见 args.rs 注释）。
@@ -66,7 +66,7 @@
 - 不支持 `--dry-run`；退出码：配置 / 凭据类中止 78，其它运行级中止 1，仅单篇失败或限流 0
 
 ### `publish` / `publish-all`
-- `--date <YYYY-MM-DD>`：指定 report 日期
+- `--date <YYYY-MM-DD>`：指定 report 日期；省略时取本次运行时刻在有效目标时区（`--timezone`，否则 `[publish].target_timezone`）下的当天日期，而非 UTC 日期（例：`Asia/Shanghai` 下 2026-11-21 00:30 运行 → `2026-11-21`）
 - `--local-only`：跳过远端 publish
 - `--force`：强制重做（即使已有 publish_record）
 

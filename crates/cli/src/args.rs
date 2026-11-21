@@ -77,7 +77,8 @@ pub struct Cli {
     #[arg(short = 'C', long = "category", value_name = "KEY")]
     pub category: Option<String>,
 
-    /// 报告日期所用时区（IANA 名称），覆盖 [publish].target_timezone
+    /// 报告日期所用时区（IANA 名称，如 Asia/Shanghai），覆盖 [publish].target_timezone；
+    /// publish / publish-all 未给 --date 时按此时区取当天日期。须为 IANA 时区库中存在的名称
     #[arg(long = "timezone", value_name = "TZ")]
     pub timezone: Option<String>,
 
@@ -252,7 +253,8 @@ pub struct DecisionRunArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct PublishArgs {
-    /// 报告日期 YYYY-MM-DD，默认今天（UTC）
+    /// 报告日期 YYYY-MM-DD；默认为本次运行时刻在有效目标时区
+    /// （--timezone，否则 [publish].target_timezone）下的当天日期
     #[arg(long)]
     pub date: Option<String>,
     /// 只写本地目录，不推 GitHub

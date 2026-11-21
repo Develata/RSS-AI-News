@@ -25,11 +25,13 @@ mod freeze;
 mod paths;
 mod remote;
 mod render;
+mod report_date;
 mod rule_versions;
 mod store_local;
 
 pub use dto::*;
 pub use paths::{ReportPathSpec, check_report_path_collisions};
+pub use report_date::default_report_date;
 pub use rule_versions::{ForceRenderTrace, PublishRuleVersions, bootstrap_publish_rule_versions};
 
 pub struct PublishFlow {

@@ -12,6 +12,7 @@
 ### 命中条件（success path）
 
 - **init**：基于 `(category_key, report_date)` 幂等键创建/复用 `publish_records.Pending` 行
+- **默认报告日期**：未给 `--date` 时取运行时刻在有效目标时区（`--timezone` / `[publish].target_timezone`）下的日期，非 UTC；未知时区 → 配置错误（exit 78），不写库
 - **freeze**：将命中 `[publish].min_importance_score` × `include_unscored` × `candidate_window_hours` 的 article 冻结为 `publish_items`；
   - AI 路径：选 `ArticleState=ReadyForPublish`
   - AI-off 直通：`Persisted` article 在同 tx 内提升为候选（无需 ai_result）
@@ -125,6 +126,9 @@
 | `publish_force_creates_unique_non_active_render_versions_on_a_fresh_db` | `crates/cli/tests/publish_cmd_tests.rs` | --force 每次唯一且非 active |
 | `publish_all_refuses_categories_whose_paths_collide_on_the_report_date` | `crates/cli/tests/publish_cmd_tests.rs` | 真实日期路径碰撞在写入前拦截 |
 | `month_day_and_day_month_templates_collide_on_eleven_eleven` | `crates/runtime/src/flows/publish/paths.rs` | 11-11 碰撞 / 其它日期不碰撞 |
+| `publish_default_date_uses_the_effective_timezone_and_rejects_unknown_zones` | `crates/cli/tests/publish_cmd_tests.rs` | 默认日期按目标时区；未知时区写库前报错 |
+| `shanghai_after_midnight_is_the_local_date_not_the_utc_date` | `crates/runtime/src/flows/publish/report_date.rs` | 2026-11-21T00:30+08:00 → 2026-11-21（另含负偏移、夏令时、未知时区用例） |
+| `real_iana_zones_are_accepted_and_made_up_ones_rejected` | `crates/config/src/validate/checks.rs` | validate 按 IANA 库校验 |
 | `publish_category_never_claims_another_categorys_pending_record` | `crates/cli/tests/publish_cmd_tests.rs` | 命令层跨分类 record 隔离 |
 | `sqlite_lease_predicates_compare_instants_not_rfc3339_text` | `crates/storage/tests/publish_stage_recovery_tests.rs` | SQLite lease 谓词按时刻（.5Z vs 整秒 now） |
 | `sqlite_claim_lease_is_not_expired_before_its_instant` | 同上 | claim 写入的 lease 不提前过期 |
