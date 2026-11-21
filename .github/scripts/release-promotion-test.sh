@@ -299,6 +299,18 @@ expect_rc 0
 alias_at latest 0.10.4
 done_case
 
+start "tags with leading-zero components are not versions (cannot block promotion)"
+case_failures=$failures
+publish 1.4.3 c143
+{ tag 1.4.3 c143; tag 01.4.99 cx; tag 1.04.0 cy; tag 1.4.007 cz; } >"$work/tags"
+reconcile 1.4.3 <"$work/tags"
+expect_rc 0
+alias_at latest 1.4.3
+alias_at 1.4 1.4.3
+reconcile 01.4.99 <"$work/tags"
+expect_rc 2
+done_case
+
 start "version missing from the listing fails"
 case_failures=$failures
 publish 0.10.5 c5

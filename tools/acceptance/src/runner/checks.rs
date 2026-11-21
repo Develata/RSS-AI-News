@@ -387,12 +387,15 @@ pub(crate) fn workspace_version(repo_root: &Path) -> Result<String, String> {
         .ok_or_else(|| "workspace.package.version is missing".to_string())
 }
 
+/// `X.Y.Z` with each component `0` or a digit run without a leading zero
+/// (SemVer 2.0.0 §2), the same rule as `.github/scripts/release-promotion.sh`.
 pub(crate) fn validate_version(version: &str) -> Result<String, String> {
-    let valid = !version.is_empty()
-        && version
-            .split('.')
-            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
-        && version.split('.').count() == 3;
+    let valid = version.split('.').count() == 3
+        && version.split('.').all(|part| {
+            !part.is_empty()
+                && part.chars().all(|ch| ch.is_ascii_digit())
+                && (part == "0" || !part.starts_with('0'))
+        });
     valid
         .then(|| version.to_string())
         .ok_or_else(|| format!("expected version must be X.Y.Z, got {version:?}"))
@@ -434,7 +437,16 @@ mod tests {
     #[test]
     fn version_input_is_strict_semver_triplet() {
         assert_eq!(validate_version("0.7.1").unwrap(), "0.7.1");
-        for invalid in ["v0.7.1", "0.7", "0.7.1-rc.1", ""] {
+        for invalid in [
+            "v0.7.1",
+            "0.7",
+            "0.7.1-rc.1",
+            "",
+            "01.7.1",
+            "0.07.1",
+            "0.7.01",
+            "0.7.1.",
+        ] {
             assert!(validate_version(invalid).is_err(), "{invalid}");
         }
     }
