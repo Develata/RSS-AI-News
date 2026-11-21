@@ -57,6 +57,51 @@ ON CONFLICT(category_key, source_key) DO UPDATE SET
     updated_at = excluded.updated_at
 "#;
 
+/// Config sync upsert (categories reindex, A14). Same 17 binds as
+/// [`UPSERT_FEED_SOURCE_SQL`]; a new row is inserted as given, but on conflict
+/// only config columns are written. Fetch runtime state (validators, failure
+/// counters, last error) is reset only when the endpoint changed
+/// (`feed_url` / `feed_kind`), exactly ingest's `needs_sync` rule;
+/// `last_fetched_at` / `last_success_at` are always kept. SET expressions read
+/// the pre-update row on both SQLite and PostgreSQL, so their order is free.
+pub(super) const UPSERT_FEED_SOURCE_CONFIG_SQL: &str = r#"
+INSERT INTO feed_sources (
+    category_key, source_key, display_name, feed_url, feed_kind, status,
+    priority, etag, last_modified, last_fetched_at, last_success_at,
+    consecutive_failures, last_error, last_error_kind, config_version,
+    created_at, updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+ON CONFLICT(category_key, source_key) DO UPDATE SET
+    display_name = excluded.display_name,
+    status = excluded.status,
+    priority = excluded.priority,
+    config_version = excluded.config_version,
+    updated_at = excluded.updated_at,
+    etag = CASE
+        WHEN feed_sources.feed_url <> excluded.feed_url
+          OR feed_sources.feed_kind <> excluded.feed_kind THEN NULL
+        ELSE feed_sources.etag END,
+    last_modified = CASE
+        WHEN feed_sources.feed_url <> excluded.feed_url
+          OR feed_sources.feed_kind <> excluded.feed_kind THEN NULL
+        ELSE feed_sources.last_modified END,
+    consecutive_failures = CASE
+        WHEN feed_sources.feed_url <> excluded.feed_url
+          OR feed_sources.feed_kind <> excluded.feed_kind THEN 0
+        ELSE feed_sources.consecutive_failures END,
+    last_error = CASE
+        WHEN feed_sources.feed_url <> excluded.feed_url
+          OR feed_sources.feed_kind <> excluded.feed_kind THEN NULL
+        ELSE feed_sources.last_error END,
+    last_error_kind = CASE
+        WHEN feed_sources.feed_url <> excluded.feed_url
+          OR feed_sources.feed_kind <> excluded.feed_kind THEN NULL
+        ELSE feed_sources.last_error_kind END,
+    feed_url = excluded.feed_url,
+    feed_kind = excluded.feed_kind
+"#;
+
 pub(super) const SELECT_FEED_SOURCE_BY_ID_SQL: &str = r#"
 SELECT id, category_key, source_key, display_name, feed_url, feed_kind, status,
        priority, etag, last_modified, last_fetched_at, last_success_at,

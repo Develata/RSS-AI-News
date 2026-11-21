@@ -647,3 +647,46 @@ fn reindex_opts(target: ReindexTarget, batch_size: u32) -> ReindexOptions {
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
+
+/// A14：categories reindex 只同步配置列；同一 endpoint 的抓取运行态
+/// （etag / last_modified / 失败计数 / 成功时间）不被清空。
+#[tokio::test]
+async fn reindex_categories_keeps_fetch_runtime_state_of_unchanged_sources() {
+    let (_dir, pool) = common::make_test_pool().await;
+    reindex(&pool)
+        .run(reindex_opts(ReindexTarget::Categories, 10))
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE feed_sources SET etag = 'e1', last_modified = 'lm1', \
+             last_success_at = '2026-11-20T10:00:00Z', consecutive_failures = 2, \
+             last_error_kind = 'http_5xx' WHERE source_key = 'new-a'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    reindex(&pool)
+        .run(reindex_opts(ReindexTarget::Categories, 10))
+        .await
+        .unwrap();
+    let row: (
+        Option<String>,
+        Option<String>,
+        Option<OffsetDateTime>,
+        i64,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT etag, last_modified, last_success_at, consecutive_failures, last_error_kind \
+             FROM feed_sources WHERE source_key = 'new-a'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(row.0.as_deref(), Some("e1"));
+    assert_eq!(row.1.as_deref(), Some("lm1"));
+    assert!(row.2.is_some());
+    assert_eq!(row.3, 2);
+    assert_eq!(row.4.as_deref(), Some("http_5xx"));
+}

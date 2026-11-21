@@ -24,8 +24,8 @@ use super::feed_source_sql::{
     LIST_FEED_SOURCES_BY_CATEGORY_SQL, LIST_RECENT_FEED_SOURCE_HEALTH_SQL,
     MARK_FEED_SOURCE_ARCHIVED_SQL, SELECT_FEED_SOURCE_BY_ID_SQL, SELECT_FEED_SOURCE_BY_KEYS_SQL,
     UPDATE_FEED_SOURCE_AFTER_FETCH_FAILURE_SQL, UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL,
-    UPDATE_FEED_SOURCE_AFTER_NOT_MODIFIED_SQL, UPSERT_FEED_SOURCE_RETURNING_ID_SQL,
-    UPSERT_FEED_SOURCE_SQL,
+    UPDATE_FEED_SOURCE_AFTER_NOT_MODIFIED_SQL, UPSERT_FEED_SOURCE_CONFIG_SQL,
+    UPSERT_FEED_SOURCE_RETURNING_ID_SQL, UPSERT_FEED_SOURCE_SQL,
 };
 
 // ── trait 实现：按 backend 分发到 sqlite_* / pg_* helper ──
@@ -87,10 +87,44 @@ impl FeedSourceRepository for FeedSourceRepo {
     ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlite_upsert_with_lease_guard(p, src, job_id, owner, now).await
+                sqlite_upsert_with_lease_guard(p, UPSERT_FEED_SOURCE_SQL, src, job_id, owner, now)
+                    .await
             }
             StoragePool::Postgres(p) => {
-                pg_upsert_with_lease_guard(p, src, job_id, owner, now).await
+                pg_upsert_with_lease_guard(p, UPSERT_FEED_SOURCE_SQL, src, job_id, owner, now).await
+            }
+        }
+    }
+
+    async fn upsert_config_with_lease_guard(
+        &self,
+        src: &FeedSource,
+        job_id: i64,
+        owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_upsert_with_lease_guard(
+                    p,
+                    UPSERT_FEED_SOURCE_CONFIG_SQL,
+                    src,
+                    job_id,
+                    owner,
+                    now,
+                )
+                .await
+            }
+            StoragePool::Postgres(p) => {
+                pg_upsert_with_lease_guard(
+                    p,
+                    UPSERT_FEED_SOURCE_CONFIG_SQL,
+                    src,
+                    job_id,
+                    owner,
+                    now,
+                )
+                .await
             }
         }
     }
@@ -327,6 +361,7 @@ async fn sqlite_mark_archived(pool: &SqlitePool, id: i64) -> Result<bool, Storag
 
 async fn sqlite_upsert_with_lease_guard(
     pool: &SqlitePool,
+    upsert_sql: &'static str,
     src: &FeedSource,
     job_id: i64,
     owner: &str,
@@ -346,7 +381,7 @@ async fn sqlite_upsert_with_lease_guard(
         return Ok(LeaseGuardedWriteOutcome::LeaseLost);
     }
 
-    sqlx::query(UPSERT_FEED_SOURCE_SQL)
+    sqlx::query(upsert_sql)
         .bind(&src.category_key)
         .bind(&src.source_key)
         .bind(&src.display_name)
@@ -534,6 +569,7 @@ async fn pg_mark_archived(pool: &PgPool, id: i64) -> Result<bool, StorageError> 
 
 async fn pg_upsert_with_lease_guard(
     pool: &PgPool,
+    upsert_sql: &'static str,
     src: &FeedSource,
     job_id: i64,
     owner: &str,
@@ -553,7 +589,7 @@ async fn pg_upsert_with_lease_guard(
         return Ok(LeaseGuardedWriteOutcome::LeaseLost);
     }
 
-    sqlx::query(UPSERT_FEED_SOURCE_SQL)
+    sqlx::query(upsert_sql)
         .bind(&src.category_key)
         .bind(&src.source_key)
         .bind(&src.display_name)

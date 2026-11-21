@@ -180,10 +180,12 @@ impl ReindexFlow {
                 // 关闭 fix2 残留的 guard→write TOCTOU 窗口。lease 已失则
                 // 整段事务 rollback，feed_sources 行不被覆盖，直接 LeaseConflict
                 // 退出走 outer run() 的 mark_failed 路径。
+                // A14：只写配置列；上面 FeedSource 的空运行态字段只用于新行，
+                // 已有行的 etag / 失败计数等仅在 endpoint 变化时清空。
                 match self
                     .ctx
                     .feed_source_repo
-                    .upsert_with_lease_guard(&feed_source, job_id, owner, now)
+                    .upsert_config_with_lease_guard(&feed_source, job_id, owner, now)
                     .await?
                 {
                     LeaseGuardedWriteOutcome::Applied => {
@@ -195,7 +197,7 @@ impl ReindexFlow {
                         // UPDATE），NoOp 状态不可达；进入此分支说明 storage
                         // 实现破坏了语义契约，留 unreachable! 兜底。
                         unreachable!(
-                            "upsert_with_lease_guard 返回 NoOp 违反契约：feed_sources \
+                            "upsert_config_with_lease_guard 返回 NoOp 违反契约：feed_sources \
                              upsert 在 lease 在手时必然写一行"
                         );
                     }

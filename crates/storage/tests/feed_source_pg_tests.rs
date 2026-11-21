@@ -343,3 +343,51 @@ async fn pg_not_modified_update_keeps_validators_the_304_omits() {
     assert_eq!(row.etag.as_deref(), Some("e1"));
     assert_eq!(row.last_modified.as_deref(), Some("lm2"));
 }
+
+/// A14 (PG): config-only upsert keeps fetch runtime state on the same
+/// endpoint and resets it when feed_url changes.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_config_upsert_keeps_runtime_state_unless_the_endpoint_changes() {
+    let ctx = make_pg_test_pool().await;
+    let rule_id = seed_rule_version(&ctx, "v1").await;
+    let owner = "owner-pg-a14";
+    let job_id = seed_running_reindex_job(&ctx, rule_id, owner).await;
+    let repo = FeedSourceRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let src = sample_feed_source("ai", "a14", rule_id);
+    repo.upsert_config_with_lease_guard(&src, job_id, owner, now)
+        .await
+        .unwrap();
+    let id = repo.find_by_keys("ai", "a14").await.unwrap().unwrap().id;
+    repo.update_after_fetch_success(id, Some("e1"), Some("lm1"), now, now)
+        .await
+        .unwrap();
+    repo.update_after_fetch_failure(id, now, "boom", "http_5xx")
+        .await
+        .unwrap();
+
+    let mut renamed = src.clone();
+    renamed.display_name = "Renamed".to_string();
+    assert_eq!(
+        repo.upsert_config_with_lease_guard(&renamed, job_id, owner, now)
+            .await
+            .unwrap(),
+        LeaseGuardedWriteOutcome::Applied
+    );
+    let row = repo.find_by_id(id).await.unwrap().unwrap();
+    assert_eq!(row.display_name, "Renamed");
+    assert_eq!(row.etag.as_deref(), Some("e1"));
+    assert_eq!(row.consecutive_failures, 1);
+    assert!(row.last_success_at.is_some());
+
+    let mut moved = renamed.clone();
+    moved.feed_url = "https://example.com/moved.xml".to_string();
+    repo.upsert_config_with_lease_guard(&moved, job_id, owner, now)
+        .await
+        .unwrap();
+    let row = repo.find_by_id(id).await.unwrap().unwrap();
+    assert_eq!((row.etag, row.last_modified), (None, None));
+    assert_eq!(row.consecutive_failures, 0);
+    assert_eq!(row.last_error_kind, None);
+}
