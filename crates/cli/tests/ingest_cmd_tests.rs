@@ -145,9 +145,10 @@ async fn extract_lease_budget_over_the_lease_fails_fast() {
     write_config(temp.path(), &server.uri());
     let app_path = temp.path().join("app.toml");
     // batch 50, 1 concurrent fetch, 5 s timeout → 50 × (5 + 5) = 500 s > 400 s.
-    let app = fs::read_to_string(&app_path)
-        .unwrap()
-        .replace("fetch_duration_seconds = 600", "fetch_duration_seconds = 400");
+    let app = fs::read_to_string(&app_path).unwrap().replace(
+        "fetch_duration_seconds = 600",
+        "fetch_duration_seconds = 400",
+    );
     fs::write(&app_path, app).unwrap();
 
     // `IngestArgs::default()` has batch 0; the CLI default is 50.
@@ -159,10 +160,17 @@ async fn extract_lease_budget_over_the_lease_fails_fast() {
         .await
         .expect_err("lease budget must be rejected");
     let message = error.to_string();
-    assert!(message.contains("lease.fetch_duration_seconds"), "{message}");
+    assert!(
+        message.contains("lease.fetch_duration_seconds"),
+        "{message}"
+    );
     assert!(message.contains("500s"), "{message}");
     assert!(
-        server.received_requests().await.unwrap_or_default().is_empty(),
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
         "no feed fetched"
     );
 
