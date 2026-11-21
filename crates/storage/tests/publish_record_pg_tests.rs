@@ -794,6 +794,137 @@ async fn pg_concurrent_freeze_of_the_same_article_serialises_on_the_article_lock
     assert_eq!((state.as_str(), owned), ("pending", 0));
 }
 
+/// R1-P-S4: the freeze's ownership re-check relies on READ COMMITTED (the
+/// statement after the article lock sees the winner's committed items). A
+/// session whose default is REPEATABLE READ would keep the snapshot taken
+/// before the wait and let both freezes commit, so the freeze sets its own
+/// isolation level.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_freeze_ownership_holds_when_the_session_defaults_to_repeatable_read() {
+    use sqlx::Executor;
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "own-rr").await;
+    let records = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let rival = records
+        .create_if_new(&new_record("idem-rr-rival", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let ours = records
+        .create_if_new(&new_record("idem-rr-ours", "ml", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    records
+        .claim_publish_by_ids(
+            &ClaimRequest {
+                owner: "frz-rr".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 1,
+                max_attempts: 5,
+            },
+            PublishState::Pending,
+            &[ours],
+        )
+        .await
+        .unwrap();
+    let article = seed_article(&ctx, "hash-rr", "uid-rr", "ready_for_publish").await;
+
+    let repeatable_read = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                connection
+                    .execute(
+                        "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+                    )
+                    .await
+                    .map(|_| ())
+            })
+        })
+        .connect_with((*ctx.pg_pool().connect_options()).clone())
+        .await
+        .unwrap();
+    let default_level: String = sqlx::query_scalar("SHOW default_transaction_isolation")
+        .fetch_one(&repeatable_read)
+        .await
+        .unwrap();
+    assert_eq!(default_level, "repeatable read");
+
+    let mut rival_tx = ctx.pg_pool().begin().await.unwrap();
+    sqlx::query("SELECT id FROM articles WHERE id = $1 FOR UPDATE")
+        .bind(article)
+        .execute(&mut *rival_tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO publish_items (publish_record_id, position, article_id, frozen_title, \
+         frozen_summary, frozen_tags_json, frozen_canonical_link, frozen_source_display_name) \
+         VALUES ($1, 1, $2, 't', 's', '[]', 'https://example.com', 'src')",
+    )
+    .bind(rival)
+    .bind(article)
+    .execute(&mut *rival_tx)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE publish_records SET state = 'snapshot_frozen' WHERE id = $1")
+        .bind(rival)
+        .execute(&mut *rival_tx)
+        .await
+        .unwrap();
+
+    let items = PublishItemRepo::new_with_storage(rss_ai_news_storage::StoragePool::Postgres(
+        repeatable_read,
+    ));
+    let ours_freeze = tokio::spawn(async move {
+        items
+            .freeze_snapshot(
+                ours,
+                "frz-rr",
+                vec![FreezeSnapshotItem {
+                    position: 1,
+                    article_id: article,
+                    article_ai_result_id: None,
+                    frozen_title: "t".to_string(),
+                    frozen_summary: "s".to_string(),
+                    frozen_tags_json: "[]".to_string(),
+                    frozen_score: None,
+                    frozen_canonical_link: "https://example.com".to_string(),
+                    frozen_source_display_name: "src".to_string(),
+                }],
+                Vec::new(),
+                OffsetDateTime::now_utc(),
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !ours_freeze.is_finished(),
+        "our freeze must be waiting for the rival's article lock"
+    );
+    rival_tx.commit().await.unwrap();
+
+    let outcome = ours_freeze.await.unwrap().unwrap();
+
+    assert_eq!(
+        outcome.status,
+        FreezeSnapshotStatus::ArticleOwnershipConflict {
+            article_id: article,
+            owner_record_id: rival,
+        }
+    );
+    let owners: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM publish_items WHERE article_id = $1")
+            .bind(article)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+    assert_eq!(owners, 1, "exactly one snapshot owns the article");
+}
+
 /// B2 selection on PostgreSQL: an article in a non-failed snapshot is not a
 /// candidate (AI-off SQL is dialect-specific).
 #[tokio::test]

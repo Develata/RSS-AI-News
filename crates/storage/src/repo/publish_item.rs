@@ -272,6 +272,8 @@ LIMIT 1
 /// PostgreSQL: lock the snapshot's articles in id order before the ownership
 /// check, so two concurrent freezes of the same article serialise (the second
 /// blocks, then sees the first's committed items) without deadlocking.
+const SET_READ_COMMITTED_PG_SQL: &str = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED";
+
 const LOCK_ARTICLES_FOR_FREEZE_PG_SQL: &str =
     "SELECT id FROM articles WHERE id = ANY($1) ORDER BY id FOR UPDATE";
 
@@ -665,6 +667,15 @@ async fn pg_freeze_snapshot(
     now: OffsetDateTime,
 ) -> Result<FreezeSnapshotOutcome, StorageError> {
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    // The ownership re-check below must see the rival's items committed while
+    // this transaction waited on the article lock: READ COMMITTED takes a new
+    // snapshot per statement, REPEATABLE READ (a possible database / role
+    // default) would keep the one from before the wait and let both freezes
+    // commit (R1-P-S4). Must be the transaction's first statement.
+    sqlx::query(SET_READ_COMMITTED_PG_SQL)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
 
     let result = sqlx::query(FREEZE_PUBLISH_RECORD_SQL)
         .bind(now)

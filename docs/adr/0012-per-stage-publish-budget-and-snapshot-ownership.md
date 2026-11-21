@@ -46,7 +46,10 @@
 - freeze 事务内复查（选稿在事务外）：
   1. 首条语句是带 owner/state 守卫的 record 推进（SQLite 由此持有写锁，串行化并发 freeze，避免读后升级写的 busy 失败）；
   2. PostgreSQL 按 id 顺序 `SELECT … FOR UPDATE` 锁住快照内文章——READ COMMITTED 下仅靠 `NOT EXISTS` 复查无法串行化，
-     两个 freeze 都会通过检查；加锁后后到者等待，再看见先到者已提交的 items；固定顺序避免死锁；
+     两个 freeze 都会通过检查；加锁后后到者等待，再看见先到者已提交的 items；固定顺序避免死锁。
+     该推理依赖 READ COMMITTED（每条语句新快照），因此 freeze 事务的第一条语句显式
+     `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`（R1-P-S4）：数据库或角色默认若是 REPEATABLE READ，复查会沿用等锁前的
+     快照，两个 freeze 都能提交（PostgreSQL 16 实测）；
   3. 被其它活动快照持有 → 回滚，`ArticleOwnershipConflict`；
   4. AI-off 文章按事务内读到的状态区分：`persisted` 晋升；已是 `ready_for_publish`（未被持有的遗留）保持原状冻结；
      其它状态 → 回滚，`ArticleStateConflict`；

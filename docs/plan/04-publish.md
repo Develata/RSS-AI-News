@@ -72,7 +72,8 @@ UPDATE publish_records SET state='snapshot_frozen' WHERE id=?;
 
 实际事务顺序（`freeze_snapshot`，两方言一致）：① 带 owner/state 守卫的 record → `snapshot_frozen`（首条语句即写，
 SQLite 由此持有写锁、串行化并发 freeze）；② PG 按 id 顺序 `SELECT … FOR UPDATE` 锁住快照内的文章（并发 freeze 同一文章时后者等待，
-随后在 READ COMMITTED 下看见前者已提交的 items；固定顺序避免死锁）；③ 事务内复查归属，被其它活动快照持有 →
+随后在 READ COMMITTED 下看见前者已提交的 items；固定顺序避免死锁；PG freeze 事务首条语句显式
+`SET TRANSACTION ISOLATION LEVEL READ COMMITTED`，不依赖数据库 / 角色默认隔离级别）；③ 事务内复查归属，被其它活动快照持有 →
 回滚，`ArticleOwnershipConflict`；④ AI-off 文章：`persisted` → `ready_for_publish`，已是 `ready_for_publish` 则保持，
 其它状态 → 回滚，`ArticleStateConflict`；⑤ 写 publish_items、提交。
 冲突时 runtime 立即释放 lease（`release_freeze_conflict`：记录回 `pending`、两个计数都退还、写 `last_error_kind`

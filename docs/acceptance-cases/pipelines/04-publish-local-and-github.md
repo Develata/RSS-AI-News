@@ -80,6 +80,7 @@
 | `freeze_snapshot_keeps_unowned_ready_article_and_promotes_persisted_one` | 同上 | AI-off 遗留 ready 文章不整批回滚（S9） |
 | `freeze_losing_an_article_releases_lease_without_charging_budget_and_retries_without_it` | `crates/runtime/tests/publish_freeze_tests.rs` | 冲突立即释放 lease、不耗预算、下轮排除 |
 | `pg_concurrent_freeze_of_the_same_article_serialises_on_the_article_lock` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 并发 freeze 由文章行锁串行化 |
+| `pg_freeze_ownership_holds_when_the_session_defaults_to_repeatable_read` | 同上 | 会话默认 REPEATABLE READ 时 freeze 仍显式用 READ COMMITTED，归属不重复 |
 | `pg_ai_off_selection_excludes_article_owned_by_active_snapshot` | 同上 | PG AI-off 选稿排除 |
 | `pg_snapshot_ownership_conflict_prefers_published_then_lowest_id` | 同上 | PG 存量重复归属：已发布者优先、否则低 id 胜出；败方释放退还、保态 |
 | `publish_remote_stops_the_higher_record_sharing_an_article_before_sending` | `crates/runtime/tests/publish_remote_tests.rs` | 存量重复归属：败方不发请求、保态、退还 claim |
