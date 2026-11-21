@@ -618,9 +618,7 @@ impl DecisionRunFlow {
     async fn record(&self, outcome: TaskOutcome, summary: &mut DecisionRunSummary) {
         let index = outcome.category_index;
         let category = summary.categories[index].category.clone();
-        // Bounded per response at decode; saturate anyway (a run summary must
-        // not panic or wrap).
-        summary.input_tokens = summary.input_tokens.saturating_add(outcome.input_tokens);
+        summary.input_tokens = add_input_tokens(summary.input_tokens, outcome.input_tokens);
         match outcome.fault {
             Some("storage_timeout") => summary.storage_timeouts += 1,
             Some(_) => summary.storage_errors += 1,
@@ -724,5 +722,30 @@ impl DecisionRunFlow {
         if let Some(abort) = outcome.abort {
             summary.abort(abort);
         }
+    }
+}
+
+/// Run total of input tokens (C8 checked addition): each response's count is
+/// bounded at decode (< 2^32) and calls are a `u32`, so the `u64` sum cannot
+/// overflow. An overflow therefore means a broken invariant: it is reported,
+/// and the total saturates instead of wrapping or panicking.
+fn add_input_tokens(total: u64, tokens: u64) -> u64 {
+    total.checked_add(tokens).unwrap_or_else(|| {
+        tracing::error!(
+            stage = "decision_run",
+            total,
+            tokens,
+            "input token total overflowed u64: decode bound invariant violated"
+        );
+        u64::MAX
+    })
+}
+
+#[cfg(test)]
+mod token_tests {
+    #[test]
+    fn input_token_total_is_checked() {
+        assert_eq!(super::add_input_tokens(1, 2), 3);
+        assert_eq!(super::add_input_tokens(u64::MAX - 1, 5), u64::MAX);
     }
 }
