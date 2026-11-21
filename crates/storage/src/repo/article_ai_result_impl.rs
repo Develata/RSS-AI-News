@@ -15,11 +15,60 @@ use super::article_ai_result::{
     ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome,
 };
 use super::article_ai_result_sql::{
-    ADVANCE_ARTICLE_FROM_AI_PHASE_SQL, ADVANCE_ARTICLE_TO_AI_PENDING_SQL, CLAIM_AI_PENDING_PG_SQL,
-    CLAIM_AI_PENDING_SQLITE_SQL, INSERT_AI_PENDING_SQL, OTHER_SUCCEEDED_AI_EXISTS_SQL,
-    RECLAIM_AI_LEASES_SQL, RELEASE_AI_FAILURE_SQL, RELEASE_AI_RETRYABLE_FAILURE_SQL,
-    RELEASE_AI_SUCCESS_SQL, SELECT_ARTICLE_STATE_SQL, TERMINALIZE_EXHAUSTED_AI_SQL,
+    ADVANCE_ARTICLE_FROM_AI_PHASE_SQL, ADVANCE_ARTICLE_TO_AI_PENDING_SQL,
+    ADVANCE_PERSISTED_ARTICLE_SQL, CLAIM_AI_PENDING_PG_SQL, CLAIM_AI_PENDING_SQLITE_SQL,
+    INSERT_AI_PENDING_SQL, OTHER_SUCCEEDED_AI_EXISTS_SQL, RECLAIM_AI_LEASES_SQL,
+    RELEASE_AI_FAILURE_SQL, RELEASE_AI_RETRYABLE_FAILURE_SQL, RELEASE_AI_SUCCESS_SQL,
+    SELECT_AI_IDENTITY_ROW_PG_SQL, SELECT_AI_IDENTITY_ROW_SQLITE_SQL, SELECT_ARTICLE_STATE_SQL,
+    TERMINALIZE_EXHAUSTED_AI_SQL,
 };
+
+/// `(id, state, keep_decision, importance_score)` of an existing identity row.
+type IdentityRow = (i64, String, Option<i32>, Option<i32>);
+
+/// What a conflicting identity row implies for a still-`persisted` article.
+enum ConflictTarget {
+    /// `pending` / `running`: the task is (or will be) executed.
+    AiPending,
+    /// `succeeded` / `filtered` and a threshold is known (task_gen).
+    Finished {
+        id: i64,
+        keep_decision: Option<bool>,
+        importance_score: Option<i32>,
+        min_importance_score: i32,
+    },
+    /// `permanent_failed`, unknown, or a finished row without a threshold
+    /// (backfill): the article stays `persisted`.
+    Leave,
+}
+
+fn conflict_target(row: Option<IdentityRow>, min_importance_score: Option<i32>) -> ConflictTarget {
+    match (row, min_importance_score) {
+        (Some((_, state, _, _)), _) if state == "pending" || state == "running" => {
+            ConflictTarget::AiPending
+        }
+        (Some((id, state, keep, score)), Some(min))
+            if state == "succeeded" || state == "filtered" =>
+        {
+            ConflictTarget::Finished {
+                id,
+                keep_decision: keep.map(|value| value != 0),
+                importance_score: score,
+                min_importance_score: min,
+            }
+        }
+        _ => ConflictTarget::Leave,
+    }
+}
+
+fn conflict_outcome(article_state: Option<&str>, advanced: bool) -> InsertPendingOutcome {
+    InsertPendingOutcome {
+        ai_result_id: None,
+        article_advanced: advanced,
+        article_already_advanced: article_state != Some("persisted"),
+        reconciled: advanced,
+    }
+}
 
 // ── trait 实现 ─────────────────────────────────────────────────
 
@@ -120,11 +169,27 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
     async fn insert_pending_and_advance_article(
         &self,
         item: &NewAiResult,
+        min_importance_score: i32,
         now: OffsetDateTime,
     ) -> Result<InsertPendingOutcome, StorageError> {
         match &self.pool {
-            StoragePool::Sqlite(p) => sqlite_insert_pending_and_advance(p, item, now).await,
-            StoragePool::Postgres(p) => pg_insert_pending_and_advance(p, item, now).await,
+            StoragePool::Sqlite(p) => {
+                sqlite_insert_pending_and_advance(p, item, min_importance_score, now).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_insert_pending_and_advance(p, item, min_importance_score, now).await
+            }
+        }
+    }
+
+    async fn insert_backfill_pending(
+        &self,
+        item: &NewAiResult,
+        now: OffsetDateTime,
+    ) -> Result<InsertPendingOutcome, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_insert_backfill_pending(p, item, now).await,
+            StoragePool::Postgres(p) => pg_insert_backfill_pending(p, item, now).await,
         }
     }
 
@@ -329,6 +394,7 @@ async fn sqlite_terminalize_exhausted(
 async fn sqlite_insert_pending_and_advance(
     pool: &SqlitePool,
     item: &NewAiResult,
+    min_importance_score: i32,
     now: OffsetDateTime,
 ) -> Result<InsertPendingOutcome, StorageError> {
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
@@ -342,17 +408,10 @@ async fn sqlite_insert_pending_and_advance(
         .map_err(|error| classify_insert_error(error, item))?;
 
     let Some(ai_result_id) = inserted_id else {
-        let state = sqlx::query_scalar::<_, String>(SELECT_ARTICLE_STATE_SQL)
-            .bind(item.article_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(StorageError::from)?;
+        let outcome =
+            sqlite_reconcile_conflict(&mut tx, item, Some(min_importance_score), now).await?;
         tx.commit().await.map_err(StorageError::from)?;
-        return Ok(InsertPendingOutcome {
-            ai_result_id: None,
-            article_advanced: false,
-            article_already_advanced: state.as_deref() != Some("persisted"),
-        });
+        return Ok(outcome);
     };
 
     let result = sqlx::query(ADVANCE_ARTICLE_TO_AI_PENDING_SQL)
@@ -368,6 +427,7 @@ async fn sqlite_insert_pending_and_advance(
             ai_result_id: None,
             article_advanced: false,
             article_already_advanced: true,
+            reconciled: false,
         });
     }
 
@@ -376,7 +436,104 @@ async fn sqlite_insert_pending_and_advance(
         ai_result_id: Some(ai_result_id),
         article_advanced: true,
         article_already_advanced: false,
+        reconciled: false,
     })
+}
+
+/// Conflict branch shared by task_gen and backfill (see the trait docs).
+/// `min_importance_score = None` (backfill) leaves finished rows alone.
+async fn sqlite_reconcile_conflict(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    item: &NewAiResult,
+    min_importance_score: Option<i32>,
+    now: OffsetDateTime,
+) -> Result<InsertPendingOutcome, StorageError> {
+    let row = sqlx::query_as::<_, IdentityRow>(SELECT_AI_IDENTITY_ROW_SQLITE_SQL)
+        .bind(item.article_id)
+        .bind(item.prompt_version)
+        .bind(item.output_schema_version)
+        .bind(&item.model_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(StorageError::from)?;
+    let article_state = sqlx::query_scalar::<_, String>(SELECT_ARTICLE_STATE_SQL)
+        .bind(item.article_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(StorageError::from)?;
+    if article_state.as_deref() != Some("persisted") {
+        return Ok(conflict_outcome(article_state.as_deref(), false));
+    }
+    let next_state = match conflict_target(row, min_importance_score) {
+        ConflictTarget::AiPending => Some("ai_pending"),
+        ConflictTarget::Finished {
+            id,
+            keep_decision,
+            importance_score,
+            min_importance_score,
+        } => sqlite_compute_article_advance(
+            tx,
+            id,
+            item.article_id,
+            keep_decision,
+            importance_score,
+            min_importance_score,
+        )
+        .await?
+        .as_article_state_str(),
+        ConflictTarget::Leave => None,
+    };
+    let Some(next_state) = next_state else {
+        return Ok(conflict_outcome(article_state.as_deref(), false));
+    };
+    let advanced = sqlx::query(ADVANCE_PERSISTED_ARTICLE_SQL)
+        .bind(next_state)
+        .bind(now)
+        .bind(item.article_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(StorageError::from)?
+        .rows_affected()
+        == 1;
+    Ok(conflict_outcome(article_state.as_deref(), advanced))
+}
+
+async fn sqlite_insert_backfill_pending(
+    pool: &SqlitePool,
+    item: &NewAiResult,
+    now: OffsetDateTime,
+) -> Result<InsertPendingOutcome, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_AI_PENDING_SQL)
+        .bind(item.article_id)
+        .bind(item.prompt_version)
+        .bind(item.output_schema_version)
+        .bind(&item.model_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| classify_insert_error(error, item))?;
+    let outcome = match inserted_id {
+        Some(ai_result_id) => {
+            // Unlike task_gen, the row is kept when the article has moved on.
+            let advanced = sqlx::query(ADVANCE_ARTICLE_TO_AI_PENDING_SQL)
+                .bind(now)
+                .bind(item.article_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(StorageError::from)?
+                .rows_affected()
+                == 1;
+            InsertPendingOutcome {
+                ai_result_id: Some(ai_result_id),
+                article_advanced: advanced,
+                article_already_advanced: !advanced,
+                reconciled: false,
+            }
+        }
+        None => sqlite_reconcile_conflict(&mut tx, item, None, now).await?,
+    };
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(outcome)
 }
 
 async fn sqlite_release_success_and_advance(
@@ -648,6 +805,7 @@ async fn pg_terminalize_exhausted(
 async fn pg_insert_pending_and_advance(
     pool: &PgPool,
     item: &NewAiResult,
+    min_importance_score: i32,
     now: OffsetDateTime,
 ) -> Result<InsertPendingOutcome, StorageError> {
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
@@ -661,17 +819,9 @@ async fn pg_insert_pending_and_advance(
         .map_err(|error| classify_insert_error(error, item))?;
 
     let Some(ai_result_id) = inserted_id else {
-        let state = sqlx::query_scalar::<_, String>(SELECT_ARTICLE_STATE_SQL)
-            .bind(item.article_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(StorageError::from)?;
+        let outcome = pg_reconcile_conflict(&mut tx, item, Some(min_importance_score), now).await?;
         tx.commit().await.map_err(StorageError::from)?;
-        return Ok(InsertPendingOutcome {
-            ai_result_id: None,
-            article_advanced: false,
-            article_already_advanced: state.as_deref() != Some("persisted"),
-        });
+        return Ok(outcome);
     };
 
     let result = sqlx::query(ADVANCE_ARTICLE_TO_AI_PENDING_SQL)
@@ -687,6 +837,7 @@ async fn pg_insert_pending_and_advance(
             ai_result_id: None,
             article_advanced: false,
             article_already_advanced: true,
+            reconciled: false,
         });
     }
 
@@ -695,7 +846,104 @@ async fn pg_insert_pending_and_advance(
         ai_result_id: Some(ai_result_id),
         article_advanced: true,
         article_already_advanced: false,
+        reconciled: false,
     })
+}
+
+/// Conflict branch shared by task_gen and backfill (see the trait docs).
+/// `min_importance_score = None` (backfill) leaves finished rows alone.
+async fn pg_reconcile_conflict(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    item: &NewAiResult,
+    min_importance_score: Option<i32>,
+    now: OffsetDateTime,
+) -> Result<InsertPendingOutcome, StorageError> {
+    let row = sqlx::query_as::<_, IdentityRow>(SELECT_AI_IDENTITY_ROW_PG_SQL)
+        .bind(item.article_id)
+        .bind(item.prompt_version)
+        .bind(item.output_schema_version)
+        .bind(&item.model_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(StorageError::from)?;
+    let article_state = sqlx::query_scalar::<_, String>(SELECT_ARTICLE_STATE_SQL)
+        .bind(item.article_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(StorageError::from)?;
+    if article_state.as_deref() != Some("persisted") {
+        return Ok(conflict_outcome(article_state.as_deref(), false));
+    }
+    let next_state = match conflict_target(row, min_importance_score) {
+        ConflictTarget::AiPending => Some("ai_pending"),
+        ConflictTarget::Finished {
+            id,
+            keep_decision,
+            importance_score,
+            min_importance_score,
+        } => pg_compute_article_advance(
+            tx,
+            id,
+            item.article_id,
+            keep_decision,
+            importance_score,
+            min_importance_score,
+        )
+        .await?
+        .as_article_state_str(),
+        ConflictTarget::Leave => None,
+    };
+    let Some(next_state) = next_state else {
+        return Ok(conflict_outcome(article_state.as_deref(), false));
+    };
+    let advanced = sqlx::query(ADVANCE_PERSISTED_ARTICLE_SQL)
+        .bind(next_state)
+        .bind(now)
+        .bind(item.article_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(StorageError::from)?
+        .rows_affected()
+        == 1;
+    Ok(conflict_outcome(article_state.as_deref(), advanced))
+}
+
+async fn pg_insert_backfill_pending(
+    pool: &PgPool,
+    item: &NewAiResult,
+    now: OffsetDateTime,
+) -> Result<InsertPendingOutcome, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_AI_PENDING_SQL)
+        .bind(item.article_id)
+        .bind(item.prompt_version)
+        .bind(item.output_schema_version)
+        .bind(&item.model_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| classify_insert_error(error, item))?;
+    let outcome = match inserted_id {
+        Some(ai_result_id) => {
+            // Unlike task_gen, the row is kept when the article has moved on.
+            let advanced = sqlx::query(ADVANCE_ARTICLE_TO_AI_PENDING_SQL)
+                .bind(now)
+                .bind(item.article_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(StorageError::from)?
+                .rows_affected()
+                == 1;
+            InsertPendingOutcome {
+                ai_result_id: Some(ai_result_id),
+                article_advanced: advanced,
+                article_already_advanced: !advanced,
+                reconciled: false,
+            }
+        }
+        None => pg_reconcile_conflict(&mut tx, item, None, now).await?,
+    };
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(outcome)
 }
 
 async fn pg_release_success_and_advance(

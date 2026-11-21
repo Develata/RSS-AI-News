@@ -16,6 +16,8 @@ AI-off 直通模式跳过整段。
 - 任务生成：`Persisted` article 插入 `(article_id, prompt_version_id)` 唯一的 ai_result Pending 行；
   article 推进到 `AiPending`
 - task_gen 跳过已推进的 article（重入幂等）
+- task_gen 遇身份行冲突时按已有行对账仍为 `Persisted` 的 article（pending/running → `AiPending`，
+  succeeded/filtered → 成功派生态，permanent_failed → 保持并被游标越过）；batch=1 时新文章不饥饿
 - task_gen 仅扫描 `--category` 指定分类（其它分类不动）
 - AI 成功 + 高分 → article → `ReadyForPublish`、ai_result → `Succeeded`
 - AI 成功 + 低分 → article → `AiDone`（不入发布候选）
@@ -38,6 +40,9 @@ AI-off 直通模式跳过整段。
 | `task_gen_inserts_pending_and_advances_article_to_ai_pending` | `crates/runtime/tests/ai_run_tests.rs` | 任务生成 |
 | `task_gen_skips_articles_already_advanced` | 同上 | 重入幂等 |
 | `task_gen_only_scans_requested_category` | 同上 | category 隔离 |
+| `task_gen_reconciles_conflicting_pending_row_and_reaches_newer_articles_with_batch_one` | 同上 | 冲突对账 + 不饥饿 |
+| `task_gen_moves_past_permanently_failed_rows_within_one_pass` | 同上 | 游标越过失败行 |
+| `task_gen_reconciles_finished_rows_to_the_post_ai_state` | 同上 | 成功派生态对账 |
 | `process_succeeds_high_score_advances_article_to_ready_for_publish` | 同上 | 高分 happy |
 | `process_succeeds_low_score_advances_article_to_ai_done` | 同上 | 低分跳过候选 |
 | `process_filtered_advances_article_to_publish_skipped` | 同上 | keep=false |

@@ -129,6 +129,28 @@ WHERE id = $2 AND state = 'persisted'
 
 pub(super) const SELECT_ARTICLE_STATE_SQL: &str = "SELECT state FROM articles WHERE id = $1";
 
+/// The existing row of one AI identity (task_gen / backfill conflict branch).
+pub(super) const SELECT_AI_IDENTITY_ROW_SQLITE_SQL: &str = r#"
+SELECT id, state, keep_decision, importance_score
+FROM article_ai_results
+WHERE article_id = $1 AND prompt_version = $2 AND output_schema_version = $3 AND model_id = $4
+"#;
+
+/// PG: lock the existing row so a concurrent success release (which updates
+/// this row first, then reads the article) serialises with the reconcile.
+pub(super) const SELECT_AI_IDENTITY_ROW_PG_SQL: &str = r#"
+SELECT id, state, keep_decision, importance_score
+FROM article_ai_results
+WHERE article_id = $1 AND prompt_version = $2 AND output_schema_version = $3 AND model_id = $4
+FOR UPDATE
+"#;
+
+pub(super) const ADVANCE_PERSISTED_ARTICLE_SQL: &str = r#"
+UPDATE articles
+SET state = $1, updated_at = $2
+WHERE id = $3 AND state = 'persisted'
+"#;
+
 pub(super) const ADVANCE_ARTICLE_FROM_AI_PHASE_SQL: &str = r#"
 UPDATE articles
 SET state = $1, updated_at = $2

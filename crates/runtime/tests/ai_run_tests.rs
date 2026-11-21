@@ -1018,6 +1018,7 @@ async fn success_release_that_lost_the_lease_is_not_reported_as_permanent() {
     assert_eq!(summary.succeeded, 0);
     assert_eq!(summary.permanent_failed, 0);
     assert_eq!(summary.lease_lost, 1);
+    assert_eq!(summary.failure_samples[0].status, AiTaskStatus::LeaseLost);
     assert_eq!(ai_result_state(&pool, ai_result_id).await, "running");
     let events: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM run_events WHERE event_kind = 'ai_release_not_applied'",
@@ -1026,4 +1027,127 @@ async fn success_release_that_lost_the_lease_is_not_reported_as_permanent() {
     .await
     .expect("events should be countable");
     assert_eq!(events, 1);
+}
+
+// === C3: task_gen / backfill starvation ===
+
+/// Inserts an AI row with the identity `opts()` uses (as an earlier backfill
+/// with the same prompt version would), leaving the article `persisted`.
+async fn seed_identity_row(
+    pool: &SqlitePool,
+    article_id: i64,
+    state: &str,
+    outcome: Option<(i32, bool)>,
+) {
+    sqlx::query(
+        "INSERT INTO article_ai_results (article_id, prompt_version, output_schema_version, \
+         model_id, state, importance_score, keep_decision, summary, tags_json) \
+         VALUES (?, 1, 1, 'test-model', ?, ?, ?, 'summary', '[\"ai\"]')",
+    )
+    .bind(article_id)
+    .bind(state)
+    .bind(outcome.map(|(score, _)| score))
+    .bind(outcome.map(|(_, keep)| i32::from(keep)))
+    .execute(pool)
+    .await
+    .expect("identity row should insert");
+}
+
+#[tokio::test]
+async fn task_gen_reconciles_conflicting_pending_row_and_reaches_newer_articles_with_batch_one() {
+    let (_dir, pool) = make_test_pool().await;
+    let first = seed_persisted_article(&pool, "starve-first", "title", "body").await;
+    let second = seed_persisted_article(&pool, "starve-second", "title", "body").await;
+    seed_identity_row(&pool, first, "pending", None).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 1;
+
+    let one = flow.task_gen(&opts).await;
+    let two = flow.task_gen(&opts).await;
+
+    assert_eq!((one.conflict_skipped, one.reconciled), (1, 1));
+    assert_eq!(two.inserted, 1);
+    assert_eq!(article_state(&pool, first).await, "ai_pending");
+    assert_eq!(article_state(&pool, second).await, "ai_pending");
+    assert_eq!(ai_result_count_by_article(&pool, first).await, 1);
+    assert_eq!(ai_result_count_by_article(&pool, second).await, 1);
+}
+
+#[tokio::test]
+async fn task_gen_moves_past_permanently_failed_rows_within_one_pass() {
+    let (_dir, pool) = make_test_pool().await;
+    let failed = seed_persisted_article(&pool, "starve-failed", "title", "body").await;
+    let fresh = seed_persisted_article(&pool, "starve-fresh", "title", "body").await;
+    seed_identity_row(&pool, failed, "permanent_failed", None).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 1;
+
+    let summary = flow.task_gen(&opts).await;
+
+    assert_eq!(summary.scanned, 2);
+    assert_eq!(summary.inserted, 1);
+    assert_eq!(summary.conflict_skipped, 1);
+    // The failed task keeps its article out of AI; it is passed over, not retried.
+    assert_eq!(article_state(&pool, failed).await, "persisted");
+    assert_eq!(article_state(&pool, fresh).await, "ai_pending");
+}
+
+#[tokio::test]
+async fn task_gen_reconciles_finished_rows_to_the_post_ai_state() {
+    let (_dir, pool) = make_test_pool().await;
+    let high = seed_persisted_article(&pool, "reconcile-high", "title", "body").await;
+    let low = seed_persisted_article(&pool, "reconcile-low", "title", "body").await;
+    let filtered = seed_persisted_article(&pool, "reconcile-filtered", "title", "body").await;
+    let running = seed_persisted_article(&pool, "reconcile-running", "title", "body").await;
+    seed_identity_row(&pool, high, "succeeded", Some((80, true))).await;
+    seed_identity_row(&pool, low, "succeeded", Some((10, true))).await;
+    seed_identity_row(&pool, filtered, "filtered", Some((0, false))).await;
+    seed_identity_row(&pool, running, "running", None).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+
+    let summary = flow.task_gen(&opts()).await;
+
+    assert_eq!(summary.reconciled, 4);
+    assert_eq!(summary.inserted, 0);
+    // min_importance_score = 30 in opts().
+    assert_eq!(article_state(&pool, high).await, "ready_for_publish");
+    assert_eq!(article_state(&pool, low).await, "ai_done");
+    assert_eq!(article_state(&pool, filtered).await, "publish_skipped");
+    assert_eq!(article_state(&pool, running).await, "ai_pending");
+}
+
+#[tokio::test]
+async fn backfilled_persisted_article_becomes_publishable_after_ai_success() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "backfill-e2e", "title", "body").await;
+    let backfill =
+        rss_ai_news_runtime::BackfillFlow::new(Arc::new(common::backfill_deps(pool.clone())));
+    let backfilled = backfill
+        .ai(rss_ai_news_runtime::BackfillAiOptions {
+            date_from: None,
+            date_to: None,
+            batch_size: 1,
+            new_prompt_version_tag: "backfill-e2e".to_string(),
+            new_prompt_version_sha256: "sha-backfill-e2e".to_string(),
+            new_prompt_version_description: "test".to_string(),
+            model_id: "test-model".to_string(),
+            output_schema_version: 1,
+        })
+        .await
+        .expect("backfill should run");
+    assert_eq!(backfilled.ai_tasks_inserted, 1);
+    assert_eq!(article_state(&pool, article_id).await, "ai_pending");
+
+    let client = Arc::new(MockAiClient::default());
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+    client.insert_success(ai_result_id, output_json(80)).await;
+    let summary = flow.run(opts()).await;
+
+    // task_gen does not add a second row: the article already left `persisted`.
+    assert_eq!(summary.task_gen.scanned, 0);
+    assert_eq!(summary.process.succeeded, 1);
+    assert_eq!(article_state(&pool, article_id).await, "ready_for_publish");
 }

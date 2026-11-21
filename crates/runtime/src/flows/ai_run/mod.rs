@@ -29,7 +29,13 @@ impl AiRunFlow {
         Self { ctx }
     }
 
-    /// Phase 1：扫描一页 `articles.state='persisted'` 并创建 pending AI 任务。
+    /// Phase 1：按 id 升序扫描 `articles.state='persisted'`，创建 pending AI 任务。
+    ///
+    /// 一次 pass 用 keyset 游标（`a.id > after_id`，按本页最后扫描到的 id 前进）
+    /// 翻页，直到本 pass 推进了 `task_gen_batch_size` 篇 article（新插入 + 冲突
+    /// 对账）或列表扫完。冲突后仍留在 `persisted` 的行（身份行 `permanent_failed`）
+    /// 不占名额，游标越过它们，因此不会占住窗口让后面的新文章饥饿（C3）。
+    /// 某页出现存储错误时本 pass 在该页后停止，不再翻页。
     pub async fn task_gen(&self, opts: &AiRunOptions) -> TaskGenSummary {
         let emitter = RunEventEmitter {
             run_id: &self.ctx.run.run_id,
@@ -47,71 +53,76 @@ impl AiRunFlow {
             )
             .await;
 
-        let candidates = match self
-            .ctx
-            .article_repo
-            .list_persisted_for_ai_task_gen(&opts.category_key, opts.task_gen_batch_size.max(1), 0)
-            .await
-        {
-            Ok(candidates) => candidates,
-            Err(error) => {
-                tracing::error!("failed to list AI task candidates: {error}");
-                emitter
-                    .emit(
-                        "run_completed",
-                        "info",
-                        None,
-                        None,
-                        "ai task_gen run completed",
-                        Some(json!({
-                            "phase": "task_gen",
-                            "scanned": 0,
-                            "error_kind": error.error_kind(),
-                        })),
-                    )
-                    .await;
-                return TaskGenSummary {
-                    list_error: Some(error.error_kind().to_string()),
-                    ..TaskGenSummary::default()
-                };
-            }
-        };
-
-        let mut summary = TaskGenSummary {
-            scanned: candidates.len() as u32,
-            ..TaskGenSummary::default()
-        };
-
-        for candidate in candidates {
-            let item = NewAiResult {
-                article_id: candidate.article_id,
-                prompt_version: opts.prompt_version,
-                output_schema_version: opts.output_schema_version,
-                model_id: opts.model_id.clone(),
-            };
-            match self
+        let page_size = opts.task_gen_batch_size.max(1);
+        let mut summary = TaskGenSummary::default();
+        let mut after_id = 0;
+        // Articles this pass moved out of `persisted` (insert or reconcile).
+        let mut handled: u32 = 0;
+        'pages: loop {
+            let candidates = match self
                 .ctx
-                .ai_result_repo
-                .insert_pending_and_advance_article(&item, (self.ctx.clock)())
+                .article_repo
+                .list_persisted_for_ai_task_gen(&opts.category_key, page_size, after_id)
                 .await
             {
-                Ok(outcome) => {
-                    if outcome.ai_result_id.is_some() {
-                        summary.inserted += 1;
-                    } else {
-                        summary.conflict_skipped += 1;
-                    }
-                    if outcome.article_already_advanced {
-                        summary.article_already_advanced += 1;
-                    }
-                }
+                Ok(candidates) => candidates,
                 Err(error) => {
-                    tracing::warn!(
-                        article_id = candidate.article_id,
-                        "failed to insert AI pending result: {error}"
-                    );
-                    summary.insert_failed += 1;
+                    tracing::error!("failed to list AI task candidates: {error}");
+                    summary.list_error = Some(error.error_kind().to_string());
+                    break;
                 }
+            };
+            let page_len = candidates.len();
+            let failed_before = summary.insert_failed;
+            for candidate in candidates {
+                after_id = candidate.article_id;
+                summary.scanned += 1;
+                let item = NewAiResult {
+                    article_id: candidate.article_id,
+                    prompt_version: opts.prompt_version,
+                    output_schema_version: opts.output_schema_version,
+                    model_id: opts.model_id.clone(),
+                };
+                match self
+                    .ctx
+                    .ai_result_repo
+                    .insert_pending_and_advance_article(
+                        &item,
+                        i32::from(opts.min_importance_score.get()),
+                        (self.ctx.clock)(),
+                    )
+                    .await
+                {
+                    Ok(outcome) => {
+                        if outcome.ai_result_id.is_some() {
+                            summary.inserted += 1;
+                        } else {
+                            summary.conflict_skipped += 1;
+                        }
+                        if outcome.reconciled {
+                            summary.reconciled += 1;
+                        }
+                        if outcome.article_already_advanced {
+                            summary.article_already_advanced += 1;
+                        }
+                        if outcome.article_advanced {
+                            handled += 1;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            article_id = candidate.article_id,
+                            "failed to insert AI pending result: {error}"
+                        );
+                        summary.insert_failed += 1;
+                    }
+                }
+                if handled >= page_size {
+                    break 'pages;
+                }
+            }
+            if page_len < page_size as usize || summary.insert_failed > failed_before {
+                break;
             }
         }
 
@@ -127,7 +138,9 @@ impl AiRunFlow {
                     "scanned": summary.scanned,
                     "inserted": summary.inserted,
                     "conflict_skipped": summary.conflict_skipped,
+                    "reconciled": summary.reconciled,
                     "article_already_advanced": summary.article_already_advanced,
+                    "error_kind": summary.list_error,
                 })),
             )
             .await;

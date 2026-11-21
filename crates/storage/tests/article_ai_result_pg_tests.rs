@@ -284,6 +284,7 @@ async fn pg_insert_pending_and_advance_rolls_back_when_article_not_persisted() {
                 output_schema_version: schema_id,
                 model_id: "gpt-4".to_string(),
             },
+            30,
             now,
         )
         .await
@@ -343,6 +344,7 @@ async fn pg_insert_pending_and_advance_article_atomically() {
                 output_schema_version: schema_id,
                 model_id: "gpt-4".to_string(),
             },
+            30,
             now,
         )
         .await
@@ -358,6 +360,89 @@ async fn pg_insert_pending_and_advance_article_atomically() {
         .await
         .unwrap();
     assert_eq!(state, "ai_pending");
+
+    ctx.cleanup().await;
+}
+
+/// C3：身份冲突时按已有行对账仍为 persisted 的 article（PG 加 FOR UPDATE 路径）。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_insert_conflict_reconciles_persisted_article_with_existing_row() {
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "reconcile").await;
+    let repo = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    for (tag, row_state, keep, score, expected) in [
+        ("rc-pending", "pending", None, None, "ai_pending"),
+        (
+            "rc-high",
+            "succeeded",
+            Some(1),
+            Some(80),
+            "ready_for_publish",
+        ),
+        ("rc-low", "succeeded", Some(1), Some(10), "ai_done"),
+        ("rc-filtered", "filtered", Some(0), None, "publish_skipped"),
+        ("rc-failed", "permanent_failed", None, None, "persisted"),
+    ] {
+        let article_id = seed_article(&ctx, tag, "persisted").await;
+        sqlx::query(
+            "INSERT INTO article_ai_results (article_id, prompt_version, output_schema_version, \
+             model_id, state, keep_decision, importance_score) VALUES ($1, $2, $3, 'gpt-4', $4, $5, $6)",
+        )
+        .bind(article_id)
+        .bind(prompt_id)
+        .bind(schema_id)
+        .bind(row_state)
+        .bind(keep)
+        .bind(score)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+        let item = NewAiResult {
+            article_id,
+            prompt_version: prompt_id,
+            output_schema_version: schema_id,
+            model_id: "gpt-4".to_string(),
+        };
+        let outcome = repo
+            .insert_pending_and_advance_article(&item, 30, now)
+            .await
+            .expect("pg insert conflict");
+        assert!(outcome.ai_result_id.is_none(), "{tag}");
+        assert_eq!(outcome.reconciled, expected != "persisted", "{tag}");
+        let state: String = sqlx::query_scalar("SELECT state FROM articles WHERE id = $1")
+            .bind(article_id)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+        assert_eq!(state, expected, "{tag}");
+    }
+
+    // backfill：新插入推进 persisted，已发布 article 保持不变且插入保留。
+    let persisted = seed_article(&ctx, "bf-persisted", "persisted").await;
+    let published = seed_article(&ctx, "bf-published", "published").await;
+    for (article_id, expected) in [(persisted, "ai_pending"), (published, "published")] {
+        let outcome = repo
+            .insert_backfill_pending(
+                &NewAiResult {
+                    article_id,
+                    prompt_version: prompt_id,
+                    output_schema_version: schema_id,
+                    model_id: "gpt-4".to_string(),
+                },
+                now,
+            )
+            .await
+            .expect("pg backfill insert");
+        assert!(outcome.ai_result_id.is_some());
+        let state: String = sqlx::query_scalar("SELECT state FROM articles WHERE id = $1")
+            .bind(article_id)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+        assert_eq!(state, expected);
+    }
 
     ctx.cleanup().await;
 }
@@ -378,7 +463,7 @@ async fn pg_release_success_and_advance_keep_ready_for_publish() {
         model_id: "gpt-4".to_string(),
     };
     let advance_outcome = repo
-        .insert_pending_and_advance_article(&item, now)
+        .insert_pending_and_advance_article(&item, 30, now)
         .await
         .unwrap();
     let ai_result_id = advance_outcome.ai_result_id.unwrap();
@@ -445,7 +530,7 @@ async fn pg_release_success_and_advance_filtered_publish_skipped() {
         model_id: "gpt-4".to_string(),
     };
     let advance_outcome = repo
-        .insert_pending_and_advance_article(&item, now)
+        .insert_pending_and_advance_article(&item, 30, now)
         .await
         .unwrap();
     let ai_result_id = advance_outcome.ai_result_id.unwrap();

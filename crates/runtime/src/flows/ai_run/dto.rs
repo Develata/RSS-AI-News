@@ -5,7 +5,7 @@ use rss_ai_news_storage::AiCompleteArticleAdvance;
 
 #[derive(Debug, Clone)]
 pub struct AiRunOptions {
-    /// task_gen 阶段一次扫描多少条 persisted article。
+    /// task_gen 一次 pass 推进多少篇 persisted article（也是每页扫描行数）。
     pub task_gen_batch_size: u32,
     /// process 阶段一次 claim 多少条 pending AI 任务。
     pub process_batch_size: u32,
@@ -54,6 +54,9 @@ pub struct TaskGenSummary {
     pub scanned: u32,
     pub inserted: u32,
     pub conflict_skipped: u32,
+    /// Conflicts whose still-`persisted` article was moved to the state the
+    /// existing task row implies (C3). Counted in `conflict_skipped` too.
+    pub reconciled: u32,
     pub article_already_advanced: u32,
     /// Pending-row inserts that failed with a storage error (not conflicts).
     pub insert_failed: u32,
