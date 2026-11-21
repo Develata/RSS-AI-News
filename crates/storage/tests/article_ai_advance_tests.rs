@@ -24,6 +24,7 @@ async fn insert_pending_and_advance_advances_article_to_ai_pending() {
     let outcome = repo
         .insert_pending_and_advance_article(
             &new_ai_result(article_id, prompt_version, output_schema_version, "model-a"),
+            30,
             OffsetDateTime::now_utc(),
         )
         .await
@@ -49,13 +50,13 @@ async fn insert_pending_returns_none_on_unique_conflict_and_detects_article_alre
     let repo = ArticleAiResultRepo::new(pool.clone());
     let item = new_ai_result(article_id, prompt_version, output_schema_version, "model-a");
     let first = repo
-        .insert_pending_and_advance_article(&item, OffsetDateTime::now_utc())
+        .insert_pending_and_advance_article(&item, 30, OffsetDateTime::now_utc())
         .await
         .expect("first insert should succeed");
     assert!(first.ai_result_id.is_some());
 
     let second = repo
-        .insert_pending_and_advance_article(&item, OffsetDateTime::now_utc())
+        .insert_pending_and_advance_article(&item, 30, OffsetDateTime::now_utc())
         .await
         .expect("duplicate insert should not error");
 
@@ -247,6 +248,7 @@ async fn setup_claimed_ai_result(
     let inserted = repo
         .insert_pending_and_advance_article(
             &new_ai_result(article_id, prompt_version, output_schema_version, model_id),
+            30,
             OffsetDateTime::now_utc(),
         )
         .await

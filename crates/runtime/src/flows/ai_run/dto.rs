@@ -5,7 +5,7 @@ use rss_ai_news_storage::AiCompleteArticleAdvance;
 
 #[derive(Debug, Clone)]
 pub struct AiRunOptions {
-    /// task_gen 阶段一次扫描多少条 persisted article。
+    /// task_gen 一次 pass 推进多少篇 persisted article（也是每页扫描行数）。
     pub task_gen_batch_size: u32,
     /// process 阶段一次 claim 多少条 pending AI 任务。
     pub process_batch_size: u32,
@@ -41,6 +41,10 @@ pub struct AiRunOptions {
     /// version_tag)` 行后得到的 `rule_versions.id`，写入
     /// `article_ai_results.output_schema_version`。
     pub output_schema_version: i64,
+    /// `[publish].candidate_window_hours`: articles inside the publish window
+    /// get a bounded share of task_gen and claim capacity (C9). `0` = no
+    /// window (every article counts as fresh), as for the freeze.
+    pub candidate_window_hours: u32,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -54,6 +58,11 @@ pub struct TaskGenSummary {
     pub scanned: u32,
     pub inserted: u32,
     pub conflict_skipped: u32,
+    /// Conflicts whose still-`persisted` article was moved to the state the
+    /// existing task row implies (C3). Counted in `conflict_skipped` too.
+    pub reconciled: u32,
+    /// Articles advanced from the publish-window (fresh) list (C9).
+    pub fresh_advanced: u32,
     pub article_already_advanced: u32,
     /// Pending-row inserts that failed with a storage error (not conflicts).
     pub insert_failed: u32,
@@ -68,6 +77,12 @@ pub struct AiProcessSummary {
     pub filtered: u32,
     pub retryable_failed: u32,
     pub permanent_failed: u32,
+    /// Releases that matched no row: the lease had moved to another owner
+    /// (reclaim + re-claim), so this run claims no transition for the task.
+    pub lease_lost: u32,
+    /// Releases that failed with a storage error; the row stays leased and is
+    /// recovered by lease reclaim. Infrastructure errors of the run.
+    pub release_failed: u32,
     /// Tasks that panicked or were cancelled; leases recover on expiry.
     pub tasks_panicked: u32,
     /// 实际执行的批次数（F6-3）。命中 `max_batches` 时等于上限；否则小于上限。
@@ -101,4 +116,8 @@ pub enum AiTaskStatus {
     Filtered,
     RetryableFailed,
     PermanentFailed,
+    /// The release matched no row (lease lost); no transition landed.
+    LeaseLost,
+    /// The release failed with a storage error; no transition landed.
+    ReleaseFailed,
 }

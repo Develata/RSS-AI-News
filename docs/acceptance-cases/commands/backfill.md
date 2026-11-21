@@ -6,7 +6,8 @@
 - `--target extract`：把窗内（UTC 日历日，`--date-from` 与 `--date-to` 当天都含）`Failed` 的 `FeedEntry` 重置回 `PendingFetch`（`FallbackPersisted` 不重置），
   等待下一次 ingest / extract 重做
 - `--target ai`：`get_or_create` 一行 `rule_versions(kind='prompt')`（已有 active 时为 `pending`，不激活），
-  对窗内全部非 retired article 批量插入新 prompt_version 的 `Pending` ai_result（不动旧 ai_result）；
+  对窗内全部非 retired article 批量插入新 prompt_version 的 `Pending` ai_result（不动旧 ai_result），
+  仍为 `Persisted` 的 article 同事务推进到 `AiPending`；
   不按分类过滤、模型取全局，见 [plan/10 §5.2](../../plan/10-replay-and-backfill.md) 已知限制
 
 与 `reindex` 的边界：`backfill` 重做业务，**不**算法升级；`reindex` 升级算法 → 重算字段。
@@ -20,7 +21,8 @@
 - `--target extract` + 时间窗 → 重置窗内 Failed entry；不动 Persisted / FallbackPersisted 行
 - `--target extract` + 无时间窗 → 重置全部 Failed
 - examined 计数与窗内实际命中数一致
-- `--target ai` → 写入 / 复用 `kind='prompt'` 的 `rule_versions` 行；窗内非 retired article 各自插入新 prompt_version 的 Pending ai_result，**不改 article 状态**
+- `--target ai` → 写入 / 复用 `kind='prompt'` 的 `rule_versions` 行；窗内非 retired article 各自插入新 prompt_version 的 Pending ai_result；
+  仍为 `Persisted` 的 article 推进到 `AiPending`（新插入或冲突行 pending/running），其它状态（`AiDone`、`Published` 等）不改
 - `(article_id, prompt_version, output_schema_version, model_id)` 唯一冲突 → 不重复插入，conflict 计数累计
 - 分页（按 article id）覆盖所有窗内 article
 - `--prompt-version-tag` 未指定时 fallback 为 `backfill-<unix-ts>`
@@ -45,7 +47,11 @@
 | `backfill_extract_with_no_window_resets_all_failed` | 同上 | 无窗口 |
 | `backfill_extract_examined_counts_window_intersection` | 同上 | 计数正确 |
 | `backfill_ai_creates_new_prompt_version_row` | 同上 | 新 prompt_version |
-| `backfill_ai_inserts_pending_for_persisted_without_state_change` | 同上 | persisted 平行任务 |
+| `backfill_ai_inserts_pending_and_advances_persisted_article` | 同上 | persisted → ai_pending |
+| `backfill_ai_conflict_with_pending_row_advances_persisted_article` | 同上 | 冲突 pending 行对账 |
+| `backfill_ai_keeps_published_article_state` | 同上 | 已发布不回退 |
+| `backfilled_persisted_article_becomes_publishable_after_ai_success` | `crates/runtime/tests/ai_run_tests.rs` | backfill → ai-run 成功可发布 |
+| `pg_insert_conflict_reconciles_persisted_article_with_existing_row` | `crates/storage/tests/article_ai_result_pg_tests.rs` | PG 冲突对账 + backfill 推进 |
 | `backfill_ai_inserts_pending_for_ai_done_without_state_change` | 同上 | ai_done 平行任务 |
 | `backfill_ai_skips_already_existing_tuple` | 同上 | tuple 唯一 |
 | `backfill_ai_pagination_covers_all_articles` | 同上 | 分页全覆盖 |

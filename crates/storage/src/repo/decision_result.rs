@@ -154,6 +154,15 @@ pub struct DecisionFailure {
     pub attempt: DecisionAttemptRecord,
 }
 
+/// Result of one [`DecisionResultRepository::generate_pending`] page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeneratedPage {
+    pub inserted: u64,
+    /// Last candidate id scanned (the next cursor); `None` when the page was
+    /// empty.
+    pub last_scanned_id: Option<i64>,
+}
+
 #[async_trait]
 pub trait DecisionResultRepository: Send + Sync {
     /// Stores a policy snapshot once; an existing row is left as is.
@@ -164,17 +173,23 @@ pub trait DecisionResultRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<(), StorageError>;
 
-    /// Inserts up to `limit` `pending` rows for articles of the category
-    /// created at or after `cutoff` (whole seconds), not retired and without a
-    /// row for this identity. Returns the number inserted.
+    /// One keyset page of generation (ADR 0011 §5): the first `limit`
+    /// candidates with `id > after_id` — articles of the category created at
+    /// or after `cutoff` (whole seconds), not retired, without a row for this
+    /// identity — get a `pending` row (`ON CONFLICT DO NOTHING`). Returns the
+    /// number inserted and the last article id scanned, which the caller
+    /// passes as the next `after_id`; `None` means no candidate is left after
+    /// `after_id`.
+    #[allow(clippy::too_many_arguments)]
     async fn generate_pending(
         &self,
         identity: &DecisionIdentity,
         execution: &DecisionExecution,
         cutoff: OffsetDateTime,
+        after_id: i64,
         limit: u32,
         now: OffsetDateTime,
-    ) -> Result<u64, StorageError>;
+    ) -> Result<GeneratedPage, StorageError>;
 
     /// Claims up to `limit` claimable `pending` rows of this identity.
     #[allow(clippy::too_many_arguments)]
@@ -226,9 +241,18 @@ pub trait DecisionResultRepository: Send + Sync {
     async fn purge_expired_raw(&self, now: OffsetDateTime, limit: u32)
     -> Result<u64, StorageError>;
 
-    /// Title and body of an article, under the same bounded transaction as
-    /// the task statements. `None` when the row does not exist.
-    async fn load_article(&self, article_id: i64) -> Result<Option<DecisionArticle>, StorageError>;
+    /// Title and the first `max_body_chars` characters of the body (a
+    /// character-boundary prefix), under the same bounded transaction as the
+    /// task statements. `None` when the row does not exist.
+    async fn load_article(
+        &self,
+        article_id: i64,
+        max_body_chars: u32,
+    ) -> Result<Option<DecisionArticle>, StorageError>;
+
+    /// Whether an expired raw response is still stored (one-row probe, same
+    /// predicate as [`Self::purge_expired_raw`]).
+    async fn expired_raw_remains(&self, now: OffsetDateTime) -> Result<bool, StorageError>;
 
     /// `pending` rows of the category that belong to another identity.
     async fn count_other_identity_pending(

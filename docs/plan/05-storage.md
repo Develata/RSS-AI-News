@@ -157,6 +157,11 @@ WHERE id IN (
 RETURNING *;
 ```
 
+候选子查询 JOIN 了其它表时（如 AI claim 连接 `articles` / `feed_entries` / `feed_sources` 以按分类过滤），
+PG 必须写 `FOR UPDATE OF <被领取表别名> SKIP LOCKED`（AI：`OF aar`）。不带 `OF` 会锁住并跳过所有
+JOIN 表的行，另一事务锁住某个 source / article 行时，本可领取的任务会被当作"已锁"跳过，worker 把空批次
+当成队列耗尽提前结束（测试 `pg_claim_is_not_hidden_by_locked_source_or_article_rows`）。
+
 reclaim：
 
 ```sql
@@ -176,9 +181,12 @@ SQLite 以小数位数可变的 RFC3339 TEXT 存时间，同一秒内字典序 �
 `julianday()` 比较 lease：比较侧 now 转 UTC 并向下取整到毫秒，claim 写入的
 `lease_expires_at` 转 UTC 并向上取整到毫秒；严格 `<` 加上 `julianday()` 的单调舍入，保证
 lease 绝不提前判过期（最多晚约 2 ms）。`julianday()` 解析不了的文本（例如 `+15:00` 偏移）
-回退到原先的文本比较，避免行被永久跳过。PG 直接比较 `TIMESTAMPTZ`。其余 lease 表
-（`article_ai_results` / `reindex_jobs` / `decision_results`）与 doctor
-的同类谓词仍是字典序比较，待单独修复。
+回退到原先的文本比较，避免行被永久跳过。PG 直接比较 `TIMESTAMPTZ`。
+`article_ai_results`（claim / reclaim / `terminalize_exhausted`）与 `decision_results`（claim /
+reclaim / `terminalize_exhausted` / 原始响应 TTL 清理的 `raw_response_expires_at`）2026-11-21 起
+采用同一规则（`repo::sqlite_stored_deadline` 写入、`repo::sqlite_instant_cutoff` 比较，
+测试 `ai_decision_lease_instant_tests.rs`）。其余 lease 表（`reindex_jobs`）与 doctor 的同类谓词仍是
+字典序比较，待单独修复。
 
 **`attempt_count` 不重置**，作为重试预算的硬约束。
 
@@ -298,6 +306,16 @@ active rule resolver 保证 reindex 中途 `active_rule(kind)` 仍返回旧 acti
 - partial unique index `UNIQUE (target) WHERE state IN ('pending', 'running')` 保证同 target
   只能有一个 active job
 - lease 过期 reclaim → 保留 last_processed_id checkpoint，下轮从 checkpoint resume
+- 续跑入口（2026-11-21）：每次 `reindex` 先在单事务内查该 target 的活动 job（`pending`，或 `running`
+  但 lease 已过期——reclaim 是 best-effort），规则 `kind` + `payload_sha256` 与本次请求一致即由本 worker
+  领取并从 `last_processed_id` 之后继续（`reindex_resumed` 事件）；没有活动 job 才新建
+  （`start_reindex_tx`）。`version_tag` 只是 CLI 每次自动生成的标签（`reindex-<target>-<unix-ts>`），
+  不参与匹配，否则普通重跑永远无法续跑。规则不一致或另一 worker 持有存活 lease → 显式
+  `StorageError::Conflict { table: "reindex_jobs" }`，信息含 `reindex --abort <id>`，不改任何行。
+- 每批一个事务：先执行 owner-guarded 的 checkpoint UPDATE（`last_processed_id` + 续租
+  `lease_expires_at`，同时取得 SQLite 写锁 / PG job 行锁，使 abort / reclaim 与本批串行化），再改写本批
+  业务行；owner 校验失败整批回滚，已失去 lease 的 worker 不会改动任何业务行。PG 的单行冲突用事务内预检
+  （不靠捕获失败语句，失败语句会中止整个 PG 事务）。
 - crash-after-batch：已 commit 批次保留，未 commit 丢失，从 checkpoint 重做
 
 测试覆盖：[`crates/runtime/tests/`](../../crates/runtime/tests/) 中的 reindex_* 测试。

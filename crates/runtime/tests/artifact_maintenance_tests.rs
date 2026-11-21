@@ -85,6 +85,7 @@ async fn ai_start_purges_artifacts_before_claim_and_records_actual_count() {
         category_key: "ai".into(),
         prompt_version: 1,
         output_schema_version: 1,
+        candidate_window_hours: 48,
     };
     assert_eq!(flow.process_ai_tasks(&opts).await.claimed, 0);
     assert!(repo.find_by_id(id).await.unwrap().is_none());

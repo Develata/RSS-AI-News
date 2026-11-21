@@ -7,7 +7,7 @@
 //! SQL const 见 `super::article_ai_result_sql`，方言分发实装见
 //! `super::article_ai_result_impl`。
 //!
-//! **§6.4 PG 契约**：`claim_pending` 子查询必须 `FOR UPDATE SKIP LOCKED`，
+//! **§6.4 PG 契约**：`claim_pending` 子查询必须 `FOR UPDATE OF aar SKIP LOCKED`（只锁 AI 行），
 //! 让 ai-run 多 worker 并发 claim 同一 pending 池时各自拿到不同候选。
 //! SQL 因此分裂为 `CLAIM_AI_PENDING_SQLITE_SQL` / `CLAIM_AI_PENDING_PG_SQL`。
 //!
@@ -55,8 +55,14 @@ pub struct AiSuccessOutcome {
 #[derive(Debug, Clone)]
 pub struct InsertPendingOutcome {
     pub ai_result_id: Option<i64>,
+    /// The article left `persisted` in this call (insert or reconcile).
     pub article_advanced: bool,
     pub article_already_advanced: bool,
+    /// The identity row already existed and the still-`persisted` article was
+    /// moved to the state that row implies (C3): `pending` / `running` →
+    /// `ai_pending`; `succeeded` / `filtered` → the post-AI state a normal
+    /// success release produces.
+    pub reconciled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +91,32 @@ pub trait ArticleAiResultRepository: Send + Sync {
         request: &ClaimRequest,
         category_key: &str,
     ) -> Result<Vec<ClaimedAiResult>, StorageError>;
+    /// C9：同 [`Self::claim_pending`]，但只领取 publish 窗口内（"fresh"）文章的
+    /// pending 任务：`COALESCE(fe.published_at, fe.discovered_at) >=
+    /// published_since`，按该来源时间升序（最先掉出窗口的先领）、任务 id 次序。
+    async fn claim_pending_fresh(
+        &self,
+        request: &ClaimRequest,
+        category_key: &str,
+        published_since: OffsetDateTime,
+    ) -> Result<Vec<ClaimedAiResult>, StorageError>;
+
+    /// C9 batch=1 轮换信号（task_gen）：该分类最新（id 最大）的 AI 任务是否属于
+    /// 窗口内文章；分类尚无任务 → `None`。
+    async fn newest_task_is_fresh(
+        &self,
+        category_key: &str,
+        published_since: OffsetDateTime,
+    ) -> Result<Option<bool>, StorageError>;
+
+    /// C9 batch=1 轮换信号（claim）：该分类最近一次首次领取（`started_at` 最大）
+    /// 的任务是否属于窗口内文章；从未领取 → `None`。
+    async fn last_claim_is_fresh(
+        &self,
+        category_key: &str,
+        published_since: OffsetDateTime,
+    ) -> Result<Option<bool>, StorageError>;
+
     async fn release_success(
         &self,
         id: i64,
@@ -124,8 +156,25 @@ pub trait ArticleAiResultRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<u64, StorageError>;
 
-    /// 同事务：INSERT article_ai_results state='pending' + UPDATE articles state='ai_pending'。
+    /// task_gen：同事务 INSERT article_ai_results state='pending' + UPDATE articles
+    /// `persisted → ai_pending`（article 已不是 persisted 时回滚插入）。
+    ///
+    /// 身份行已存在（唯一键冲突）且 article 仍为 `persisted` 时，同事务按该行状态
+    /// 对账 article：`pending` / `running` → `ai_pending`；`succeeded` / `filtered`
+    /// → 与正常成功 release 相同的派生态（`min_importance_score` 定门槛）；
+    /// `permanent_failed` → 保持 `persisted`。PG 对已有行加 `FOR UPDATE`，与并发
+    /// success release 串行化。其它 article 状态（含 `published`）不动。
     async fn insert_pending_and_advance_article(
+        &self,
+        item: &NewAiResult,
+        min_importance_score: i32,
+        now: OffsetDateTime,
+    ) -> Result<InsertPendingOutcome, StorageError>;
+
+    /// backfill：同事务 INSERT pending 行（冲突跳过），并把仍为 `persisted` 的
+    /// article 推进到 `ai_pending`——新插入，或冲突的已有行为 `pending` / `running`
+    /// 时。已推进的 article（`ai_done`、`published` 等）保持不变，插入照常保留。
+    async fn insert_backfill_pending(
         &self,
         item: &NewAiResult,
         now: OffsetDateTime,

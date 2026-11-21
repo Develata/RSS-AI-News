@@ -171,6 +171,8 @@ count=0 静默，同一 run 内多次执行无害（codex W15-P4 复审补全）
 ## 8. 不变契约
 
 1. claim SQL 一字不动（含 `attempt_count < max` 过滤与 PG `FOR UPDATE SKIP LOCKED`）。
+   W15 之后的改动（2026-11-21）：SQLite lease 按时刻比较（C5）、AI claim 的 PG 锁限定为 `OF aar`（C6）、
+   AI claim 增加 publish 窗口份额的 fresh 变体（C9，plan/03 §5.2）；预算谓词与自增语义不变。
 2. `attempt_count` 契约不变（11 §4.1：claim 时自增，成功不清零，失败/reclaim 不改值；
    唯一例外是 Publish `SnapshotEmpty` 退还该次 claim 的计数，空快照不计入 sweep 预算）。
 3. `release_permanent_failure` / `release_success*` 语义与签名不变。

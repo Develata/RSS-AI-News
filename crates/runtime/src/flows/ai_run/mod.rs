@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use rss_ai_news_domain::error::ClassifiedError;
-use rss_ai_news_storage::{ClaimRequest, NewAiResult, build_owner_id, lease_expires_at};
+use rss_ai_news_storage::{
+    ClaimRequest, ClaimedAiResult, NewAiResult, build_owner_id, lease_expires_at,
+};
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use tokio::task::JoinSet;
@@ -29,7 +31,18 @@ impl AiRunFlow {
         Self { ctx }
     }
 
-    /// Phase 1：扫描一页 `articles.state='persisted'` 并创建 pending AI 任务。
+    /// Phase 1：为 `articles.state='persisted'` 的文章创建 pending AI 任务。
+    ///
+    /// 一次 pass 推进至多 `task_gen_batch_size` 篇 article（新插入 + 冲突对账，
+    /// 记 `article_advanced`），由两个列表分享（C9，plan/03 §5.1）：
+    /// - fresh：publish 窗口内（若此刻 freeze 即可入选）且尚无本身份任务的文章，
+    ///   来源时间最早者优先（最先掉出窗口）；
+    /// - backlog：全部 `persisted`，按 id 升序 + keyset 游标（C3：越过冲突后仍留在
+    ///   `persisted` 的行，并对账已有任务行）。
+    ///
+    /// 先行一侧得 `ceil(n/2)`，另一侧得余下，某侧不足时名额转给另一侧（两侧都扫完
+    /// 才少于 n）。n ≥ 2 时 fresh 先行；n = 1 时按该分类最新任务是否 fresh 轮换先行侧，
+    /// 跨 run 交替而不引入新状态。某页出现插入存储错误时本 pass 停止。
     pub async fn task_gen(&self, opts: &AiRunOptions) -> TaskGenSummary {
         let emitter = RunEventEmitter {
             run_id: &self.ctx.run.run_id,
@@ -47,72 +60,55 @@ impl AiRunFlow {
             )
             .await;
 
-        let candidates = match self
-            .ctx
-            .article_repo
-            .list_persisted_for_ai_task_gen(&opts.category_key, opts.task_gen_batch_size.max(1), 0)
-            .await
-        {
-            Ok(candidates) => candidates,
-            Err(error) => {
-                tracing::error!("failed to list AI task candidates: {error}");
-                emitter
-                    .emit(
-                        "run_completed",
-                        "info",
-                        None,
-                        None,
-                        "ai task_gen run completed",
-                        Some(json!({
-                            "phase": "task_gen",
-                            "scanned": 0,
-                            "error_kind": error.error_kind(),
-                        })),
-                    )
-                    .await;
-                return TaskGenSummary {
-                    list_error: Some(error.error_kind().to_string()),
-                    ..TaskGenSummary::default()
-                };
-            }
+        let page_size = opts.task_gen_batch_size.max(1);
+        let since = ai_fresh_since((self.ctx.clock)(), opts.candidate_window_hours);
+        let mut summary = TaskGenSummary::default();
+        let mut pass = TaskGenPass {
+            page_size,
+            since,
+            backlog_cursor: 0,
+            stopped: false,
         };
-
-        let mut summary = TaskGenSummary {
-            scanned: candidates.len() as u32,
-            ..TaskGenSummary::default()
-        };
-
-        for candidate in candidates {
-            let item = NewAiResult {
-                article_id: candidate.article_id,
-                prompt_version: opts.prompt_version,
-                output_schema_version: opts.output_schema_version,
-                model_id: opts.model_id.clone(),
-            };
+        let fresh_first = if page_size == 1 {
             match self
                 .ctx
                 .ai_result_repo
-                .insert_pending_and_advance_article(&item, OffsetDateTime::now_utc())
+                .newest_task_is_fresh(&opts.category_key, since)
                 .await
             {
-                Ok(outcome) => {
-                    if outcome.ai_result_id.is_some() {
-                        summary.inserted += 1;
-                    } else {
-                        summary.conflict_skipped += 1;
-                    }
-                    if outcome.article_already_advanced {
-                        summary.article_already_advanced += 1;
-                    }
-                }
+                Ok(newest_fresh) => !newest_fresh.unwrap_or(false),
                 Err(error) => {
-                    tracing::warn!(
-                        article_id = candidate.article_id,
-                        "failed to insert AI pending result: {error}"
-                    );
-                    summary.insert_failed += 1;
+                    tracing::error!("failed to read the task_gen alternation signal: {error}");
+                    summary.list_error = Some(error.error_kind().to_string());
+                    pass.stopped = true;
+                    true
                 }
             }
+        } else {
+            true
+        };
+        let order = if fresh_first {
+            [TaskGenSide::Fresh, TaskGenSide::Backlog]
+        } else {
+            [TaskGenSide::Backlog, TaskGenSide::Fresh]
+        };
+        let first_quota = page_size.div_ceil(2);
+        let first = self
+            .task_gen_side(order[0], first_quota, opts, &mut pass, &mut summary)
+            .await;
+        let second = self
+            .task_gen_side(
+                order[1],
+                page_size - first.handled,
+                opts,
+                &mut pass,
+                &mut summary,
+            )
+            .await;
+        let left = page_size - first.handled - second.handled;
+        if left > 0 && !first.exhausted {
+            self.task_gen_side(order[0], left, opts, &mut pass, &mut summary)
+                .await;
         }
 
         emitter
@@ -126,13 +122,188 @@ impl AiRunFlow {
                     "phase": "task_gen",
                     "scanned": summary.scanned,
                     "inserted": summary.inserted,
+                    "fresh_advanced": summary.fresh_advanced,
+                    "fresh_first": fresh_first,
                     "conflict_skipped": summary.conflict_skipped,
+                    "reconciled": summary.reconciled,
                     "article_already_advanced": summary.article_already_advanced,
+                    "error_kind": summary.list_error,
                 })),
             )
             .await;
 
         summary
+    }
+
+    /// Drains one task_gen list until `quota` articles advanced, the list is
+    /// exhausted, or a storage error stops the pass.
+    async fn task_gen_side(
+        &self,
+        side: TaskGenSide,
+        quota: u32,
+        opts: &AiRunOptions,
+        pass: &mut TaskGenPass,
+        summary: &mut TaskGenSummary,
+    ) -> SideOutcome {
+        let mut outcome = SideOutcome::default();
+        if quota == 0 || pass.stopped {
+            return outcome;
+        }
+        let identity = NewAiResult {
+            article_id: 0,
+            prompt_version: opts.prompt_version,
+            output_schema_version: opts.output_schema_version,
+            model_id: opts.model_id.clone(),
+        };
+        loop {
+            let listed = match side {
+                TaskGenSide::Fresh => {
+                    self.ctx
+                        .article_repo
+                        .list_fresh_for_ai_task_gen(
+                            &opts.category_key,
+                            &identity,
+                            pass.since,
+                            pass.page_size,
+                        )
+                        .await
+                }
+                TaskGenSide::Backlog => {
+                    self.ctx
+                        .article_repo
+                        .list_persisted_for_ai_task_gen(
+                            &opts.category_key,
+                            pass.page_size,
+                            pass.backlog_cursor,
+                        )
+                        .await
+                }
+            };
+            let candidates = match listed {
+                Ok(candidates) => candidates,
+                Err(error) => {
+                    tracing::error!("failed to list AI task candidates: {error}");
+                    summary.list_error = Some(error.error_kind().to_string());
+                    pass.stopped = true;
+                    return outcome;
+                }
+            };
+            let page_len = candidates.len();
+            let failed_before = summary.insert_failed;
+            let handled_before = outcome.handled;
+            for candidate in candidates {
+                if side == TaskGenSide::Backlog {
+                    pass.backlog_cursor = candidate.article_id;
+                }
+                summary.scanned += 1;
+                let item = NewAiResult {
+                    article_id: candidate.article_id,
+                    ..identity.clone()
+                };
+                match self
+                    .ctx
+                    .ai_result_repo
+                    .insert_pending_and_advance_article(
+                        &item,
+                        i32::from(opts.min_importance_score.get()),
+                        (self.ctx.clock)(),
+                    )
+                    .await
+                {
+                    Ok(insert) => {
+                        if insert.ai_result_id.is_some() {
+                            summary.inserted += 1;
+                        } else {
+                            summary.conflict_skipped += 1;
+                        }
+                        if insert.reconciled {
+                            summary.reconciled += 1;
+                        }
+                        if insert.article_already_advanced {
+                            summary.article_already_advanced += 1;
+                        }
+                        if insert.article_advanced {
+                            outcome.handled += 1;
+                            if side == TaskGenSide::Fresh {
+                                summary.fresh_advanced += 1;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            article_id = candidate.article_id,
+                            "failed to insert AI pending result: {error}"
+                        );
+                        summary.insert_failed += 1;
+                    }
+                }
+                if outcome.handled >= quota {
+                    return outcome;
+                }
+            }
+            if page_len < pass.page_size as usize {
+                outcome.exhausted = true;
+                return outcome;
+            }
+            if summary.insert_failed > failed_before {
+                pass.stopped = true;
+                return outcome;
+            }
+            // The fresh list is re-read from its head: rows it returned left
+            // `persisted`. A page that advanced nothing would be returned again.
+            if side == TaskGenSide::Fresh && outcome.handled == handled_before {
+                outcome.exhausted = true;
+                return outcome;
+            }
+        }
+    }
+
+    /// Claims one batch, sharing it between in-window ("fresh") pending tasks
+    /// and all pending tasks by id (C9, plan/03 §5.2): the leading side gets
+    /// `ceil(n/2)`, the other the rest, and a side that runs short passes its
+    /// share on. `n ≥ 2` leads with fresh; `n = 1` leads with the side the
+    /// category's most recent first claim did not serve.
+    async fn claim_batch(
+        &self,
+        opts: &AiRunOptions,
+        request: &ClaimRequest,
+    ) -> Result<Vec<ClaimedAiResult>, rss_ai_news_storage::StorageError> {
+        let repo = &self.ctx.ai_result_repo;
+        let n = request.batch_size;
+        let since = ai_fresh_since(request.now, opts.candidate_window_hours);
+        let fresh_first = n > 1
+            || !repo
+                .last_claim_is_fresh(&opts.category_key, since)
+                .await?
+                .unwrap_or(false);
+        let claim = |fresh: bool, limit: u32| {
+            let request = ClaimRequest {
+                batch_size: limit,
+                ..request.clone()
+            };
+            async move {
+                if fresh {
+                    repo.claim_pending_fresh(&request, &opts.category_key, since)
+                        .await
+                } else {
+                    repo.claim_pending(&request, &opts.category_key).await
+                }
+            }
+        };
+        let first_quota = n.div_ceil(2);
+        let mut claimed = claim(fresh_first, first_quota).await?;
+        let first_short = (claimed.len() as u32) < first_quota;
+        let rest = n - claimed.len() as u32;
+        let second = claim(!fresh_first, rest).await?;
+        let second_short = (second.len() as u32) < rest;
+        claimed.extend(second);
+        let left = n - claimed.len() as u32;
+        // "All pending" short means nothing is left at all; fresh short means
+        // no fresh task is left.
+        if left > 0 && !first_short && !(second_short && fresh_first) {
+            claimed.extend(claim(fresh_first, left).await?);
+        }
+        Ok(claimed)
     }
 
     /// Phase 2：claim pending AI 任务，并发调用 AI、写 artifact、解析并 release。
@@ -156,7 +327,7 @@ impl AiRunFlow {
 
         purge_expired_artifacts(self.ctx.artifact_repo.as_ref(), &emitter).await;
         // W15 §5：首次 claim 前执行一次 ① reclaim + ② sweep（顺序固定，best-effort）。
-        let maintenance_now = OffsetDateTime::now_utc();
+        let maintenance_now = (self.ctx.clock)();
         let reclaimed = self
             .ctx
             .ai_result_repo
@@ -192,11 +363,10 @@ impl AiRunFlow {
                 break;
             }
 
-            let now = OffsetDateTime::now_utc();
+            let now = (self.ctx.clock)();
             let claimed = match self
-                .ctx
-                .ai_result_repo
-                .claim_pending(
+                .claim_batch(
+                    &opts,
                     &ClaimRequest {
                         owner: owner.clone(),
                         now,
@@ -207,7 +377,6 @@ impl AiRunFlow {
                         batch_size: opts.process_batch_size.max(1),
                         max_attempts: opts.max_attempts,
                     },
-                    &opts.category_key,
                 )
                 .await
             {
@@ -297,6 +466,8 @@ impl AiRunFlow {
                     "filtered": summary.filtered,
                     "retryable_failed": summary.retryable_failed,
                     "permanent_failed": summary.permanent_failed,
+                    "lease_lost": summary.lease_lost,
+                    "release_failed": summary.release_failed,
                     "tasks_panicked": summary.tasks_panicked,
                     "batches_executed": summary.batches_executed,
                     "max_batches_reached": summary.max_batches_reached,
@@ -316,6 +487,41 @@ impl AiRunFlow {
     }
 }
 
+/// Which task_gen list a side drains (C9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskGenSide {
+    Fresh,
+    Backlog,
+}
+
+/// State shared by the sides of one task_gen pass.
+struct TaskGenPass {
+    page_size: u32,
+    since: OffsetDateTime,
+    /// C3 keyset cursor of the backlog (id-ordered) list.
+    backlog_cursor: i64,
+    /// A storage error ended the pass.
+    stopped: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SideOutcome {
+    handled: u32,
+    exhausted: bool,
+}
+
+/// Start of the publish window, as the freeze computes it
+/// (`flows/publish/freeze.rs::published_since`, duplicated there): `now −
+/// candidate_window_hours`, and `0` = no window (everything is fresh). An
+/// article counts as fresh when it would be eligible if publish froze now.
+fn ai_fresh_since(now: OffsetDateTime, candidate_window_hours: u32) -> OffsetDateTime {
+    if candidate_window_hours == 0 {
+        OffsetDateTime::UNIX_EPOCH
+    } else {
+        now - Duration::hours(i64::from(candidate_window_hours))
+    }
+}
+
 impl AiProcessSummary {
     /// Count every outcome; retain only the first 32 failures for diagnostics.
     fn record(&mut self, outcome: AiTaskOutcome) {
@@ -324,10 +530,12 @@ impl AiProcessSummary {
             AiTaskStatus::Filtered => self.filtered += 1,
             AiTaskStatus::RetryableFailed => self.retryable_failed += 1,
             AiTaskStatus::PermanentFailed => self.permanent_failed += 1,
+            AiTaskStatus::LeaseLost => self.lease_lost += 1,
+            AiTaskStatus::ReleaseFailed => self.release_failed += 1,
         }
-        if matches!(
+        if !matches!(
             outcome.status,
-            AiTaskStatus::RetryableFailed | AiTaskStatus::PermanentFailed
+            AiTaskStatus::Succeeded | AiTaskStatus::Filtered
         ) && self.failure_samples.len() < 32
         {
             self.failure_samples.push(outcome);
@@ -378,6 +586,7 @@ mod tests {
             category_key: "x".to_string(),
             prompt_version: 1,
             output_schema_version: 1,
+            candidate_window_hours: 48,
         };
         // newtype 提供 type-safe 0..=100 不变量；该断言只是文档化运行时值。
         assert_eq!(opts.min_importance_score.get(), 50);

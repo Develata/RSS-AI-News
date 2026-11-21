@@ -32,6 +32,10 @@ pub struct AiRunCommandSummary {
     /// 因 task panic / cancel 而失败的 AI 任务数（codex P2-1）。与业务永久失败
     /// 分列，避免 panic 在运维输出中报 0 failure。
     pub process_tasks_panicked: u32,
+    /// Releases whose owner guard matched no row (lease moved elsewhere).
+    pub process_lease_lost: u32,
+    /// Releases that failed with a storage error (rows recover via reclaim).
+    pub process_release_failed: u32,
     /// Pending-row inserts that failed with a storage error.
     pub task_gen_insert_failed: u32,
     /// `error_kind` when listing task-gen candidates failed.
@@ -64,6 +68,8 @@ impl AiRunCommandSummary {
         self.process_retryable_failed += other.process_retryable_failed;
         self.process_permanent_failed += other.process_permanent_failed;
         self.process_tasks_panicked += other.process_tasks_panicked;
+        self.process_lease_lost += other.process_lease_lost;
+        self.process_release_failed += other.process_release_failed;
         self.task_gen_insert_failed += other.task_gen_insert_failed;
         self.task_gen_error = self.task_gen_error.take().or(other.task_gen_error);
         self.process_claim_error = self
@@ -91,6 +97,12 @@ impl AiRunCommandSummary {
                 ),
             });
         }
+        if self.process_release_failed > 0 {
+            errors.push(RenderedError {
+                kind: "ai_release_failed".to_string(),
+                message: format!("{} AI result releases failed", self.process_release_failed),
+            });
+        }
         if let Some(kind) = &self.process_claim_error {
             errors.push(RenderedError {
                 kind: format!("ai_claim_{kind}"),
@@ -111,6 +123,7 @@ impl CommandSummary for AiRunCommandSummary {
         // (their own exit codes, e.g. 78 for missing credentials).
         let storage = (self.task_gen_error.is_some()
             || self.task_gen_insert_failed > 0
+            || self.process_release_failed > 0
             || self.process_claim_error.is_some())
         .then_some(ExitCode::RuntimeError.as_i32());
         storage
@@ -177,6 +190,11 @@ impl CommandSummary for AiRunCommandSummary {
             writer,
             "  Tasks panicked:        {}",
             self.process_tasks_panicked
+        )?;
+        writeln!(
+            writer,
+            "  Lease lost:            {}",
+            self.process_lease_lost
         )?;
         writeln!(
             writer,
@@ -350,6 +368,8 @@ async fn run_category(
             category_key: category.category.key.clone(),
             prompt_version,
             output_schema_version,
+            // C9: the publish window decides which articles are "fresh".
+            candidate_window_hours: loaded.app.publish.candidate_window_hours,
         })
         .await;
 
@@ -364,6 +384,8 @@ async fn run_category(
         process_retryable_failed: summary.process.retryable_failed,
         process_permanent_failed: summary.process.permanent_failed,
         process_tasks_panicked: summary.process.tasks_panicked,
+        process_lease_lost: summary.process.lease_lost,
+        process_release_failed: summary.process.release_failed,
         task_gen_insert_failed: summary.task_gen.insert_failed,
         task_gen_error: summary.task_gen.list_error,
         process_claim_error: summary.process.claim_error,

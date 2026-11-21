@@ -360,3 +360,166 @@ async fn pg_reclaim_expired_leases_clears_owner_and_returns_to_pending() {
         "checkpoint preserved across reclaim"
     );
 }
+
+/// C4：PG 续跑领取（FOR UPDATE OF j）+ 批事务 owner 校验回滚。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_resume_claims_same_rule_and_batch_rolls_back_without_lease() {
+    use rss_ai_news_storage::{
+        ReindexBatchCheckpoint, ResumeReindexOutcome, UpdateContentHashOutcome,
+        UpdateLinkHashOutcome,
+    };
+
+    let ctx = make_pg_test_pool().await;
+    let repo = ReindexJobRepo::new_with_storage(ctx.storage_pool().clone());
+    let t0 = OffsetDateTime::now_utc() - time::Duration::hours(1);
+    let now = OffsetDateTime::now_utc();
+
+    // Seed one feed entry and one article to rewrite.
+    let cfg: i64 = sqlx::query_scalar(
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status) \
+         VALUES ('config', 'cfg-resume', 'c', 'sha-cfg-resume', 'superseded') RETURNING id",
+    )
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    let source: i64 = sqlx::query_scalar(
+        "INSERT INTO feed_sources (category_key, source_key, display_name, feed_url, feed_kind, \
+            config_version) VALUES ('ai', 'resume', 'R', 'https://example.com/f.xml', 'rss', $1) \
+         RETURNING id",
+    )
+    .bind(cfg)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    let entry: i64 = sqlx::query_scalar(
+        "INSERT INTO feed_entries (source_id, feed_entry_uid, normalized_link, link_hash, \
+            title_raw, discovered_at, state, dedup_decision) \
+         VALUES ($1, 'u', 'https://example.com/u', 'old-hash', 't', $2, 'pending_fetch', 'fresh') \
+         RETURNING id",
+    )
+    .bind(source)
+    .bind(now)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    let ext: i64 = sqlx::query_scalar(
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status) \
+         VALUES ('extractor', 'ext-resume', 'e', 'sha-ext-resume', 'superseded') RETURNING id",
+    )
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    let article: i64 = sqlx::query_scalar(
+        "INSERT INTO articles (content_hash, canonical_link, title, body_text, \
+            extractor_strategy, extractor_version, content_quality, origin_feed_entry_id) \
+         VALUES ('old-content', 'https://example.com/a', 't', 'b', 'readability', $1, 'high', $2) \
+         RETURNING id",
+    )
+    .bind(ext)
+    .bind(entry)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+
+    let job = repo
+        .start_reindex_tx("reindex", "tag-resume", "d", "sha-resume", "link_hash", t0)
+        .await
+        .unwrap();
+    repo.claim_by_id(job.job_id, "crashed", t0, t0 + time::Duration::seconds(60))
+        .await
+        .unwrap()
+        .unwrap();
+    repo.advance_checkpoint(
+        job.job_id,
+        "crashed",
+        42,
+        t0,
+        t0 + time::Duration::seconds(60),
+    )
+    .await
+    .unwrap();
+
+    let mismatch = repo
+        .claim_resumable_by_target(
+            "link_hash",
+            "reindex",
+            "other",
+            "rerun",
+            now,
+            lease_expires(now),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(mismatch, ResumeReindexOutcome::RuleMismatch { job_id, .. } if job_id == job.job_id)
+    );
+
+    let resumed = repo
+        .claim_resumable_by_target(
+            "link_hash",
+            "reindex",
+            "sha-resume",
+            "rerun",
+            now,
+            lease_expires(now),
+        )
+        .await
+        .unwrap();
+    let ResumeReindexOutcome::Resumed(claimed) = resumed else {
+        panic!("expected Resumed, got {resumed:?}");
+    };
+    assert_eq!(claimed.last_processed_id, Some(42));
+
+    let checkpoint = |owner| ReindexBatchCheckpoint {
+        job_id: job.job_id,
+        owner,
+        last_processed_id: entry,
+        now,
+        lease_expires_at: lease_expires(now) + time::Duration::minutes(5),
+    };
+    // The crashed worker lost the lease: nothing is written.
+    assert!(
+        repo.apply_link_hash_batch(checkpoint("crashed"), &[(entry, "new-hash".to_string())])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repo.apply_content_hash_batch(
+            checkpoint("crashed"),
+            &[(article, "new-content".to_string())]
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let hashes: (String, String) = sqlx::query_as(
+        "SELECT fe.link_hash, a.content_hash FROM feed_entries fe, articles a \
+         WHERE fe.id = $1 AND a.id = $2",
+    )
+    .bind(entry)
+    .bind(article)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    assert_eq!(hashes, ("old-hash".to_string(), "old-content".to_string()));
+
+    // The owner writes rows, checkpoint and renewed lease together.
+    assert_eq!(
+        repo.apply_link_hash_batch(checkpoint("rerun"), &[(entry, "new-hash".to_string())])
+            .await
+            .unwrap(),
+        Some(vec![UpdateLinkHashOutcome::Updated])
+    );
+    assert_eq!(
+        repo.apply_content_hash_batch(checkpoint("rerun"), &[(article, "new-content".to_string())])
+            .await
+            .unwrap(),
+        Some(vec![UpdateContentHashOutcome::Updated])
+    );
+    let job_row = repo.find_by_id(job.job_id).await.unwrap().unwrap();
+    assert_eq!(job_row.last_processed_id, Some(entry));
+    assert!(job_row.lease_expires_at.unwrap() > lease_expires(now));
+    ctx.cleanup().await;
+}

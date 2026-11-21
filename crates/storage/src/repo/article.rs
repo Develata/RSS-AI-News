@@ -117,6 +117,20 @@ pub trait ArticleRepository: Send + Sync {
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
+    /// C9 task_gen fresh share: `persisted` articles of the category inside
+    /// the publish window (`COALESCE(fe.published_at, fe.discovered_at) >=
+    /// published_since`) that have no AI row of `identity` yet, oldest source
+    /// time first (they leave the window first), ties by id. The anti-join
+    /// keeps rows whose task already exists (and may stay `persisted`, e.g.
+    /// `permanent_failed`) out of this list; the id-ordered list
+    /// ([`Self::list_persisted_for_ai_task_gen`]) still reconciles them.
+    async fn list_fresh_for_ai_task_gen(
+        &self,
+        category_key: &str,
+        identity: &crate::NewAiResult,
+        published_since: OffsetDateTime,
+        batch_size: u32,
+    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
     async fn list_in_window_for_backfill(
         &self,
         date_from: Option<OffsetDateTime>,
@@ -214,6 +228,46 @@ ORDER BY a.id ASC
 LIMIT $3
 "#;
 
+/// C9 fresh task_gen list, SQLite: the source time is compared and ordered
+/// by `julianday()` instant with a text fallback; `$2` is
+/// `sqlite_instant_cutoff(published_since)`.
+const LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL: &str = r#"
+SELECT a.id AS article_id
+FROM articles a
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE a.state = 'persisted'
+  AND fs.category_key = $1
+  AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($2),
+               COALESCE(fe.published_at, fe.discovered_at) >= $2)
+  AND NOT EXISTS (
+      SELECT 1 FROM article_ai_results r
+      WHERE r.article_id = a.id AND r.prompt_version = $3
+        AND r.output_schema_version = $4 AND r.model_id = $5
+  )
+ORDER BY julianday(COALESCE(fe.published_at, fe.discovered_at)) ASC,
+         COALESCE(fe.published_at, fe.discovered_at) ASC,
+         a.id ASC
+LIMIT $6
+"#;
+
+const LIST_FRESH_FOR_AI_TASK_GEN_PG_SQL: &str = r#"
+SELECT a.id AS article_id
+FROM articles a
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE a.state = 'persisted'
+  AND fs.category_key = $1
+  AND COALESCE(fe.published_at, fe.discovered_at) >= $2
+  AND NOT EXISTS (
+      SELECT 1 FROM article_ai_results r
+      WHERE r.article_id = a.id AND r.prompt_version = $3
+        AND r.output_schema_version = $4 AND r.model_id = $5
+  )
+ORDER BY COALESCE(fe.published_at, fe.discovered_at) ASC, a.id ASC
+LIMIT $6
+"#;
+
 const LIST_ARTICLES_IN_WINDOW_FOR_BACKFILL_SQL: &str = r#"
 SELECT id AS article_id, state
 FROM articles
@@ -254,15 +308,16 @@ ORDER BY id ASC
 LIMIT $2
 "#;
 
-const UPDATE_ARTICLE_CONTENT_HASH_SQL: &str = r#"
+pub(super) const UPDATE_ARTICLE_CONTENT_HASH_SQL: &str = r#"
 UPDATE articles
 SET content_hash = $1, updated_at = $2
 WHERE id = $3
 "#;
 
-const SELECT_ARTICLE_CONTENT_HASH_SQL: &str = "SELECT content_hash FROM articles WHERE id = $1";
+pub(super) const SELECT_ARTICLE_CONTENT_HASH_SQL: &str =
+    "SELECT content_hash FROM articles WHERE id = $1";
 
-const SELECT_ARTICLE_CONTENT_HASH_COLLISION_SQL: &str = "SELECT CASE WHEN EXISTS(SELECT 1 FROM articles WHERE content_hash = $1 AND id <> $2) THEN 1 ELSE 0 END";
+pub(super) const SELECT_ARTICLE_CONTENT_HASH_COLLISION_SQL: &str = "SELECT CASE WHEN EXISTS(SELECT 1 FROM articles WHERE content_hash = $1 AND id <> $2) THEN 1 ELSE 0 END";
 
 // ── trait 实现：按 backend 分发 ─────────────────────────────────
 
@@ -314,6 +369,41 @@ impl ArticleRepository for ArticleRepo {
             }
             StoragePool::Postgres(p) => {
                 pg_list_persisted_for_ai_task_gen(p, category_key, batch_size, after_id).await
+            }
+        }
+    }
+
+    async fn list_fresh_for_ai_task_gen(
+        &self,
+        category_key: &str,
+        identity: &crate::NewAiResult,
+        published_since: OffsetDateTime,
+        batch_size: u32,
+    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL)
+                    .bind(category_key)
+                    .bind(super::sqlite_instant_cutoff(published_since))
+                    .bind(identity.prompt_version)
+                    .bind(identity.output_schema_version)
+                    .bind(&identity.model_id)
+                    .bind(i64::from(batch_size))
+                    .fetch_all(p)
+                    .await
+                    .map_err(StorageError::from)
+            }
+            StoragePool::Postgres(p) => {
+                sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_FRESH_FOR_AI_TASK_GEN_PG_SQL)
+                    .bind(category_key)
+                    .bind(published_since)
+                    .bind(identity.prompt_version)
+                    .bind(identity.output_schema_version)
+                    .bind(&identity.model_id)
+                    .bind(i64::from(batch_size))
+                    .fetch_all(p)
+                    .await
+                    .map_err(StorageError::from)
             }
         }
     }

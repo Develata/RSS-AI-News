@@ -156,7 +156,11 @@ rss-ai-news --category ai backfill --target ai --date-from 2026-05-01 \
    按 id 分页；**不按分类过滤**。
 4. **插入**：每篇插入 `pending` 的 `article_ai_results`（新 prompt_version、当前 v1 schema、
    `model_id = --model` 或全局 `[ai].model`）；`(article_id, prompt_version, output_schema_version, model_id)`
-   冲突跳过并计数。不改 article 状态。
+   冲突跳过并计数。同一事务内，仍为 `persisted` 的 article 推进到 `ai_pending`（新插入，或冲突的
+   已有行为 `pending` / `running` 时），使该任务成功后能推进 article（成功 release 只推进
+   `ai_pending` / `ai_done`）；其它状态（`ai_done`、`ready_for_publish`、`published` 等）不改。
+   2026-11-21 前的实现不改 article 状态，留在 `persisted` 的 article 会占住 task_gen 的扫描窗口（C3）；
+   这类存量由 ai-run task_gen 的冲突对账收敛（[./03-ai.md](./03-ai.md) §5.1）。
 
 返回 `BackfillAiSummary { new_prompt_version_id, articles_scanned, ai_tasks_inserted, ai_tasks_conflict }`。
 

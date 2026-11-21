@@ -158,6 +158,9 @@ release 折叠出终态时，既有失败事件升级：`ai_failed` / `entry_per
 `publish_failed` 携带 `"budget_exhausted": true`，severity 为 `error`（AI 同时
 `"retryable": false`）。maintenance 自身失败仅 `tracing::warn`（best-effort，不中断 run）。
 
+AI release 未落地（owner guard 命中 0 行或 release 存储报错）时不发 `ai_completed` / `ai_failed`，
+改发 `ai_release_not_applied`（warn / error，见 [./03-ai.md](./03-ai.md) §5.3）。
+
 ### 5.5 查询入口
 
 `run_events` 没有内置查询子命令，按 SQL 直查即可。typical query：

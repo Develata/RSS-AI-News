@@ -220,6 +220,7 @@ async fn ai_orchestration() {
         category_key: "ai".into(),
         prompt_version: 1,
         output_schema_version: 1,
+        candidate_window_hours: 48,
     };
     let started = Instant::now();
     let summary = flow.run(opts).await;

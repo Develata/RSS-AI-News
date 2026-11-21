@@ -162,10 +162,52 @@ WHERE id IN (
 RETURNING id, target, rule_version_id, last_processed_id, attempt_count
 "#;
 
+/// Checkpoint + lease renewal + owner check in one statement. Batch writers
+/// run it first in their transaction (it also takes the SQLite write lock /
+/// the PG job-row lock), so abort / reclaim serialise against the batch.
 pub(super) const ADVANCE_CHECKPOINT_SQL: &str = r#"
 UPDATE reindex_jobs
-SET last_processed_id = $1, updated_at = $2
+SET last_processed_id = $1, lease_expires_at = $5, updated_at = $2
 WHERE id = $3 AND state = 'running' AND lease_owner = $4
+"#;
+
+/// SQLite: take the write lock before reading, so the lookup and the claim
+/// of [`CLAIM_RESUMABLE_SQL`] are one serialised step (no read→write upgrade).
+pub(super) const LOCK_REINDEX_TARGET_SQLITE_SQL: &str =
+    "UPDATE reindex_jobs SET id = id WHERE target = $1";
+
+/// The active (pending / running) job of a target and its rule identity.
+pub(super) const FIND_ACTIVE_JOB_RULE_SQLITE_SQL: &str = r#"
+SELECT j.id, j.state, rv.kind, rv.version_tag, rv.payload_sha256
+FROM reindex_jobs j
+JOIN rule_versions rv ON rv.id = j.rule_version_id
+WHERE j.target = $1 AND j.state IN ('pending', 'running')
+"#;
+
+pub(super) const FIND_ACTIVE_JOB_RULE_PG_SQL: &str = r#"
+SELECT j.id, j.state, rv.kind, rv.version_tag, rv.payload_sha256
+FROM reindex_jobs j
+JOIN rule_versions rv ON rv.id = j.rule_version_id
+WHERE j.target = $1 AND j.state IN ('pending', 'running')
+FOR UPDATE OF j
+"#;
+
+/// Claims a resumable job by id: `pending` without a live lease, or
+/// `running` whose lease has expired (reclaim is best-effort).
+pub(super) const CLAIM_RESUMABLE_SQL: &str = r#"
+UPDATE reindex_jobs
+SET state = 'running',
+    lease_owner = $1,
+    lease_expires_at = $2,
+    started_at = COALESCE(started_at, $3),
+    attempt_count = attempt_count + 1,
+    updated_at = $3
+WHERE id = $4
+  AND (
+      (state = 'pending' AND (lease_expires_at IS NULL OR lease_expires_at < $3))
+      OR (state = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < $3)
+  )
+RETURNING id, target, rule_version_id, last_processed_id, attempt_count
 "#;
 
 pub(super) const ASSERT_LEASE_HELD_SQL: &str = r#"

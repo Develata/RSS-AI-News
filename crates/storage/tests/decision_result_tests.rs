@@ -114,34 +114,69 @@ async fn generation_is_scoped_by_window_category_state_and_identity() {
     let cutoff = now - Duration::hours(48);
     let first = identity(POLICY, "laya:multilingual:2048");
     assert_eq!(
-        repo.generate_pending(&first, &laya(), cutoff, 10, now)
+        repo.generate_pending(&first, &laya(), cutoff, 0, 10, now)
             .await
-            .unwrap(),
+            .unwrap()
+            .inserted,
         2
     );
     // The anti-join makes generation idempotent.
     assert_eq!(
-        repo.generate_pending(&first, &laya(), cutoff, 10, now)
+        repo.generate_pending(&first, &laya(), cutoff, 0, 10, now)
             .await
-            .unwrap(),
+            .unwrap()
+            .inserted,
         0
     );
     // Another identity has its own rows; another category has none.
     let second = identity(OTHER_POLICY, "laya:multilingual:2048");
     assert_eq!(
-        repo.generate_pending(&second, &laya(), cutoff, 1, now)
+        repo.generate_pending(&second, &laya(), cutoff, 0, 1, now)
             .await
-            .unwrap(),
+            .unwrap()
+            .inserted,
         1
     );
     let mut elsewhere = first.clone();
     elsewhere.category_key = "ml".to_string();
     assert_eq!(
-        repo.generate_pending(&elsewhere, &laya(), long_ago(), 10, now)
+        repo.generate_pending(&elsewhere, &laya(), long_ago(), 0, 10, now)
             .await
-            .unwrap(),
+            .unwrap()
+            .inserted,
         0
     );
+}
+
+/// C7 (ADR 0011 §5): generation pages by keyset cursor and reports the last
+/// id scanned.
+#[tokio::test]
+async fn generation_pages_by_keyset_cursor_and_reports_the_last_scanned_id() {
+    let (pool, repo, ids) = setup(5).await;
+    let now = OffsetDateTime::now_utc();
+    let current = identity(POLICY, "laya:multilingual:2048");
+    let execution = laya();
+    let since = long_ago();
+    let page =
+        |after_id, limit| repo.generate_pending(&current, &execution, since, after_id, limit, now);
+
+    let first = page(0, 2).await.unwrap();
+    assert_eq!(first.inserted, 2);
+    assert_eq!(first.last_scanned_id, Some(ids[1]));
+    // The cursor skips what was already scanned: no rescan from the start.
+    let second = page(ids[1], 2).await.unwrap();
+    assert_eq!(second.inserted, 2);
+    assert_eq!(second.last_scanned_id, Some(ids[3]));
+    let third = page(ids[3], 2).await.unwrap();
+    assert_eq!((third.inserted, third.last_scanned_id), (1, Some(ids[4])));
+    let done = page(ids[4], 2).await.unwrap();
+    assert_eq!((done.inserted, done.last_scanned_id), (0, None));
+    // Nothing below the cursor was left without a row.
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM decision_results")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 5);
 }
 
 #[tokio::test]
@@ -167,12 +202,13 @@ async fn the_window_compares_whole_seconds_on_sqlite_text() {
             &identity(POLICY, "laya:multilingual:2048"),
             &laya(),
             cutoff,
+            0,
             10,
             OffsetDateTime::now_utc(),
         )
         .await
         .unwrap();
-    assert_eq!(inserted, 2);
+    assert_eq!(inserted.inserted, 2);
 }
 
 #[tokio::test]
@@ -186,10 +222,10 @@ async fn claim_takes_only_the_current_identity_and_counts_the_attempt() {
         requested_model: "jev-1.13.0".to_string(),
         laya_max_len: None,
     };
-    repo.generate_pending(&old, &jev, long_ago(), 10, now)
+    repo.generate_pending(&old, &jev, long_ago(), 0, 10, now)
         .await
         .unwrap();
-    repo.generate_pending(&current, &laya(), long_ago(), 2, now)
+    repo.generate_pending(&current, &laya(), long_ago(), 0, 2, now)
         .await
         .unwrap();
     let claimed = repo
@@ -221,7 +257,7 @@ async fn parallel_claims_are_disjoint() {
     let now = OffsetDateTime::now_utc();
     repo.upsert_policy(POLICY, "{}", now).await.unwrap();
     let current = identity(POLICY, "laya:multilingual:2048");
-    repo.generate_pending(&current, &laya(), long_ago(), 40, now)
+    repo.generate_pending(&current, &laya(), long_ago(), 0, 40, now)
         .await
         .unwrap();
     let mut handles = Vec::new();
@@ -256,7 +292,7 @@ async fn release_success_needs_the_owner_and_records_the_attempt() {
     let (pool, repo, _ids) = setup(1).await;
     let now = OffsetDateTime::now_utc();
     let current = identity(POLICY, "laya:multilingual:2048");
-    repo.generate_pending(&current, &laya(), long_ago(), 1, now)
+    repo.generate_pending(&current, &laya(), long_ago(), 0, 1, now)
         .await
         .unwrap();
     let claimed = repo
@@ -311,7 +347,7 @@ async fn failures_charge_refund_or_terminate() {
     let (pool, repo, _ids) = setup(3).await;
     let now = OffsetDateTime::now_utc();
     let current = identity(POLICY, "laya:multilingual:2048");
-    repo.generate_pending(&current, &laya(), long_ago(), 3, now)
+    repo.generate_pending(&current, &laya(), long_ago(), 0, 3, now)
         .await
         .unwrap();
     let lease = now + Duration::minutes(2);
@@ -372,7 +408,7 @@ async fn maintenance_reclaims_expired_leases_and_terminalizes_spent_rows() {
     let (pool, repo, _ids) = setup(2).await;
     let now = OffsetDateTime::now_utc();
     let current = identity(POLICY, "laya:multilingual:2048");
-    repo.generate_pending(&current, &laya(), long_ago(), 2, now)
+    repo.generate_pending(&current, &laya(), long_ago(), 0, 2, now)
         .await
         .unwrap();
     let claimed = repo
@@ -413,7 +449,7 @@ async fn expired_raw_bodies_are_cleared_across_identities_once_and_in_bounded_ba
         (POLICY, "laya:multilingual:2048"),
         (OTHER_POLICY, "laya:multilingual:2048"),
     ] {
-        repo.generate_pending(&identity(policy, execution), &laya(), long_ago(), 3, now)
+        repo.generate_pending(&identity(policy, execution), &laya(), long_ago(), 0, 3, now)
             .await
             .unwrap();
     }
@@ -422,8 +458,12 @@ async fn expired_raw_bodies_are_cleared_across_identities_once_and_in_bounded_ba
         .execute(&pool)
         .await
         .unwrap();
+    assert!(repo.expired_raw_remains(now).await.unwrap());
     assert_eq!(repo.purge_expired_raw(now, 4).await.unwrap(), 4);
+    assert!(repo.expired_raw_remains(now).await.unwrap());
     assert_eq!(repo.purge_expired_raw(now, 4).await.unwrap(), 2);
+    // C8: the backlog probe sees nothing once the last row is cleared.
+    assert!(!repo.expired_raw_remains(now).await.unwrap());
     assert_eq!(repo.purge_expired_raw(now, 4).await.unwrap(), 0);
     let left: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM decision_results WHERE raw_response IS NOT NULL OR raw_response_expires_at IS NOT NULL",
@@ -481,13 +521,35 @@ async fn constraints_reject_invalid_rows() {
 async fn the_repo_reads_article_text_and_writes_run_events() {
     let (pool, repo, ids) = setup(1).await;
     assert_eq!(
-        repo.load_article(ids[0]).await.unwrap(),
+        repo.load_article(ids[0], 6001).await.unwrap(),
         Some(DecisionArticle {
             title: "title".to_string(),
             body_text: "body".to_string(),
         })
     );
-    assert_eq!(repo.load_article(ids[0] + 1000).await.unwrap(), None);
+    assert_eq!(repo.load_article(ids[0] + 1000, 6001).await.unwrap(), None);
+    // C8: only a character-boundary prefix of the body is read (CJK).
+    sqlx::query("UPDATE articles SET body_text = '中文正文内容' WHERE id = ?")
+        .bind(ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.load_article(ids[0], 3)
+            .await
+            .unwrap()
+            .unwrap()
+            .body_text,
+        "中文正"
+    );
+    assert_eq!(
+        repo.load_article(ids[0], 100)
+            .await
+            .unwrap()
+            .unwrap()
+            .body_text,
+        "中文正文内容"
+    );
     let id = repo
         .insert(&NewRunEvent {
             run_id: "run-1".to_string(),

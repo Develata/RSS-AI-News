@@ -18,6 +18,8 @@
 - partial unique index 保证同 target 只能存在一个 pending/running 任务
 - claim → state=`running`，lease 写入；checkpoint 按批 commit `last_processed_id`
 - lease 过期 reclaim → 保留 checkpoint + started_at，可 resume
+- 普通重跑（CLI 自动生成新 tag、同一规则 sha256）领取未完成的同 target job，从 checkpoint 之后继续并完成它
+- 每批 checkpoint 续租 lease；批写入 + owner 校验 + checkpoint 同一事务，失去 lease 的 worker 整批回滚
 - 完成时事务内：rule_versions pending→active、旧 active→superseded、reindex_jobs→completed
 - `link_hash`：扫描所有 entry；每次 move 原子重选 old/new groups 的最小 id canonical，任一非空 final group 恰一 canonical
 - collision candidate 若非组内最小 id → 记 `conflict_skipped`；后续 canonical 移出时原 shadow 同事务 promote
@@ -38,6 +40,7 @@
 ### 失败条件（failure path）
 
 - target 已有 active job → `start_tx` 回滚（partial unique）
+- 重跑时活动 job 的规则 sha256 不同，或另一 worker 持有存活 lease → 显式 Conflict（提示 `reindex --abort <id>`），不改任何行
 - rule_version_tag 冲突 → `start_tx` 回滚
 - claim 时 lease 已被其它 worker 持有 → 不抢占
 - mark_failed 时保留 pending 新 rule_version + 不降级旧 active（避免读路径丢 active）
@@ -89,6 +92,14 @@
 | `dry_run_content_hash_distinguishes_unchanged_updated_conflict` | 同上 | dry-run 三态 |
 | `dry_run_categories_counts_would_archive_without_writing` | 同上 | dry-run 不写 |
 | `reindex_lease_reclaim_preserves_checkpoint_and_started_at_for_resume` | 同上 | reclaim 续跑 |
+| `plain_rerun_resumes_crashed_job_past_its_checkpoint` | `crates/runtime/tests/reindex_e2e_tests.rs` | 普通重跑越过 checkpoint |
+| `rerun_with_another_rule_conflicts_and_names_the_abort` | 同上 | 规则不一致 → 冲突 |
+| `rerun_while_a_live_worker_holds_the_lease_conflicts` | 同上 | 存活 lease 不被接管 |
+| `resumes_expired_job_of_the_same_rule_with_its_checkpoint` | `crates/storage/tests/reindex_job_resume_tests.rs` | 续跑领取（running 过期） |
+| `a_different_rule_is_a_mismatch_and_changes_nothing` | 同上 | 规则不一致不改行 |
+| `link_hash_batch_of_a_worker_that_lost_the_lease_changes_nothing` | 同上 | 失去 lease 整批回滚 |
+| `content_hash_batch_classifies_rows_and_rolls_back_without_lease` | 同上 | content_hash 批事务 |
+| `pg_resume_claims_same_rule_and_batch_rolls_back_without_lease` | `crates/storage/tests/reindex_job_pg_tests.rs` | PG 续跑 + 批回滚 |
 | `reindex_link_hash_batch_size_one_processes_all_rows_and_checkpoints_last_id` | 同上 | checkpoint 推进 |
 | `reindex_second_start_for_same_target_rejected_by_partial_unique` | 同上 | partial unique 端到端 |
 | `reindex_mark_failed_keeps_old_active_and_pending_new_rule_version` | 同上 | 失败保旧 active |

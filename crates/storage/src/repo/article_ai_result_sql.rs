@@ -13,6 +13,13 @@ ON CONFLICT(article_id, prompt_version, output_schema_version, model_id) DO NOTH
 RETURNING id
 "#;
 
+/// SQLite claim. SQLite stores times as RFC3339 TEXT with a variable-width
+/// fraction, so text order is not instant order within a second; the lease
+/// predicate compares `julianday()` instants. `$2` is written through
+/// `sqlite_stored_deadline` (UTC, rounded up to the ms) and `$5` is
+/// `sqlite_instant_cutoff(now)` (rounded down), so the comparison is exact
+/// and never early. Text unparseable by `julianday()` (NULL) falls back to the
+/// old text comparison via `COALESCE` (same rule as `feed_entries`).
 pub(super) const CLAIM_AI_PENDING_SQLITE_SQL: &str = r#"
 UPDATE article_ai_results
 SET state = 'running',
@@ -28,7 +35,9 @@ WHERE id IN (
     JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
     JOIN feed_sources fs ON fs.id = fe.source_id
     WHERE aar.state = 'pending'
-      AND (aar.lease_expires_at IS NULL OR aar.lease_expires_at < $5)
+      AND (aar.lease_expires_at IS NULL
+           OR COALESCE(julianday(aar.lease_expires_at) < julianday($5),
+                       aar.lease_expires_at < $5))
       AND aar.attempt_count < $6
       AND fs.category_key = $7
     ORDER BY aar.id ASC
@@ -37,6 +46,10 @@ WHERE id IN (
 RETURNING id, article_id, prompt_version, output_schema_version, model_id
 "#;
 
+/// PG claim. `FOR UPDATE OF aar`: only the AI rows are locked / skipped. A
+/// bare `FOR UPDATE` would lock every joined table, so a source or article
+/// row locked by another transaction would hide claimable AI rows and the
+/// worker would read the empty batch as an exhausted queue.
 pub(super) const CLAIM_AI_PENDING_PG_SQL: &str = r#"
 UPDATE article_ai_results
 SET state = 'running',
@@ -57,9 +70,128 @@ WHERE id IN (
       AND fs.category_key = $7
     ORDER BY aar.id ASC
     LIMIT $8
-    FOR UPDATE SKIP LOCKED
+    FOR UPDATE OF aar SKIP LOCKED
 )
 RETURNING id, article_id, prompt_version, output_schema_version, model_id
+"#;
+
+// ── C9: publish-window ("fresh") share ────────────────────────────────
+// "Fresh" = the article would be eligible if publish froze now:
+// `COALESCE(fe.published_at, fe.discovered_at) >= published_since` (the
+// freeze rule, `flows/publish/freeze.rs::published_since`; no upper bound, so
+// future-dated articles count as fresh). SQLite compares and orders that
+// source time by `julianday()` instant with a text fallback; `$9` is
+// `sqlite_instant_cutoff(published_since)`.
+
+/// SQLite fresh claim: pending tasks of in-window articles, oldest source
+/// time first (they leave the window first), ties by task id. Lease,
+/// attempt and category predicates are those of [`CLAIM_AI_PENDING_SQLITE_SQL`].
+pub(super) const CLAIM_AI_PENDING_FRESH_SQLITE_SQL: &str = r#"
+UPDATE article_ai_results
+SET state = 'running',
+    lease_owner = $1,
+    lease_expires_at = $2,
+    attempt_count = attempt_count + 1,
+    started_at = COALESCE(started_at, $3),
+    updated_at = $4
+WHERE id IN (
+    SELECT aar.id
+    FROM article_ai_results aar
+    JOIN articles a ON a.id = aar.article_id
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE aar.state = 'pending'
+      AND (aar.lease_expires_at IS NULL
+           OR COALESCE(julianday(aar.lease_expires_at) < julianday($5),
+                       aar.lease_expires_at < $5))
+      AND aar.attempt_count < $6
+      AND fs.category_key = $7
+      AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($9),
+                   COALESCE(fe.published_at, fe.discovered_at) >= $9)
+    ORDER BY julianday(COALESCE(fe.published_at, fe.discovered_at)) ASC,
+             COALESCE(fe.published_at, fe.discovered_at) ASC,
+             aar.id ASC
+    LIMIT $8
+)
+RETURNING id, article_id, prompt_version, output_schema_version, model_id
+"#;
+
+/// PG fresh claim; `FOR UPDATE OF aar` as in [`CLAIM_AI_PENDING_PG_SQL`].
+pub(super) const CLAIM_AI_PENDING_FRESH_PG_SQL: &str = r#"
+UPDATE article_ai_results
+SET state = 'running',
+    lease_owner = $1,
+    lease_expires_at = $2,
+    attempt_count = attempt_count + 1,
+    started_at = COALESCE(started_at, $3),
+    updated_at = $4
+WHERE id IN (
+    SELECT aar.id
+    FROM article_ai_results aar
+    JOIN articles a ON a.id = aar.article_id
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE aar.state = 'pending'
+      AND (aar.lease_expires_at IS NULL OR aar.lease_expires_at < $5)
+      AND aar.attempt_count < $6
+      AND fs.category_key = $7
+      AND COALESCE(fe.published_at, fe.discovered_at) >= $9
+    ORDER BY COALESCE(fe.published_at, fe.discovered_at) ASC, aar.id ASC
+    LIMIT $8
+    FOR UPDATE OF aar SKIP LOCKED
+)
+RETURNING id, article_id, prompt_version, output_schema_version, model_id
+"#;
+
+/// Batch-size-1 alternation signal for task_gen: is the category's newest AI
+/// task (highest id) for an in-window article? No row → NULL.
+pub(super) const NEWEST_TASK_IS_FRESH_SQLITE_SQL: &str = r#"
+SELECT COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($2),
+                COALESCE(fe.published_at, fe.discovered_at) >= $2)
+FROM article_ai_results aar
+JOIN articles a ON a.id = aar.article_id
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE fs.category_key = $1
+ORDER BY aar.id DESC
+LIMIT 1
+"#;
+
+pub(super) const NEWEST_TASK_IS_FRESH_PG_SQL: &str = r#"
+SELECT COALESCE(fe.published_at, fe.discovered_at) >= $2
+FROM article_ai_results aar
+JOIN articles a ON a.id = aar.article_id
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE fs.category_key = $1
+ORDER BY aar.id DESC
+LIMIT 1
+"#;
+
+/// Batch-size-1 alternation signal for the claim: is the category's most
+/// recently first-claimed task (latest `started_at`) for an in-window
+/// article? Never claimed → NULL.
+pub(super) const LAST_CLAIM_IS_FRESH_SQLITE_SQL: &str = r#"
+SELECT COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($2),
+                COALESCE(fe.published_at, fe.discovered_at) >= $2)
+FROM article_ai_results aar
+JOIN articles a ON a.id = aar.article_id
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE fs.category_key = $1 AND aar.started_at IS NOT NULL
+ORDER BY julianday(aar.started_at) DESC, aar.started_at DESC, aar.id DESC
+LIMIT 1
+"#;
+
+pub(super) const LAST_CLAIM_IS_FRESH_PG_SQL: &str = r#"
+SELECT COALESCE(fe.published_at, fe.discovered_at) >= $2
+FROM article_ai_results aar
+JOIN articles a ON a.id = aar.article_id
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE fs.category_key = $1 AND aar.started_at IS NOT NULL
+ORDER BY aar.started_at DESC, aar.id DESC
+LIMIT 1
 "#;
 
 pub(super) const RELEASE_AI_SUCCESS_SQL: &str = r#"
@@ -105,6 +237,19 @@ WHERE lease_expires_at IS NOT NULL
   AND state = 'running'
 "#;
 
+/// SQLite variant: instant comparison (see [`CLAIM_AI_PENDING_SQLITE_SQL`]);
+/// `$2` is `sqlite_instant_cutoff(now)`.
+pub(super) const RECLAIM_AI_LEASES_SQLITE_SQL: &str = r#"
+UPDATE article_ai_results
+SET state = 'pending',
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = $1
+WHERE lease_expires_at IS NOT NULL
+  AND COALESCE(julianday(lease_expires_at) < julianday($2), lease_expires_at < $2)
+  AND state = 'running'
+"#;
+
 /// W15 §4 sweep：预算耗尽且 claim 永远不会再领取的 pending 行 → 终态。
 /// COALESCE 保留行上既有真实错误（retryable release 已写过），仅对从未留过
 /// 错误的行落兜底文案。
@@ -121,6 +266,22 @@ WHERE state = 'pending'
   AND (lease_expires_at IS NULL OR lease_expires_at < $3)
 "#;
 
+/// SQLite variant of [`TERMINALIZE_EXHAUSTED_AI_SQL`]: instant comparison;
+/// `$3` is `sqlite_instant_cutoff(now)`.
+pub(super) const TERMINALIZE_EXHAUSTED_AI_SQLITE_SQL: &str = r#"
+UPDATE article_ai_results
+SET state = 'permanent_failed',
+    last_error = COALESCE(last_error, 'retry budget exhausted'),
+    last_error_kind = COALESCE(last_error_kind, 'retry_budget_exhausted'),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = $1
+WHERE state = 'pending'
+  AND attempt_count >= $2
+  AND (lease_expires_at IS NULL
+       OR COALESCE(julianday(lease_expires_at) < julianday($3), lease_expires_at < $3))
+"#;
+
 pub(super) const ADVANCE_ARTICLE_TO_AI_PENDING_SQL: &str = r#"
 UPDATE articles
 SET state = 'ai_pending', updated_at = $1
@@ -128,6 +289,28 @@ WHERE id = $2 AND state = 'persisted'
 "#;
 
 pub(super) const SELECT_ARTICLE_STATE_SQL: &str = "SELECT state FROM articles WHERE id = $1";
+
+/// The existing row of one AI identity (task_gen / backfill conflict branch).
+pub(super) const SELECT_AI_IDENTITY_ROW_SQLITE_SQL: &str = r#"
+SELECT id, state, keep_decision, importance_score
+FROM article_ai_results
+WHERE article_id = $1 AND prompt_version = $2 AND output_schema_version = $3 AND model_id = $4
+"#;
+
+/// PG: lock the existing row so a concurrent success release (which updates
+/// this row first, then reads the article) serialises with the reconcile.
+pub(super) const SELECT_AI_IDENTITY_ROW_PG_SQL: &str = r#"
+SELECT id, state, keep_decision, importance_score
+FROM article_ai_results
+WHERE article_id = $1 AND prompt_version = $2 AND output_schema_version = $3 AND model_id = $4
+FOR UPDATE
+"#;
+
+pub(super) const ADVANCE_PERSISTED_ARTICLE_SQL: &str = r#"
+UPDATE articles
+SET state = $1, updated_at = $2
+WHERE id = $3 AND state = 'persisted'
+"#;
 
 pub(super) const ADVANCE_ARTICLE_FROM_AI_PHASE_SQL: &str = r#"
 UPDATE articles

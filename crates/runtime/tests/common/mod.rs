@@ -245,6 +245,7 @@ pub fn ai_deps(pool: SqlitePool, app: Arc<AppConfig>, ai_client: Arc<dyn AiClien
         ai_result_repo: Arc::new(rss_ai_news_storage::ArticleAiResultRepo::new(pool.clone())),
         artifact_repo: Arc::new(rss_ai_news_storage::RawArtifactRepo::new(pool.clone())),
         event_repo: Arc::new(rss_ai_news_storage::RunEventRepo::new(pool.clone())),
+        clock: rss_ai_news_runtime::context::system_clock(),
     }
 }
 

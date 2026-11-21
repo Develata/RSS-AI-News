@@ -11,14 +11,17 @@ use time::OffsetDateTime;
 use crate::{StorageError, StoragePool};
 
 use super::reindex_job::{
-    ClaimedReindexJob, FinishReindexTxOutcome, ReindexJob, ReindexJobRepo, ReindexJobRepository,
-    StartReindexTxOutcome,
+    ClaimedReindexJob, FinishReindexTxOutcome, ReindexBatchCheckpoint, ReindexJob, ReindexJobRepo,
+    ReindexJobRepository, ResumeReindexOutcome, StartReindexTxOutcome,
 };
 use super::reindex_job_impl_pg::{
     pg_abort, pg_advance_checkpoint, pg_advance_to_completed, pg_assert_lease_held, pg_claim_by_id,
     pg_claim_pending, pg_complete_without_claim, pg_find_active_by_target, pg_find_by_id,
     pg_finish_reindex_tx, pg_insert_pending, pg_list_running, pg_mark_failed,
     pg_reclaim_expired_leases, pg_start_reindex_tx,
+};
+use super::reindex_job_impl_pg::{
+    pg_apply_content_hash_batch, pg_apply_link_hash_batch, pg_claim_resumable_by_target,
 };
 use super::reindex_job_impl_sqlite::{
     sqlite_abort, sqlite_advance_checkpoint, sqlite_advance_to_completed, sqlite_assert_lease_held,
@@ -27,6 +30,10 @@ use super::reindex_job_impl_sqlite::{
     sqlite_insert_pending, sqlite_list_running, sqlite_mark_failed, sqlite_reclaim_expired_leases,
     sqlite_start_reindex_tx,
 };
+use super::reindex_job_impl_sqlite::{
+    sqlite_apply_content_hash_batch, sqlite_apply_link_hash_batch, sqlite_claim_resumable_by_target,
+};
+use crate::{UpdateContentHashOutcome, UpdateLinkHashOutcome};
 
 #[async_trait]
 impl ReindexJobRepository for ReindexJobRepo {
@@ -141,14 +148,77 @@ impl ReindexJobRepository for ReindexJobRepo {
         owner: &str,
         last_processed_id: i64,
         now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        let checkpoint = ReindexBatchCheckpoint {
+            job_id: id,
+            owner,
+            last_processed_id,
+            now,
+            lease_expires_at,
+        };
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_advance_checkpoint(p, checkpoint).await,
+            StoragePool::Postgres(p) => pg_advance_checkpoint(p, checkpoint).await,
+        }
+    }
+
+    async fn claim_resumable_by_target(
+        &self,
+        target: &str,
+        rule_kind: &str,
+        rule_payload_sha256: &str,
+        owner: &str,
+        now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
+    ) -> Result<ResumeReindexOutcome, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlite_advance_checkpoint(p, id, owner, last_processed_id, now).await
+                sqlite_claim_resumable_by_target(
+                    p,
+                    target,
+                    rule_kind,
+                    rule_payload_sha256,
+                    owner,
+                    now,
+                    lease_expires_at,
+                )
+                .await
             }
             StoragePool::Postgres(p) => {
-                pg_advance_checkpoint(p, id, owner, last_processed_id, now).await
+                pg_claim_resumable_by_target(
+                    p,
+                    target,
+                    rule_kind,
+                    rule_payload_sha256,
+                    owner,
+                    now,
+                    lease_expires_at,
+                )
+                .await
             }
+        }
+    }
+
+    async fn apply_link_hash_batch(
+        &self,
+        checkpoint: ReindexBatchCheckpoint<'_>,
+        updates: &[(i64, String)],
+    ) -> Result<Option<Vec<UpdateLinkHashOutcome>>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_apply_link_hash_batch(p, checkpoint, updates).await,
+            StoragePool::Postgres(p) => pg_apply_link_hash_batch(p, checkpoint, updates).await,
+        }
+    }
+
+    async fn apply_content_hash_batch(
+        &self,
+        checkpoint: ReindexBatchCheckpoint<'_>,
+        updates: &[(i64, String)],
+    ) -> Result<Option<Vec<UpdateContentHashOutcome>>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => sqlite_apply_content_hash_batch(p, checkpoint, updates).await,
+            StoragePool::Postgres(p) => pg_apply_content_hash_batch(p, checkpoint, updates).await,
         }
     }
 

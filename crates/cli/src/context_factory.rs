@@ -61,6 +61,7 @@ pub fn build_decision_run_deps(
         run: RunMeta::default(),
         settings: DecisionRunSettings {
             concurrency: settings.concurrency,
+            max_state_chars: settings.max_state_chars,
             lease_seconds: settings.lease_seconds,
             max_attempts: settings.max_attempts,
             request_timeout: settings.request_timeout,
@@ -172,6 +173,7 @@ pub fn build_ai_deps(
         ai_result_repo: Arc::new(ArticleAiResultRepo::new_with_storage(pool.clone())),
         artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
         event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+        clock: system_clock(),
     }))
 }
 

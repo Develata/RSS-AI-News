@@ -120,15 +120,17 @@ async fn pg_window_uses_whole_second_cutoff_and_generation_is_idempotent() {
     let cutoff = time::macros::datetime!(2026-10-31 12:00:00.800 UTC);
     let now = OffsetDateTime::now_utc();
     assert_eq!(
-        repo.generate_pending(&identity(), &laya(), cutoff, 10, now)
+        repo.generate_pending(&identity(), &laya(), cutoff, 0, 10, now)
             .await
-            .unwrap(),
+            .unwrap()
+            .inserted,
         2
     );
     assert_eq!(
-        repo.generate_pending(&identity(), &laya(), cutoff, 10, now)
+        repo.generate_pending(&identity(), &laya(), cutoff, 0, 10, now)
             .await
-            .unwrap(),
+            .unwrap()
+            .inserted,
         0
     );
     ctx.cleanup().await;
@@ -140,7 +142,7 @@ async fn pg_parallel_claims_are_disjoint_and_releases_follow_their_mode() {
     let (ctx, repo, _ids) = setup(12).await;
     let now = OffsetDateTime::now_utc();
     let long_ago = now - Duration::days(3650);
-    repo.generate_pending(&identity(), &laya(), long_ago, 12, now)
+    repo.generate_pending(&identity(), &laya(), long_ago, 0, 12, now)
         .await
         .unwrap();
     let lease = now + Duration::minutes(2);
@@ -231,7 +233,7 @@ async fn pg_parallel_claims_are_disjoint_and_releases_follow_their_mode() {
 async fn pg_maintenance_and_raw_cleanup() {
     let (ctx, repo, _ids) = setup(3).await;
     let now = OffsetDateTime::now_utc();
-    repo.generate_pending(&identity(), &laya(), now - Duration::days(3650), 3, now)
+    repo.generate_pending(&identity(), &laya(), now - Duration::days(3650), 0, 3, now)
         .await
         .unwrap();
     let claimed = repo
@@ -271,11 +273,35 @@ async fn pg_maintenance_and_raw_cleanup() {
     .await;
     assert!(laya_without_len.is_err());
     let article = repo
-        .load_article(claimed[0].article_id)
+        .load_article(claimed[0].article_id, 6001)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(article.body_text, "body");
+    // C8: only a character-boundary prefix of the body is read.
+    sqlx::query("UPDATE articles SET body_text = '中文正文内容' WHERE id = $1")
+        .bind(claimed[0].article_id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    let prefix = repo
+        .load_article(claimed[0].article_id, 3)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(prefix.body_text, "中文正");
+    // C8: the backlog probe.
+    let now = OffsetDateTime::now_utc();
+    assert!(!repo.expired_raw_remains(now).await.unwrap());
+    sqlx::query(
+        "UPDATE decision_results SET raw_response = '{}', raw_response_expires_at = $1 WHERE id = $2",
+    )
+    .bind(now - Duration::days(1))
+    .bind(claimed[0].id)
+    .execute(ctx.pg_pool())
+    .await
+    .unwrap();
+    assert!(repo.expired_raw_remains(now).await.unwrap());
     let event_id = rss_ai_news_storage::RunEventRepository::insert(
         &repo,
         &rss_ai_news_storage::NewRunEvent {
@@ -306,7 +332,7 @@ async fn pg_lock_timeouts_surface_as_storage_timeouts() {
         .await
         .unwrap();
     let started = std::time::Instant::now();
-    let error = repo.load_article(ids[0]).await.unwrap_err();
+    let error = repo.load_article(ids[0], 6001).await.unwrap_err();
     assert!(
         matches!(error, rss_ai_news_storage::StorageError::Timeout),
         "{error:?}"

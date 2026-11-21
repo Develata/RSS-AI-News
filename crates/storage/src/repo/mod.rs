@@ -46,6 +46,27 @@ pub(crate) fn sqlite_utc_seconds(value: time::OffsetDateTime) -> String {
 }
 
 pub use article::EntryPersistOutcome;
+/// A deadline as stored (lease expiry, raw-response TTL): UTC, rounded up
+/// to a whole millisecond. With [`sqlite_instant_cutoff`] rounding the
+/// compared `now` down, SQLite's `julianday()` (millisecond precision)
+/// compares deadlines exactly and never treats one as passed early; UTC keeps
+/// the text parseable by SQLite date functions. Same rule as `feed_entries`
+/// (`feed_entry_impl::stored_deadline`, plan/02 §5.3).
+pub(crate) fn sqlite_stored_deadline(at: time::OffsetDateTime) -> time::OffsetDateTime {
+    let at = at.to_offset(time::UtcOffset::UTC);
+    match at.nanosecond() % 1_000_000 {
+        0 => at,
+        sub_ms => at + time::Duration::nanoseconds(i64::from(1_000_000 - sub_ms)),
+    }
+}
+
+/// The `now` SQLite deadline predicates compare against: UTC, rounded down
+/// to a whole millisecond (see [`sqlite_stored_deadline`]).
+pub(crate) fn sqlite_instant_cutoff(now: time::OffsetDateTime) -> time::OffsetDateTime {
+    let now = now.to_offset(time::UtcOffset::UTC);
+    now - time::Duration::nanoseconds(i64::from(now.nanosecond() % 1_000_000))
+}
+
 pub use article::{
     ArticleAiTaskCandidate, ArticleContentHash, ArticleInsertOutcome, ArticleRepo,
     ArticleRepository, BackfillArticleCandidate, ContentHashReindexCandidate, NewArticle,
@@ -58,7 +79,7 @@ pub use article_ai_result::{
 pub use decision_result::{
     ClaimedDecision, DecisionArticle, DecisionAttemptRecord, DecisionExecution, DecisionFailure,
     DecisionFailureMode, DecisionIdentity, DecisionRawRecord, DecisionResultRepo,
-    DecisionResultRepository, DecisionResultState, DecisionSuccess,
+    DecisionResultRepository, DecisionResultState, DecisionSuccess, GeneratedPage,
 };
 pub use feed_entry::{
     ClaimedFeedEntry, FeedEntry, FeedEntryInsertOutcome, FeedEntryRepo, FeedEntryRepository,
@@ -80,8 +101,8 @@ pub use publish_record::{
 };
 pub use raw_artifact::{NewRawArtifact, RawArtifactRepo, RawArtifactRepository};
 pub use reindex_job::{
-    ClaimedReindexJob, FinishReindexTxOutcome, ReindexJob, ReindexJobRepo, ReindexJobRepository,
-    StartReindexTxOutcome,
+    ClaimedReindexJob, FinishReindexTxOutcome, ReindexBatchCheckpoint, ReindexJob, ReindexJobRepo,
+    ReindexJobRepository, ResumeReindexOutcome, StartReindexTxOutcome,
 };
 pub use replay::{
     HtmlReplaySource, ReplayArticleDigest, ReplayProjectionRepo, ReplayProjectionRepository,

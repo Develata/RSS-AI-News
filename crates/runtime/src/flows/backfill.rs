@@ -147,11 +147,14 @@ impl BackfillFlow {
                     output_schema_version: opts.output_schema_version,
                     model_id: opts.model_id.clone(),
                 };
+                // C3: a still-`persisted` article moves to `ai_pending` with its
+                // task, so the task's success can advance it.
                 if self
                     .ctx
                     .ai_result_repo
-                    .insert_pending(&item)
+                    .insert_backfill_pending(&item, OffsetDateTime::now_utc())
                     .await?
+                    .ai_result_id
                     .is_some()
                 {
                     summary.ai_tasks_inserted += 1;

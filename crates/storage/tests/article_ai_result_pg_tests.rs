@@ -284,6 +284,7 @@ async fn pg_insert_pending_and_advance_rolls_back_when_article_not_persisted() {
                 output_schema_version: schema_id,
                 model_id: "gpt-4".to_string(),
             },
+            30,
             now,
         )
         .await
@@ -343,6 +344,7 @@ async fn pg_insert_pending_and_advance_article_atomically() {
                 output_schema_version: schema_id,
                 model_id: "gpt-4".to_string(),
             },
+            30,
             now,
         )
         .await
@@ -358,6 +360,251 @@ async fn pg_insert_pending_and_advance_article_atomically() {
         .await
         .unwrap();
     assert_eq!(state, "ai_pending");
+
+    ctx.cleanup().await;
+}
+
+/// C6：claim 只锁 `article_ai_results` 行（`FOR UPDATE OF aar`）。另一事务锁住
+/// 所属 feed_sources / articles 行时，可领取的 AI 行仍须被领取，而不是被
+/// SKIP LOCKED 当作已锁跳过（worker 会把空批次当成队列耗尽提前结束）。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_claim_is_not_hidden_by_locked_source_or_article_rows() {
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "lock-of").await;
+    let article_id = seed_article(&ctx, "lock-of", "ai_pending").await;
+    let repo = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .insert_pending(&NewAiResult {
+            article_id,
+            prompt_version: prompt_id,
+            output_schema_version: schema_id,
+            model_id: "gpt-4".to_string(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Connection 1 holds row locks on the article and its source (as an
+    // ingest / publish transaction would) and keeps its transaction open.
+    let mut locker = ctx.pg_pool().begin().await.unwrap();
+    sqlx::query(
+        "SELECT a.id FROM articles a \
+         JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id \
+         JOIN feed_sources fs ON fs.id = fe.source_id \
+         WHERE a.id = $1 FOR UPDATE OF a, fs",
+    )
+    .bind(article_id)
+    .fetch_one(&mut *locker)
+    .await
+    .unwrap();
+
+    // Connection 2 claims.
+    let now = OffsetDateTime::now_utc();
+    let claimed = repo
+        .claim_pending(
+            &ClaimRequest {
+                owner: "worker-B".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 4,
+                max_attempts: 3,
+            },
+            "ai",
+        )
+        .await
+        .expect("pg claim_pending");
+    locker.rollback().await.unwrap();
+
+    assert_eq!(
+        claimed.len(),
+        1,
+        "locked parent rows must not hide the AI row"
+    );
+    assert_eq!(claimed[0].id, id);
+    ctx.cleanup().await;
+}
+
+/// C9：PG 的 publish 窗口份额 SQL——fresh 列表（反连接 + 来源时间升序）、
+/// fresh claim（来源时间升序，`FOR UPDATE OF aar`）与两个 batch=1 轮换信号。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
+    use rss_ai_news_storage::{ArticleRepo, ArticleRepository};
+
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "fresh").await;
+    let ai = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let articles = ArticleRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let since = now - time::Duration::hours(48);
+    let mut ids = Vec::new();
+    // (tag, source time): old backlog, late fresh, early fresh.
+    for (tag, at) in [
+        ("f-old", now - time::Duration::days(10)),
+        ("f-late", now - time::Duration::hours(1)),
+        ("f-early", now - time::Duration::hours(40)),
+    ] {
+        let id = seed_article(&ctx, tag, "persisted").await;
+        sqlx::query(
+            "UPDATE feed_entries SET published_at = $1 \
+             WHERE id = (SELECT origin_feed_entry_id FROM articles WHERE id = $2)",
+        )
+        .bind(at)
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    let identity = NewAiResult {
+        article_id: 0,
+        prompt_version: prompt_id,
+        output_schema_version: schema_id,
+        model_id: "gpt-4".to_string(),
+    };
+    let listed = articles
+        .list_fresh_for_ai_task_gen("ai", &identity, since, 10)
+        .await
+        .expect("pg fresh list");
+    assert_eq!(
+        listed.iter().map(|c| c.article_id).collect::<Vec<_>>(),
+        [ids[2], ids[1]],
+        "in-window only, earliest source time first"
+    );
+    assert_eq!(ai.newest_task_is_fresh("ai", since).await.unwrap(), None);
+
+    let mut tasks = Vec::new();
+    for id in &ids {
+        tasks.push(
+            ai.insert_pending(&NewAiResult {
+                article_id: *id,
+                ..identity.clone()
+            })
+            .await
+            .unwrap()
+            .unwrap(),
+        );
+    }
+    // The anti-join drops articles that already have a task of the identity.
+    assert!(
+        articles
+            .list_fresh_for_ai_task_gen("ai", &identity, since, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        ai.newest_task_is_fresh("ai", since).await.unwrap(),
+        Some(true)
+    );
+    assert_eq!(ai.last_claim_is_fresh("ai", since).await.unwrap(), None);
+
+    let request = ClaimRequest {
+        owner: "w".to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 3,
+    };
+    let fresh = ai.claim_pending_fresh(&request, "ai", since).await.unwrap();
+    assert_eq!(fresh.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[2]]);
+    assert_eq!(
+        ai.last_claim_is_fresh("ai", since).await.unwrap(),
+        Some(true)
+    );
+    let later = ClaimRequest {
+        now: now + time::Duration::seconds(1),
+        ..request.clone()
+    };
+    let oldest = ai.claim_pending(&later, "ai").await.unwrap();
+    assert_eq!(oldest.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[0]]);
+    assert_eq!(
+        ai.last_claim_is_fresh("ai", since).await.unwrap(),
+        Some(false)
+    );
+    ctx.cleanup().await;
+}
+
+/// C3：身份冲突时按已有行对账仍为 persisted 的 article（PG 加 FOR UPDATE 路径）。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_insert_conflict_reconciles_persisted_article_with_existing_row() {
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "reconcile").await;
+    let repo = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    for (tag, row_state, keep, score, expected) in [
+        ("rc-pending", "pending", None, None, "ai_pending"),
+        (
+            "rc-high",
+            "succeeded",
+            Some(1),
+            Some(80),
+            "ready_for_publish",
+        ),
+        ("rc-low", "succeeded", Some(1), Some(10), "ai_done"),
+        ("rc-filtered", "filtered", Some(0), None, "publish_skipped"),
+        ("rc-failed", "permanent_failed", None, None, "persisted"),
+    ] {
+        let article_id = seed_article(&ctx, tag, "persisted").await;
+        sqlx::query(
+            "INSERT INTO article_ai_results (article_id, prompt_version, output_schema_version, \
+             model_id, state, keep_decision, importance_score) VALUES ($1, $2, $3, 'gpt-4', $4, $5, $6)",
+        )
+        .bind(article_id)
+        .bind(prompt_id)
+        .bind(schema_id)
+        .bind(row_state)
+        .bind(keep)
+        .bind(score)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+        let item = NewAiResult {
+            article_id,
+            prompt_version: prompt_id,
+            output_schema_version: schema_id,
+            model_id: "gpt-4".to_string(),
+        };
+        let outcome = repo
+            .insert_pending_and_advance_article(&item, 30, now)
+            .await
+            .expect("pg insert conflict");
+        assert!(outcome.ai_result_id.is_none(), "{tag}");
+        assert_eq!(outcome.reconciled, expected != "persisted", "{tag}");
+        let state: String = sqlx::query_scalar("SELECT state FROM articles WHERE id = $1")
+            .bind(article_id)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+        assert_eq!(state, expected, "{tag}");
+    }
+
+    // backfill：新插入推进 persisted，已发布 article 保持不变且插入保留。
+    let persisted = seed_article(&ctx, "bf-persisted", "persisted").await;
+    let published = seed_article(&ctx, "bf-published", "published").await;
+    for (article_id, expected) in [(persisted, "ai_pending"), (published, "published")] {
+        let outcome = repo
+            .insert_backfill_pending(
+                &NewAiResult {
+                    article_id,
+                    prompt_version: prompt_id,
+                    output_schema_version: schema_id,
+                    model_id: "gpt-4".to_string(),
+                },
+                now,
+            )
+            .await
+            .expect("pg backfill insert");
+        assert!(outcome.ai_result_id.is_some());
+        let state: String = sqlx::query_scalar("SELECT state FROM articles WHERE id = $1")
+            .bind(article_id)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+        assert_eq!(state, expected);
+    }
 
     ctx.cleanup().await;
 }
@@ -378,7 +625,7 @@ async fn pg_release_success_and_advance_keep_ready_for_publish() {
         model_id: "gpt-4".to_string(),
     };
     let advance_outcome = repo
-        .insert_pending_and_advance_article(&item, now)
+        .insert_pending_and_advance_article(&item, 30, now)
         .await
         .unwrap();
     let ai_result_id = advance_outcome.ai_result_id.unwrap();
@@ -445,7 +692,7 @@ async fn pg_release_success_and_advance_filtered_publish_skipped() {
         model_id: "gpt-4".to_string(),
     };
     let advance_outcome = repo
-        .insert_pending_and_advance_article(&item, now)
+        .insert_pending_and_advance_article(&item, 30, now)
         .await
         .unwrap();
     let ai_result_id = advance_outcome.ai_result_id.unwrap();
