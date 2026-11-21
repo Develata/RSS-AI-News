@@ -193,3 +193,45 @@ async fn missing_or_invalid_retry_after_on_429_is_none() {
         Some(Duration::ZERO)
     );
 }
+
+/// R2-S11: reqwest sends the previous URL as `Referer` on redirects by
+/// default; a signed article URL (`?sig=…`) must not leak to another host
+/// through the production client.
+#[tokio::test]
+async fn cross_host_redirect_sends_no_referer() {
+    let origin = MockServer::start().await;
+    let other_host = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/article"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("Location", format!("{}/moved", other_host.uri()).as_str()),
+        )
+        .mount(&origin)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/moved"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(HTML_BODY))
+        .mount(&other_host)
+        .await;
+
+    let fetcher = ReqwestHtmlFetcher::new(1024 * 1024).expect("fetcher should build");
+    fetcher
+        .fetch_html(&task(&origin, "/article?sig=secret-token"))
+        .await
+        .expect("redirected fetch succeeds");
+
+    let received = other_host.received_requests().await.expect("recording");
+    assert_eq!(received.len(), 1);
+    assert!(
+        received[0].headers.get("referer").is_none(),
+        "no Referer on the redirected request: {:?}",
+        received[0].headers.get("referer")
+    );
+    for (name, value) in &received[0].headers {
+        assert!(
+            !value.to_str().unwrap_or_default().contains("secret-token"),
+            "header {name} leaks the signed URL"
+        );
+    }
+}

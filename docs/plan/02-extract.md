@@ -43,6 +43,7 @@ User-Agent 由 fetcher 构造器设置。
 
 ### 2.2 字符集解码（2026-11-21）
 
+HTML 客户端关闭自动 `Referer`（`.referer(false)`，R2-S11）：跨源重定向不会把文章 URL（含签名查询参数）带给另一主机，与 feed 客户端一致。
 fetcher 把响应 `Content-Type` 原样放进 `RawHtmlFetch.content_type`。extract flow 在策略链前调用
 `rss_ai_news_extractor::decode_html(bytes, content_type)`，按 WHATWG 编码嗅探顺序（简化）选候选：
 BOM → `Content-Type` 的 `charset` 参数 → 前 1024 字节内的 `<meta charset>` /

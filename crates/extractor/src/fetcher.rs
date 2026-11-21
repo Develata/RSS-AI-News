@@ -40,6 +40,10 @@ impl ReqwestHtmlFetcher {
         let client = Client::builder()
             .user_agent(USER_AGENT_VALUE)
             .redirect(reqwest::redirect::Policy::limited(5))
+            // R2-S11: no automatic `Referer` on redirects — it would carry
+            // the article URL (query included, e.g. signed links) to another
+            // host. Same rule as the feed client.
+            .referer(false)
             .build()
             .map_err(ExtractorError::from)?;
         Ok(Self {
@@ -48,6 +52,8 @@ impl ReqwestHtmlFetcher {
         })
     }
 
+    /// Uses a caller-built client as is; build it with `.referer(false)`
+    /// like [`Self::new`] (R2-S11).
     pub fn with_client(client: Client, max_body_bytes: u64) -> Self {
         Self {
             client,

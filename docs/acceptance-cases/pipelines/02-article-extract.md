@@ -52,6 +52,7 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `extract_fetch_403_without_summary_fails_permanent` | 同上 | W18 无摘要仍 Failed |
 | `extract_fetch_5xx_with_summary_stays_retryable` | 同上 | W18 可重试不降级 |
 | `extract_fetch_429_with_summary_stays_retryable` | 同上 | 429 可重试、不降级（plan/17 §7） |
+| `cross_host_redirect_sends_no_referer` | `crates/extractor/tests/fetcher_tests.rs` | R2-S11 重定向不带 Referer |
 | `extract_429_cooldown_honours_retry_after` | 同上 | R2-S10 冷却 = max(退避, Retry-After) |
 | `retry_after_seconds_on_429_are_kept` / `retry_after_http_date_on_429_becomes_a_delay` / `missing_or_invalid_retry_after_on_429_is_none` | `crates/extractor/tests/fetcher_tests.rs` | R2-S10 Retry-After 解析 |
 | `status_classification_retries_429_and_5xx_only` | `crates/extractor/src/error.rs`、`crates/feed/src/error.rs`（单元测试） | 仅 429 / 5xx 可重试；403/404/408 不变 |
