@@ -685,6 +685,48 @@ async fn pg_publish_budget_is_per_stage() {
     assert_eq!(counters().await, ("failed".to_string(), 2, 1));
 }
 
+/// R1-P-S15 on PostgreSQL: the category-scoped pending claim skips an older
+/// pending record of another category.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_pending_claim_in_category_skips_other_categories() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "cat-claim").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let older_ai = repo
+        .create_if_new(&new_record("idem-cat-ai", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let ml = repo
+        .create_if_new(&new_record("idem-cat-ml", "ml", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    let claimed = repo
+        .claim_pending_for_freeze_in_category(
+            &ClaimRequest {
+                owner: "cat".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 1,
+                max_attempts: 5,
+            },
+            "ml",
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed.iter().map(|r| r.id).collect::<Vec<_>>(), vec![ml]);
+    let ai_owner: Option<String> =
+        sqlx::query_scalar("SELECT lease_owner FROM publish_records WHERE id = $1")
+            .bind(older_ai)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+    assert_eq!(ai_owner, None);
+}
+
 /// R1-P-S12 on PostgreSQL: the rate-limit wait blocks the state-scan and
 /// the by-id claim until its instant, and the next advance clears it.
 #[tokio::test]

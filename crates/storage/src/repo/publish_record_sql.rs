@@ -139,6 +139,92 @@ RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           attempt_count, rendered_at
 "#;
 
+/// Pending claim limited to one category (R1-P-S15): the freeze selects
+/// candidates for the caller's category, so it must not claim another
+/// category's record. Same filters as [`CLAIM_PUBLISH_SQLITE_SQL`] (`$4` is
+/// always `'pending'`), plus `category_key = $8`.
+const CLAIM_PENDING_IN_CATEGORY_SQLITE_SQL: &str = r#"
+UPDATE publish_records
+SET lease_owner = $1, lease_expires_at = $2,
+    attempt_count = attempt_count + 1,
+    stage_attempt_count = stage_attempt_count + 1, updated_at = $3
+WHERE id IN (
+    SELECT id FROM publish_records
+    WHERE state = $4
+      AND category_key = $8
+      AND (lease_expires_at IS NULL
+           OR COALESCE(julianday(lease_expires_at) < julianday($5), lease_expires_at < $5))
+      AND (next_attempt_at IS NULL
+           OR COALESCE(julianday(next_attempt_at) <= julianday($5), next_attempt_at <= $5))
+      AND stage_attempt_count < $6
+    ORDER BY id ASC
+    LIMIT $7
+)
+RETURNING id, idempotency_key, category_key, report_date, target_timezone,
+          render_version, selection_policy_version, state, remote_target,
+          attempt_count, rendered_at
+"#;
+
+/// PG variant of [`CLAIM_PENDING_IN_CATEGORY_SQLITE_SQL`].
+const CLAIM_PENDING_IN_CATEGORY_PG_SQL: &str = r#"
+UPDATE publish_records
+SET lease_owner = $1, lease_expires_at = $2,
+    attempt_count = attempt_count + 1,
+    stage_attempt_count = stage_attempt_count + 1, updated_at = $3
+WHERE id IN (
+    SELECT id FROM publish_records
+    WHERE state = $4
+      AND category_key = $8
+      AND (lease_expires_at IS NULL OR lease_expires_at < $5)
+      AND (next_attempt_at IS NULL OR next_attempt_at <= $5)
+      AND stage_attempt_count < $6
+    ORDER BY id ASC
+    LIMIT $7
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, idempotency_key, category_key, report_date, target_timezone,
+          render_version, selection_policy_version, state, remote_target,
+          attempt_count, rendered_at
+"#;
+
+pub(super) async fn claim_pending_in_category_sqlite(
+    pool: &SqlitePool,
+    request: &ClaimRequest,
+    category_key: &str,
+) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+    sqlx::query_as::<_, ClaimedPublishRecord>(CLAIM_PENDING_IN_CATEGORY_SQLITE_SQL)
+        .bind(&request.owner)
+        .bind(sqlite_stored_deadline(request.lease_expires_at))
+        .bind(request.now)
+        .bind("pending")
+        .bind(sqlite_lease_cutoff(request.now))
+        .bind(i64::from(request.max_attempts))
+        .bind(i64::from(request.batch_size))
+        .bind(category_key)
+        .fetch_all(pool)
+        .await
+        .map_err(StorageError::from)
+}
+
+pub(super) async fn claim_pending_in_category_pg(
+    pool: &PgPool,
+    request: &ClaimRequest,
+    category_key: &str,
+) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+    sqlx::query_as::<_, ClaimedPublishRecord>(CLAIM_PENDING_IN_CATEGORY_PG_SQL)
+        .bind(&request.owner)
+        .bind(request.lease_expires_at)
+        .bind(request.now)
+        .bind("pending")
+        .bind(request.now)
+        .bind(i64::from(request.max_attempts))
+        .bind(i64::from(request.batch_size))
+        .bind(category_key)
+        .fetch_all(pool)
+        .await
+        .map_err(StorageError::from)
+}
+
 pub(super) const ADVANCE_SNAPSHOT_SQL: &str = "UPDATE publish_records SET state = $1, snapshot_frozen_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
 pub(super) const ADVANCE_RENDERED_SQL: &str = "UPDATE publish_records SET state = $1, rendered_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
 pub(super) const ADVANCE_LOCAL_SQL: &str = "UPDATE publish_records SET state = $1, local_stored_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";

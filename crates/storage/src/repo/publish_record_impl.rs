@@ -23,7 +23,8 @@ use super::{
         RELEASE_FREEZE_CONFLICT_SQL, RELEASE_OWNERSHIP_CONFLICT_SQL, RELEASE_PERMANENT_FAILURE_SQL,
         RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL, SELECT_PUBLISH_RECORD_BY_ID,
         SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY, TERMINALIZE_EXHAUSTED_PUBLISH_SQL,
-        TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL, claim_publish_pg, claim_publish_sqlite,
+        TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL, claim_pending_in_category_pg,
+        claim_pending_in_category_sqlite, claim_publish_pg, claim_publish_sqlite,
         sqlite_lease_cutoff, sqlite_stored_deadline,
     },
 };
@@ -70,6 +71,21 @@ impl PublishRecordRepository for PublishRecordRepo {
         match self.storage_pool() {
             StoragePool::Sqlite(p) => claim_publish_sqlite(p, request, "pending").await,
             StoragePool::Postgres(p) => claim_publish_pg(p, request, "pending").await,
+        }
+    }
+
+    async fn claim_pending_for_freeze_in_category(
+        &self,
+        request: &ClaimRequest,
+        category_key: &str,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+        match self.storage_pool() {
+            StoragePool::Sqlite(p) => {
+                claim_pending_in_category_sqlite(p, request, category_key).await
+            }
+            StoragePool::Postgres(p) => {
+                claim_pending_in_category_pg(p, request, category_key).await
+            }
         }
     }
 

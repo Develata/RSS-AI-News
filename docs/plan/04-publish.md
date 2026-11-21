@@ -322,6 +322,10 @@ items 一次性圈走，避免跨 record 互抢。
 
 详见 commit `9080223` "Fix publish-all record-scoped claims"。
 
+freeze 的选稿按调用方的 `category_key` 进行，因此（R1-P-S15）无 ID 的 `PublishFlow::freeze` 只领取同分类的 pending 记录
+（`claim_pending_for_freeze_in_category`，两方言），按 ID 的 `freeze_record` 若领到的记录分类不同 → 退还 claim、不选稿、
+`Failed { error_kind: "category_mismatch" }`，不会把一个分类的文章冻结进另一个分类的记录。
+
 ## 6. rebuild-report
 
 ```bash

@@ -123,6 +123,13 @@ pub trait PublishRecordRepository: Send + Sync {
         &self,
         request: &ClaimRequest,
     ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
+    /// [`Self::claim_pending_for_freeze`] limited to records of
+    /// `category_key` (R1-P-S15).
+    async fn claim_pending_for_freeze_in_category(
+        &self,
+        request: &ClaimRequest,
+        category_key: &str,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
     async fn claim_frozen_for_render(
         &self,
         request: &ClaimRequest,
