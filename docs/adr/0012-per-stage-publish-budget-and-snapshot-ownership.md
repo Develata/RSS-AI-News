@@ -69,6 +69,16 @@
 （SHA-1 over `blob <len>\0` + 内容）比对。**全部**一致才认定上一次尝试已落地，直接以该 HEAD commit 记回执（每份报告一条，
 按输入顺序）；任一缺失 / 不一致照常提交；查询出错按原分类失败，绝不当作"已发布"。保留 422 non-fast-forward 重试。
 
+**同一次尝试内的歧义写入核对（2026-11-22，R1-P-B2）**：写请求（批量的 `PATCH ref`、单报告的 `PUT contents`）已发出、
+但结果未知——传输失败 / 响应不可读（分类为 503）或 5xx 应答——时，释放前先做只读核对：`GET ref` 取分支 HEAD commit，
+再按该 commit 查每个路径的 blob（`find_published`，与上文同一比对）。全部一致 → 以 HEAD commit 记成功回执；不一致或核对本身
+出错 → 原写入错误不变，按原分类释放。4xx（含 409、422）表示写入被拒，不核对。runtime 层的远端 deadline（lease 的 80%）
+切断调用时同样核对，核对自己的时限为 deadline 之后再加 lease 的 10%（其余 10% 留给数据库收尾），lease 已失时由带 owner
+守卫的推进拒绝。因此 `publish_max_attempts = 1` 或默认预算的最后一次尝试里"PATCH 已落地、响应丢失"也会记为
+`published_remote`，而不是 `failed` 并释放文章归属。限流（`GitHubRateLimit`）不核对，避免在限流窗口内追加请求。
+**残留限制**：进程在写请求之后、核对之前崩溃，且该阶段预算已耗尽时，过期清扫仍会把记录转 `failed`（未核对、归属释放）；
+预算未耗尽时，下一次运行的多报告幂等比对 / 单报告幂等（§3 下文）会补回执。
+
 ### 4. 默认报告日期按目标时区
 
 未给 `--date` 时，`publish` / `publish-all` 取运行时刻在有效目标时区（`--timezone` / `[publish].target_timezone`）下的日期。

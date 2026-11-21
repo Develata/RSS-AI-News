@@ -243,6 +243,10 @@ v0.3 引入：`publish_many(reports: &[RenderedReport])` 在一次 commit 内推
 不再新建 commit；任何一个路径缺失 / 不一致 → 照常建 commit；查询出错 → 本次失败（按原分类重试），绝不当作"已发布"。
 仅覆盖多报告批次；单报告走 Contents API（§4.2 上文），不在此列。
 
+**歧义写入的只读核对（2026-11-22，ADR 0012 §3）**：`PATCH ref`（批量）或 `PUT contents`（单报告）发出后遇到传输失败 /
+响应不可读 / 5xx，或 runtime 的远端 deadline 切断了调用时，释放前先 `GET ref` 取 HEAD commit、按该 commit 比对全部 blob；
+一致 → 以 HEAD commit 记成功；否则保留原错误按分类释放。4xx 与限流不核对。
+
 ### 4.2.2 422 lost-update retry
 
 PATCH refs/heads 时如果 base SHA 不再是 HEAD（并发 push 了别的 commit），GitHub 返 422

@@ -41,6 +41,48 @@ fn remote_deadline(lease_seconds: u64) -> Instant {
     Instant::now() + (lease - lease / 5)
 }
 
+/// P-B2: a remote call cut off by [`remote_deadline`] may already have
+/// written. Half of the reserved 20% of the lease is given to a read-only
+/// HEAD check; the other half stays for the database release. The
+/// owner-guarded advance still refuses a record whose lease was lost.
+fn verify_deadline(deadline: Instant, lease_seconds: u64) -> Instant {
+    deadline + StdDuration::from_secs(lease_seconds) / 10
+}
+
+/// Read-only receipt lookup after a remote timeout; `None` = not verified
+/// (not there, check failed or ran out of time), so the timeout stands.
+async fn verify_after_timeout(
+    target: &dyn PublishTarget,
+    reports: &[RenderedReport],
+    until: Instant,
+) -> Option<rss_ai_news_publish::PublishedBatchArtifact> {
+    if Instant::now() >= until {
+        return None;
+    }
+    match tokio::time::timeout_at(until, target.find_published(reports)).await {
+        Ok(Ok(Some(batch))) if batch.artifacts.len() == reports.len() => {
+            tracing::info!(
+                reports = reports.len(),
+                commit_sha = batch.commit_sha.as_deref(),
+                "remote publish timed out but the destination already holds every report"
+            );
+            Some(batch)
+        }
+        Ok(Ok(_)) => None,
+        Ok(Err(error)) => {
+            tracing::warn!(
+                ?error,
+                "post-timeout HEAD check failed; keeping the timeout"
+            );
+            None
+        }
+        Err(_) => {
+            tracing::warn!("post-timeout HEAD check ran out of time; keeping the timeout");
+            None
+        }
+    }
+}
+
 enum RemotePreparationError {
     Report(ReportError),
     Timeout,
@@ -299,9 +341,18 @@ impl PublishFlow {
         let result = if Instant::now() >= deadline {
             Err(PublishError::RemoteTimeout)
         } else {
-            tokio::time::timeout_at(deadline, target.publish(&report))
+            match tokio::time::timeout_at(deadline, target.publish(&report)).await {
+                Ok(result) => result,
+                // The cancelled call may already have written.
+                Err(_) => verify_after_timeout(
+                    target.as_ref(),
+                    std::slice::from_ref(&report),
+                    verify_deadline(deadline, self.ctx.lease.publish_duration_seconds),
+                )
                 .await
-                .unwrap_or(Err(PublishError::RemoteTimeout))
+                .map(|mut batch| batch.artifacts.remove(0))
+                .ok_or(PublishError::RemoteTimeout),
+            }
         };
         let now = OffsetDateTime::now_utc();
         let artifact = match result {
@@ -599,9 +650,17 @@ impl PublishFlow {
         let result = if Instant::now() >= deadline {
             Err(PublishError::RemoteTimeout)
         } else {
-            tokio::time::timeout_at(deadline, target.publish_many(&reports))
+            match tokio::time::timeout_at(deadline, target.publish_many(&reports)).await {
+                Ok(result) => result,
+                // The cancelled call may already have written.
+                Err(_) => verify_after_timeout(
+                    target.as_ref(),
+                    &reports,
+                    verify_deadline(deadline, self.ctx.lease.publish_duration_seconds),
+                )
                 .await
-                .unwrap_or(Err(PublishError::RemoteTimeout))
+                .ok_or(PublishError::RemoteTimeout),
+            }
         };
         let now = OffsetDateTime::now_utc();
         let batch = match result {

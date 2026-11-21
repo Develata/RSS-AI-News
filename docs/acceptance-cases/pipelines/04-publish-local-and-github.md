@@ -45,6 +45,8 @@
 - 远端 429 → `GithubRateLimit`，state 保持、article 不晋升
 - 远端 422 重试达上限 → 仍报错，record 保持 `StoredLocal`
 - 多报告批次重试：HEAD 已逐字节包含整批内容（上次 ref 更新落地、响应丢失）→ 不新建 commit，回执指向该 HEAD
+- 歧义写入（PATCH ref / PUT contents 后传输失败、5xx，或远端 deadline 切断）：释放前只读核对 HEAD，已含全部内容 → 记成功；
+  否则按原错误释放（最后一次尝试也不会因已落地的写入而 `failed`）
 - promote target article 已被其它流转推进 → `ArticleConflict`
 - 存量重复归属（0008 前两份未失败快照共享文章）：store_local / remote 写前拦截，已发布者或低 id 者胜出；败方不写外部产物、
   释放 lease、退还 claim、保持阶段态 → `ArticleConflict`（`article_owned_by_active_snapshot`）
@@ -108,6 +110,13 @@
 | `retry_after_lost_ref_update_response_records_existing_head_without_new_commit` | `crates/publish/tests/github_batch_idempotency_tests.rs` | ref 更新已落地但响应丢失：重试不新建 commit，按 HEAD 记回执 |
 | `one_differing_blob_still_creates_a_commit` | 同上 | 任一 blob 不一致照常提交 |
 | `blob_lookup_error_is_not_treated_as_already_published` | 同上 | 查询出错不当作已发布 |
+| `ambiguous_ref_update_not_on_head_keeps_the_write_error` | 同上 | 歧义 PATCH 未落地：保留原 5xx 错误 |
+| `ambiguous_contents_put_is_verified_against_head` | 同上 | 单报告歧义 PUT：HEAD 已含内容 → 成功回执 |
+| `ambiguous_contents_put_not_on_head_keeps_the_write_error` | 同上 | 单报告歧义 PUT 未落地：保留原错误 |
+| `refused_contents_put_is_not_verified` | 同上 | 4xx 写入被拒不核对 |
+| `publish_remote_timeout_on_last_attempt_records_success_when_head_holds_the_report` | `crates/runtime/tests/publish_remote_tests.rs` | 最后一次尝试超时但已落地 → `published_remote` |
+| `publish_remote_timeout_without_the_report_at_head_keeps_the_timeout` | 同上 | 未落地 → 维持超时语义 |
+| `publish_remote_batch_timeout_records_success_when_head_holds_the_batch` | 同上 | 批量超时核对 |
 | `git_blob_sha_matches_git_hash_object` | `crates/publish/src/github.rs` | blob sha 与 `git hash-object` 一致（含中文） |
 | `auth_failure_maps_to_github_auth_failed` | 同上 | 401 映射 |
 | `chinese_path_leaves_the_client_percent_encoded_on_get_and_put` | `crates/publish/tests/github_contents_path_tests.rs` | 中文路径请求行按段编码（原始字节） |

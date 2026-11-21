@@ -111,15 +111,41 @@ impl PublishTarget for GitHubTarget {
     async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
         let final_path = self.join_path(&report.relative_path)?;
         let existing_sha = self.existing_sha(&final_path).await?;
-        let commit_sha = self
+        match self
             .put_file(report, &final_path, existing_sha.as_deref())
-            .await?;
+            .await
+        {
+            Ok(commit_sha) => Ok(PublishedArtifact {
+                local_path: None,
+                commit_sha: Some(commit_sha),
+                remote_target: Some(self.remote_target_url(&final_path)),
+            }),
+            Err(error) => {
+                let mut batch = self
+                    .recover_ambiguous_write(error, std::slice::from_ref(report))
+                    .await?;
+                Ok(batch.artifacts.remove(0))
+            }
+        }
+    }
 
-        Ok(PublishedArtifact {
-            local_path: None,
-            commit_sha: Some(commit_sha),
-            remote_target: Some(self.remote_target_url(&final_path)),
-        })
+    async fn find_published(
+        &self,
+        reports: &[RenderedReport],
+    ) -> Result<Option<PublishedBatchArtifact>, PublishError> {
+        if reports.is_empty() {
+            return Ok(None);
+        }
+        let (expected_blobs, artifacts) = self.expected_blobs(reports)?;
+        let head_commit_sha = self.head_commit_sha().await?;
+        if self
+            .head_contains_blobs(&head_commit_sha, &expected_blobs)
+            .await?
+        {
+            Ok(Some(receipts_at(artifacts, head_commit_sha)))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn publish_many(
@@ -196,32 +222,100 @@ fn is_non_fast_forward_message(message: &str) -> bool {
     lower.contains("fast forward") || lower.contains("not a fast-forward")
 }
 
+/// A failed write request (PUT contents / PATCH ref) whose effect on GitHub is
+/// unknown: a transport failure or an unreadable response (both mapped to
+/// 503 by [`classify`]) or a 5xx answer may follow a write the server already
+/// applied. A 4xx (including 409 and 422) means the write was refused.
+fn is_ambiguous_write_failure(error: &PublishError) -> bool {
+    matches!(error, PublishError::GitHubApiError { status, .. } if *status >= 500)
+}
+
+/// Stamps every artifact with the commit that holds the batch.
+fn receipts_at(
+    mut artifacts: Vec<PublishedArtifact>,
+    commit_sha: String,
+) -> PublishedBatchArtifact {
+    for artifact in &mut artifacts {
+        artifact.commit_sha = Some(commit_sha.clone());
+    }
+    PublishedBatchArtifact {
+        artifacts,
+        commit_sha: Some(commit_sha),
+    }
+}
+
 impl GitHubTarget {
-    async fn publish_many_atomic(
+    /// `(final path, local git blob sha)` per report plus artifacts without a
+    /// commit yet, both in input order.
+    #[allow(clippy::type_complexity)]
+    fn expected_blobs(
         &self,
         reports: &[RenderedReport],
-    ) -> Result<PublishedBatchArtifact, PublishError> {
-        let mut tree_entries = Vec::with_capacity(reports.len());
+    ) -> Result<(Vec<(String, String)>, Vec<PublishedArtifact>), PublishError> {
+        let mut expected = Vec::with_capacity(reports.len());
         let mut artifacts = Vec::with_capacity(reports.len());
-        let mut expected_blobs = Vec::with_capacity(reports.len());
         for report in reports {
             let final_path = self.join_path(&report.relative_path)?;
-            expected_blobs.push((
-                final_path.clone(),
-                git_blob_sha(report.markdown_content.as_bytes()),
-            ));
-            tree_entries.push(json!({
-                "path": final_path,
-                "mode": "100644",
-                "type": "blob",
-                "content": report.markdown_content,
-            }));
             artifacts.push(PublishedArtifact {
                 local_path: None,
                 commit_sha: None,
                 remote_target: Some(self.remote_target_url(&final_path)),
             });
+            expected.push((final_path, git_blob_sha(report.markdown_content.as_bytes())));
         }
+        Ok((expected, artifacts))
+    }
+
+    /// P-B2: after an ambiguous write failure, a read-only check of the
+    /// branch HEAD decides. HEAD holding every report byte for byte means the
+    /// write landed (or the content was already there): record receipts
+    /// against that commit. Otherwise — or if the check itself fails — the
+    /// original error stands and the normal release applies.
+    async fn recover_ambiguous_write(
+        &self,
+        error: PublishError,
+        reports: &[RenderedReport],
+    ) -> Result<PublishedBatchArtifact, PublishError> {
+        if !is_ambiguous_write_failure(&error) {
+            return Err(error);
+        }
+        match self.find_published(reports).await {
+            Ok(Some(batch)) => {
+                tracing::info!(
+                    reports = reports.len(),
+                    commit_sha = batch.commit_sha.as_deref(),
+                    "ambiguous GitHub write verified as landed by a HEAD content check"
+                );
+                Ok(batch)
+            }
+            Ok(None) => Err(error),
+            Err(check_error) => {
+                tracing::warn!(
+                    ?check_error,
+                    "HEAD content check after an ambiguous GitHub write failed; keeping the write error"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    async fn publish_many_atomic(
+        &self,
+        reports: &[RenderedReport],
+    ) -> Result<PublishedBatchArtifact, PublishError> {
+        let (expected_blobs, artifacts) = self.expected_blobs(reports)?;
+        let tree_entries = expected_blobs
+            .iter()
+            .zip(reports)
+            .map(|((final_path, _), report)| {
+                json!({
+                    "path": final_path,
+                    "mode": "100644",
+                    "type": "blob",
+                    "content": report.markdown_content,
+                })
+            })
+            .collect::<Vec<_>>();
 
         let (head_commit_sha, base_tree_sha) = self.head_commit_and_tree().await?;
         // Idempotent retry (B9): if an earlier attempt's ref update landed but
@@ -232,13 +326,7 @@ impl GitHubTarget {
             .head_contains_blobs(&head_commit_sha, &expected_blobs)
             .await?
         {
-            for artifact in &mut artifacts {
-                artifact.commit_sha = Some(head_commit_sha.clone());
-            }
-            return Ok(PublishedBatchArtifact {
-                artifacts,
-                commit_sha: Some(head_commit_sha),
-            });
+            return Ok(receipts_at(artifacts, head_commit_sha));
         }
         let tree_sha = self.create_tree(&base_tree_sha, tree_entries).await?;
         let commit_message = format!(
@@ -249,15 +337,10 @@ impl GitHubTarget {
         let commit_sha = self
             .create_commit(&commit_message, &tree_sha, &head_commit_sha)
             .await?;
-        self.update_branch_ref(&commit_sha).await?;
-
-        for artifact in &mut artifacts {
-            artifact.commit_sha = Some(commit_sha.clone());
+        if let Err(error) = self.update_branch_ref(&commit_sha).await {
+            return self.recover_ambiguous_write(error, reports).await;
         }
-        Ok(PublishedBatchArtifact {
-            artifacts,
-            commit_sha: Some(commit_sha),
-        })
+        Ok(receipts_at(artifacts, commit_sha))
     }
 
     async fn get_json(&self, operation: &'static str, route: &str) -> Result<Value, PublishError> {
@@ -322,21 +405,25 @@ impl GitHubTarget {
         Ok((status, body, request_id))
     }
 
-    async fn head_commit_and_tree(&self) -> Result<(String, String), PublishError> {
+    /// Commit sha the configured branch points at now.
+    async fn head_commit_sha(&self) -> Result<String, PublishError> {
         let ref_route = format!(
             "/repos/{}/{}/git/ref/heads/{}",
             self.cfg.owner, self.cfg.repo, self.cfg.branch
         );
         let head = self.get_json("GET ref", &ref_route).await?;
-        let head_commit_sha = head
-            .get("object")
+        head.get("object")
             .and_then(|object| object.get("sha"))
             .and_then(|sha| sha.as_str())
             .map(ToOwned::to_owned)
             .ok_or_else(|| PublishError::GitHubApiError {
                 status: 502,
                 message: "missing object.sha in GitHub ref response".to_string(),
-            })?;
+            })
+    }
+
+    async fn head_commit_and_tree(&self) -> Result<(String, String), PublishError> {
+        let head_commit_sha = self.head_commit_sha().await?;
 
         let commit_route = format!(
             "/repos/{}/{}/git/commits/{}",
@@ -647,22 +734,25 @@ fn validate_path_part(path: &str) -> Result<(), PublishError> {
 }
 
 fn response_message(status: u16, body: &[u8], token: &str) -> String {
-    let message = if let Ok(value) = serde_json::from_slice::<Value>(body) {
-        value
+    // An undecodable body is omitted on purpose (only the 422 retry signal is
+    // kept): unparsed escapes could hide credentials.
+    let message = match serde_json::from_slice::<Value>(body) {
+        Ok(value) => value
             .get("message")
             .and_then(Value::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| {
                 // Unknown JSON keys/values may contain escaped credentials.
                 format!("github api returned status {status} with an unrecognized JSON error")
-            })
-    } else {
-        let body = String::from_utf8_lossy(body);
-        if status == 422 && is_non_fast_forward_message(&body.replace(token, "***")) {
-            // Preserve only the retry signal, never the undecodable body.
-            "not a fast-forward".to_string()
-        } else {
-            format!("github api returned status {status}; unreadable error body omitted")
+            }),
+        Err(_) => {
+            let body = String::from_utf8_lossy(body);
+            if status == 422 && is_non_fast_forward_message(&body.replace(token, "***")) {
+                // Preserve only the retry signal, never the undecodable body.
+                "not a fast-forward".to_string()
+            } else {
+                format!("github api returned status {status}; unreadable error body omitted")
+            }
         }
     };
     // Error JSON can encode the token with escapes. Scrub after decoding, before

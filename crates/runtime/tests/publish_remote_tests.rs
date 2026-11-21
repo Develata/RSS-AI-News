@@ -657,6 +657,118 @@ async fn publish_remote_batch_skips_only_the_mismatched_record() {
     assert_record_state(&pool, matching, "published_remote").await;
 }
 
+// === P-B2: a write cut off by the deadline is verified before release ===
+
+/// The write never answers within the lease (its response is lost), but the
+/// destination already holds the content when asked read-only afterwards.
+struct LandedButUnansweredTarget {
+    landed: bool,
+}
+
+#[async_trait]
+impl PublishTarget for LandedButUnansweredTarget {
+    async fn publish(&self, _report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        std::future::pending().await
+    }
+
+    async fn find_published(
+        &self,
+        reports: &[RenderedReport],
+    ) -> Result<Option<PublishedBatchArtifact>, PublishError> {
+        Ok(self.landed.then(|| PublishedBatchArtifact {
+            commit_sha: Some("landed-head".to_string()),
+            artifacts: reports
+                .iter()
+                .map(|report| PublishedArtifact {
+                    local_path: None,
+                    commit_sha: Some("landed-head".to_string()),
+                    remote_target: Some(format!(
+                        "github://owner/repo/main/{}",
+                        report.relative_path
+                    )),
+                })
+                .collect(),
+        }))
+    }
+}
+
+/// One attempt per stage, one-second lease: without the post-timeout check
+/// the last attempt would fail the record although the write landed.
+fn last_attempt_flow(pool: SqlitePool, landed: bool) -> PublishFlow {
+    let mut app = app_config(RetentionPolicy::Always, 1);
+    app.lease.publish_duration_seconds = 1;
+    app.retry.publish_max_attempts = 1;
+    PublishFlow::new(Arc::new(publish_deps(
+        pool,
+        Arc::new(app),
+        Arc::new(LocalFsTarget::new(std::env::temp_dir())),
+        Some(Arc::new(LandedButUnansweredTarget { landed })),
+    )))
+}
+
+#[tokio::test]
+async fn publish_remote_timeout_on_last_attempt_records_success_when_head_holds_the_report() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        last_attempt_flow(pool.clone(), true).publish_remote_record(id, remote_opts()),
+    )
+    .await
+    .expect("verification stays inside the lease");
+
+    assert_eq!(outcome.status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(outcome.commit_sha.as_deref(), Some("landed-head"));
+    assert_record_state(&pool, id, "published_remote").await;
+    assert_referenced_articles_state(&pool, id, "published").await;
+}
+
+#[tokio::test]
+async fn publish_remote_timeout_without_the_report_at_head_keeps_the_timeout() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        last_attempt_flow(pool.clone(), false).publish_remote_record(id, remote_opts()),
+    )
+    .await
+    .expect("verification stays inside the lease");
+
+    assert!(
+        matches!(outcome.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "remote_timeout")
+    );
+    // Last attempt of the stage: the fold makes the unverified record failed.
+    assert_record_state(&pool, id, "failed").await;
+    assert_last_error_kind(&pool, id, "remote_timeout").await;
+}
+
+#[tokio::test]
+async fn publish_remote_batch_timeout_records_success_when_head_holds_the_batch() {
+    let (_dir, pool) = make_test_pool().await;
+    let first = seed_stored_local_publish_record(&pool).await;
+    let second = seed_stored_local_publish_record(&pool).await;
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        last_attempt_flow(pool.clone(), true).publish_remote_batch(PublishRemoteBatchOptions {
+            items: vec![
+                batch_item(first, "AI", "Daily AI"),
+                batch_item(second, "ML", "Daily ML"),
+            ],
+        }),
+    )
+    .await
+    .expect("verification stays inside the lease");
+
+    assert_eq!(outcome.commit_sha.as_deref(), Some("landed-head"));
+    for item in outcome.items {
+        assert_eq!(item.status, PublishRemoteStatus::PublishedRemote);
+        assert_record_state(&pool, item.publish_record_id, "published_remote").await;
+    }
+}
+
 // === P-B1: legacy duplicate ownership is stopped before any external write ===
 
 /// Puts `from`'s first article into `into`'s snapshot too, the state a
