@@ -9,9 +9,10 @@ CI release workflow（push tag `v*` 触发）同时发布两套镜像：
 | runtime | `ghcr.io/develata/rss-ai-news:0.7.0` | `rss-ai-news` 二进制直跑 | 一次性命令（migrate / ingest / doctor 等） |
 | scheduler | `ghcr.io/develata/rss-ai-news:0.7.0-scheduler` | `scheduler-entrypoint.sh` + supercronic | 常驻容器按 cron 触发 |
 
-镜像 tag 规则（`docker/metadata-action`）：
-- 稳定版 `vX.Y.Z` → `X.Y.Z` + `X.Y` + `latest`；scheduler 为各 tag 加 `-scheduler`
-- 预发 `vX.Y.Z-rc.N` → 仅完整版本号，**不**打 `latest`
+镜像 tag 规则（详见 [./ci-and-release.md](./ci-and-release.md) §镜像 tag 规则）：
+- 稳定版 `vX.Y.Z` → `X.Y.Z`；两镜像都推送成功后，最高 stable tag 才晋升 `latest`，`X.Y` 线内最高才晋升 `X.Y`；
+  scheduler 为各 tag 加 `-scheduler`
+- 预发 tag 不推镜像（release verify gate 只接受 `X.Y.Z`）
 - workflow 不维护 `X` major-only alias
 
 ## 一次性 compose（宿主 cron 接管）

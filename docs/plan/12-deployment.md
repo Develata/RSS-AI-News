@@ -32,9 +32,11 @@ push tag `v*` 时同时构建发布两套镜像：
 
 底层共享同一 builder stage；scheduler 镜像只在 runtime 镜像基础上多装 supercronic。
 
-镜像标签规则（`docker/metadata-action`）：
-- `vX.Y.Z` → `X.Y.Z` + `X.Y` + `latest`（仅 stable；workflow 不维护 `X` major-only alias）
-- `vX.Y.Z-rc.N` / `vX.Y.Z-alpha.N` → 仅完整版本号，**不**打 `latest`
+镜像标签规则：
+- `vX.Y.Z` → 先推 `X.Y.Z`（及 `X.Y.Z-scheduler`）；两镜像都成功后，若为仓库最高 stable tag 再晋升 `latest`，
+  若为 `X.Y` 线内最高再晋升 `X.Y`（各带 `-scheduler` 对应 tag）；重跑旧 tag 不会让它们回退。
+  workflow 不维护 `X` major-only alias。
+- prerelease tag（`vX.Y.Z-rc.N` 等）不推镜像：release verify gate 只接受 `X.Y.Z`。
 
 ## 3. Dockerfile multi-stage
 

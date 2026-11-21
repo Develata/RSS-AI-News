@@ -84,19 +84,28 @@ Jobs：
   `DATABASE_URL`，读 `test-pg-*` 缓存；
 - `verify-audit` —— 复用 composite action `.github/actions/cargo-audit`（依赖策略脚本 + `cargo audit`），在 tag 的依赖图上
   拦下自上次 `main` 运行以来新发布的 advisory；
-- `publish-image`（`needs: [verify-test, verify-release, verify-postgres, verify-audit]`）—— 同时构建发布 runtime + scheduler
-  两套镜像；任一 verify 失败则不推镜像。四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit
+- `publish-image`（`needs: [verify-test, verify-release, verify-postgres, verify-audit]`）—— 构建并推送 runtime + scheduler
+  两套镜像，**只**打不可变的版本 tag（`X.Y.Z` / `X.Y.Z-scheduler`），并记录两者的 digest；任一 verify 失败则不推镜像。
+- `promote-tags`（`needs: [publish-image]`）—— 两个镜像都推送成功后才运行，用 `docker buildx imagetools create`
+  把 `latest` / `X.Y` 及其 `-scheduler` 对应 tag 指向上一步记录的 digest（不重新构建）。是否晋升由
+  [`.github/scripts/release-promotion.sh`](../../.github/scripts/release-promotion.sh) 根据 `git ls-remote --tags` 决定：
+  只有当该 tag 是仓库内最高的 stable tag 时才动 `latest`，是同一 `X.Y` 线内最高时才动 `X.Y`；
+  因此重跑旧 tag 不会让 `latest` 回退，scheduler 构建失败也不会留下只更新了一半的稳定 tag。该 job 有
+  `concurrency: release-promote-<repo>`（不取消进行中的运行），不同 tag 的晋升串行执行。脚本由 static lane 的
+  `release-promotion` 步骤测试。
+  注意：若存在更高的 tag 但其 release 失败、从未推出镜像，较低版本也不会晋升 `latest`（保守方向）。四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit
   不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
 
 ## 镜像 tag 规则
 
-由 `docker/metadata-action` 计算：
+版本 tag 由 `docker/metadata-action` 计算，`latest` / `X.Y` 由 `promote-tags` 在两镜像推送后晋升：
 
 | 推送 tag | 生成镜像 tag |
 |---|---|
-| `v0.7.0` | `0.7.0`、`0.7`、`latest` |
-| `v0.7.0-rc.1` | `0.7.0-rc.1`（仅完整版；**不**打 `latest`） |
-| `v1.0.0` | `1.0.0`、`1.0`、`latest` |
+| `v0.7.0`（且为最高 stable tag） | `0.7.0`、`0.7`、`latest` |
+| `v0.6.3`（`v0.7.0` 已存在，`0.6` 线内最高） | `0.6.3`、`0.6`（**不**动 `latest`） |
+| 重跑 `v0.7.0`（`v0.7.1` 已存在） | `0.7.0`（**不**动 `0.7` / `latest`） |
+| `v0.7.0-rc.1` | 不推镜像：verify gate 只接受 `X.Y.Z` |
 
 `develata` lowercase 后即 GHCR 命名空间（owner）。runtime 使用上述 tag；scheduler 位于**同一 package**，
 对应 `<tag>-scheduler`（例如 `ghcr.io/develata/rss-ai-news:0.7.0-scheduler`）。workflow 不生成

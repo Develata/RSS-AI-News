@@ -52,6 +52,15 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         &[],
         0,
     );
+    // The release workflow's only locally testable decision: which moving
+    // image tags (latest / X.Y) a tag may promote.
+    executor.command(
+        "release-promotion",
+        "sh",
+        &strings([".github/scripts/release-promotion-test.sh"]),
+        &[],
+        0,
+    );
     executor.check(
         "tooling-boundary",
         "acceptance tooling has no product-crate dependency",
