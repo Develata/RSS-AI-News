@@ -117,11 +117,17 @@ Jobs：
   - 目标：`latest[-scheduler]` → 全局最高已发布版本；`X.Y[-scheduler]` → 触发版本所在线与 `latest` 所在线各自的最高已发布版本。
     因此较低版本的 run 也会把 `latest` / `2.0` 推到更高版本（排队中被挤掉的高版本 run 不再造成漏晋升）。
   - 不回退：别名当前的 `org.opencontainers.image.version` label 高于目标时保持不动（例如更高的 tag 被删除后重跑旧 tag）。
-    存在但没有合法版本 label 的别名、任何非"tag 不存在"的读取错误都会使 job 失败且不再写入（fail closed）。
+    先读后写（R3G-B3）：本次涉及的**全部**别名（每条线的 runtime 与 scheduler）在第一次写入前读完并校验；存在但没有合法版本
+    label 的别名、任何非"tag 不存在"的读取错误、或一对别名按计划会停在不同版本，都使 job 失败且**零写入**（fail closed）。
   - 写入：每条线先写 runtime 别名再写 scheduler 别名，`docker buildx imagetools create --prefer-index=false`（单一来源按原样
     复制，别名 digest = 版本 tag digest；不加该参数时普通 manifest 会被包成新 index、digest 改变），写后逐个读回比对 digest。
     两次写之间被取消 / 超时 / 第二次写失败时，别名可能暂时一新一旧（registry 写入无法原子化）；**重跑该 promote-tags job**
     （或之后任一 release 的 promote-tags）会幂等补齐。最后若 runtime 与 scheduler 别名停在不同版本，job 失败。
+    中断后若较高的 `vC` tag 又被删除，低版本的重跑会看到一侧别名停在 `C`（高于目标，保持不动）、另一侧仍旧，于是按"会停在不同
+    版本"零写入失败，不能自动补齐。恢复前提是 `C` / `C-scheduler` 两个精确版本镜像仍在 registry：把 `vC` 按原 commit 重新推送
+    （`git push origin <commit>:refs/tags/vC`；不改 commit 时版本 tag 的 revision 校验仍成立），再重跑 `vC` 的 promote-tags；
+    或由维护者用 `docker buildx imagetools create --prefer-index=false -t <image>:<alias>-scheduler <image>@<C-scheduler 的 digest>`
+    把落后的一侧对齐到 `C`，再重跑任一现行 release 的 promote-tags 复核。
   - 串行：job 级 `concurrency: release-promote-<repo>`、`cancel-in-progress: false`、`queue: max`（最多 100 个等待中的 run，按
     FIFO；默认的单个 pending 名额会让后到的 run 取消正在等待的 run）。`queue` 属于 GitHub 的 job concurrency schema，actionlint
     1.7.12 尚不认识，见 `.github/actionlint.yaml`。正确性不依赖排队：每次 reconcile 都对齐到最高已发布版本；排队溢出或被人工

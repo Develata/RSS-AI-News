@@ -30,12 +30,16 @@
 #       version label V and revision label = the tag's commit (the peeled
 #       `^{}` SHA of an annotated tag). An alias is never moved to a version
 #       lower than its current `org.opencontainers.image.version` label, so a
-#       deleted higher tag cannot move it backwards. Runtime aliases are
-#       written before scheduler aliases, each with `--prefer-index=false`
-#       semantics (adapter), and every written alias is read back (R3-4,
-#       R3-22). A re-run completes an interrupted reconcile. Any read error,
-#       an alias without a valid version label, or a runtime / scheduler pair
-#       left at different versions fails the run.
+#       deleted higher tag cannot move it backwards. Every alias the run
+#       touches (runtime and scheduler, every line) is read and validated
+#       before the first write, so a read error, an alias without a valid
+#       version label, or a runtime / scheduler pair that would end at
+#       different versions fails the run with nothing written (R3G-B3). Then
+#       runtime aliases are written before scheduler aliases, each with
+#       `--prefer-index=false` semantics (adapter), and every written alias
+#       is read back (R3-4, R3-22). A re-run completes a reconcile
+#       interrupted between two writes (see docs/operations/ci-and-release.md
+#       for the case where the higher tag is deleted in between).
 #
 # Versions: stable `X.Y.Z` only, each component `0` or `[1-9][0-9]*` (SemVer
 # 2.0.0 §2; at most 9 digits so awk compares them exactly).
@@ -165,51 +169,74 @@ $2
 EOF
 }
 
-# reconcile_alias IMAGE ALIAS VERSION DIGEST -> prints the alias's final version.
-reconcile_alias() {
+# plan_alias IMAGE ALIAS VERSION DIGEST -> reads the alias and prints one
+# line `<final-version> <action> <current-digest> <current-revision>`, where
+# action is `keep` (already at a newer version), `unchanged`, `create` or
+# `update:<current-version>` (write DIGEST). Writes nothing.
+plan_alias() {
     registry_inspect "$1:$2"
-    action=""
     if [ "$inspect_rc" -eq 3 ]; then
-        action=created
+        echo "$3 create - -"
+        return 0
+    fi
+    current="${inspect_version%-scheduler}"
+    is_version "$current" ||
+        die "$1:$2 exists without a valid org.opencontainers.image.version label ('$inspect_version'); refusing to move it"
+    if [ "$(version_cmp "$current" "$3")" -eq 1 ]; then
+        echo "$current keep $inspect_digest $inspect_revision"
+    elif [ "$inspect_digest" = "$4" ]; then
+        echo "$3 unchanged $inspect_digest $inspect_revision"
     else
-        current="${inspect_version%-scheduler}"
-        is_version "$current" ||
-            die "$1:$2 exists without a valid org.opencontainers.image.version label ('$inspect_version'); refusing to move it"
-        case "$(version_cmp "$current" "$3")" in
-            1)
-                echo "alias $2: kept at newer $current (highest released tag is $3)" >&2
-                echo "$current"
-                return 0
-                ;;
-            *)
-                if [ "$inspect_digest" = "$4" ]; then
-                    echo "alias $2: unchanged at $3" >&2
-                    echo "$3"
-                    return 0
-                fi
-                action="updated from $current"
-                ;;
-        esac
+        echo "$3 update:$current $inspect_digest $inspect_revision"
     fi
-    sh "$registry" copy "$1@$4" "$1:$2" >&2 || die "writing $1:$2 failed; re-run to complete the promotion"
-    registry_inspect "$1:$2"
-    if [ "$inspect_rc" -ne 0 ] || [ "$inspect_digest" != "$4" ]; then
-        die "$1:$2 reads back as '${inspect_digest:-missing}', expected $4"
-    fi
-    echo "alias $2: $action -> $3 ($4)" >&2
-    echo "$3"
 }
 
-# reconcile_pair IMAGE ALIAS TARGET-LINE: runtime alias, then scheduler alias.
-reconcile_pair() {
+# plan_pair IMAGE ALIAS TARGET (`V runtime-digest scheduler-digest`) ->
+# validates both aliases of the pair and prints its plan: `write <tag>
+# <digest> <version> <from>` lines (runtime first), then `result
+# <alias>=<version>`. Writes nothing.
+plan_pair() {
     # shellcheck disable=SC2086 # `V runtime-digest scheduler-digest`
     set -- "$1" "$2" $3
-    runtime_at="$(reconcile_alias "$1" "$2" "$3" "$4")"
-    scheduler_at="$(reconcile_alias "$1" "$2-scheduler" "$3" "$5")"
-    if [ "$runtime_at" != "$scheduler_at" ]; then
-        die "$1:$2 is at $runtime_at but $1:$2-scheduler at $scheduler_at; promote the matching release to pair them"
+    runtime_plan="$(plan_alias "$1" "$2" "$3" "$4")" || exit 1
+    scheduler_plan="$(plan_alias "$1" "$2-scheduler" "$3" "$5")" || exit 1
+    # shellcheck disable=SC2086 # plan_alias prints four fields
+    set -- "$@" $runtime_plan $scheduler_plan
+    # $6..$9: runtime final / action / digest / revision; ${10}..${13}: scheduler.
+    if [ "$6" != "${10}" ]; then
+        die "$1:$2 would be at $6 but $1:$2-scheduler at ${10}; nothing was written. Promote the matching release to pair them"
     fi
-    echo "$2=$runtime_at"
+    for side in runtime scheduler; do
+        if [ "$side" = runtime ]; then
+            tag="$2" action="$7" digest="$4"
+        else
+            tag="$2-scheduler" action="${11}" digest="$5"
+        fi
+        case "$action" in
+            keep) echo "alias $tag: kept at newer $6 (highest released tag is $3)" >&2 ;;
+            unchanged) echo "alias $tag: unchanged at $3" >&2 ;;
+            create) echo "write $tag $digest $3 created" ;;
+            update:*) echo "write $tag $digest $3 updated-from-${action#update:}" ;;
+        esac
+    done
+    echo "result $2=$6"
+}
+
+# apply_plan IMAGE PLAN: performs the planned writes in order, reading each
+# alias back, then prints the `<alias>=<version>` results.
+apply_plan() {
+    while read -r kind tag digest version action; do
+        [ "$kind" = write ] || continue
+        sh "$registry" copy "$1@$digest" "$1:$tag" >&2 || die "writing $1:$tag failed; re-run to complete the promotion"
+        registry_inspect "$1:$tag"
+        if [ "$inspect_rc" -ne 0 ] || [ "$inspect_digest" != "$digest" ]; then
+            die "$1:$tag reads back as '${inspect_digest:-missing}', expected $digest"
+        fi
+        echo "alias $tag: $action -> $version ($digest)" >&2
+    done <<EOF
+$2
+EOF
+    printf '%s\n' "$2" | sed -n 's/^result //p'
 }
 
 cmd_reconcile() {
@@ -228,11 +255,15 @@ cmd_reconcile() {
     [ -n "$line_target" ] || die "no released version of the $trigger_line line (v$trigger's images are missing)"
     latest_line="$(minor_line "${latest_target%% *}")"
 
-    reconcile_pair "$image" latest "$latest_target"
-    reconcile_pair "$image" "$trigger_line" "$line_target"
+    # Read and validate every alias of every pair before the first write.
+    plan="$(plan_pair "$image" latest "$latest_target")" || exit 1
+    plan="$plan
+$(plan_pair "$image" "$trigger_line" "$line_target")" || exit 1
     if [ "$latest_line" != "$trigger_line" ]; then
-        reconcile_pair "$image" "$latest_line" "$latest_target"
+        plan="$plan
+$(plan_pair "$image" "$latest_line" "$latest_target")" || exit 1
     fi
+    apply_plan "$image" "$plan"
 }
 
 command="${1:-}"

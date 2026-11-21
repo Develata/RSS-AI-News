@@ -235,10 +235,9 @@ export FAKE_FAIL_INSPECT
 reconcile 0.10.4 <"$work/tags"
 expect_rc 1
 unset FAKE_FAIL_INSPECT
-# The runtime alias is read and written before the scheduler alias is read:
-# the failure must stop before anything else is written.
-lines="$(wc -l <"$FAKE_REGISTRY/writes.log" | tr -d ' ')"
-[ "$lines" -le 1 ] || fail "$lines writes after a read error"
+# Every alias is read before the first write (R3G-B3): a failed read of the
+# scheduler alias leaves the runtime alias unwritten too.
+no_writes
 FAKE_FAIL_INSPECT=0.10.4
 export FAKE_FAIL_INSPECT
 : >"$FAKE_REGISTRY/writes.log"
@@ -246,6 +245,40 @@ rm -f "$FAKE_REGISTRY/tags/latest"
 reconcile 0.10.4 <"$work/tags"
 expect_rc 1
 no_writes
+done_case
+
+start "an invalid scheduler alias stops the run before the runtime alias is written"
+case_failures=$failures
+publish 0.10.4 c4
+publish 0.10.5 c5
+point latest 0.10.4
+point 0.10 0.10.4
+printf '%s\n' 'garbage cx' >"$FAKE_REGISTRY/blobs/sha256:garbage"
+printf 'sha256:garbage\n' >"$FAKE_REGISTRY/tags/latest-scheduler"
+{ tag 0.10.4 c4; tag 0.10.5 c5; } >"$work/tags"
+reconcile 0.10.5 <"$work/tags"
+expect_rc 1
+no_writes
+[ "$(cat "$FAKE_REGISTRY/tags/latest")" = sha256:rt-0.10.4 ] || fail "runtime alias moved"
+# A second run fails the same way and still writes nothing (no split pair).
+reconcile 0.10.5 <"$work/tags"
+expect_rc 1
+no_writes
+done_case
+
+start "an invalid alias of a later line stops the run before any line is written"
+case_failures=$failures
+publish 0.10.4 c4
+publish 0.10.5 c5
+point latest 0.10.4
+point 0.10 0.10.4
+printf '%s\n' 'garbage cx' >"$FAKE_REGISTRY/blobs/sha256:garbage"
+printf 'sha256:garbage\n' >"$FAKE_REGISTRY/tags/0.10-scheduler"
+{ tag 0.10.4 c4; tag 0.10.5 c5; } >"$work/tags"
+reconcile 0.10.5 <"$work/tags"
+expect_rc 1
+no_writes
+alias_at latest 0.10.4
 done_case
 
 start "an interrupted promotion (scheduler write failed) is completed by a re-run"
@@ -288,6 +321,7 @@ point 1.4 1.4.3
 tag 1.4.3 c143 >"$work/tags"
 reconcile 1.4.3 <"$work/tags"
 expect_rc 1
+no_writes
 done_case
 
 start "prerelease tags are ignored"
