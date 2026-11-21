@@ -46,6 +46,7 @@
 - 远端 429 → `GithubRateLimit`，state 保持、article 不晋升
 - 远端 422 重试达上限 → 仍报错，record 保持 `StoredLocal`
 - 多报告批次重试：HEAD 已逐字节包含整批内容（上次 ref 更新落地、响应丢失）→ 不新建 commit，回执指向该 HEAD
+- 单报告重试：分支上既有 blob 与本地内容一致且在固定 HEAD commit 复核一致 → 不发 PUT，回执指向该 HEAD
 - 歧义写入（PATCH ref / PUT contents 后传输失败、5xx，或远端 deadline 切断）：释放前只读核对 HEAD，已含全部内容 → 记成功；
   否则按原错误释放（最后一次尝试也不会因已落地的写入而 `failed`）
 - promote target article 已被其它流转推进 → `ArticleConflict`
@@ -115,6 +116,8 @@
 | `ambiguous_contents_put_is_verified_against_head` | 同上 | 单报告歧义 PUT：HEAD 已含内容 → 成功回执 |
 | `ambiguous_contents_put_not_on_head_keeps_the_write_error` | 同上 | 单报告歧义 PUT 未落地：保留原错误 |
 | `refused_contents_put_is_not_verified` | 同上 | 4xx 写入被拒不核对 |
+| `remaining_single_report_already_on_head_records_receipt_without_put` | 同上 | 批量部分回执后重跑剩一条：HEAD 已含 → 零 PUT |
+| `matching_branch_blob_not_confirmed_at_head_still_puts` | 同上 | HEAD 已移动未含该 blob → 照常 PUT |
 | `publish_remote_timeout_on_last_attempt_records_success_when_head_holds_the_report` | `crates/runtime/tests/publish_remote_tests.rs` | 最后一次尝试超时但已落地 → `published_remote` |
 | `publish_remote_timeout_without_the_report_at_head_keeps_the_timeout` | 同上 | 未落地 → 维持超时语义 |
 | `publish_remote_batch_timeout_records_success_when_head_holds_the_batch` | 同上 | 批量超时核对 |

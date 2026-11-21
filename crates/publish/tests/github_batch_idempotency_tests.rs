@@ -298,6 +298,69 @@ async fn ambiguous_contents_put_not_on_head_keeps_the_write_error() {
     );
 }
 
+/// R1-P-S2: a batch whose first receipt was recorded before an interruption
+/// is resumed with the one remaining report, which takes the single-report
+/// path. The branch already holds that exact blob, so the receipt names the
+/// HEAD commit and no PUT (no write permission) is needed.
+#[tokio::test]
+async fn remaining_single_report_already_on_head_records_receipt_without_put() {
+    let server = MockServer::start().await;
+    mount_head(&server, "batch-commit", "batch-tree", None).await;
+    mount_blob(&server, "tech/2026-04-29.md", "main", HELLO_BLOB).await;
+    mount_blob(&server, "tech/2026-04-29.md", "batch-commit", HELLO_BLOB).await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({ "message": "no write" })))
+        .mount(&server)
+        .await;
+
+    let batch = target(&server)
+        .publish_many(&[single_report()])
+        .await
+        .expect("the report is already on HEAD");
+
+    assert_eq!(batch.commit_sha.as_deref(), Some("batch-commit"));
+    assert_eq!(
+        batch.artifacts[0].commit_sha.as_deref(),
+        Some("batch-commit")
+    );
+    let puts = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.method.as_str() == "PUT")
+        .count();
+    assert_eq!(puts, 0, "an identical blob needs no write");
+}
+
+/// The branch blob matches but HEAD moved to a commit without it: the
+/// normal PUT (with the branch blob sha) still runs.
+#[tokio::test]
+async fn matching_branch_blob_not_confirmed_at_head_still_puts() {
+    let server = MockServer::start().await;
+    mount_head(&server, "moved-head", "moved-tree", None).await;
+    mount_blob(&server, "tech/2026-04-29.md", "main", HELLO_BLOB).await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/repos/owner/repo/contents/reports/tech/2026-04-29.md",
+        ))
+        .and(query_param("ref", "moved-head"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": { "sha": HELLO_BLOB },
+            "commit": { "sha": "put-commit" }
+        })))
+        .mount(&server)
+        .await;
+
+    let artifact = target(&server).publish(&single_report()).await.unwrap();
+
+    assert_eq!(artifact.commit_sha.as_deref(), Some("put-commit"));
+}
+
 /// A refused write (4xx) is never checked: it cannot have landed.
 #[tokio::test]
 async fn refused_contents_put_is_not_verified() {

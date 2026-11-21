@@ -237,6 +237,10 @@ ref 路由（`GET git/ref/heads/{branch}`、`PATCH git/refs/heads/{branch}`）�
 记录与产物里的路径（`remote_target`、Git tree JSON 的 `path`、输出文件名）仍是逻辑路径，不编码。
 来由：2026-11-21 中文路径 `科技新闻/…` 的单报告发布以 HTTP 400 失败（请求行含字面 UTF-8）。
 
+单报告幂等（2026-11-22，R1-P-S2）：`GET contents` 取到的既有 blob sha 等于本地内容的 git blob sha 时，先 `GET ref` 取 HEAD
+commit、按该 commit 复核同一路径；一致 → 以 HEAD commit 记回执，不发 PUT。批量发布中途中断（第一条回执已落库）后重跑只剩
+一条报告、走单报告路径时，因此不再重复提交、也不需要写权限。
+
 GitHub 调用失败时，`PublishError::GitHubApiError` / `GitHubAuthFailed` 的消息带上失败的操作
 （`GET contents` / `PUT contents` / `GET ref` / `GET commit` / `POST tree` / `POST commit` / `PATCH ref`）、
 HTTP 状态、GitHub message 的**固定词表摘要**与 `x-github-request-id`（若有），并进入 `last_error` 与
@@ -266,7 +270,7 @@ v0.3 引入：`publish_many(reports: &[RenderedReport])` 在一次 commit 内推
 对批内每个路径 `GET contents?ref=<head commit>`，与本地按 git 规则（SHA-1 over `blob <len>\0` + 内容）算出的 blob sha 比对。
 **全部**路径都存在且 blob 一致 → 视为上一次尝试的 ref 更新已落地（响应丢失），直接以该 HEAD commit 记回执（每份报告一条、按输入顺序），
 不再新建 commit；任何一个路径缺失 / 不一致 → 照常建 commit；查询出错 → 本次失败（按原分类重试），绝不当作"已发布"。
-仅覆盖多报告批次；单报告走 Contents API（§4.2 上文），不在此列。
+单报告走 Contents API，其幂等见 §4.2 上文"单报告幂等"。
 
 **歧义写入的只读核对（2026-11-22，ADR 0012 §3）**：`PATCH ref`（批量）或 `PUT contents`（单报告）发出后遇到传输失败 /
 响应不可读 / 5xx，或 runtime 的远端 deadline 切断了调用时，释放前先 `GET ref` 取 HEAD commit、按该 commit 比对全部 blob；

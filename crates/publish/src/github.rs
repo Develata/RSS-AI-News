@@ -111,6 +111,17 @@ impl PublishTarget for GitHubTarget {
     async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
         let final_path = self.join_path(&report.relative_path)?;
         let existing_sha = self.existing_sha(&final_path).await?;
+        // R1-P-S2: the branch already holds this exact blob (an earlier
+        // attempt landed, or a batch whose other receipts were recorded is
+        // resumed with this one report): confirm it at a fixed HEAD commit and
+        // record that commit instead of a PUT. A mismatch at HEAD (the branch
+        // moved in between) falls through to the normal PUT.
+        if existing_sha.as_deref()
+            == Some(git_blob_sha(report.markdown_content.as_bytes()).as_str())
+            && let Some(mut batch) = self.find_published(std::slice::from_ref(report)).await?
+        {
+            return Ok(batch.artifacts.remove(0));
+        }
         match self
             .put_file(report, &final_path, existing_sha.as_deref())
             .await
