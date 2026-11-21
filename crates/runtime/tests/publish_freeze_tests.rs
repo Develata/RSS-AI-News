@@ -176,6 +176,66 @@ async fn freeze_record_isolates_two_concurrent_pending_records_by_id() {
     assert_eq!(items_b[0].article_id, article_b);
 }
 
+/// R1-P-S15: the no-ID freeze selects for `opts.category_key`, so it claims
+/// only that category's pending record — never an older record of another
+/// category (whose snapshot would then hold this category's articles).
+#[tokio::test]
+async fn freeze_without_id_claims_only_its_own_categorys_record() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flow(pool.clone());
+    let render = insert_config_rule(&pool).await;
+    let policy = insert_config_rule(&pool).await;
+    let older_ai = init_for_category(&flow, "ai", "2026-04-28", render, policy).await;
+    let ml = init_for_category(&flow, "ml", "2026-04-28", render, policy).await;
+    let (ml_article, _) =
+        seed_ai_succeeded_article(&pool, "ml", "own-cat-ml", "T", "b", "s", 88, 1).await;
+
+    let outcome = flow.freeze(freeze_opts_for_category("ml")).await;
+
+    assert_eq!(outcome.publish_record_id, ml);
+    assert_eq!(outcome.status, PublishFreezeStatus::Frozen);
+    assert_record_state(&pool, older_ai, "pending").await;
+    let items = PublishItemRepo::new(pool.clone())
+        .list_by_publish_record(ml)
+        .await
+        .unwrap();
+    assert_eq!(
+        items.iter().map(|item| item.article_id).collect::<Vec<_>>(),
+        vec![ml_article]
+    );
+}
+
+/// R1-P-S15: the by-id entry refuses a record of another category instead
+/// of freezing `opts.category_key`'s articles into it; the claim is refunded.
+#[tokio::test]
+async fn freeze_record_rejects_a_record_of_another_category() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flow(pool.clone());
+    let render = insert_config_rule(&pool).await;
+    let policy = insert_config_rule(&pool).await;
+    let ai = init_for_category(&flow, "ai", "2026-04-28", render, policy).await;
+    seed_ai_succeeded_article(&pool, "ml", "mismatch-ml", "T", "b", "s", 88, 1).await;
+
+    let outcome = flow.freeze_record(ai, freeze_opts_for_category("ml")).await;
+
+    assert!(
+        matches!(&outcome.status, PublishFreezeStatus::Failed { error_kind } if error_kind == "category_mismatch"),
+        "{:?}",
+        outcome.status
+    );
+    assert_record_state(&pool, ai, "pending").await;
+    let (attempts, owned, owner): (i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT attempt_count, (SELECT COUNT(*) FROM publish_items WHERE publish_record_id = ?), \
+         lease_owner FROM publish_records WHERE id = ?",
+    )
+    .bind(ai)
+    .bind(ai)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((attempts, owned, owner), (0, 0, None));
+}
+
 #[tokio::test]
 async fn freeze_with_ai_off_passthrough_promotes_persisted_articles_in_same_tx() {
     let (_dir, pool) = make_test_pool().await;
@@ -519,6 +579,15 @@ impl PublishItemRepository for FlakyCandidateRepo {
     ) -> Result<Vec<rss_ai_news_domain::model::PublishItem>, StorageError> {
         self.inner.list_by_publish_record(publish_record_id).await
     }
+
+    async fn find_snapshot_ownership_conflict(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Option<rss_ai_news_storage::SnapshotOwnershipConflict>, StorageError> {
+        self.inner
+            .find_snapshot_ownership_conflict(publish_record_id)
+            .await
+    }
 }
 
 fn flaky_flow(pool: SqlitePool, err: fn() -> StorageError) -> PublishFlow {
@@ -691,6 +760,15 @@ impl PublishItemRepository for RacingFreezeRepo {
         publish_record_id: i64,
     ) -> Result<Vec<rss_ai_news_domain::model::PublishItem>, StorageError> {
         self.inner.list_by_publish_record(publish_record_id).await
+    }
+
+    async fn find_snapshot_ownership_conflict(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Option<rss_ai_news_storage::SnapshotOwnershipConflict>, StorageError> {
+        self.inner
+            .find_snapshot_ownership_conflict(publish_record_id)
+            .await
     }
 }
 

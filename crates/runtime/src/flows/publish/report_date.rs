@@ -12,7 +12,8 @@ use crate::error::RuntimeError;
 /// (instant, zone): callers sample `now` once per run. An unknown zone is an
 /// error, never a silent fallback to UTC.
 pub fn default_report_date(now: OffsetDateTime, timezone: &str) -> Result<String, RuntimeError> {
-    let zone = jiff::tz::TimeZone::get(timezone).map_err(|error| {
+    // The parser validate-config and doctor use (R1-P-S14).
+    let zone = rss_ai_news_config::validate::parse_target_timezone(timezone).map_err(|error| {
         RuntimeError::Config(format!("invalid IANA timezone {timezone:?}: {error}"))
     })?;
     let instant = jiff::Timestamp::from_nanosecond(now.unix_timestamp_nanos())
@@ -63,6 +64,18 @@ mod tests {
             default_report_date(now, "America/New_York").unwrap(),
             "2026-06-30"
         );
+    }
+
+    /// R1-P-S14: jiff's special `Etc/Unknown` behaves like UTC; it must be
+    /// refused like any unknown zone, not used.
+    #[test]
+    fn etc_unknown_is_an_error_not_a_utc_fallback() {
+        for zone in ["Etc/Unknown", "etc/unknown"] {
+            assert!(
+                default_report_date(at("2026-11-21T00:30:00Z"), zone).is_err(),
+                "{zone}"
+            );
+        }
     }
 
     #[test]

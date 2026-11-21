@@ -78,7 +78,7 @@ trait ClassifiedError {
 | 正文提取 | `feed_entries.last_error*` | 同上；fallback 命中时转 `FallbackPersisted`；article 写入 / 摘要回读的存储错误按 `StorageError::is_retryable()` 同样分流（不再一律 `Failed`） |
 | AI 调用 | `article_ai_results.last_error*` | `Running → Pending`（retry）/ `PermanentFailed`（exhausted） |
 | 本地落盘 | `publish_records.last_error*` | retryable 回原态重试 / 耗尽或永久 → `Failed` |
-| GitHub 推送 | `publish_records.last_error*` | 422 → 重试一次后 `Failed`；其它直接 `Failed` |
+| GitHub 推送 | `publish_records.last_error*` | 按 `PublishError::is_retryable()`：限流、409、5xx / 传输失败、远端超时 → 保持 `StoredLocal` 并计本阶段预算（耗尽 → `Failed`；歧义写入先只读核对 HEAD，限流写 `next_attempt_at`）；422 non-fast-forward 在同一次尝试内重试一次，第二次 422 及其它 4xx、认证失败、目标漂移、超大成功响应 → 直接 `Failed`。完整表见 [plan/04 §7](./04-publish.md) |
 | Reindex 批次 | `reindex_jobs.last_error*` | `Running → Pending`（retry）/ `Failed`（exhausted） |
 
 `articles` 表**不**承载 `last_error*` 列。错误归属规则见 [./08-state-machines.md §4.2](./08-state-machines.md)。
@@ -106,9 +106,10 @@ Reindex 无预算（claim 不过滤 attempt_count，失败 `mark_failed` 直转�
 - 失败时**不**改值（已在 claim 时递增）
 - reclaim（lease 过期）时**不**改值
 - 这样保证：worker 崩溃 / lease 过期不会刷预算，预算严格反映尝试次数
-- **唯一例外**：Publish freeze 选不到候选（`SnapshotEmpty`）时退还本次 claim 计入的 1 次
-  （`release_empty_snapshot`，记录回 `pending`；两个计数都退）。空快照不是一次发布尝试，否则同日反复空跑会耗尽预算、
-  被 sweep 转 `failed`（见 [./08-state-machines.md](./08-state-machines.md) §6.1）
+- **例外（仅 Publish，均不是一次发布尝试，两个计数都退）**：freeze 选不到候选（`SnapshotEmpty`，`release_empty_snapshot`，
+  记录回 `pending`）——否则同日反复空跑会耗尽预算、被 sweep 转 `failed`；freeze 输掉文章归属竞争（`release_freeze_conflict`）；
+  按 ID freeze 遇分类不符（`category_mismatch`，同一释放，R1-P-S15）；store_local / remote 写前发现存量重复归属的败方
+  （`release_ownership_conflict`，保持阶段态，R1-P-B1）。见 [./08-state-machines.md](./08-state-machines.md) §6.1
 
 **Publish 按阶段计预算（2026-11-21，migration 0008，[ADR 0012](../adr/0012-per-stage-publish-budget-and-snapshot-ownership.md)）**：
 publish_records 有两个计数。`attempt_count` 仍按上述契约累计（审计用，成功不清零）；
@@ -117,6 +118,10 @@ publish_records 有两个计数。`attempt_count` 仍按上述契约累计（审
 都用 `stage_attempt_count` 对比 `retry.publish_max_attempts`。因此 `publish_max_attempts = N` 表示
 "每个阶段最多 N 次尝试"，`N = 1` 的无故障运行也能走完四个阶段；旧的"四阶段共享预算"不再成立。
 0008 之前的行迁移后 `stage_attempt_count = 0`（当前阶段重新拿到完整预算；终态行不受影响）。
+
+**限流等待（2026-11-22，R1-P-S12）**：远端 `GitHubRateLimit` 的 retryable release 同时写 `next_attempt_at`
+（GitHub 给的最早重试时刻，钳制到 1 小时内），claim 在此之前不领取该记录（不耗预算、不发请求）；
+任一阶段推进或非限流的 retryable release 清空它。见 ADR 0012 §3a。
 
 ## 5. exit code 速查
 
@@ -137,7 +142,8 @@ CLI 退出码由 [`crates/cli/src/exit_code.rs`](../../crates/cli/src/exit_code.
 - `publish` / `publish-all`：每个阶段带 `verdict`。`ok`；`skipped`（`SnapshotEmpty`、`NothingToClaim`、
   `Conflicted`——无可发布内容，或记录被其他 worker 持有 / 已推进，下次调度接手）→ exit 0；
   `failed`（`Failed`、`ArticleConflict`、`MissingTarget`）→ exit 1。已知缺口：record 绑定 claim 时
-  `NothingToClaim` 也可能表示重试预算耗尽，由 sweep 转 `failed` 后下一次运行以 `PublishConflict` 报出。
+  `NothingToClaim` 也可能表示重试预算耗尽，由 sweep 转 `failed` 后下一次运行以 `PublishConflict` 报出；
+  或表示记录仍在限流等待期（`next_attempt_at` 未到），等待期过后的运行照常续跑。
 - `publish-all`：分类级 init 失败或已终态 `failed` 记录（`conflict` 阶段）只记入该分类 summary（exit 1），
   其他分类与已就绪的远端 batch 照常执行。单分类 `publish` 遇终态记录仍直接报 `PublishConflict`。
 - `ingest` / `ai-run`：自身存储失败（entry 插入、source 行、claim / 候选查询、pending 行插入）→ exit 1；

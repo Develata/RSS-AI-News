@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_report::{RenderTemplates, ReportError};
-use rss_ai_news_storage::NewPublishRecord;
+use rss_ai_news_storage::{NewPublishRecord, PublishState};
 use serde_json::json;
 use time::{Duration, OffsetDateTime, UtcOffset};
 
@@ -37,6 +37,23 @@ pub use rule_versions::{ForceRenderTrace, PublishRuleVersions, bootstrap_publish
 
 pub struct PublishFlow {
     ctx: Arc<PublishDeps>,
+}
+
+/// `last_error_kind` of an article held by another active snapshot, shared by
+/// the freeze re-check and the pre-write guard (ADR 0012 §2).
+const OWNERSHIP_CONFLICT_KIND: &str = "article_owned_by_active_snapshot";
+
+/// Result of [`PublishFlow::guard_snapshot_ownership`].
+enum OwnershipGuard {
+    Clear,
+    /// Released: another snapshot keeps `article_id`; nothing was written.
+    Conflict {
+        article_id: i64,
+    },
+    /// The lookup failed and the claim was released by classification.
+    Failed {
+        error_kind: String,
+    },
 }
 
 fn render_templates_from_ctx(ctx: &PublishDeps, path_template: Option<&str>) -> RenderTemplates {
@@ -222,6 +239,93 @@ impl PublishFlow {
                 })),
             )
             .await;
+    }
+
+    /// P-B1: before a stage writes externally (local file, GitHub), make sure
+    /// no winning snapshot also holds one of this record's articles (only
+    /// pre-0008 data can contain such a pair). On a conflict the lease is
+    /// released at once, the claim refunded and the stage state kept; nothing
+    /// is written. A lookup error is released by its classification.
+    async fn guard_snapshot_ownership(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        state: PublishState,
+        phase: &'static str,
+        emitter: &RunEventEmitter<'_>,
+    ) -> OwnershipGuard {
+        let now = OffsetDateTime::now_utc();
+        let conflict = match self
+            .ctx
+            .publish_item_repo
+            .find_snapshot_ownership_conflict(publish_record_id)
+            .await
+        {
+            Ok(None) => return OwnershipGuard::Clear,
+            Ok(Some(conflict)) => conflict,
+            Err(error) => {
+                self.release_classified_failure(
+                    publish_record_id,
+                    owner,
+                    &error,
+                    phase,
+                    now,
+                    emitter,
+                )
+                .await;
+                return OwnershipGuard::Failed {
+                    error_kind: error.error_kind().to_string(),
+                };
+            }
+        };
+        let message = format!(
+            "article {} is also in publish record {}, which keeps it; record {publish_record_id} \
+             stops before writing (fail one of the two records to resolve)",
+            conflict.article_id, conflict.owner_record_id
+        );
+        let released = self
+            .ctx
+            .publish_record_repo
+            .release_ownership_conflict(
+                publish_record_id,
+                owner,
+                state,
+                &message,
+                OWNERSHIP_CONFLICT_KIND,
+                now,
+            )
+            .await;
+        match &released {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                publish_record_id,
+                "ownership conflict release lost the lease"
+            ),
+            Err(error) => tracing::warn!(
+                publish_record_id,
+                ?error,
+                "ownership conflict release failed; lease recovery remains available"
+            ),
+        }
+        emitter
+            .emit(
+                "publish_failed",
+                "warn",
+                Some("publish_record"),
+                Some(publish_record_id),
+                &message,
+                Some(json!({
+                    "phase": phase,
+                    "error_kind": OWNERSHIP_CONFLICT_KIND,
+                    "article_id": conflict.article_id,
+                    "owner_record_id": conflict.owner_record_id,
+                    "released": matches!(released, Ok(true)),
+                })),
+            )
+            .await;
+        OwnershipGuard::Conflict {
+            article_id: conflict.article_id,
+        }
     }
 
     async fn fail_claimed(

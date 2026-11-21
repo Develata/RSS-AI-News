@@ -46,7 +46,10 @@
 - freeze 事务内复查（选稿在事务外）：
   1. 首条语句是带 owner/state 守卫的 record 推进（SQLite 由此持有写锁，串行化并发 freeze，避免读后升级写的 busy 失败）；
   2. PostgreSQL 按 id 顺序 `SELECT … FOR UPDATE` 锁住快照内文章——READ COMMITTED 下仅靠 `NOT EXISTS` 复查无法串行化，
-     两个 freeze 都会通过检查；加锁后后到者等待，再看见先到者已提交的 items；固定顺序避免死锁；
+     两个 freeze 都会通过检查；加锁后后到者等待，再看见先到者已提交的 items；固定顺序避免死锁。
+     该推理依赖 READ COMMITTED（每条语句新快照），因此 freeze 事务的第一条语句显式
+     `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`（R1-P-S4）：数据库或角色默认若是 REPEATABLE READ，复查会沿用等锁前的
+     快照，两个 freeze 都能提交（PostgreSQL 16 实测）；
   3. 被其它活动快照持有 → 回滚，`ArticleOwnershipConflict`；
   4. AI-off 文章按事务内读到的状态区分：`persisted` 晋升；已是 `ready_for_publish`（未被持有的遗留）保持原状冻结；
      其它状态 → 回滚，`ArticleStateConflict`；
@@ -54,6 +57,14 @@
 - 冲突时 runtime 立即释放 lease（`release_freeze_conflict`：记录回 `pending`、退还本次 claim、写 `last_error_kind`），
   不发生外部写入；下一次运行重新选稿时自然排除该文章。输掉竞争不是一次发布尝试，因此不消耗阶段预算——
   否则 `publish_max_attempts = 1` 时一次竞争就会让记录 `failed`。
+- **存量重复归属的写前拦截（2026-11-22，R1-P-B1）**：0008 之前的库里可能已有两份未失败快照持有同一文章（迁移只建索引，
+  不改数据；之后的 freeze 都会事务内复查，不会再产生新的重复）。因此 store_local 与 remote（单条与批量）在 claim 之后、
+  任何外部写入（本地文件 / GitHub）之前，查询本记录快照中是否有文章同时属于另一份**胜出**的未失败记录：
+  已 `published_*` 的记录无论 id 大小都胜出（其文章已是 `published`），其余情况 id 较小者胜出。
+  败方不写任何外部产物：立即释放 lease、两个计数都退还、**保持当前阶段态**、`last_error_kind =
+  article_owned_by_active_snapshot`、`last_error` 列出文章与胜方记录 id，阶段结果为 `ArticleConflict`（exit 1）；
+  批量发布中只剔除败方，其余照常提交。胜方转 `failed` 后归属释放，败方下次运行即可继续；胜方已发布时败方无法完成，
+  由运维把败方置为 `failed`（冻结快照保留）。
 
 ### 3. 多报告重试幂等
 
@@ -61,11 +72,34 @@
 （SHA-1 over `blob <len>\0` + 内容）比对。**全部**一致才认定上一次尝试已落地，直接以该 HEAD commit 记回执（每份报告一条，
 按输入顺序）；任一缺失 / 不一致照常提交；查询出错按原分类失败，绝不当作"已发布"。保留 422 non-fast-forward 重试。
 
+**同一次尝试内的歧义写入核对（2026-11-22，R1-P-B2）**：写请求（批量的 `PATCH ref`、单报告的 `PUT contents`）已发出、
+但结果未知——传输失败 / 响应不可读（分类为 503）或 5xx 应答——时，释放前先做只读核对：`GET ref` 取分支 HEAD commit，
+再按该 commit 查每个路径的 blob（`find_published`，与上文同一比对）。全部一致 → 以 HEAD commit 记成功回执；不一致或核对本身
+出错 → 原写入错误不变，按原分类释放。4xx（含 409、422）表示写入被拒，不核对。runtime 层的远端 deadline（lease 的 80%）
+切断调用时同样核对，核对自己的时限为 deadline 之后再加 lease 的 10%（其余 10% 留给数据库收尾），lease 已失时由带 owner
+守卫的推进拒绝。因此 `publish_max_attempts = 1` 或默认预算的最后一次尝试里"PATCH 已落地、响应丢失"也会记为
+`published_remote`，而不是 `failed` 并释放文章归属。限流（`GitHubRateLimit`）不核对，避免在限流窗口内追加请求。
+**残留限制**：进程在写请求之后、核对之前崩溃，且该阶段预算已耗尽时，过期清扫仍会把记录转 `failed`（未核对、归属释放）；
+预算未耗尽时，下一次运行的多报告幂等比对 / 单报告幂等（§3 下文）会补回执。
+
+### 3a. 限流等待写入记录（2026-11-22，R1-P-S12，同属未发布的 migration 0008）
+
+- `publish_records.next_attempt_at`（SQLite `TEXT` / PG `TIMESTAMPTZ`，可空）：远端阶段遇 `GitHubRateLimit` 时，
+  retryable release 写入 GitHub 要求的最早重试时刻（`retry-after` / `x-ratelimit-reset`，见 plan/04 §7），
+  并钳制到 `[now, now + 1 h]`——记录在等待期间仍持有文章归属，过远的时刻（或恶意头）不能把它长期挂起；
+  其它 retryable release 把它写回 NULL，每次阶段推进（含 freeze）清零。
+- 四个 claim 入口（按状态扫描的 SQLite / PG SQL 与两个按 ID 的构造器）都要求 `next_attempt_at IS NULL OR <= now`；
+  SQLite 照 lease 的做法按 `julianday` 比较（写入向上、now 向下取整到毫秒），不会提前领取。
+- 等待期内的运行领不到记录：`NothingToClaim`（verdict `skipped`，exit 0），不发任何 GitHub 请求、不耗预算；
+  `publish_failed` 事件带 `retry_not_before`。耗尽 sweep 不看该列（耗尽行本就不会被领取）。
+- 存量行为 NULL；down 迁移删除该列。
+
 ### 4. 默认报告日期按目标时区
 
 未给 `--date` 时，`publish` / `publish-all` 取运行时刻在有效目标时区（`--timezone` / `[publish].target_timezone`）下的日期。
 时区经 jiff 按 IANA 库解析（有系统 zoneinfo 用系统库，否则用内置库），validate-config、doctor 与运行时用同一查询；
-未知时区在任何写入之前报错，不回退 UTC。
+未知时区在任何写入之前报错，不回退 UTC。三处共用 `config::validate::parse_target_timezone`（2026-11-22，R1-P-S14）：
+不 trim，且拒绝 jiff 的特殊 `Etc/Unknown`（`TimeZone::is_unknown()`，任意大小写都能查到、按 UTC 运算）。
 
 ## Alternatives considered
 
@@ -96,11 +130,38 @@
   终结一份停在中间阶段、且 lease 已清、阶段预算未耗尽的**更早日期**的记录。归属规则下这样的记录会一直持有其文章，
   使它们进不了之后的报告，直到运维对该日期重跑 `publish --date <那天>`（续跑或失败后释放）或人工把记录置为 `failed`。
   此前同样的记录也不会被续跑，但文章仍可能被重复选入；现在改为"不重复、但需要人工收尾"。
+- **已知限制：`--force` 记录无法定向续跑（R1-P-S5，2026-11-22 记录，暂不新增 CLI 入口）**。force 记录的 render version
+  是一次性的 `pending` trace 行。若它在 freeze 之后、预算未耗尽时停住（例如远端短暂失败），普通 `publish --date <那天>`
+  取 active render 版本、再次 `--force` 又新建 trace 行，两者的幂等键都不是原记录，原记录不会被续跑，而它持有的文章被
+  归属规则排除在之后的报告之外（同日即可发生）。上文"按日期重跑"的办法对 force 记录无效。**人工处理**：确认该记录
+  （`SELECT id, state, render_version FROM publish_records WHERE render_version IN (SELECT id FROM rule_versions WHERE
+  version_tag LIKE 'force-%')`）后把它置为 `failed` 释放文章——`UPDATE publish_records SET state = 'failed',
+  lease_owner = NULL, lease_expires_at = NULL, last_error_kind = 'operator_failed' WHERE id = <id> AND state <> 'failed'`
+  ——再按需重新 `publish --date <那天> --force`。按记录 ID（或原 render version）定向续跑的入口（如 `publish --record <id>`，
+  沿用原目标与快照）列为后续行动。
+- **已知限制：旧版 `stored_local` 记录的本地字节（R1-P-S10，B8）**。`f420d95` 及更早版本渲染时用调用方时间生成本地文件，
+  另一次采样写入 `rendered_at`；升级后远端阶段与 rebuild-report 从 `rendered_at` 重渲染，因此模板含 `{generated_at}` 时，
+  升级前已 `stored_local` 的记录推到 GitHub 的字节可能与本地文件不同（相差的只是该时间戳），0008 也没有原时间可供恢复。
+  字节一致保证只适用于新版首次渲染的记录；不做自动比对。
+- **已知限制：存量 Contents 回执只比对 blob sha（R1-P-S3，后续）**。幂等 / 歧义核对按 Contents API 的 `sha` 比对，
+  不检查目标树条目的 `mode`（`100644` vs `100755`）与类型（Contents API 会解引用指向仓库内普通文件的 symlink）。
+  在固定 commit 上经 Trees API 核对条目类型、mode 与 sha 列为后续行动；目前一个 200 但无 `sha` 的响应已按协议错误处理（R1-P-S1）。
 - 新依赖：`jiff`（IANA 时区；内置 tzdb）、`sha1`（git blob id，lockfile 中已有同版本）。
 
 ### 后续行动
 - 评估为"更早日期的中间态记录"增加有界的自动收尾（例如 maintenance 中按 report_date 过期终结），需另行设计与审批。
-- 单报告批次走 Contents API，不在本 ADR 的幂等范围内。
+- 按记录 ID 定向续跑 force 记录的 CLI 入口（R1-P-S5，见上文已知限制）。
+- 旧版遗留的 active force trace 修复（R1-P-S6 前半，后续）：B10 之前的版本在空库首次 `--force` 时会把 `force-…` render 行
+  建成 `active`，0008 之后普通发布仍会选中它。识别并恢复明确的 `default` 规则需要迁移或启动期修复，另行设计。人工修复
+  （同一事务内）：`UPDATE rule_versions SET status = 'superseded' WHERE kind = 'render' AND status = 'active' AND version_tag
+  LIKE 'force-%';` 然后 `UPDATE rule_versions SET status = 'active' WHERE kind = 'render' AND version_tag = 'default';`
+  （若无 `default` 行，下一次发布会自行登记）。引导现已拒绝盖上非 active 的版本（R1-P-S6 后半）。
+- 在固定 commit 上经 Trees API 核对条目类型与 mode（R1-P-S3）。
+- 本地写入改为基于目录句柄（`openat` / `renameat`）以消除输出根内并发写者的 TOCTOU（R1-P-B4，见 plan/04 §4.1）。
+- ~~单报告批次走 Contents API，不在本 ADR 的幂等范围内。~~ 已补（2026-11-22，R1-P-S2）：单报告路径在 `GET contents?ref=<branch>`
+  取到的 blob sha 与本地 git blob sha 相同时，先按固定 HEAD commit 复核（`find_published`），一致即以该 HEAD commit 记回执、
+  不发 PUT（也就不需要写权限）；HEAD 已移动且不含该 blob 时照常 PUT。这覆盖了"批量回执部分落库后中断、重跑只剩一条报告"
+  的恢复。
 
 ## Links
 

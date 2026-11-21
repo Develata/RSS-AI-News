@@ -342,9 +342,9 @@ struct MockRateLimitTarget;
 #[async_trait]
 impl PublishTarget for MockRateLimitTarget {
     async fn publish(&self, _report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
-        Err(PublishError::GitHubRateLimit {
-            reset_at: OffsetDateTime::from_unix_timestamp(1_800).unwrap(),
-        })
+        Err(PublishError::rate_limit(
+            OffsetDateTime::from_unix_timestamp(1_800).unwrap(),
+        ))
     }
 }
 
@@ -353,7 +353,7 @@ struct MockAuthFailTarget;
 #[async_trait]
 impl PublishTarget for MockAuthFailTarget {
     async fn publish(&self, _report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
-        Err(PublishError::GitHubAuthFailed("bad token".to_string()))
+        Err(PublishError::auth("bad token"))
     }
 }
 
@@ -655,4 +655,523 @@ async fn publish_remote_batch_skips_only_the_mismatched_record() {
     assert_eq!(target.sent(), 1, "only the matching report is sent");
     assert_record_state(&pool, drifted, "failed").await;
     assert_record_state(&pool, matching, "published_remote").await;
+}
+
+// === P-S16: the documented recovery for a second 422 matches the code ===
+
+/// The batch retries a non-fast-forward 422 once; a second 422 is a
+/// permanent `github_api_error`, so both records end `failed` (not
+/// `stored_local`) and their articles stay unpromoted.
+#[tokio::test]
+async fn publish_remote_batch_second_non_fast_forward_fails_the_records() {
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let (_dir, pool) = make_test_pool().await;
+    let first = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let second = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/git/ref/heads/main$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"object": {"sha": "head"}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/git/commits/head$"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"tree": {"sha": "tree"}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(serde_json::json!({"message": "Not Found"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex("^/repos/owner/repo/git/(trees|commits)$"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"sha": "new"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .respond_with(
+            ResponseTemplate::new(422)
+                .set_body_json(serde_json::json!({"message": "Update is not a fast forward"})),
+        )
+        .mount(&server)
+        .await;
+    let target = rss_ai_news_publish::GitHubTarget::with_base_uri(
+        rss_ai_news_publish::GitHubTargetConfig {
+            token: rss_ai_news_domain::SecretString::from("t"),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            branch: "main".to_string(),
+            path_prefix: "reports".to_string(),
+            commit_message_prefix: "auto: publish".to_string(),
+        },
+        &server.uri(),
+    )
+    .unwrap();
+    let flow = flow(pool.clone(), Some(Arc::new(target)));
+
+    let outcome = flow
+        .publish_remote_batch(PublishRemoteBatchOptions {
+            items: vec![
+                batch_item(first, "AI", "Daily AI"),
+                batch_item(second, "ML", "Daily ML"),
+            ],
+        })
+        .await;
+
+    let patches = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.method.as_str() == "PATCH")
+        .count();
+    assert_eq!(patches, 2, "one retry after the first 422");
+    for item in outcome.items {
+        assert!(
+            matches!(&item.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "github_api_error"),
+            "{:?}",
+            item.status
+        );
+        assert_record_state(&pool, item.publish_record_id, "failed").await;
+        assert_last_error_kind(&pool, item.publish_record_id, "github_api_error").await;
+        assert_referenced_articles_state(&pool, item.publish_record_id, "ready_for_publish").await;
+    }
+}
+
+// === P-S12: a rate limit's reset time gates the next claim ===
+
+/// Rate-limited until `reset_at` on the first call, succeeds afterwards.
+struct RateLimitedOnce {
+    reset_at: OffsetDateTime,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl PublishTarget for RateLimitedOnce {
+    async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Err(PublishError::rate_limit(self.reset_at));
+        }
+        MockSuccessTarget.publish(report).await
+    }
+}
+
+#[tokio::test]
+async fn publish_remote_rate_limit_persists_the_reset_and_skips_claims_until_then() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+    let before = OffsetDateTime::now_utc();
+    let target = Arc::new(RateLimitedOnce {
+        reset_at: before + time::Duration::minutes(10),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let first = flow.publish_remote_record(id, remote_opts()).await;
+    assert!(
+        matches!(first.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "github_rate_limit")
+    );
+    let wait: Option<OffsetDateTime> =
+        sqlx::query_scalar("SELECT next_attempt_at FROM publish_records WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let wait = wait.expect("the reset time is persisted");
+    assert!(wait >= before + time::Duration::minutes(10), "{wait}");
+
+    // A rerun inside the window does not claim (and does not call GitHub).
+    let second = flow.publish_remote_record(id, remote_opts()).await;
+    assert_eq!(second.status, PublishRemoteStatus::NothingToClaim);
+    assert_eq!(
+        target.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "no request inside the rate-limit window"
+    );
+
+    // Once the window has passed the record publishes.
+    sqlx::query("UPDATE publish_records SET next_attempt_at = ? WHERE id = ?")
+        .bind(OffsetDateTime::now_utc() - time::Duration::seconds(1))
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let third = flow.publish_remote_record(id, remote_opts()).await;
+    assert_eq!(third.status, PublishRemoteStatus::PublishedRemote);
+}
+
+/// A reset far in the future is clamped to one hour: the record keeps owning
+/// its articles, so it must not be parked for longer.
+#[tokio::test]
+async fn publish_remote_rate_limit_wait_is_clamped_to_one_hour() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+    let target = Arc::new(RateLimitedOnce {
+        reset_at: OffsetDateTime::now_utc() + time::Duration::days(30),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let flow = flow(pool.clone(), Some(target));
+
+    flow.publish_remote_record(id, remote_opts()).await;
+
+    let wait: Option<OffsetDateTime> =
+        sqlx::query_scalar("SELECT next_attempt_at FROM publish_records WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let wait = wait.unwrap();
+    assert!(
+        wait <= OffsetDateTime::now_utc() + time::Duration::hours(1),
+        "{wait}"
+    );
+}
+
+// === P-B6: persisted diagnostics never carry server-echoed text ===
+
+#[tokio::test]
+async fn github_failure_persists_only_sanitized_reason_and_valid_request_id() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    const TOKEN: &str = "runtime-diagnostics-test-token";
+    const MARKER: &str = "ECHOED-REPORT-MARKER-91c2";
+
+    let (_dir, pool) = make_test_pool().await;
+    let record_id = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .insert_header("x-github-request-id", "828A:4A44E:40DA1B1:CEE6757:6B01CE59")
+                .set_body_json(serde_json::json!({
+                    "message": format!("Bad request: {MARKER} for {TOKEN}")
+                })),
+        )
+        .mount(&server)
+        .await;
+    let target = rss_ai_news_publish::GitHubTarget::with_base_uri(
+        rss_ai_news_publish::GitHubTargetConfig {
+            token: rss_ai_news_domain::SecretString::from(TOKEN),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            branch: "main".to_string(),
+            path_prefix: "reports".to_string(),
+            commit_message_prefix: "auto: publish".to_string(),
+        },
+        &server.uri(),
+    )
+    .unwrap();
+    let flow = flow(pool.clone(), Some(Arc::new(target)));
+
+    let outcome = flow.publish_remote_record(record_id, remote_opts()).await;
+
+    assert!(matches!(outcome.status, PublishRemoteStatus::Failed { .. }));
+    let last_error: String =
+        sqlx::query_scalar("SELECT last_error FROM publish_records WHERE id = ?")
+            .bind(record_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let events: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT message, context_json FROM run_events WHERE event_kind = 'publish_failed'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    let persisted = format!("{last_error} {events:?}");
+    assert!(last_error.contains("GET contents"), "{last_error}");
+    assert!(last_error.contains("bad request"), "{last_error}");
+    assert!(
+        last_error.contains("828A:4A44E:40DA1B1:CEE6757:6B01CE59"),
+        "{last_error}"
+    );
+    assert!(!persisted.contains(MARKER), "{persisted}");
+    assert!(!persisted.contains(TOKEN), "{persisted}");
+    // R1-P-S1: the event carries the request context as fields.
+    let payload: serde_json::Value =
+        serde_json::from_str(events[0].1.as_deref().expect("event payload")).unwrap();
+    assert_eq!(payload["operation"], "GET contents");
+    assert_eq!(payload["http_status"], 400);
+    assert_eq!(payload["request_id"], "828A:4A44E:40DA1B1:CEE6757:6B01CE59");
+}
+
+// === P-B2: a write cut off by the deadline is verified before release ===
+
+/// The write never answers within the lease (its response is lost), but the
+/// destination already holds the content when asked read-only afterwards.
+struct LandedButUnansweredTarget {
+    landed: bool,
+}
+
+#[async_trait]
+impl PublishTarget for LandedButUnansweredTarget {
+    async fn publish(&self, _report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        std::future::pending().await
+    }
+
+    async fn find_published(
+        &self,
+        reports: &[RenderedReport],
+    ) -> Result<Option<PublishedBatchArtifact>, PublishError> {
+        Ok(self.landed.then(|| PublishedBatchArtifact {
+            commit_sha: Some("landed-head".to_string()),
+            artifacts: reports
+                .iter()
+                .map(|report| PublishedArtifact {
+                    local_path: None,
+                    commit_sha: Some("landed-head".to_string()),
+                    remote_target: Some(format!(
+                        "github://owner/repo/main/{}",
+                        report.relative_path
+                    )),
+                })
+                .collect(),
+        }))
+    }
+}
+
+/// One attempt per stage, one-second lease: without the post-timeout check
+/// the last attempt would fail the record although the write landed.
+fn last_attempt_flow(pool: SqlitePool, landed: bool) -> PublishFlow {
+    let mut app = app_config(RetentionPolicy::Always, 1);
+    app.lease.publish_duration_seconds = 1;
+    app.retry.publish_max_attempts = 1;
+    PublishFlow::new(Arc::new(publish_deps(
+        pool,
+        Arc::new(app),
+        Arc::new(LocalFsTarget::new(std::env::temp_dir())),
+        Some(Arc::new(LandedButUnansweredTarget { landed })),
+    )))
+}
+
+#[tokio::test]
+async fn publish_remote_timeout_on_last_attempt_records_success_when_head_holds_the_report() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        last_attempt_flow(pool.clone(), true).publish_remote_record(id, remote_opts()),
+    )
+    .await
+    .expect("verification stays inside the lease");
+
+    assert_eq!(outcome.status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(outcome.commit_sha.as_deref(), Some("landed-head"));
+    assert_record_state(&pool, id, "published_remote").await;
+    assert_referenced_articles_state(&pool, id, "published").await;
+}
+
+#[tokio::test]
+async fn publish_remote_timeout_without_the_report_at_head_keeps_the_timeout() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        last_attempt_flow(pool.clone(), false).publish_remote_record(id, remote_opts()),
+    )
+    .await
+    .expect("verification stays inside the lease");
+
+    assert!(
+        matches!(outcome.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "remote_timeout")
+    );
+    // Last attempt of the stage: the fold makes the unverified record failed.
+    assert_record_state(&pool, id, "failed").await;
+    assert_last_error_kind(&pool, id, "remote_timeout").await;
+}
+
+#[tokio::test]
+async fn publish_remote_batch_timeout_records_success_when_head_holds_the_batch() {
+    let (_dir, pool) = make_test_pool().await;
+    let first = seed_stored_local_publish_record(&pool).await;
+    let second = seed_stored_local_publish_record(&pool).await;
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        last_attempt_flow(pool.clone(), true).publish_remote_batch(PublishRemoteBatchOptions {
+            items: vec![
+                batch_item(first, "AI", "Daily AI"),
+                batch_item(second, "ML", "Daily ML"),
+            ],
+        }),
+    )
+    .await
+    .expect("verification stays inside the lease");
+
+    assert_eq!(outcome.commit_sha.as_deref(), Some("landed-head"));
+    for item in outcome.items {
+        assert_eq!(item.status, PublishRemoteStatus::PublishedRemote);
+        assert_record_state(&pool, item.publish_record_id, "published_remote").await;
+    }
+}
+
+// === P-B1: legacy duplicate ownership is stopped before any external write ===
+
+/// Puts `from`'s first article into `into`'s snapshot too, the state a
+/// pre-0008 database can hold (two dates' snapshots sharing one article).
+async fn share_first_article(pool: &SqlitePool, from: i64, into: i64) -> i64 {
+    let article_id: i64 = sqlx::query_scalar(
+        "SELECT article_id FROM publish_items WHERE publish_record_id = ? ORDER BY position LIMIT 1",
+    )
+    .bind(from)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO publish_items (publish_record_id, position, article_id, frozen_title, \
+         frozen_summary, frozen_tags_json, frozen_canonical_link, frozen_source_display_name) \
+         VALUES (?, 2, ?, 'Shared', 's', '[]', 'https://example.com/shared', 'Source')",
+    )
+    .bind(into)
+    .bind(article_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    article_id
+}
+
+async fn record_counters(pool: &SqlitePool, id: i64) -> (i64, i64, Option<String>) {
+    sqlx::query_as(
+        "SELECT attempt_count, stage_attempt_count, lease_owner FROM publish_records WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn publish_remote_stops_the_higher_record_sharing_an_article_before_sending() {
+    let (_dir, pool) = make_test_pool().await;
+    let keeper = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let loser = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let shared = share_first_article(&pool, keeper, loser).await;
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow.publish_remote_record(loser, remote_opts()).await;
+
+    assert_eq!(
+        outcome.status,
+        PublishRemoteStatus::ArticleConflict { article_id: shared }
+    );
+    assert_eq!(target.sent(), 0, "the losing record must not be sent");
+    assert_record_state(&pool, loser, "stored_local").await;
+    assert_last_error_kind(&pool, loser, "article_owned_by_active_snapshot").await;
+    let last_error: String =
+        sqlx::query_scalar("SELECT last_error FROM publish_records WHERE id = ?")
+            .bind(loser)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        last_error.contains(&format!("publish record {keeper}")),
+        "{last_error}"
+    );
+    assert_eq!(
+        record_counters(&pool, loser).await,
+        (0, 0, None),
+        "lease released and claim refunded"
+    );
+
+    // The lower record keeps the article and publishes normally.
+    let kept = flow.publish_remote_record(keeper, remote_opts()).await;
+    assert_eq!(kept.status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(target.sent(), 1);
+}
+
+/// A published owner wins even with the higher id: its articles are already
+/// `published`, so the lower record could only write and then fail.
+#[tokio::test]
+async fn publish_remote_stops_a_lower_record_whose_article_a_published_record_holds() {
+    let (_dir, pool) = make_test_pool().await;
+    let lower = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let published = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let shared = share_first_article(&pool, published, lower).await;
+    sqlx::query("UPDATE publish_records SET state = 'published_remote' WHERE id = ?")
+        .bind(published)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow.publish_remote_record(lower, remote_opts()).await;
+
+    assert_eq!(
+        outcome.status,
+        PublishRemoteStatus::ArticleConflict { article_id: shared }
+    );
+    assert_eq!(target.sent(), 0);
+    assert_record_state(&pool, lower, "stored_local").await;
+}
+
+#[tokio::test]
+async fn publish_remote_batch_drops_only_the_record_losing_a_shared_article() {
+    let (_dir, pool) = make_test_pool().await;
+    let keeper = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let loser = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    share_first_article(&pool, keeper, loser).await;
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow
+        .publish_remote_batch(PublishRemoteBatchOptions {
+            items: vec![
+                batch_item(keeper, "AI", "Daily AI"),
+                batch_item(loser, "ML", "Daily ML"),
+            ],
+        })
+        .await;
+
+    let status_of = |id: i64| {
+        outcome
+            .items
+            .iter()
+            .find(|item| item.publish_record_id == id)
+            .map(|item| item.status.clone())
+            .unwrap()
+    };
+    assert_eq!(status_of(keeper), PublishRemoteStatus::PublishedRemote);
+    assert!(matches!(
+        status_of(loser),
+        PublishRemoteStatus::ArticleConflict { .. }
+    ));
+    assert_eq!(target.sent(), 1, "only the keeper's report is sent");
+    assert_record_state(&pool, keeper, "published_remote").await;
+    assert_record_state(&pool, loser, "stored_local").await;
+}
+
+/// Once the keeper fails, its ownership is released and the other record may
+/// publish.
+#[tokio::test]
+async fn publish_remote_sends_the_other_record_after_the_keeper_failed() {
+    let (_dir, pool) = make_test_pool().await;
+    let keeper = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let other = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    share_first_article(&pool, keeper, other).await;
+    sqlx::query("UPDATE publish_records SET state = 'failed' WHERE id = ?")
+        .bind(keeper)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow.publish_remote_record(other, remote_opts()).await;
+
+    assert_eq!(outcome.status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(target.sent(), 1);
 }

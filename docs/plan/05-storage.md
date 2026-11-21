@@ -265,7 +265,7 @@ schema 变更只能新增迁移，且 SQLite / PostgreSQL 两个方言同时提�
 | 0005 | `0005_artifact_reference_indexes` | raw artifact 引用列索引（artifact 过期时的反查） |
 | 0006 | `0006_decision_results` | decision_policies / decision_results（typed-decision shadow，[ADR 0011](../adr/0011-decision-run-shadow-runner.md)） |
 | 0007 | `0007_feed_entry_retry_cooldown` | `feed_entries.next_attempt_at`：extract retryable 失败的冷却截止点（[02-extract §5.3](./02-extract.md)） |
-| 0008 | `0008_publish_stage_budget_and_item_article_index` | `publish_records.stage_attempt_count`（按阶段计的发布重试预算，存量行为 0）+ `idx_publish_items_article`（快照归属查询）；[ADR 0012](../adr/0012-per-stage-publish-budget-and-snapshot-ownership.md) |
+| 0008 | `0008_publish_stage_budget_and_item_article_index` | `publish_records.stage_attempt_count`（按阶段计的发布重试预算，存量行为 0）+ `idx_publish_items_article`（快照归属查询）+ `publish_records.next_attempt_at`（限流后的最早重试时刻，claim 遵守，R1-P-S12）；[ADR 0012](../adr/0012-per-stage-publish-budget-and-snapshot-ownership.md) |
 
 ### 7.2 migrate 子命令
 

@@ -19,11 +19,11 @@ use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use tokio::time::Instant;
 
-use super::PublishFlow;
 use super::dto::{
     PublishRemoteBatchOptions, PublishRemoteBatchOutcome, PublishRemoteOptions,
     PublishRemoteOutcome, PublishRemoteStatus,
 };
+use super::{OwnershipGuard, PublishFlow};
 use super::{render_templates_from_ctx, rendered_timestamp};
 use crate::events::RunEventEmitter;
 
@@ -39,6 +39,67 @@ struct PreparedRemote {
 fn remote_deadline(lease_seconds: u64) -> Instant {
     let lease = StdDuration::from_secs(lease_seconds);
     Instant::now() + (lease - lease / 5)
+}
+
+/// P-B2: a remote call cut off by [`remote_deadline`] may already have
+/// written. Half of the reserved 20% of the lease is given to a read-only
+/// HEAD check; the other half stays for the database release. The
+/// owner-guarded advance still refuses a record whose lease was lost.
+fn verify_deadline(deadline: Instant, lease_seconds: u64) -> Instant {
+    deadline + StdDuration::from_secs(lease_seconds) / 10
+}
+
+/// Read-only receipt lookup after a remote timeout; `None` = not verified
+/// (not there, check failed or ran out of time), so the timeout stands.
+async fn verify_after_timeout(
+    target: &dyn PublishTarget,
+    reports: &[RenderedReport],
+    until: Instant,
+) -> Option<rss_ai_news_publish::PublishedBatchArtifact> {
+    if Instant::now() >= until {
+        return None;
+    }
+    match tokio::time::timeout_at(until, target.find_published(reports)).await {
+        Ok(Ok(Some(batch))) if batch.artifacts.len() == reports.len() => {
+            tracing::info!(
+                reports = reports.len(),
+                commit_sha = batch.commit_sha.as_deref(),
+                "remote publish timed out but the destination already holds every report"
+            );
+            Some(batch)
+        }
+        Ok(Ok(_)) => None,
+        Ok(Err(error)) => {
+            tracing::warn!(
+                ?error,
+                "post-timeout HEAD check failed; keeping the timeout"
+            );
+            None
+        }
+        Err(_) => {
+            tracing::warn!("post-timeout HEAD check ran out of time; keeping the timeout");
+            None
+        }
+    }
+}
+
+/// Longest wait a rate limit may impose on the next claim. GitHub's primary
+/// quota resets within the hour; a larger (or hostile) reset time must not
+/// park a record — which keeps owning its snapshot's articles — for longer.
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::hours(1);
+
+/// R1-P-S12: GitHub asks to wait until `reset_at` (Retry-After or quota
+/// reset) before trying again; persisted so the next claim honours it.
+/// Clamped to `[now, now + MAX_RATE_LIMIT_WAIT]`; `None` for other errors.
+fn rate_limit_retry_not_before(
+    error: &PublishError,
+    now: OffsetDateTime,
+) -> Option<OffsetDateTime> {
+    let PublishError::GitHubRateLimit { reset_at, .. } = error else {
+        return None;
+    };
+    let latest = now.checked_add(MAX_RATE_LIMIT_WAIT).unwrap_or(now);
+    Some((*reset_at).clamp(now, latest))
 }
 
 enum RemotePreparationError {
@@ -249,6 +310,19 @@ impl PublishFlow {
             };
         }
 
+        if let Some(status) = self
+            .remote_ownership_status(claimed.id, &owner, "publish_remote", &emitter)
+            .await
+        {
+            return PublishRemoteOutcome {
+                publish_record_id: claimed.id,
+                status,
+                commit_sha: None,
+                remote_target: None,
+                item_count: 0,
+            };
+        }
+
         let render_config = RenderConfig {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
@@ -286,9 +360,18 @@ impl PublishFlow {
         let result = if Instant::now() >= deadline {
             Err(PublishError::RemoteTimeout)
         } else {
-            tokio::time::timeout_at(deadline, target.publish(&report))
+            match tokio::time::timeout_at(deadline, target.publish(&report)).await {
+                Ok(result) => result,
+                // The cancelled call may already have written.
+                Err(_) => verify_after_timeout(
+                    target.as_ref(),
+                    std::slice::from_ref(&report),
+                    verify_deadline(deadline, self.ctx.lease.publish_duration_seconds),
+                )
                 .await
-                .unwrap_or(Err(PublishError::RemoteTimeout))
+                .map(|mut batch| batch.artifacts.remove(0))
+                .ok_or(PublishError::RemoteTimeout),
+            }
         };
         let now = OffsetDateTime::now_utc();
         let artifact = match result {
@@ -519,6 +602,21 @@ impl PublishFlow {
                 continue;
             }
 
+            // Only the losing record leaves the batch; the rest still commit.
+            if let Some(status) = self
+                .remote_ownership_status(claimed.id, &owner, "publish_remote_batch", &emitter)
+                .await
+            {
+                outcomes.push(PublishRemoteOutcome {
+                    publish_record_id: claimed.id,
+                    status,
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count: 0,
+                });
+                continue;
+            }
+
             let render_config = RenderConfig {
                 category_display_name: item.category_display_name,
                 report_title: item.report_title,
@@ -571,22 +669,30 @@ impl PublishFlow {
         let result = if Instant::now() >= deadline {
             Err(PublishError::RemoteTimeout)
         } else {
-            tokio::time::timeout_at(deadline, target.publish_many(&reports))
+            match tokio::time::timeout_at(deadline, target.publish_many(&reports)).await {
+                Ok(result) => result,
+                // The cancelled call may already have written.
+                Err(_) => verify_after_timeout(
+                    target.as_ref(),
+                    &reports,
+                    verify_deadline(deadline, self.ctx.lease.publish_duration_seconds),
+                )
                 .await
-                .unwrap_or(Err(PublishError::RemoteTimeout))
+                .ok_or(PublishError::RemoteTimeout),
+            }
         };
         let now = OffsetDateTime::now_utc();
         let batch = match result {
             Ok(batch) if batch.artifacts.len() == prepared.len() => batch,
             Ok(batch) => {
-                let error = PublishError::GitHubApiError {
-                    status: 502,
-                    message: format!(
+                let error = PublishError::api(
+                    502,
+                    format!(
                         "publish_many returned {} artifacts for {} reports",
                         batch.artifacts.len(),
                         prepared.len()
                     ),
-                };
+                );
                 self.release_publish_error_for_prepared(&prepared, &owner, &error, &emitter)
                     .await;
                 for item in prepared {
@@ -692,6 +798,35 @@ impl PublishFlow {
         }
     }
 
+    /// Pre-write ownership guard for a claimed `stored_local` record (P-B1);
+    /// `None` = clear to send.
+    async fn remote_ownership_status(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        phase: &'static str,
+        emitter: &RunEventEmitter<'_>,
+    ) -> Option<PublishRemoteStatus> {
+        match self
+            .guard_snapshot_ownership(
+                publish_record_id,
+                owner,
+                PublishState::StoredLocal,
+                phase,
+                emitter,
+            )
+            .await
+        {
+            OwnershipGuard::Clear => None,
+            OwnershipGuard::Conflict { article_id } => {
+                Some(PublishRemoteStatus::ArticleConflict { article_id })
+            }
+            OwnershipGuard::Failed { error_kind } => {
+                Some(PublishRemoteStatus::Failed { error_kind })
+            }
+        }
+    }
+
     async fn release_publish_error_for_prepared(
         &self,
         prepared: &[PreparedRemote],
@@ -721,16 +856,18 @@ impl PublishFlow {
     ) {
         let now = OffsetDateTime::now_utc();
         let message = error.display_user();
+        let retry_not_before = rate_limit_retry_not_before(error, now);
         let mut budget_exhausted = false;
         let release_result = if error.is_retryable() {
             self.ctx
                 .publish_record_repo
-                .release_retryable_failure(
+                .release_retryable_failure_until(
                     publish_record_id,
                     owner,
                     &message,
                     error.error_kind(),
                     self.ctx.retry.publish_max_attempts,
+                    retry_not_before,
                     now,
                 )
                 .await
@@ -770,6 +907,13 @@ impl PublishFlow {
                     "phase": phase,
                     "error_kind": error.error_kind(),
                     "budget_exhausted": budget_exhausted,
+                    // R1-P-S1: where a GitHub failure happened, as fields.
+                    "operation": error.github_context().and_then(|context| context.operation),
+                    "http_status": error.github_context().and_then(|context| context.http_status),
+                    "request_id": error
+                        .github_context()
+                        .and_then(|context| context.request_id.as_deref()),
+                    "retry_not_before": retry_not_before.map(|at| at.to_string()),
                 })),
             )
             .await;
@@ -883,6 +1027,12 @@ mod deadline_tests {
                 std::thread::sleep(self.0.saturating_duration_since(Instant::now()));
             }
             Ok(vec![])
+        }
+        async fn find_snapshot_ownership_conflict(
+            &self,
+            _: i64,
+        ) -> Result<Option<SnapshotOwnershipConflict>, StorageError> {
+            unreachable!()
         }
     }
     struct NoopEvents;

@@ -94,6 +94,7 @@ RETURNING id
 
 /// SQLite claim：子查询无 `FOR UPDATE`（语法不支持，整库写锁兜底）。
 /// lease 过期按时刻比较（见上方 julianday 说明）：`$2` 向上、`$5` 向下取整到毫秒。
+/// `next_attempt_at`（限流后的最早重试时刻，R1-P-S12）同样按时刻比较，未到不领取。
 const CLAIM_PUBLISH_SQLITE_SQL: &str = r#"
 UPDATE publish_records
 SET lease_owner = $1, lease_expires_at = $2,
@@ -104,6 +105,8 @@ WHERE id IN (
     WHERE state = $4
       AND (lease_expires_at IS NULL
            OR COALESCE(julianday(lease_expires_at) < julianday($5), lease_expires_at < $5))
+      AND (next_attempt_at IS NULL
+           OR COALESCE(julianday(next_attempt_at) <= julianday($5), next_attempt_at <= $5))
       AND stage_attempt_count < $6
     ORDER BY id ASC
     LIMIT $7
@@ -125,6 +128,7 @@ WHERE id IN (
     SELECT id FROM publish_records
     WHERE state = $4
       AND (lease_expires_at IS NULL OR lease_expires_at < $5)
+      AND (next_attempt_at IS NULL OR next_attempt_at <= $5)
       AND stage_attempt_count < $6
     ORDER BY id ASC
     LIMIT $7
@@ -135,18 +139,106 @@ RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           attempt_count, rendered_at
 "#;
 
-pub(super) const ADVANCE_SNAPSHOT_SQL: &str = "UPDATE publish_records SET state = $1, snapshot_frozen_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
-pub(super) const ADVANCE_RENDERED_SQL: &str = "UPDATE publish_records SET state = $1, rendered_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
-pub(super) const ADVANCE_LOCAL_SQL: &str = "UPDATE publish_records SET state = $1, local_stored_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
-pub(super) const ADVANCE_REMOTE_SQL: &str = "UPDATE publish_records SET state = $1, remote_published_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
+/// Pending claim limited to one category (R1-P-S15): the freeze selects
+/// candidates for the caller's category, so it must not claim another
+/// category's record. Same filters as [`CLAIM_PUBLISH_SQLITE_SQL`] (`$4` is
+/// always `'pending'`), plus `category_key = $8`.
+const CLAIM_PENDING_IN_CATEGORY_SQLITE_SQL: &str = r#"
+UPDATE publish_records
+SET lease_owner = $1, lease_expires_at = $2,
+    attempt_count = attempt_count + 1,
+    stage_attempt_count = stage_attempt_count + 1, updated_at = $3
+WHERE id IN (
+    SELECT id FROM publish_records
+    WHERE state = $4
+      AND category_key = $8
+      AND (lease_expires_at IS NULL
+           OR COALESCE(julianday(lease_expires_at) < julianday($5), lease_expires_at < $5))
+      AND (next_attempt_at IS NULL
+           OR COALESCE(julianday(next_attempt_at) <= julianday($5), next_attempt_at <= $5))
+      AND stage_attempt_count < $6
+    ORDER BY id ASC
+    LIMIT $7
+)
+RETURNING id, idempotency_key, category_key, report_date, target_timezone,
+          render_version, selection_policy_version, state, remote_target,
+          attempt_count, rendered_at
+"#;
+
+/// PG variant of [`CLAIM_PENDING_IN_CATEGORY_SQLITE_SQL`].
+const CLAIM_PENDING_IN_CATEGORY_PG_SQL: &str = r#"
+UPDATE publish_records
+SET lease_owner = $1, lease_expires_at = $2,
+    attempt_count = attempt_count + 1,
+    stage_attempt_count = stage_attempt_count + 1, updated_at = $3
+WHERE id IN (
+    SELECT id FROM publish_records
+    WHERE state = $4
+      AND category_key = $8
+      AND (lease_expires_at IS NULL OR lease_expires_at < $5)
+      AND (next_attempt_at IS NULL OR next_attempt_at <= $5)
+      AND stage_attempt_count < $6
+    ORDER BY id ASC
+    LIMIT $7
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, idempotency_key, category_key, report_date, target_timezone,
+          render_version, selection_policy_version, state, remote_target,
+          attempt_count, rendered_at
+"#;
+
+pub(super) async fn claim_pending_in_category_sqlite(
+    pool: &SqlitePool,
+    request: &ClaimRequest,
+    category_key: &str,
+) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+    sqlx::query_as::<_, ClaimedPublishRecord>(CLAIM_PENDING_IN_CATEGORY_SQLITE_SQL)
+        .bind(&request.owner)
+        .bind(sqlite_stored_deadline(request.lease_expires_at))
+        .bind(request.now)
+        .bind("pending")
+        .bind(sqlite_lease_cutoff(request.now))
+        .bind(i64::from(request.max_attempts))
+        .bind(i64::from(request.batch_size))
+        .bind(category_key)
+        .fetch_all(pool)
+        .await
+        .map_err(StorageError::from)
+}
+
+pub(super) async fn claim_pending_in_category_pg(
+    pool: &PgPool,
+    request: &ClaimRequest,
+    category_key: &str,
+) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+    sqlx::query_as::<_, ClaimedPublishRecord>(CLAIM_PENDING_IN_CATEGORY_PG_SQL)
+        .bind(&request.owner)
+        .bind(request.lease_expires_at)
+        .bind(request.now)
+        .bind("pending")
+        .bind(request.now)
+        .bind(i64::from(request.max_attempts))
+        .bind(i64::from(request.batch_size))
+        .bind(category_key)
+        .fetch_all(pool)
+        .await
+        .map_err(StorageError::from)
+}
+
+pub(super) const ADVANCE_SNAPSHOT_SQL: &str = "UPDATE publish_records SET state = $1, snapshot_frozen_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
+pub(super) const ADVANCE_RENDERED_SQL: &str = "UPDATE publish_records SET state = $1, rendered_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
+pub(super) const ADVANCE_LOCAL_SQL: &str = "UPDATE publish_records SET state = $1, local_stored_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
+pub(super) const ADVANCE_REMOTE_SQL: &str = "UPDATE publish_records SET state = $1, remote_published_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
 /// W15 §3 折叠：retryable 失败按预算决定维持原阶段态（清 lease 后等下轮
 /// claim）/ 转终态 `failed`，规则收口在 SQL。`RETURNING state` 供调用方判定
 /// 走向。预算按阶段计（`stage_attempt_count`，ADR 0012）：claim 自增、阶段推进清零。
+/// `$7` = 最早重试时刻（限流时为 Retry-After / reset，否则 NULL；R1-P-S12），claim 在此之前不领取。
 pub(super) const RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL: &str = r#"
 UPDATE publish_records
 SET state = CASE WHEN stage_attempt_count >= $1 THEN 'failed' ELSE state END,
     lease_owner = NULL, lease_expires_at = NULL,
-    last_error = $2, last_error_kind = $3, updated_at = $4
+    last_error = $2, last_error_kind = $3, updated_at = $4,
+    next_attempt_at = $7
 WHERE id = $5 AND lease_owner = $6
 RETURNING state
 "#;
@@ -162,6 +254,11 @@ pub(super) const RELEASE_EMPTY_SNAPSHOT_SQL: &str = "UPDATE publish_records SET 
 /// race is not a publish attempt, so it must not exhaust the stage budget.
 /// The next run re-selects without the contested article.
 pub(super) const RELEASE_FREEZE_CONFLICT_SQL: &str = "UPDATE publish_records SET lease_owner = NULL, lease_expires_at = NULL, attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, stage_attempt_count = CASE WHEN stage_attempt_count > 0 THEN stage_attempt_count - 1 ELSE 0 END, last_error = $1, last_error_kind = $2, updated_at = $3 WHERE id = $4 AND lease_owner = $5 AND state = 'pending'";
+/// A claimed record whose snapshot shares an article with a winning snapshot
+/// (P-B1): release the lease in the current stage, refund the claim on both
+/// counters (no write happened, so it is not an attempt) and record why. The
+/// state is kept so the record can continue if the winner later fails.
+pub(super) const RELEASE_OWNERSHIP_CONFLICT_SQL: &str = "UPDATE publish_records SET lease_owner = NULL, lease_expires_at = NULL, attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, stage_attempt_count = CASE WHEN stage_attempt_count > 0 THEN stage_attempt_count - 1 ELSE 0 END, last_error = $1, last_error_kind = $2, updated_at = $3 WHERE id = $4 AND lease_owner = $5 AND state = $6";
 pub(super) const RECLAIM_PUBLISH_LEASES_SQL: &str = r#"
 UPDATE publish_records
 SET lease_owner = NULL, lease_expires_at = NULL, updated_at = $1

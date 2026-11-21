@@ -29,6 +29,18 @@ pub trait PublishTarget: Send + Sync {
         None
     }
 
+    /// Read-only receipt lookup after an attempt whose outcome is unknown
+    /// (the write was cancelled by the deadline, or its response was lost):
+    /// `Some` with one artifact per report, in order, iff the destination
+    /// already holds every report byte for byte; `None` = not there, or the
+    /// target cannot tell (the default). Never writes.
+    async fn find_published(
+        &self,
+        _reports: &[RenderedReport],
+    ) -> Result<Option<PublishedBatchArtifact>, PublishError> {
+        Ok(None)
+    }
+
     async fn publish_many(
         &self,
         reports: &[RenderedReport],

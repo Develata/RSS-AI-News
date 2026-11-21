@@ -9,3 +9,9 @@ ALTER TABLE publish_records ADD COLUMN stage_attempt_count BIGINT NOT NULL DEFAU
 -- Snapshot ownership lookups (ADR 0012): candidate selection and the freeze
 -- re-check ask whether an article is already in another active snapshot.
 CREATE INDEX idx_publish_items_article ON publish_items (article_id);
+
+-- Earliest retry time after a GitHub rate limit (Retry-After / quota reset,
+-- R1-P-S12). The claim skips a record until then; a retryable release writes
+-- it (NULL unless rate limited) and every stage advance clears it. NULL = no
+-- wait. Existing rows: NULL.
+ALTER TABLE publish_records ADD COLUMN next_attempt_at TIMESTAMPTZ NULL;

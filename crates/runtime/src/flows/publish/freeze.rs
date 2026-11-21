@@ -76,9 +76,11 @@ impl PublishFlow {
                 .claim_publish_by_ids(&claim, PublishState::Pending, &[publish_record_id])
                 .await
         } else {
+            // Selection below is for `opts.category_key`; claiming another
+            // category's record would freeze these articles into it (R1-P-S15).
             self.ctx
                 .publish_record_repo
-                .claim_pending_for_freeze(&claim)
+                .claim_pending_for_freeze_in_category(&claim, &opts.category_key)
                 .await
         };
         let claimed = match claimed_result {
@@ -114,6 +116,48 @@ impl PublishFlow {
                 };
             }
         };
+
+        if claimed.category_key != opts.category_key {
+            // By-id entry given options of another category (R1-P-S15):
+            // nothing was selected or written; refund the claim and refuse.
+            let message = format!(
+                "publish record {} belongs to category {:?}, not {:?}",
+                claimed.id, claimed.category_key, opts.category_key
+            );
+            let released = self
+                .ctx
+                .publish_record_repo
+                .release_freeze_conflict(claimed.id, &owner, &message, "category_mismatch", now)
+                .await;
+            if let Err(error) = &released {
+                tracing::warn!(
+                    publish_record_id = claimed.id,
+                    ?error,
+                    "category mismatch release failed; lease recovery remains available"
+                );
+            }
+            emitter
+                .emit(
+                    "publish_failed",
+                    "error",
+                    Some("publish_record"),
+                    Some(claimed.id),
+                    &message,
+                    Some(json!({
+                        "phase": PHASE,
+                        "error_kind": "category_mismatch",
+                        "released": matches!(released, Ok(true)),
+                    })),
+                )
+                .await;
+            return PublishFreezeOutcome {
+                publish_record_id: claimed.id,
+                status: PublishFreezeStatus::Failed {
+                    error_kind: "category_mismatch".to_string(),
+                },
+                item_count: 0,
+            };
+        }
 
         let request = PublishRequest {
             category_key: opts.category_key.clone(),
@@ -299,7 +343,7 @@ impl PublishFlow {
                     &owner,
                     article_id,
                     &message,
-                    "article_owned_by_active_snapshot",
+                    super::OWNERSHIP_CONFLICT_KIND,
                     &emitter,
                 )
                 .await

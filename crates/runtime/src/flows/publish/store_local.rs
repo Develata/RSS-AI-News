@@ -9,9 +9,8 @@ use rss_ai_news_storage::{
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 
-use super::PublishFlow;
 use super::dto::{PublishStoreLocalOptions, PublishStoreLocalOutcome, PublishStoreLocalStatus};
-use super::{render_templates_from_ctx, rendered_timestamp};
+use super::{OwnershipGuard, PublishFlow, render_templates_from_ctx, rendered_timestamp};
 use crate::events::RunEventEmitter;
 
 const PHASE: &str = "store_local";
@@ -93,6 +92,29 @@ impl PublishFlow {
                 };
             }
         };
+
+        match self
+            .guard_snapshot_ownership(claimed.id, &owner, PublishState::Rendered, PHASE, &emitter)
+            .await
+        {
+            OwnershipGuard::Clear => {}
+            OwnershipGuard::Conflict { article_id } => {
+                return PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::ArticleConflict { article_id },
+                    local_path: None,
+                    item_count: 0,
+                };
+            }
+            OwnershipGuard::Failed { error_kind } => {
+                return PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::Failed { error_kind },
+                    local_path: None,
+                    item_count: 0,
+                };
+            }
+        }
 
         let render_config = RenderConfig {
             category_display_name: opts.category_display_name,

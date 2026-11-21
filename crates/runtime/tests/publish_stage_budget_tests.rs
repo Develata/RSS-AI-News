@@ -41,9 +41,7 @@ impl PublishTarget for FlakyRemote {
             })
             .is_ok()
         {
-            return Err(PublishError::GitHubRateLimit {
-                reset_at: OffsetDateTime::now_utc(),
-            });
+            return Err(PublishError::rate_limit(OffsetDateTime::now_utc()));
         }
         Ok(PublishedArtifact {
             local_path: None,

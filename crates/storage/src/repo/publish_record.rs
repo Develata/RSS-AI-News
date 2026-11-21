@@ -123,6 +123,13 @@ pub trait PublishRecordRepository: Send + Sync {
         &self,
         request: &ClaimRequest,
     ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
+    /// [`Self::claim_pending_for_freeze`] limited to records of
+    /// `category_key` (R1-P-S15).
+    async fn claim_pending_for_freeze_in_category(
+        &self,
+        request: &ClaimRequest,
+        category_key: &str,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
     async fn claim_frozen_for_render(
         &self,
         request: &ClaimRequest,
@@ -166,6 +173,23 @@ pub trait PublishRecordRepository: Send + Sync {
         kind: &str,
         max_attempts: u32,
         now: OffsetDateTime,
+    ) -> Result<ReleaseFailureOutcome, StorageError> {
+        self.release_retryable_failure_until(id, owner, error, kind, max_attempts, None, now)
+            .await
+    }
+    /// [`Self::release_retryable_failure`] that also persists the earliest
+    /// time the record may be claimed again (`next_attempt_at`, R1-P-S12):
+    /// `Some` after a rate limit, `None` clears any earlier wait.
+    #[allow(clippy::too_many_arguments)]
+    async fn release_retryable_failure_until(
+        &self,
+        id: i64,
+        owner: &str,
+        error: &str,
+        kind: &str,
+        max_attempts: u32,
+        retry_not_before: Option<OffsetDateTime>,
+        now: OffsetDateTime,
     ) -> Result<ReleaseFailureOutcome, StorageError>;
     /// Releases a `pending` record whose freeze found no candidates back to
     /// claimable `pending`, refunding the claim's attempt. Returns `false` when
@@ -183,6 +207,18 @@ pub trait PublishRecordRepository: Send + Sync {
         &self,
         id: i64,
         owner: &str,
+        error: &str,
+        kind: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+    /// Releases a record claimed in `state` whose snapshot shares an article
+    /// with a winning snapshot (P-B1): lease cleared, claim refunded, state
+    /// kept, `last_error*` set. Returns `false` when the lease was lost.
+    async fn release_ownership_conflict(
+        &self,
+        id: i64,
+        owner: &str,
+        state: PublishState,
         error: &str,
         kind: &str,
         now: OffsetDateTime,

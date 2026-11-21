@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -45,7 +46,20 @@ impl PublishTarget for LocalFsTarget {
         let dest = dir.join(file_name);
         reject_escaping_symlink(&root, &dest, &report.relative_path).await?;
 
-        let temp = write_temp(&dir, file_name, report.markdown_content.as_bytes()).await?;
+        // R1-P-S9: replacing a report keeps its permissions. Its temp file is
+        // created 0600 (never readable beyond the owner while being written)
+        // and given the old file's permissions just before the rename. A new
+        // report keeps the default create mode (0666 minus the umask), which
+        // is also what its temp file gets: std offers no way to read the
+        // umask, and the final file is that permissive anyway.
+        let existing = existing_permissions(&dest).await?;
+        let temp = write_temp(&dir, report.markdown_content.as_bytes(), existing.is_some()).await?;
+        if let Some(permissions) = existing
+            && let Err(error) = fs::set_permissions(&temp, permissions).await
+        {
+            remove_temp(&temp).await;
+            return Err(error.into());
+        }
         commit_temp(&temp, &dest, &dir).await?;
 
         // Reported path keeps the configured (non-canonical) spelling.
@@ -141,40 +155,95 @@ async fn reject_escaping_symlink(
     }
 }
 
-/// Writes `contents` to a fresh hidden temp file in `dir` (same filesystem as
-/// the destination, so the later rename is atomic) and fsyncs it. The
-/// destination is untouched until [`commit_temp`].
-async fn write_temp(
-    dir: &Path,
-    file_name: &std::ffi::OsStr,
-    contents: &[u8],
-) -> Result<PathBuf, PublishError> {
+/// Names tried before giving up on finding a free temp name.
+const TEMP_NAME_ATTEMPTS: usize = 8;
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A short hidden temp name, independent of the report's own name (a name
+/// near the volume's 255-byte limit plus a suffix would not fit, R1-P-S8):
+/// pid, clock and a process-wide counter, all hex.
+fn next_temp_name() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or_default();
-    let temp = dir.join(format!(
-        ".{}.{}.{nanos}.tmp",
-        file_name.to_string_lossy(),
-        std::process::id()
-    ));
-    let written = async {
+    format!(
+        ".rss-ai-news.{:x}.{nanos:x}.{:x}.tmp",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Permissions of the file `dest` currently names (following a link, as the
+/// old in-place write did), `None` when there is none.
+async fn existing_permissions(dest: &Path) -> Result<Option<std::fs::Permissions>, PublishError> {
+    match fs::metadata(dest).await {
+        Ok(metadata) if metadata.is_file() => Ok(Some(metadata.permissions())),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Writes `contents` to a fresh hidden temp file in `dir` (same filesystem as
+/// the destination, so the later rename is atomic) and fsyncs it. The
+/// destination is untouched until [`commit_temp`]. `owner_only` creates the
+/// file with mode 0600 on Unix.
+async fn write_temp(
+    dir: &Path,
+    contents: &[u8],
+    owner_only: bool,
+) -> Result<PathBuf, PublishError> {
+    write_temp_named(dir, contents, owner_only, next_temp_name).await
+}
+
+/// [`write_temp`] with the name source injectable for tests. A name that
+/// already exists belongs to someone else: it is never written to or removed,
+/// another name is tried. Only a temp file this call created is removed when
+/// writing it fails.
+async fn write_temp_named(
+    dir: &Path,
+    contents: &[u8],
+    owner_only: bool,
+    mut next_name: impl FnMut() -> String,
+) -> Result<PathBuf, PublishError> {
+    for _ in 0..TEMP_NAME_ATTEMPTS {
+        let temp = dir.join(next_name());
+        let mut options = fs::OpenOptions::new();
         // `create_new` (O_EXCL) never follows or reuses an existing path.
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .await?;
-        file.write_all(contents).await?;
-        file.flush().await?;
-        file.sync_all().await
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if owner_only {
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = owner_only;
+        let mut file = match options.open(&temp).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        };
+        // From here on the temp file is ours.
+        let written = async {
+            file.write_all(contents).await?;
+            file.flush().await?;
+            file.sync_all().await
+        }
+        .await;
+        if let Err(error) = written {
+            remove_temp(&temp).await;
+            return Err(error.into());
+        }
+        return Ok(temp);
     }
-    .await;
-    if let Err(error) = written {
-        remove_temp(&temp).await;
-        return Err(error.into());
-    }
-    Ok(temp)
+    Err(PublishError::LocalIoError(std::io::Error::new(
+        ErrorKind::AlreadyExists,
+        format!(
+            "no free publish temp file name in {} after {TEMP_NAME_ATTEMPTS} attempts",
+            dir.display()
+        ),
+    )))
 }
 
 /// Atomically replaces `dest` with `temp`, then fsyncs the directory so the
@@ -218,9 +287,7 @@ mod tests {
         let dest = dir.path().join("report.md");
         std::fs::write(&dest, "old report").unwrap();
 
-        let temp = write_temp(dir.path(), dest.file_name().unwrap(), b"new report")
-            .await
-            .unwrap();
+        let temp = write_temp(dir.path(), b"new report", true).await.unwrap();
 
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "old report");
         assert_eq!(std::fs::read_to_string(&temp).unwrap(), "new report");
@@ -229,5 +296,59 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new report");
         assert!(!temp.exists());
+    }
+
+    /// R1-P-S8: a temp name that is already taken is someone else's file —
+    /// left byte-for-byte alone, and another name is used.
+    #[tokio::test]
+    async fn taken_temp_name_is_neither_written_nor_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let taken = dir.path().join(".taken.tmp");
+        std::fs::write(&taken, "not ours").unwrap();
+        let mut names = vec![".fresh.tmp".to_string(), ".taken.tmp".to_string()];
+
+        let temp = write_temp_named(dir.path(), b"report", false, || names.pop().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(temp, dir.path().join(".fresh.tmp"));
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "not ours");
+        assert_eq!(std::fs::read_to_string(&temp).unwrap(), "report");
+    }
+
+    #[tokio::test]
+    async fn every_temp_name_taken_is_an_error_that_removes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let taken = dir.path().join(".taken.tmp");
+        std::fs::write(&taken, "not ours").unwrap();
+
+        let error = write_temp_named(dir.path(), b"report", false, || ".taken.tmp".to_string())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, PublishError::LocalIoError(_)), "{error:?}");
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "not ours");
+    }
+
+    /// R1-P-S9: the temp file of a replacement is owner-only from creation.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owner_only_temp_file_is_created_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+
+        let temp = write_temp(dir.path(), b"report", true).await.unwrap();
+
+        let mode = std::fs::metadata(&temp).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o600, "{mode:o}");
+    }
+
+    #[test]
+    fn temp_names_are_short_and_unique() {
+        let first = next_temp_name();
+        let second = next_temp_name();
+        assert_ne!(first, second);
+        assert!(first.len() < 64, "{first}");
+        assert!(first.starts_with('.') && first.ends_with(".tmp"));
     }
 }

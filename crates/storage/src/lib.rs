@@ -19,6 +19,7 @@ pub use pool::{
     build_sqlite_read_only_pool, pg_hostaddr_in_use, pghostaddr_set,
 };
 pub use repo::EntryPersistOutcome;
+pub use repo::SnapshotOwnershipConflict;
 pub use repo::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
     ArticleAiTaskCandidate, ArticleContentHash, ArticleInsertOutcome, ArticleRepo,

@@ -105,6 +105,11 @@ pub struct ReleaseFailureOutcome {
 flow 据 `exhausted` 发准确事件（见 §7）。调用点共 5 处：`extract.rs`、`ai_run.rs`
 （`release_retryable_ai_failure` helper）、`publish/remote.rs` ×2、`publish/store_local.rs`。
 
+Publish 后续变化（ADR 0012）：预算列为 `stage_attempt_count`（0008）而非 `attempt_count`；`PublishRecordRepository`
+另有 `release_retryable_failure_until(…, retry_not_before: Option<OffsetDateTime>, now)`，同一条 SQL 额外写
+`next_attempt_at = $7`（远端限流时为 GitHub 的重试时刻，否则 NULL），`release_retryable_failure` 即其 `None` 版本；
+publish 的 claim 还要求 `next_attempt_at` 为空或已到（R1-P-S12）。sweep 谓词不看 `next_attempt_at`。
+
 ### 3.3 一致性论证
 
 claim 过滤 `attempt_count < max` 发生在自增**前** ⇒ claim 后 `attempt_count ≤ max` ⇒
