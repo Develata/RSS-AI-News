@@ -82,7 +82,10 @@
 
 ## 4. `replay` 子命令
 
-入口：[`crates/cli/src/commands/replay.rs`](../../crates/cli/src/commands/replay.rs)。
+入口：[`crates/cli/src/commands/replay.rs`](../../crates/cli/src/commands/replay.rs)（参数、装配与渲染）→
+`ReplayFlow`（[`crates/runtime/src/flows/replay.rs`](../../crates/runtime/src/flows/replay.rs)，只读）→
+`RawArtifactRepository` + `ReplayProjectionRepository`
+（[`crates/storage/src/repo/replay.rs`](../../crates/storage/src/repo/replay.rs)）。CLI 不直接发 SQL。
 
 ```bash
 rss-ai-news replay --kind ai     --id 12345
@@ -95,7 +98,7 @@ rss-ai-news replay --kind feed   --id 678
 | kind | 解析路径 | 输出 |
 |---|---|---|
 | `feed` | `rss_ai_news_feed::parse_feed(bytes, FeedKind::Rss)` | `{ "entry_count": N, "samples": [...] }` |
-| `html` | `ReadabilityStrategy::extract(html_bytes)` | 抽取出的 title / body 长度 / 是否触发 fallback |
+| `html` | `ReadabilityStrategy::extract(html_bytes)`，base URI 见下 | 抽取出的 title / word_count / content_quality / body_preview，以及所用 `base_uri` |
 | `ai` | `rss_ai_news_ai::parse_response(raw)` | 解析后的 `ParsedResponse`（含 schema 校验） |
 
 副作用：**无**。`replay` 不写任何业务表，仅查询 `raw_artifacts` 并在内存中重做，
@@ -104,9 +107,16 @@ rss-ai-news replay --kind feed   --id 678
 `--id` 直查 `raw_artifacts.id`，`--key` 走 `(kind, key)` 联合索引。两者必给其一，
 否则 CLI 报 `replay requires either --id or --key`。
 
+`html` 的 base URI：`html_payload` 的 artifact key 是 feed entry id，replay 用该 entry 的
+`normalized_link`（线上抽取开始抓取的链接）作为传给策略的 `final_url` 与 `task.normalized_link`；
+key 不是数字或对应 entry 不存在时用占位符 `about:blank`（`REPLAY_PLACEHOLDER_BASE_URI`，合法 URL 但不能作 base，
+相对链接因此保持相对，不编造主机）。线上抽取用的是重定向后的最终 URL，replay 没有留存它，所以发生过重定向时两者
+可能不同。当前 readability-rust 0.1.0 只保存 base URI、不据此改写正文链接，可见影响是抽取结果的 `canonical_link`。
+
 ### 4.1 diff 字段
 
-`--diff` 目前只对 `html` 实现：对比入库文章的 content hash 与字数，输出在
+`--diff` 目前只对 `html` 实现：经 feed entry 的 `article_id` 找到文章（含指向更早文章的 content-dedup entry），
+对比入库文章的 content hash 与字数，输出在
 `ReplayCommandSummary.diff`，是"线上结果跟当下代码是否一致"的诊断点。`feed` / `ai` 返回
 `{"supported": false, ...}`，不读取业务表。
 
@@ -216,6 +226,8 @@ exit code 详表见 [./11-error-and-recovery.md](./11-error-and-recovery.md)。
 | 内容 | 路径 |
 |---|---|
 | replay CLI | [`crates/cli/src/commands/replay.rs`](../../crates/cli/src/commands/replay.rs) |
+| replay Flow | [`crates/runtime/src/flows/replay.rs`](../../crates/runtime/src/flows/replay.rs) |
+| replay 只读 projection | [`crates/storage/src/repo/replay.rs`](../../crates/storage/src/repo/replay.rs) |
 | backfill CLI | [`crates/cli/src/commands/backfill.rs`](../../crates/cli/src/commands/backfill.rs) |
 | backfill Flow | [`crates/runtime/src/flows/backfill.rs`](../../crates/runtime/src/flows/backfill.rs) |
 | rebuild-report CLI | [`crates/cli/src/commands/rebuild_report.rs`](../../crates/cli/src/commands/rebuild_report.rs) |
