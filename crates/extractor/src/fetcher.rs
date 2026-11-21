@@ -87,16 +87,15 @@ impl HtmlFetcher for ReqwestHtmlFetcher {
             .and_then(|value| value.to_str().ok())
             .map(ToOwned::to_owned);
         if status.as_u16() == 429 {
-            let retry_after_seconds = response
+            // R3E-S10: the deadline is fixed now, at receipt, so a later
+            // release cannot shift it.
+            let received_at = std::time::SystemTime::now();
+            let retry_at = response
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
-                .and_then(|value| {
-                    crate::error::parse_retry_after(value, std::time::SystemTime::now())
-                });
-            return Err(ExtractorError::RateLimited {
-                retry_after_seconds,
-            });
+                .and_then(|value| crate::error::parse_retry_at(value, received_at));
+            return Err(ExtractorError::RateLimited { retry_at });
         }
         if !status.is_success() {
             return Err(ExtractorError::HttpStatus {

@@ -378,9 +378,8 @@ impl ExtractFlow {
                         }
                     }
                 }
-                return entry
-                    .release_failure_after(&error, error.retry_after(), now)
-                    .await;
+                let retry_at = error.retry_at().and_then(offset_from_system_time);
+                return entry.release_failure_after(&error, retry_at, now).await;
             }
         };
 
@@ -662,13 +661,13 @@ impl EntryRelease<'_> {
         self.release_failure_after(error, None, now).await
     }
 
-    /// [`Self::release_failure`] with the server's requested wait (a 429's
-    /// `Retry-After`, R2-S10): the cooldown ends at the later of the local
-    /// backoff and `released_at + retry_after`.
+    /// [`Self::release_failure`] with the server's earliest retry instant (a
+    /// 429's `Retry-After`, fixed at receipt, R2-S10 / R3E-S10): the cooldown
+    /// ends at the later of `released_at` + local backoff and `retry_at`.
     async fn release_failure_after(
         &self,
         error: &(dyn ClassifiedError + Sync),
-        retry_after: Option<StdDuration>,
+        retry_at: Option<OffsetDateTime>,
         now: OffsetDateTime,
     ) -> ExtractEntryOutcome {
         let message = error.display_user();
@@ -691,7 +690,7 @@ impl EntryRelease<'_> {
                 &message,
                 &kind,
                 self.retry.max_attempts,
-                self.retry.next_attempt_at(released_at, retry_after),
+                self.retry.next_attempt_at(released_at, retry_at),
                 released_at,
             )
             .await
@@ -868,19 +867,28 @@ struct RetrySchedule {
 
 impl RetrySchedule {
     /// When a retryable failure released at `now` becomes claimable again:
-    /// the later of the local backoff and the server's `retry_after`
-    /// (R2-S10). The releasing run itself never retries the entry (it stays
-    /// excluded).
+    /// the later of `now` + local backoff and the server's absolute
+    /// `retry_at` (R2-S10, R3E-S10: fixed at receipt, so the release time does
+    /// not move it). The releasing run itself never retries the entry (it
+    /// stays excluded).
     fn next_attempt_at(
         &self,
         now: OffsetDateTime,
-        retry_after: Option<StdDuration>,
+        retry_at: Option<OffsetDateTime>,
     ) -> OffsetDateTime {
         let backoff = now + retry_backoff(self.attempt_count);
-        let server = retry_after
-            .and_then(|wait| Duration::try_from(wait).ok())
-            .and_then(|wait| now.checked_add(wait));
-        server.map_or(backoff, |server| server.max(backoff))
+        retry_at.map_or(backoff, |server| server.max(backoff))
+    }
+}
+
+/// `SystemTime` → `OffsetDateTime` without panicking on values outside the
+/// `time` range (`None` then: the local backoff alone applies).
+fn offset_from_system_time(at: std::time::SystemTime) -> Option<OffsetDateTime> {
+    match at.duration_since(std::time::UNIX_EPOCH) {
+        Ok(after) => OffsetDateTime::UNIX_EPOCH.checked_add(Duration::try_from(after).ok()?),
+        Err(before) => {
+            OffsetDateTime::UNIX_EPOCH.checked_sub(Duration::try_from(before.duration()).ok()?)
+        }
     }
 }
 
@@ -1016,13 +1024,13 @@ mod tests {
             retry(3).next_attempt_at(now, None),
             now + Duration::minutes(40)
         );
-        // R2-S10: the later of backoff and the server's Retry-After.
-        let hour = StdDuration::from_secs(3600);
+        // R2-S10 / R3E-S10: the later of backoff and the server's retry instant.
+        let hour = now + Duration::hours(1);
         assert_eq!(
             retry(1).next_attempt_at(now, Some(hour)),
             now + Duration::hours(1)
         );
-        let minute = StdDuration::from_secs(60);
+        let minute = now + Duration::minutes(1);
         assert_eq!(
             retry(1).next_attempt_at(now, Some(minute)),
             now + Duration::minutes(10)

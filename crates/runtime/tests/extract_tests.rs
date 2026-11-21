@@ -357,7 +357,7 @@ async fn extract_fetch_429_with_summary_stays_retryable() {
 }
 
 /// R2-S10: the cooldown is the later of the local backoff and the server's
-/// Retry-After (3600 s here > the 10 min first backoff; 60 s < it).
+/// retry instant (now + 3600 s here > the 10 min first backoff; 60 s < it).
 #[tokio::test]
 async fn extract_429_cooldown_honours_retry_after() {
     for (retry_after, expect_at_least) in [(3600_u64, 3600_i64), (60, 600)] {
@@ -371,17 +371,18 @@ async fn extract_429_cooldown_honours_retry_after() {
             None,
         )
         .await;
+        let sent = std::time::SystemTime::now();
         let flow = flow(
             pool.clone(),
             responses([(
                 entry_id,
                 Err(ExtractorError::RateLimited {
-                    retry_after_seconds: Some(retry_after),
+                    retry_at: Some(sent + std::time::Duration::from_secs(retry_after)),
                 }),
             )]),
             vec![success_strategy("unused")],
         );
-        let before = time::OffsetDateTime::now_utc();
+        let before = time::OffsetDateTime::from(sent);
 
         flow.run(opts(1, 0)).await;
 
@@ -1289,6 +1290,35 @@ async fn entry_whose_lease_was_reclaimed_is_not_claimed_again_in_the_same_run() 
         ("pending_fetch".to_string(), 1, None)
     );
     assert_eq!(entry_row(&pool, healthy).await.0, "persisted");
+}
+
+/// R3E-S10: the server's retry deadline is fixed when the 429 arrives (t0 +
+/// 1 h); a release 30 min later neither shifts it nor waits less than the
+/// local backoff after the release.
+#[tokio::test]
+async fn extract_429_deadline_does_not_move_with_a_delayed_release() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let limited = seed_at(&pool, source_id, "uid-429-delay", 0).await;
+    let clock = TestClock::at(t0());
+    let (flow, _fetcher) = recording_flow(
+        &pool,
+        &clock,
+        responses([(
+            limited,
+            Err(ExtractorError::RateLimited {
+                retry_at: Some(std::time::SystemTime::from(t0() + 60 * MIN)),
+            }),
+        )]),
+        vec![(limited, OnFetch::Advance(30 * MIN))],
+    );
+
+    flow.run(opts(1, 0)).await;
+
+    assert_eq!(
+        entry_row(&pool, limited).await,
+        ("pending_fetch".to_string(), 1, Some(t0() + 60 * MIN))
+    );
 }
 
 #[tokio::test]

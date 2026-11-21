@@ -155,10 +155,24 @@ async fn status_429(retry_after: Option<&str>) -> ExtractorError {
         .expect_err("429")
 }
 
+/// The absolute retry instant, as a delay from `before` (the instant just
+/// before the request was sent).
+fn delay_from(error: &ExtractorError, before: std::time::SystemTime) -> Option<Duration> {
+    error
+        .retry_at()
+        .map(|at| at.duration_since(before).unwrap_or(Duration::ZERO))
+}
+
 #[tokio::test]
 async fn retry_after_seconds_on_429_are_kept() {
+    let before = std::time::SystemTime::now();
     let error = status_429(Some("3600")).await;
-    assert_eq!(error.retry_after(), Some(Duration::from_secs(3600)));
+    let delay = delay_from(&error, before).expect("deadline");
+    // Fixed at receipt: receipt + 3600 s.
+    assert!(
+        delay >= Duration::from_secs(3600) && delay <= Duration::from_secs(3605),
+        "{delay:?}"
+    );
     assert_eq!(
         rss_ai_news_domain::error::ClassifiedError::error_kind(&error),
         "http_429"
@@ -169,28 +183,43 @@ async fn retry_after_seconds_on_429_are_kept() {
 }
 
 #[tokio::test]
-async fn retry_after_http_date_on_429_becomes_a_delay() {
+async fn retry_after_http_date_on_429_is_kept_as_that_instant() {
     let at = std::time::SystemTime::now() + Duration::from_secs(1800);
-    let error = status_429(Some(&httpdate::fmt_http_date(at))).await;
-    let delay = error.retry_after().expect("delay");
-    // HTTP dates have whole-second precision.
-    assert!(
-        delay >= Duration::from_secs(1790) && delay <= Duration::from_secs(1801),
-        "{delay:?}"
+    let date = httpdate::fmt_http_date(at);
+    let error = status_429(Some(&date)).await;
+    // The date itself (whole-second precision), not a delay re-anchored later.
+    assert_eq!(
+        error.retry_at(),
+        Some(httpdate::parse_http_date(&date).unwrap())
     );
+}
+
+/// R3E-S10: a 48 h wait (either form) is capped at receipt + 1 day, an
+/// absolute deadline.
+#[tokio::test]
+async fn retry_after_of_48_hours_is_capped_one_day_after_receipt() {
+    let day = Duration::from_secs(24 * 60 * 60);
+    let in_48h = httpdate::fmt_http_date(std::time::SystemTime::now() + 2 * day);
+    for value in ["172800", in_48h.as_str()] {
+        let before = std::time::SystemTime::now();
+        let error = status_429(Some(value)).await;
+        let after = std::time::SystemTime::now();
+        let at = error.retry_at().expect("deadline");
+        assert!(at >= before + day && at <= after + day, "{value}: {at:?}");
+    }
 }
 
 #[tokio::test]
 async fn missing_or_invalid_retry_after_on_429_is_none() {
-    assert_eq!(status_429(None).await.retry_after(), None);
-    assert_eq!(status_429(Some("soon")).await.retry_after(), None);
-    assert_eq!(status_429(Some("-5")).await.retry_after(), None);
-    // A date in the past means "now": no extra wait.
+    assert_eq!(status_429(None).await.retry_at(), None);
+    assert_eq!(status_429(Some("soon")).await.retry_at(), None);
+    assert_eq!(status_429(Some("-5")).await.retry_at(), None);
+    // A date in the past stays in the past: no extra wait beyond the backoff.
     assert_eq!(
         status_429(Some("Sun, 06 Nov 1994 08:49:37 GMT"))
             .await
-            .retry_after(),
-        Some(Duration::ZERO)
+            .retry_at(),
+        Some(httpdate::parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap())
     );
 }
 

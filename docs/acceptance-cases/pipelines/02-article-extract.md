@@ -53,8 +53,10 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `extract_fetch_5xx_with_summary_stays_retryable` | 同上 | W18 可重试不降级 |
 | `extract_fetch_429_with_summary_stays_retryable` | 同上 | 429 可重试、不降级（plan/17 §7） |
 | `cross_host_redirect_sends_no_referer` | `crates/extractor/tests/fetcher_tests.rs` | R2-S11 重定向不带 Referer |
-| `extract_429_cooldown_honours_retry_after` | 同上 | R2-S10 冷却 = max(退避, Retry-After) |
-| `retry_after_seconds_on_429_are_kept` / `retry_after_http_date_on_429_becomes_a_delay` / `missing_or_invalid_retry_after_on_429_is_none` | `crates/extractor/tests/fetcher_tests.rs` | R2-S10 Retry-After 解析 |
+| `extract_429_cooldown_honours_retry_after` | 同上 | R2-S10 冷却 = max(释放 + 退避, retry_at) |
+| `extract_429_deadline_does_not_move_with_a_delayed_release` | 同上 | R3E-S10 retry_at 收包时确定，延迟释放不平移 |
+| `retry_after_seconds_on_429_are_kept` / `retry_after_http_date_on_429_is_kept_as_that_instant` / `missing_or_invalid_retry_after_on_429_is_none` | `crates/extractor/tests/fetcher_tests.rs` | R2-S10 / R3E-S10 Retry-After 解析为绝对时刻 |
+| `retry_after_of_48_hours_is_capped_one_day_after_receipt` | 同上 | R3E-S10 上限 = 收包时刻 + 1 天 |
 | `status_classification_retries_429_and_5xx_only` | `crates/extractor/src/error.rs`、`crates/feed/src/error.rs`（单元测试） | 仅 429 / 5xx 可重试；403/404/408 不变 |
 | `transient_article_insert_failure_is_retried_with_cooldown` | `crates/runtime/tests/extract_storage_failure_tests.rs` | 瞬时写入失败回队 + 冷却 |
 | `transient_article_insert_failure_on_last_attempt_folds_to_failed` | 同上 | 最后一次尝试折叠 failed |
