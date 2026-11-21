@@ -20,10 +20,11 @@
 - **render**：snapshot_frozen → rendered；空 items 失败
 - **store-local**：写本地文件 + 推进 article 到 `Published`（无远端目标时）/ 保持文章不动（有远端目标待 push）；
   - 分类 `path_template` override 生效
-- **publish-remote**：批量提交一个 commit 覆盖多 publish_records；422 lost-update 自动重试一次；429 保持状态可重试
+- **publish-remote**：批量提交一个 commit 覆盖多 publish_records；422 lost-update 自动重试一次；429 见失败条件（写入等待时保持状态、不计预算）；
+  每个 GitHub 请求只发一次，客户端不透明重发（R3F-B1）
 - **本地原子写**：临时文件 fsync 后 rename 覆盖；越出输出根的符号链接（父目录或目标）被拒绝
 - **跨分类路径碰撞（运行时）**：`publish-all` 在首次写入前按本次报告日期渲染全部分类真实路径并查重；碰撞 → 报错退出，不打开存储（不建库、不迁移、不轮换 config）、不建 record、不登记规则版本、不落盘。
-  比较忽略大小写，且一个路径是另一路径的整段父目录也算碰撞（validate 同规则）
+  比较忽略大小写与 Unicode 规范化差异（`ſ`/`s`、组合/分解 `é`，R3F-B3），且一个路径是另一路径的整段父目录也算碰撞（validate 同规则）
 - **--force**：每次调用新建唯一的 `pending` render trace 行与新记录；force 行永不成为 active
 - **path 防穿越**：含 `..` / 反斜杠 / 无日期 token 的模板在 validate 阶段就报错（详见 [./06-config-loading.md](./06-config-loading.md)）
 - 远端 publish 成功后 article → `Published`；批次成功后 record → `PublishedRemote`
@@ -32,7 +33,7 @@
 - **快照归属**：选稿排除已在其它未失败记录（活动快照）中的文章；freeze 事务内复查，输掉竞争 → 回滚、立即释放 lease、退还 claim，下轮不含该文章；记录 `failed` 释放归属；AI-off 下未被持有的 `ready_for_publish` 遗留文章可直接冻结
 - **record 隔离**：`publish` 与 `publish-all` 的每个阶段（freeze / render / store-local / publish-remote）都只 claim init 得到的 `publish_record_id`；
   单分类 `publish` 不得领取或推进其他分类残留的记录。无 ID 的 `PublishFlow::freeze` 只领取 `category_key` 与选稿分类相同的
-  pending 记录；按 ID 的 `freeze_record` 遇分类不符 → `Failed { category_mismatch }`、退还 claim、不写快照（R1-P-S15）。例外：每阶段 claim 前的全局 maintenance
+  pending 记录；按 ID 的 `freeze_record` 在 claim 的 SQL 中限定分类：分类不符的记录不被领取、不被改动（含被他人租用时），只读判定后 → `Failed { category_mismatch }`、不写快照（R1-P-S15 / R3F-S15）。例外：每阶段 claim 前的全局 maintenance
   （lease 过期 reclaim + 预算耗尽 sweep → `failed`）按设计作用于全表，不区分分类
 
 ### 失败条件（failure path）
@@ -44,13 +45,19 @@
 - 远端 401，或无限流信号的 403 → `GithubAuthFailed`（终态，不重试）
 - 单报告 Contents API：路径按段百分号编码、`ref` 编码为查询参数（中文 / 空格 / 保留字符路径可发布）；任何 GitHub 失败的消息含操作、状态、message 的固定词表摘要与 `x-github-request-id`（整值符合 GitHub 形状且不含 token 时）；服务端回显的自由文本不落库、不进事件
 - 远端 403 且 `x-ratelimit-remaining: 0` / 带 `retry-after` / message 提到 rate limit → `GithubRateLimit`（可重试）
-- 远端 429 → `GithubRateLimit`，state 保持、article 不晋升；GitHub 要求的重试时刻（钳制 1 h）写入 `next_attempt_at`，到点前的运行 `NothingToClaim`
+- 远端 429（及带限流信号的 403）→ `GithubRateLimit`，article 不晋升；GitHub 要求的重试时刻（适用期限中最晚者，钳制 1 h）在未来时
+  写入 `next_attempt_at`，到点前的运行 `NothingToClaim`，且该次尝试**不计预算**（退还 claim、state 保持 `stored_local`，最后一次预算
+  也不转 `failed`）；reset 已过去（不写等待）时按普通 retryable 计本阶段预算，**预算耗尽 → `failed`**（R3F-S12 / R3F-S16）
 - 远端 422 non-fast-forward：同一次尝试内重试一次；第二次 422 为永久错误 → record `failed`（`github_api_error`），文章不晋升
-- 远端 5xx / 传输失败 / 远端超时 / 409 → retryable：保持 `StoredLocal`、计本阶段预算（耗尽 → `failed`）
+- 远端 5xx / 传输失败 / 远端超时 / 409 → retryable：保持 `StoredLocal`、计本阶段预算（耗尽 → `failed`）；
+  写请求之后的 5xx / 传输失败 / 超时先走下面的歧义写入核对，只有"确认未落地"才按此计预算
 - 多报告批次重试：HEAD 已逐字节包含整批内容（上次 ref 更新落地、响应丢失）→ 不新建 commit，回执指向该 HEAD
 - 单报告重试：分支上既有 blob 与本地内容一致且在固定 HEAD commit 复核一致 → 不发 PUT，回执指向该 HEAD
-- 歧义写入（PATCH ref / PUT contents 后传输失败、5xx，或远端 deadline 切断）：释放前只读核对 HEAD，已含全部内容 → 记成功；
-  否则按原错误释放（最后一次尝试也不会因已落地的写入而 `failed`）
+- 歧义写入（PATCH ref / PUT contents 后传输失败、5xx，或远端 deadline 切断）：释放前只读核对 HEAD，结果三分（R3F-S16）：
+  - **核对成功且 HEAD 已含全部内容** → 记成功回执（`published_remote`）；只有这一种情况下"已落地的写入"在最后一次预算里也会成功；
+  - **核对成功但 HEAD 不含** → 按原写入错误释放（计预算，最后一次预算 → `failed`）；
+  - **核对未完成**（核对请求失败 / 被限流 / 超时）→ `remote_write_unverified`：保持 `stored_local`、退还 claim、文章归属保留
+    （最后一次预算也不 `failed`），核对的限流期限写入 `next_attempt_at`；下一次尝试的写前 HEAD 比对幂等（R3F-B2）
 - promote target article 已被其它流转推进 → `ArticleConflict`
 - 存量重复归属（0008 前两份未失败快照共享文章）：store_local / remote 写前拦截，已发布者或低 id 者胜出；败方不写外部产物、
   释放 lease、退还 claim、保持阶段态 → `ArticleConflict`（`article_owned_by_active_snapshot`）
@@ -68,7 +75,9 @@
 | `freeze_record_claims_requested_pending_record_not_older_one` | 同上 | claim 指定 record |
 | `freeze_record_isolates_two_concurrent_pending_records_by_id` | 同上 | 并发隔离 |
 | `freeze_without_id_claims_only_its_own_categorys_record` | 同上 | 无 ID freeze 只领本分类记录 |
-| `freeze_record_rejects_a_record_of_another_category` | 同上 | 按 ID freeze 拒绝分类不符（`category_mismatch`，退还 claim） |
+| `freeze_record_rejects_a_record_of_another_category` | 同上 | 按 ID freeze 拒绝分类不符（`category_mismatch`，计数不变） |
+| `freeze_record_of_another_category_is_never_claimed_even_when_leased` | 同上 | 分类不符的记录不被领取 / 改动；被他人租用时仍报 `category_mismatch`；同分类被租用 → `NothingToClaim`（R3F-S15） |
+| `sqlite_by_id_freeze_claim_requires_the_category` | `crates/storage/tests/publish_stage_recovery_tests.rs` | 按 ID freeze claim 的 SQL 限定分类（PG 同名 `pg_…`） |
 | `pg_pending_claim_in_category_skips_other_categories` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 分类限定 claim |
 | `freeze_with_ai_off_passthrough_promotes_persisted_articles_in_same_tx` | 同上 | AI-off 直通 |
 | `freeze_returns_snapshot_empty_when_no_candidates_match` | 同上 | SnapshotEmpty |
@@ -91,6 +100,8 @@
 | `publish_remote_stops_the_higher_record_sharing_an_article_before_sending` | `crates/runtime/tests/publish_remote_tests.rs` | 存量重复归属：败方不发请求、保态、退还 claim |
 | `publish_remote_stops_a_lower_record_whose_article_a_published_record_holds` | 同上 | 已发布的持有者无论 id 都胜出 |
 | `publish_remote_batch_drops_only_the_record_losing_a_shared_article` | 同上 | 批量只剔除败方 |
+| `three_owners_are_all_told_the_published_record_keeps_the_article` | 同上 | 三方共享：同一排序决定并报告胜方，两个败方都报已发布记录（R3F-P-B1） |
+| `pg_three_owners_all_name_the_same_top_ranked_winner` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 三方共享同一胜方；胜方 failed 后低 id 胜出 |
 | `publish_remote_sends_the_other_record_after_the_keeper_failed` | 同上 | 胜方 failed 后归属释放 |
 | `store_local_stops_the_higher_record_sharing_an_article_before_writing` | `crates/runtime/tests/publish_store_local_tests.rs` | 败方不落盘 |
 | `freeze_transient_candidate_load_error_keeps_record_pending_and_next_run_freezes` | 同上 | 瞬时存储错误保态、下轮继续 |
@@ -109,6 +120,10 @@
 | `publish_remote_rate_limit_keeps_state_and_articles` | 同上 | 429 |
 | `publish_remote_rate_limit_persists_the_reset_and_skips_claims_until_then` | 同上 | 限流 reset 写入 `next_attempt_at`；期内重跑不领取、不请求；到点后发布 |
 | `publish_remote_rate_limit_wait_is_clamped_to_one_hour` | 同上 | 远期 reset 钳制到 1 h |
+| `publish_remote_rate_limit_with_a_wait_does_not_spend_the_last_attempt` | 同上 | 写入等待的限流不计预算：末次预算仍 `stored_local`、退还 claim，到点后发布（R3F-S12） |
+| `exhausted_quota_reset_later_than_retry_after_wins` | `crates/publish/tests/github_classify_tests.rs` | 配额耗尽时取 `retry-after` 与 reset 中较晚者 |
+| `retry_after_later_than_an_exhausted_quota_reset_wins` | 同上 | 较晚的 `retry-after` 胜出 |
+| `reset_does_not_apply_while_quota_remains_and_retry_after_is_given` | 同上 | 仍有配额时 reset 不适用，只看 `retry-after` |
 | `sqlite_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advance` | `crates/storage/tests/publish_stage_recovery_tests.rs` | SQLite 两类 claim 按时刻遵守等待；推进 / 普通 release 清空 |
 | `pg_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advance` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 同语义 |
 | `publish_remote_auth_failed_is_terminal_without_promoting_articles` | 同上 | 401 终态 |
@@ -127,11 +142,19 @@
 | `ambiguous_contents_put_is_verified_against_head` | 同上 | 单报告歧义 PUT：HEAD 已含内容 → 成功回执 |
 | `ambiguous_contents_put_not_on_head_keeps_the_write_error` | 同上 | 单报告歧义 PUT 未落地：保留原错误 |
 | `refused_contents_put_is_not_verified` | 同上 | 4xx 写入被拒不核对 |
+| `ambiguous_contents_put_with_a_failed_verification_is_unverified` | 同上 | 歧义 PUT + 核对 GET ref 失败 → `remote_write_unverified`（可重试），不是原写入错误 |
+| `ambiguous_ref_update_with_a_rate_limited_verification_keeps_the_deadline` | 同上 | 歧义 PATCH + 核对被限流 → 未核实错误携带核对的限流期限 |
 | `remaining_single_report_already_on_head_records_receipt_without_put` | 同上 | 批量部分回执后重跑剩一条：HEAD 已含 → 零 PUT |
-| `matching_branch_blob_not_confirmed_at_head_still_puts` | 同上 | HEAD 已移动未含该 blob → 照常 PUT |
+| `matching_branch_blob_not_confirmed_at_head_still_puts` | 同上 | HEAD 已移动、文件已删 → 照常 PUT，请求体不带 `sha`（R3F-S2） |
+| `matching_branch_blob_changed_at_head_puts_with_the_heads_sha` | 同上 | HEAD 已移动、文件变为 B → PUT 携带 B 的 sha（复核结果，非旧 sha） |
 | `publish_remote_timeout_on_last_attempt_records_success_when_head_holds_the_report` | `crates/runtime/tests/publish_remote_tests.rs` | 最后一次尝试超时但已落地 → `published_remote` |
 | `publish_remote_timeout_without_the_report_at_head_keeps_the_timeout` | 同上 | 未落地 → 维持超时语义 |
 | `publish_remote_batch_timeout_records_success_when_head_holds_the_batch` | 同上 | 批量超时核对 |
+| `publish_remote_unverified_write_on_the_last_attempt_keeps_the_record_and_its_articles` | 同上 | 末次预算：PUT 歧义 + 核对失败 → 保持 `stored_local`、退还 claim、文章仍归属，之后可再领取并发布 |
+| `publish_remote_unverified_write_honours_the_verifications_rate_limit` | 同上 | 核对被限流 → 其期限写入 `next_attempt_at`，期内 `NothingToClaim` |
+| `publish_remote_timeout_with_an_unfinished_check_keeps_the_record_on_the_last_attempt` | 同上 | 远端超时且核对也超时 → 末次预算不 `failed` |
+| `publish_remote_batch_timeout_with_an_unfinished_check_keeps_every_record` | 同上 | 批量同上：每条记录保持 `stored_local`、退还 claim |
+| `sqlite_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait` | `crates/storage/tests/publish_stage_recovery_tests.rs` | 不计预算的释放：保态、清 lease、退还两计数、写 / 清 `next_attempt_at`（PG 同名 `pg_…`） |
 | `git_blob_sha_matches_git_hash_object` | `crates/publish/src/github.rs` | blob sha 与 `git hash-object` 一致（含中文） |
 | `auth_failure_maps_to_github_auth_failed` | 同上 | 401 映射 |
 | `chinese_path_leaves_the_client_percent_encoded_on_get_and_put` | `crates/publish/tests/github_contents_path_tests.rs` | 中文路径请求行按段编码（原始字节） |
@@ -141,16 +164,18 @@
 | `ascii_path_request_target_is_unchanged` | 同上 | ASCII 路径回归 |
 | `batch_ref_routes_encode_hash_percent_and_keep_slashes_in_the_branch` | `crates/publish/tests/github_ref_route_tests.rs` | ref GET / PATCH 分支名按段编码（原始请求行，`#` `%` `/`） |
 | `plain_hierarchical_branch_ref_route_is_unchanged` | 同上 | 含 `/` 的普通分支名不变 |
-| `transport_failure_after_the_ref_patch_is_verified_against_head` | 同上 | PATCH 发出后连接断开（传输失败）→ 只读核对 HEAD → 记成功 |
+| `transport_failure_after_the_ref_patch_is_verified_against_head` | 同上 | PATCH 发出后连接断开（传输失败）→ 只读核对 HEAD → 记成功；PATCH 恰 1 次 |
+| `landed_put_with_a_dropped_connection_is_sent_once_and_verified` | `crates/publish/tests/github_write_once_tests.rs` | 客户端不透明重发（R3F-B1）：PUT 落地后断线，若重发会 422；实际只 1 次 PUT，核对 HEAD 记回执 |
+| `rate_limited_request_is_not_resent_by_the_client` | 同上 | 429 不在本次 claim 内重发（窗口内恰 1 个请求） |
 | `contents_get_failure_keeps_operation_status_message_and_request_id` | 同上 | 失败保留操作、状态、固定词表摘要、request id；服务端回显的正文标记与 token 不出现 |
-| `malformed_or_token_bearing_request_id_is_dropped` | 同上 | 形状不符或含 token 的 request id 整值丢弃 |
+| `malformed_or_token_bearing_request_id_is_dropped` | 同上 | 形状不符（含 `12:34` 等非五组值，R3F-B6）或含 token 的 request id 整值丢弃 |
 | `auth_failures_keep_the_actual_status_and_request_id` | 同上 | 401 / 403 认证失败保留实际状态、操作、request id |
 | `rate_limits_keep_operation_status_and_request_id` | 同上 | 两类 403 限流与 429 保留上下文 |
 | `oversized_success_keeps_its_request_context` | 同上 | 过大成功响应保留上下文 |
 | `success_missing_a_required_field_keeps_its_request_context` | 同上 | 缺字段 2xx：502 + 实际状态 + request id |
 | `contents_200_without_sha_is_a_protocol_error` | 同上 | Contents 200 无 sha → 协议错误 |
 | `response_reason_keeps_only_known_phrases_never_server_text` | `crates/publish/src/github.rs` | 持久化原因只来自固定词表 |
-| `request_id_is_kept_only_in_githubs_shape_and_never_with_the_token` | 同上 | request id 整值校验 |
+| `request_id_is_kept_only_in_githubs_shape_and_never_with_the_token` | 同上 | request id 整值校验：只接受五组十六进制 |
 | `github_failure_persists_only_sanitized_reason_and_valid_request_id` | `crates/runtime/tests/publish_remote_tests.rs` | `last_error` 与 `publish_failed` 事件均不含回显标记与 token；事件 payload 含 `operation` / `http_status` / `request_id` |
 | `contents_put_failure_keeps_operation_and_request_id` | 同上 | PUT 失败上下文 |
 | `contents_rate_limited_403_is_still_retryable_with_request_context` | 同上 | 403 限流分类不变 |
@@ -161,6 +186,7 @@
 | `status_403_naming_a_rate_limit_maps_to_rate_limit` | `crates/publish/tests/github_classify_tests.rs` | message 含 (secondary) rate limit |
 | `status_403_without_rate_limit_signal_maps_to_auth_failed` | 同上 | 普通 403 |
 | `forbidden_with_an_http_date_retry_after_is_a_rate_limit_until_that_date` | 同上 | HTTP 日期形式 `retry-after` |
+| `obsolete_http_date_forms_of_retry_after_give_the_real_deadline` | 同上 | RFC 850 与 asctime 形式的 `retry-after` 得到真实期限，而非 60 s 回退（R3F-S11） |
 | `unparsable_retry_after_still_marks_a_403_as_rate_limited` | 同上 | 头存在即限流信号 |
 | `oversized_retry_after_seconds_are_capped_without_overflow` | 同上 | 超大秒数封顶、无溢出 |
 | `past_http_date_retry_after_means_now` | 同上 | 过去日期 = now |
@@ -176,9 +202,9 @@
 | `taken_temp_name_is_neither_written_nor_removed` | 同上 | 临时名被占用：不碰他人文件，换名 |
 | `every_temp_name_taken_is_an_error_that_removes_nothing` | 同上 | 重试耗尽报错且不删任何文件 |
 | `temp_names_are_short_and_unique` | 同上 | 临时名短且唯一 |
-| `owner_only_temp_file_is_created_0600` | 同上 | 替换用临时文件 0600 创建 |
+| `first_create_temp_file_is_created_0600` | 同上 | 临时文件（含首次创建，无文件可替换）一律 0600 创建（R3F-S9） |
 | `local_fs_target_keeps_the_permissions_of_the_report_it_replaces` | `crates/publish/tests/local_target_tests.rs` | 替换保留 0600 / 0640 |
-| `local_fs_target_new_report_gets_the_default_create_permissions` | 同上 | 新报告为默认创建权限 |
+| `local_fs_target_new_report_gets_the_default_create_permissions` | 同上 | 新报告最终为默认创建权限（0600 临时文件写完后设定） |
 | `local_fs_target_publishes_a_report_whose_name_is_near_the_name_limit` | `crates/publish/tests/local_target_tests.rs` | 240 字节文件名可发布、无残留临时文件 |
 | `publish_force_creates_unique_non_active_render_versions_on_a_fresh_db` | `crates/cli/tests/publish_cmd_tests.rs` | --force 每次唯一且非 active |
 | `bootstrap_refuses_a_superseded_default_rule_when_none_is_active` | `crates/runtime/tests/publish_rule_bootstrap_tests.rs` | 无 active render 规则（default 已 superseded）→ 建记录前报错 |
@@ -190,6 +216,9 @@
 | `paths_differing_only_in_case_collide` | 同上 | 仅大小写不同的路径碰撞 |
 | `a_report_path_that_is_another_reports_directory_collides` | 同上 | 文件路径是另一路径的父目录 → 碰撞 |
 | `paths_differing_only_in_letter_case_collide` | `crates/config/src/validate/checks.rs` | 共享碰撞规则：大小写折叠（含非 ASCII）、整段父子、整段前缀才算 |
+| `long_s_and_s_collide` | 同上 | `ſ`（U+017F）与 `s` 同名（R3F-B3） |
+| `composed_and_decomposed_letters_collide` | 同上 | 组合 `é` 与分解 `e`+U+0301（含大写）同名 |
+| `caseless_normalization_also_applies_to_parent_directories` | 同上 | 整段父子判定同样用该比较键 |
 | `publish_default_date_uses_the_effective_timezone_and_rejects_unknown_zones` | `crates/cli/tests/publish_cmd_tests.rs` | 默认日期按目标时区；未知时区写库前报错 |
 | `shanghai_after_midnight_is_the_local_date_not_the_utc_date` | `crates/runtime/src/flows/publish/report_date.rs` | 2026-11-21T00:30+08:00 → 2026-11-21（另含负偏移、夏令时、未知时区用例） |
 | `real_iana_zones_are_accepted_and_made_up_ones_rejected` | `crates/config/src/validate/checks.rs` | validate 按 IANA 库校验 |

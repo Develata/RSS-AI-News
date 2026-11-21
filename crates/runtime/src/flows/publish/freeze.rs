@@ -8,8 +8,7 @@ use rss_ai_news_report::{
     SelectionConfig, SnapshotConfig, freeze as snapshot_freeze, load_candidates, to_storage_items,
 };
 use rss_ai_news_storage::{
-    ClaimRequest, FreezeSnapshotOutcome, FreezeSnapshotStatus, PublishState, build_owner_id,
-    lease_expires_at,
+    ClaimRequest, FreezeSnapshotOutcome, FreezeSnapshotStatus, build_owner_id, lease_expires_at,
 };
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
@@ -71,9 +70,16 @@ impl PublishFlow {
             max_attempts: self.ctx.retry.publish_max_attempts,
         };
         let claimed_result = if let Some(publish_record_id) = publish_record_id {
+            // The category is part of the claim (R3F-S15): selection below is
+            // for `opts.category_key`, and a mismatched call must not claim —
+            // or, if interrupted, charge — another category's record.
             self.ctx
                 .publish_record_repo
-                .claim_publish_by_ids(&claim, PublishState::Pending, &[publish_record_id])
+                .claim_pending_for_freeze_by_id_in_category(
+                    &claim,
+                    publish_record_id,
+                    &opts.category_key,
+                )
                 .await
         } else {
             // Selection below is for `opts.category_key`; claiming another
@@ -99,6 +105,17 @@ impl PublishFlow {
         let claimed = match claimed.into_iter().next() {
             Some(claimed) => claimed,
             None => {
+                if let Some(publish_record_id) = publish_record_id
+                    && let Some(status) = self
+                        .by_id_category_mismatch(publish_record_id, &opts.category_key, &emitter)
+                        .await
+                {
+                    return PublishFreezeOutcome {
+                        publish_record_id,
+                        status,
+                        item_count: 0,
+                    };
+                }
                 emitter
                     .emit(
                         "publish_completed",
@@ -116,48 +133,6 @@ impl PublishFlow {
                 };
             }
         };
-
-        if claimed.category_key != opts.category_key {
-            // By-id entry given options of another category (R1-P-S15):
-            // nothing was selected or written; refund the claim and refuse.
-            let message = format!(
-                "publish record {} belongs to category {:?}, not {:?}",
-                claimed.id, claimed.category_key, opts.category_key
-            );
-            let released = self
-                .ctx
-                .publish_record_repo
-                .release_freeze_conflict(claimed.id, &owner, &message, "category_mismatch", now)
-                .await;
-            if let Err(error) = &released {
-                tracing::warn!(
-                    publish_record_id = claimed.id,
-                    ?error,
-                    "category mismatch release failed; lease recovery remains available"
-                );
-            }
-            emitter
-                .emit(
-                    "publish_failed",
-                    "error",
-                    Some("publish_record"),
-                    Some(claimed.id),
-                    &message,
-                    Some(json!({
-                        "phase": PHASE,
-                        "error_kind": "category_mismatch",
-                        "released": matches!(released, Ok(true)),
-                    })),
-                )
-                .await;
-            return PublishFreezeOutcome {
-                publish_record_id: claimed.id,
-                status: PublishFreezeStatus::Failed {
-                    error_kind: "category_mismatch".to_string(),
-                },
-                item_count: 0,
-            };
-        }
 
         let request = PublishRequest {
             category_key: opts.category_key.clone(),
@@ -421,6 +396,59 @@ impl PublishFlow {
             status: PublishFreezeStatus::ArticleConflict { article_id },
             item_count: 0,
         }
+    }
+
+    /// R3F-S15: the by-id claim (which filters by category) found nothing.
+    /// A read-only lookup tells a record of another category — refused as
+    /// `category_mismatch`, whether it is claimable or leased right now —
+    /// from one that is simply not claimable (`None`: nothing to claim). The
+    /// record itself is never touched.
+    async fn by_id_category_mismatch(
+        &self,
+        publish_record_id: i64,
+        category_key: &str,
+        emitter: &RunEventEmitter<'_>,
+    ) -> Option<PublishFreezeStatus> {
+        let record = match self
+            .ctx
+            .publish_record_repo
+            .find_by_id(publish_record_id)
+            .await
+        {
+            Ok(record) => record?,
+            Err(error) => {
+                tracing::warn!(
+                    publish_record_id,
+                    ?error,
+                    "publish record lookup after an empty by-id claim failed"
+                );
+                return None;
+            }
+        };
+        if record.category_key == category_key {
+            return None;
+        }
+        let message = format!(
+            "publish record {publish_record_id} belongs to category {:?}, not {category_key:?}",
+            record.category_key
+        );
+        emitter
+            .emit(
+                "publish_failed",
+                "error",
+                Some("publish_record"),
+                Some(publish_record_id),
+                &message,
+                Some(json!({
+                    "phase": PHASE,
+                    "error_kind": "category_mismatch",
+                    "claimed": false,
+                })),
+            )
+            .await;
+        Some(PublishFreezeStatus::Failed {
+            error_kind: "category_mismatch".to_string(),
+        })
     }
 }
 

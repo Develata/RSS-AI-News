@@ -19,13 +19,13 @@ use super::{
     publish_record_sql::{
         ADVANCE_LOCAL_SQL, ADVANCE_REMOTE_SQL, ADVANCE_RENDERED_SQL, ADVANCE_SNAPSHOT_SQL,
         CREATE_IF_NEW_SQL, PROMOTE_ARTICLE_PUBLISHED_SQL, PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL,
-        RECLAIM_PUBLISH_LEASES_SQL, RECLAIM_PUBLISH_LEASES_SQLITE_SQL, RELEASE_EMPTY_SNAPSHOT_SQL,
-        RELEASE_FREEZE_CONFLICT_SQL, RELEASE_OWNERSHIP_CONFLICT_SQL, RELEASE_PERMANENT_FAILURE_SQL,
-        RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL, SELECT_PUBLISH_RECORD_BY_ID,
-        SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY, TERMINALIZE_EXHAUSTED_PUBLISH_SQL,
-        TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL, claim_pending_in_category_pg,
-        claim_pending_in_category_sqlite, claim_publish_pg, claim_publish_sqlite,
-        sqlite_lease_cutoff, sqlite_stored_deadline,
+        RECLAIM_PUBLISH_LEASES_SQL, RECLAIM_PUBLISH_LEASES_SQLITE_SQL, RELEASE_DEFERRED_RETRY_SQL,
+        RELEASE_EMPTY_SNAPSHOT_SQL, RELEASE_FREEZE_CONFLICT_SQL, RELEASE_OWNERSHIP_CONFLICT_SQL,
+        RELEASE_PERMANENT_FAILURE_SQL, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL,
+        SELECT_PUBLISH_RECORD_BY_ID, SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY,
+        TERMINALIZE_EXHAUSTED_PUBLISH_SQL, TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL,
+        claim_pending_in_category_pg, claim_pending_in_category_sqlite, claim_publish_pg,
+        claim_publish_sqlite, sqlite_lease_cutoff, sqlite_stored_deadline,
     },
 };
 
@@ -138,8 +138,26 @@ impl PublishRecordRepository for PublishRecordRepo {
             return Ok(Vec::new());
         }
         match self.storage_pool() {
-            StoragePool::Sqlite(p) => sqlite_claim_by_ids(p, request, state.as_str(), ids).await,
-            StoragePool::Postgres(p) => pg_claim_by_ids(p, request, state.as_str(), ids).await,
+            StoragePool::Sqlite(p) => {
+                sqlite_claim_by_ids(p, request, state.as_str(), ids, None).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_claim_by_ids(p, request, state.as_str(), ids, None).await
+            }
+        }
+    }
+
+    async fn claim_pending_for_freeze_by_id_in_category(
+        &self,
+        request: &ClaimRequest,
+        id: i64,
+        category_key: &str,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+        let state = PublishState::Pending.as_str();
+        let category = Some(category_key);
+        match self.storage_pool() {
+            StoragePool::Sqlite(p) => sqlite_claim_by_ids(p, request, state, &[id], category).await,
+            StoragePool::Postgres(p) => pg_claim_by_ids(p, request, state, &[id], category).await,
         }
     }
 
@@ -275,6 +293,46 @@ impl PublishRecordRepository for PublishRecordRepo {
                 .bind(id)
                 .bind(owner)
                 .bind(state.as_str())
+                .execute(p)
+                .await
+                .map_err(StorageError::from)?
+                .rows_affected(),
+        };
+        Ok(affected == 1)
+    }
+
+    async fn release_deferred_retry(
+        &self,
+        id: i64,
+        owner: &str,
+        state: PublishState,
+        error: &str,
+        kind: &str,
+        retry_not_before: Option<OffsetDateTime>,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let affected = match self.storage_pool() {
+            StoragePool::Sqlite(p) => sqlx::query(RELEASE_DEFERRED_RETRY_SQL)
+                .bind(error)
+                .bind(kind)
+                .bind(now)
+                .bind(id)
+                .bind(owner)
+                .bind(state.as_str())
+                // Rounded up like every SQLite deadline: never claimable early.
+                .bind(retry_not_before.map(sqlite_stored_deadline))
+                .execute(p)
+                .await
+                .map_err(StorageError::from)?
+                .rows_affected(),
+            StoragePool::Postgres(p) => sqlx::query(RELEASE_DEFERRED_RETRY_SQL)
+                .bind(error)
+                .bind(kind)
+                .bind(now)
+                .bind(id)
+                .bind(owner)
+                .bind(state.as_str())
+                .bind(retry_not_before)
                 .execute(p)
                 .await
                 .map_err(StorageError::from)?
@@ -513,11 +571,14 @@ async fn sqlite_terminalize_exhausted(
     Ok(result.rows_affected())
 }
 
+/// `category_key`: `Some` additionally requires the record's category
+/// (R3F-S15).
 async fn sqlite_claim_by_ids(
     pool: &SqlitePool,
     request: &ClaimRequest,
     state: &str,
     ids: &[i64],
+    category_key: Option<&str>,
 ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
     let mut builder = QueryBuilder::<Sqlite>::new("UPDATE publish_records SET lease_owner = ");
     let cutoff = sqlite_lease_cutoff(request.now);
@@ -538,17 +599,25 @@ async fn sqlite_claim_by_ids(
     }
     // Instant-correct lease expiry (see publish_record_sql.rs).
     builder
-        .push(") AND (lease_expires_at IS NULL OR COALESCE(julianday(lease_expires_at) < julianday(")
+        .push(
+            ") AND (lease_expires_at IS NULL OR COALESCE(julianday(lease_expires_at) < julianday(",
+        )
         .push_bind(cutoff)
         .push("), lease_expires_at < ")
         .push_bind(cutoff)
         // Rate-limit wait (R1-P-S12), instant-correct like the lease.
-        .push(")) AND (next_attempt_at IS NULL OR COALESCE(julianday(next_attempt_at) <= julianday(")
+        .push(
+            ")) AND (next_attempt_at IS NULL OR COALESCE(julianday(next_attempt_at) <= julianday(",
+        )
         .push_bind(cutoff)
         .push("), next_attempt_at <= ")
         .push_bind(cutoff)
         .push(")) AND stage_attempt_count < ")
-        .push_bind(i64::from(request.max_attempts))
+        .push_bind(i64::from(request.max_attempts));
+    if let Some(category_key) = category_key {
+        builder.push(" AND category_key = ").push_bind(category_key);
+    }
+    builder
         .push(" RETURNING id, idempotency_key, category_key, report_date, target_timezone, ")
         .push("render_version, selection_policy_version, state, remote_target, attempt_count, rendered_at");
 
@@ -755,6 +824,7 @@ async fn pg_claim_by_ids(
     request: &ClaimRequest,
     state: &str,
     ids: &[i64],
+    category_key: Option<&str>,
 ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
     let mut builder = QueryBuilder::<Postgres>::new("UPDATE publish_records SET lease_owner = ");
     builder
@@ -778,7 +848,11 @@ async fn pg_claim_by_ids(
         .push(") AND (next_attempt_at IS NULL OR next_attempt_at <= ")
         .push_bind(request.now)
         .push(") AND stage_attempt_count < ")
-        .push_bind(i64::from(request.max_attempts))
+        .push_bind(i64::from(request.max_attempts));
+    if let Some(category_key) = category_key {
+        builder.push(" AND category_key = ").push_bind(category_key);
+    }
+    builder
         .push(" ORDER BY id FOR UPDATE SKIP LOCKED)")
         .push(" RETURNING id, idempotency_key, category_key, report_date, target_timezone, ")
         .push("render_version, selection_policy_version, state, remote_target, attempt_count, rendered_at");

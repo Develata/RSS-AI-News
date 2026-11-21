@@ -177,7 +177,7 @@ async fn contents_get_failure_keeps_operation_status_message_and_request_id() {
     Mock::given(method("GET"))
         .respond_with(
             ResponseTemplate::new(400)
-                .insert_header("x-github-request-id", "C0DE:1234:ABCD")
+                .insert_header("x-github-request-id", "C0DE:1234:ABCD:5678:9ABCDEF0")
                 // The server echoes request text: token, report marker, path.
                 .set_body_json(json!({
                     "message": format!("Bad request for {TOKEN}: {BODY_MARKER} 科技新闻")
@@ -202,7 +202,7 @@ async fn contents_get_failure_keeps_operation_status_message_and_request_id() {
     assert!(shown.contains("bad request"), "{shown}");
     assert!(!shown.contains("Bad request for"), "{shown}");
     assert!(
-        shown.contains("x-github-request-id: C0DE:1234:ABCD"),
+        shown.contains("x-github-request-id: C0DE:1234:ABCD:5678:9ABCDEF0"),
         "{shown}"
     );
     assert!(!shown.contains(TOKEN), "{shown}");
@@ -229,7 +229,7 @@ async fn contents_put_failure_keeps_operation_and_request_id() {
     Mock::given(method("PUT"))
         .respond_with(
             ResponseTemplate::new(422)
-                .insert_header("x-github-request-id", "B0D7:5678")
+                .insert_header("x-github-request-id", "B0D7:5678:9A0B1C2:D3E4F56:6B01CE60")
                 .set_body_json(json!({"message": "Invalid request."})),
         )
         .mount(&server)
@@ -247,7 +247,10 @@ async fn contents_put_failure_keeps_operation_and_request_id() {
     ));
     assert!(shown.contains("PUT contents"), "{shown}");
     assert!(shown.contains("invalid request"), "{shown}");
-    assert!(shown.contains("x-github-request-id: B0D7:5678"), "{shown}");
+    assert!(
+        shown.contains("x-github-request-id: B0D7:5678:9A0B1C2:D3E4F56:6B01CE60"),
+        "{shown}"
+    );
 }
 
 /// R1-P-B6: a request id that does not have GitHub's shape, or carries the
@@ -258,6 +261,8 @@ async fn malformed_or_token_bearing_request_id_is_dropped() {
         TOKEN.to_string(),
         "not:an:id".to_string(),
         format!("ABCD:{BODY_MARKER}"),
+        // R3F-B6: hex but not GitHub's five-group shape.
+        "12:34".to_string(),
     ] {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -502,6 +507,17 @@ async fn oversized_success_keeps_its_request_context() {
 #[tokio::test]
 async fn success_missing_a_required_field_keeps_its_request_context() {
     let server = MockServer::start().await;
+    // The 502 protocol error is an ambiguous write: the read-only HEAD check
+    // runs and finds the report absent, so the write error stands (a failing
+    // check would make it `RemoteWriteUnverified`, R3F-B2).
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path(
+            "/repos/owner/repo/git/ref/heads/main",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"object": {"sha": "head"}})))
+        .with_priority(1)
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
         .mount(&server)

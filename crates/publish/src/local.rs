@@ -46,15 +46,21 @@ impl PublishTarget for LocalFsTarget {
         let dest = dir.join(file_name);
         reject_escaping_symlink(&root, &dest, &report.relative_path).await?;
 
-        // R1-P-S9: replacing a report keeps its permissions. Its temp file is
-        // created 0600 (never readable beyond the owner while being written)
-        // and given the old file's permissions just before the rename. A new
-        // report keeps the default create mode (0666 minus the umask), which
-        // is also what its temp file gets: std offers no way to read the
-        // umask, and the final file is that permissive anyway.
-        let existing = existing_permissions(&dest).await?;
-        let temp = write_temp(&dir, report.markdown_content.as_bytes(), existing.is_some()).await?;
-        if let Some(permissions) = existing
+        // R1-P-S9 / R3F-S9: on Unix every temp file is created 0600, so no
+        // other user can open it while the content is being written (a
+        // descriptor opened then would keep reading after a later chmod).
+        // Just before the rename it gets its final mode: the replaced
+        // report's permissions, or for a new report the mode a plain create
+        // in that directory gives (umask / default ACL), read from an empty
+        // probe file. Windows: the temp file inherits the directory's ACL and
+        // a replaced report's explicit ACL is not carried over (only the
+        // read-only flag is), a documented limitation (plan/04 §4.1).
+        let final_permissions = match existing_permissions(&dest).await? {
+            Some(permissions) => Some(permissions),
+            None => default_create_permissions(&dir).await?,
+        };
+        let temp = write_temp(&dir, report.markdown_content.as_bytes()).await?;
+        if let Some(permissions) = final_permissions
             && let Err(error) = fs::set_permissions(&temp, permissions).await
         {
             remove_temp(&temp).await;
@@ -186,16 +192,57 @@ async fn existing_permissions(dest: &Path) -> Result<Option<std::fs::Permissions
     }
 }
 
+/// Permissions a plain create in `dir` gives (0666 minus the umask, or what
+/// a default ACL dictates), read from an empty probe file that is removed
+/// again: std cannot read the umask, and calling `umask(2)` would race other
+/// threads. The probe never holds report content. `None` off Unix.
+#[cfg(unix)]
+async fn default_create_permissions(
+    dir: &Path,
+) -> Result<Option<std::fs::Permissions>, PublishError> {
+    for _ in 0..TEMP_NAME_ATTEMPTS {
+        let probe = dir.join(next_temp_name());
+        let file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .await
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let permissions = file.metadata().await.map(|metadata| metadata.permissions());
+        drop(file);
+        remove_temp(&probe).await;
+        return Ok(Some(permissions?));
+    }
+    Err(no_free_temp_name(dir))
+}
+
+#[cfg(not(unix))]
+async fn default_create_permissions(
+    _dir: &Path,
+) -> Result<Option<std::fs::Permissions>, PublishError> {
+    Ok(None)
+}
+
+fn no_free_temp_name(dir: &Path) -> PublishError {
+    PublishError::LocalIoError(std::io::Error::new(
+        ErrorKind::AlreadyExists,
+        format!(
+            "no free publish temp file name in {} after {TEMP_NAME_ATTEMPTS} attempts",
+            dir.display()
+        ),
+    ))
+}
+
 /// Writes `contents` to a fresh hidden temp file in `dir` (same filesystem as
 /// the destination, so the later rename is atomic) and fsyncs it. The
-/// destination is untouched until [`commit_temp`]. `owner_only` creates the
-/// file with mode 0600 on Unix.
-async fn write_temp(
-    dir: &Path,
-    contents: &[u8],
-    owner_only: bool,
-) -> Result<PathBuf, PublishError> {
-    write_temp_named(dir, contents, owner_only, next_temp_name).await
+/// destination is untouched until [`commit_temp`]. On Unix the file is
+/// created with mode 0600 (R3F-S9); the caller applies the final mode.
+async fn write_temp(dir: &Path, contents: &[u8]) -> Result<PathBuf, PublishError> {
+    write_temp_named(dir, contents, next_temp_name).await
 }
 
 /// [`write_temp`] with the name source injectable for tests. A name that
@@ -205,7 +252,6 @@ async fn write_temp(
 async fn write_temp_named(
     dir: &Path,
     contents: &[u8],
-    owner_only: bool,
     mut next_name: impl FnMut() -> String,
 ) -> Result<PathBuf, PublishError> {
     for _ in 0..TEMP_NAME_ATTEMPTS {
@@ -214,11 +260,7 @@ async fn write_temp_named(
         // `create_new` (O_EXCL) never follows or reuses an existing path.
         options.write(true).create_new(true);
         #[cfg(unix)]
-        if owner_only {
-            options.mode(0o600);
-        }
-        #[cfg(not(unix))]
-        let _ = owner_only;
+        options.mode(0o600);
         let mut file = match options.open(&temp).await {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
@@ -237,13 +279,7 @@ async fn write_temp_named(
         }
         return Ok(temp);
     }
-    Err(PublishError::LocalIoError(std::io::Error::new(
-        ErrorKind::AlreadyExists,
-        format!(
-            "no free publish temp file name in {} after {TEMP_NAME_ATTEMPTS} attempts",
-            dir.display()
-        ),
-    )))
+    Err(no_free_temp_name(dir))
 }
 
 /// Atomically replaces `dest` with `temp`, then fsyncs the directory so the
@@ -287,7 +323,7 @@ mod tests {
         let dest = dir.path().join("report.md");
         std::fs::write(&dest, "old report").unwrap();
 
-        let temp = write_temp(dir.path(), b"new report", true).await.unwrap();
+        let temp = write_temp(dir.path(), b"new report").await.unwrap();
 
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "old report");
         assert_eq!(std::fs::read_to_string(&temp).unwrap(), "new report");
@@ -307,7 +343,7 @@ mod tests {
         std::fs::write(&taken, "not ours").unwrap();
         let mut names = vec![".fresh.tmp".to_string(), ".taken.tmp".to_string()];
 
-        let temp = write_temp_named(dir.path(), b"report", false, || names.pop().unwrap())
+        let temp = write_temp_named(dir.path(), b"report", || names.pop().unwrap())
             .await
             .unwrap();
 
@@ -322,7 +358,7 @@ mod tests {
         let taken = dir.path().join(".taken.tmp");
         std::fs::write(&taken, "not ours").unwrap();
 
-        let error = write_temp_named(dir.path(), b"report", false, || ".taken.tmp".to_string())
+        let error = write_temp_named(dir.path(), b"report", || ".taken.tmp".to_string())
             .await
             .unwrap_err();
 
@@ -330,14 +366,19 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&taken).unwrap(), "not ours");
     }
 
-    /// R1-P-S9: the temp file of a replacement is owner-only from creation.
+    /// R3F-S9: the first create of a report (no file to replace yet) writes
+    /// its content into a 0600 temp file too, whatever the umask; the one
+    /// temp-file path serves replacements as well (R1-P-S9).
     #[cfg(unix)]
     #[tokio::test]
-    async fn owner_only_temp_file_is_created_0600() {
+    async fn first_create_temp_file_is_created_0600() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("new.md");
+        let existing = existing_permissions(&dest).await.unwrap();
+        assert!(existing.is_none());
 
-        let temp = write_temp(dir.path(), b"report", true).await.unwrap();
+        let temp = write_temp(dir.path(), b"report").await.unwrap();
 
         let mode = std::fs::metadata(&temp).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o600, "{mode:o}");

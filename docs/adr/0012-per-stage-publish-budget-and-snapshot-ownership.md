@@ -61,6 +61,9 @@
   不改数据；之后的 freeze 都会事务内复查，不会再产生新的重复）。因此 store_local 与 remote（单条与批量）在 claim 之后、
   任何外部写入（本地文件 / GitHub）之前，查询本记录快照中是否有文章同时属于另一份**胜出**的未失败记录：
   已 `published_*` 的记录无论 id 大小都胜出（其文章已是 `published`），其余情况 id 较小者胜出。
+  这是**同一个排序**（先已发布、再按 id 升序，2026-11-22 R3F-P-B1）：它既决定本记录是否落败（有排在自己之前的持有者），
+  也决定报告的胜方（排第一的持有者），因此三方及以上共享时所有败方报告的是同一个胜方（例如 9101、9102 与已发布的 9103
+  共享文章时，9101 与 9102 都报 9103）。
   败方不写任何外部产物：立即释放 lease、两个计数都退还、**保持当前阶段态**、`last_error_kind =
   article_owned_by_active_snapshot`、`last_error` 列出文章与胜方记录 id，阶段结果为 `ArticleConflict`（exit 1）；
   批量发布中只剔除败方，其余照常提交。胜方转 `failed` 后归属释放，败方下次运行即可继续；胜方已发布时败方无法完成，
@@ -74,10 +77,18 @@
 
 **同一次尝试内的歧义写入核对（2026-11-22，R1-P-B2）**：写请求（批量的 `PATCH ref`、单报告的 `PUT contents`）已发出、
 但结果未知——传输失败 / 响应不可读（分类为 503）或 5xx 应答——时，释放前先做只读核对：`GET ref` 取分支 HEAD commit，
-再按该 commit 查每个路径的 blob（`find_published`，与上文同一比对）。全部一致 → 以 HEAD commit 记成功回执；不一致或核对本身
-出错 → 原写入错误不变，按原分类释放。4xx（含 409、422）表示写入被拒，不核对。runtime 层的远端 deadline（lease 的 80%）
+再按该 commit 查每个路径的 blob（`find_published`，与上文同一比对）。全部一致 → 以 HEAD commit 记成功回执；不一致 → 原写入错误不变，按原分类释放。
+4xx（含 409、422）表示写入被拒，不核对。runtime 层的远端 deadline（lease 的 80%）
 切断调用时同样核对，核对自己的时限为 deadline 之后再加 lease 的 10%（其余 10% 留给数据库收尾），lease 已失时由带 owner
-守卫的推进拒绝。因此 `publish_max_attempts = 1` 或默认预算的最后一次尝试里"PATCH 已落地、响应丢失"也会记为
+守卫的推进拒绝。
+**核对未完成（2026-11-22，R3F-B2）**：核对本身出错（传输失败、5xx、限流）或用完时限时，既不能认定已落地也不能认定未落地，
+结果为 `RemoteWriteUnverified`（`error_kind = remote_write_unverified`，可重试）。runtime 以 `release_deferred_retry` 释放：
+**保持 `stored_local`**、清 lease、两个计数都退还（与空快照 / 归属冲突同一做法）、写 `last_error*`；核对遇到限流时把该限流的
+期限（同样钳制 1 h）写入 `next_attempt_at`，否则置 NULL。因此即使是本阶段最后一次预算，记录也不会转 `failed`、不会释放
+文章归属；下一次尝试的写前 HEAD 比对（多报告 §3 / 单报告 R1-P-S2）是幂等的：已落地 → 直接记回执，未落地 → 照常写。
+发布客户端不做透明重试（R3F-B1），写请求只发一次，首次的歧义结果必然进入本核对。
+**代价（未解决）**：每次尝试都以"写入歧义 + 核对未完成"结束的记录（例如 GitHub 长期对写与读都不可达）不会耗尽预算、
+一直持有文章归属；它每次运行最多再发一次请求序列，且下一次尝试开头的只读请求失败会照常计预算。因此 `publish_max_attempts = 1` 或默认预算的最后一次尝试里"PATCH 已落地、响应丢失"也会记为
 `published_remote`，而不是 `failed` 并释放文章归属。限流（`GitHubRateLimit`）不核对，避免在限流窗口内追加请求。
 **残留限制**：进程在写请求之后、核对之前崩溃，且该阶段预算已耗尽时，过期清扫仍会把记录转 `failed`（未核对、归属释放）；
 预算未耗尽时，下一次运行的多报告幂等比对 / 单报告幂等（§3 下文）会补回执。
@@ -85,9 +96,14 @@
 ### 3a. 限流等待写入记录（2026-11-22，R1-P-S12，同属未发布的 migration 0008）
 
 - `publish_records.next_attempt_at`（SQLite `TEXT` / PG `TIMESTAMPTZ`，可空）：远端阶段遇 `GitHubRateLimit` 时，
-  retryable release 写入 GitHub 要求的最早重试时刻（`retry-after` / `x-ratelimit-reset`，见 plan/04 §7），
-  并钳制到 `[now, now + 1 h]`——记录在等待期间仍持有文章归属，过远的时刻（或恶意头）不能把它长期挂起；
-  其它 retryable release 把它写回 NULL，每次阶段推进（含 freeze）清零。
+  release 写入 GitHub 要求的最早重试时刻——所有适用期限中**最晚**的一个（2026-11-22，R3F-S12：`retry-after`；
+  配额耗尽 `x-ratelimit-remaining: 0`、或没有可用 `retry-after` 时再加 `x-ratelimit-reset`；都没有 → now + 60 s；见 plan/04 §7），
+  并钳制到 `[now, now + 1 h]`——记录在等待期间仍持有文章归属，过远的时刻（或恶意头）不能把它长期挂起。
+  **有意的取舍**：GitHub 要求超过 1 h 时（如两小时的 `retry-after`），记录在 1 h 后即可再领取，那次请求大概率再被限流，
+  再写一次期限；用多一次请求换取归属不被长期挂起。其它 retryable release 把它写回 NULL，每次阶段推进（含 freeze）清零。
+- **限流不计阶段预算（R3F-S12）**：写入了等待期限的限流尝试用 `release_deferred_retry` 释放（与 §3 核对未完成相同）：
+  保持阶段态、退还本次 claim，节流由 `next_attempt_at` 负责，因此最后一次预算遇到限流也不会转 `failed`。
+  reset 已过去（不写等待）的限流照常计预算，避免无等待、无节流地反复免费重试。发布客户端不在一次 claim 内重发 429（R3F-B1）。
 - 四个 claim 入口（按状态扫描的 SQLite / PG SQL 与两个按 ID 的构造器）都要求 `next_attempt_at IS NULL OR <= now`；
   SQLite 照 lease 的做法按 `julianday` 比较（写入向上、now 向下取整到毫秒），不会提前领取。
 - 等待期内的运行领不到记录：`NothingToClaim`（verdict `skipped`，exit 0），不发任何 GitHub 请求、不耗预算；
@@ -133,12 +149,30 @@
 - **已知限制：`--force` 记录无法定向续跑（R1-P-S5，2026-11-22 记录，暂不新增 CLI 入口）**。force 记录的 render version
   是一次性的 `pending` trace 行。若它在 freeze 之后、预算未耗尽时停住（例如远端短暂失败），普通 `publish --date <那天>`
   取 active render 版本、再次 `--force` 又新建 trace 行，两者的幂等键都不是原记录，原记录不会被续跑，而它持有的文章被
-  归属规则排除在之后的报告之外（同日即可发生）。上文"按日期重跑"的办法对 force 记录无效。**人工处理**：确认该记录
-  （`SELECT id, state, render_version FROM publish_records WHERE render_version IN (SELECT id FROM rule_versions WHERE
-  version_tag LIKE 'force-%')`）后把它置为 `failed` 释放文章——`UPDATE publish_records SET state = 'failed',
-  lease_owner = NULL, lease_expires_at = NULL, last_error_kind = 'operator_failed' WHERE id = <id> AND state <> 'failed'`
-  ——再按需重新 `publish --date <那天> --force`。按记录 ID（或原 render version）定向续跑的入口（如 `publish --record <id>`，
-  沿用原目标与快照）列为后续行动。
+  归属规则排除在之后的报告之外（同日即可发生）。上文"按日期重跑"的办法对 force 记录无效。**人工处理**（2026-11-22 改为原子守卫，R3F-B4）：
+  1. 找出候选：`SELECT id, state, render_version, remote_target, local_path, lease_owner, lease_expires_at FROM publish_records
+     WHERE state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local') AND render_version IN (SELECT id FROM rule_versions
+     WHERE kind = 'render' AND version_tag LIKE 'force-%')`。
+  2. **先核实远端回执**：`stored_local` 记录（尤其 `last_error_kind = remote_write_unverified` / `remote_timeout`）的远端写入
+     可能已落地而回执未落库。在目标分支 HEAD 上比对报告路径的 blob 与本地文件（`git hash-object <local_path>`，GitHub
+     `GET contents/<path>?ref=<branch>` 的 `sha`）。**已存在则不要置 `failed`**：其文章已在远端发布，置 `failed` 会释放归属、
+     让它们重新入选；保留记录，等待定向续跑入口（见后续行动）。
+  3. 只对确认未发布、且没有进程正在处理（无有效 lease）的记录，在事务中执行下面的守卫式 UPDATE。守卫在同一条语句里
+     复核"仍是未终态、仍是 force 记录、无有效 lease"，查询与更新之间完成的发布或新领取都会让它更新 0 行；
+     `RETURNING id` 必须**恰好返回一行**，否则 `ROLLBACK` 并重新从第 1 步检查。
+     - SQLite（3.35+，lease 按时刻比较，与 reclaim 相同的 `julianday` 谓词；无法解析的 lease 文本使谓词为 NULL、不更新）：
+       `BEGIN IMMEDIATE; UPDATE publish_records SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL,
+       last_error_kind = 'operator_failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = <id>
+       AND state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local') AND render_version IN (SELECT id FROM
+       rule_versions WHERE kind = 'render' AND version_tag LIKE 'force-%') AND (lease_expires_at IS NULL OR
+       julianday(lease_expires_at) < julianday('now')) RETURNING id;` → 恰好一行 `COMMIT;`，否则 `ROLLBACK;`
+     - PostgreSQL：`BEGIN; UPDATE publish_records SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL,
+       last_error_kind = 'operator_failed', updated_at = now() WHERE id = <id> AND state IN ('pending', 'snapshot_frozen',
+       'rendered', 'stored_local') AND render_version IN (SELECT id FROM rule_versions WHERE kind = 'render' AND version_tag
+       LIKE 'force-%') AND (lease_expires_at IS NULL OR lease_expires_at < now()) RETURNING id;` → 恰好一行 `COMMIT;`，
+       否则 `ROLLBACK;`
+  4. 再按需重新 `publish --date <那天> --force`。
+  按记录 ID（或原 render version）定向续跑的入口（如 `publish --record <id>`，沿用原目标与快照）列为后续行动。
 - **已知限制：旧版 `stored_local` 记录的本地字节（R1-P-S10，B8）**。`f420d95` 及更早版本渲染时用调用方时间生成本地文件，
   另一次采样写入 `rendered_at`；升级后远端阶段与 rebuild-report 从 `rendered_at` 重渲染，因此模板含 `{generated_at}` 时，
   升级前已 `stored_local` 的记录推到 GitHub 的字节可能与本地文件不同（相差的只是该时间戳），0008 也没有原时间可供恢复。
@@ -160,7 +194,7 @@
 - 本地写入改为基于目录句柄（`openat` / `renameat`）以消除输出根内并发写者的 TOCTOU（R1-P-B4，见 plan/04 §4.1）。
 - ~~单报告批次走 Contents API，不在本 ADR 的幂等范围内。~~ 已补（2026-11-22，R1-P-S2）：单报告路径在 `GET contents?ref=<branch>`
   取到的 blob sha 与本地 git blob sha 相同时，先按固定 HEAD commit 复核（`find_published`），一致即以该 HEAD commit 记回执、
-  不发 PUT（也就不需要写权限）；HEAD 已移动且不含该 blob 时照常 PUT。这覆盖了"批量回执部分落库后中断、重跑只剩一条报告"
+  不发 PUT（也就不需要写权限）；HEAD 已移动且不含该 blob 时照常 PUT，`sha` 取自固定 HEAD 复核（现有 blob 或缺失，R3F-S2）。这覆盖了"批量回执部分落库后中断、重跑只剩一条报告"
   的恢复。
 
 ## Links

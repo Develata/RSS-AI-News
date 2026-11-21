@@ -114,11 +114,10 @@ async fn retry_after_lost_ref_update_response_records_existing_head_without_new_
         .await
         .expect("the ambiguous ref update is verified against HEAD");
     assert_eq!(first.commit_sha.as_deref(), Some("batch-commit"));
-    // The HTTP client may itself resend the PATCH on a 5xx; all of that
-    // belongs to attempt 1.
+    // The client sends the PATCH once (R3F-B1): no transparent resend.
     let ref_updates_in_attempt_1 =
         count(&server, "PATCH", "/repos/owner/repo/git/refs/heads/main").await;
-    assert!(ref_updates_in_attempt_1 >= 1);
+    assert_eq!(ref_updates_in_attempt_1, 1);
     // A later run (e.g. the receipt was never persisted) is idempotent too.
     let second = target
         .publish_many(&reports())
@@ -298,6 +297,81 @@ async fn ambiguous_contents_put_not_on_head_keeps_the_write_error() {
     );
 }
 
+/// R3F-B2: the PUT outcome is unknown (5xx) and the read-only HEAD check
+/// itself fails (GET ref 503). Neither "landed" nor "not landed" is known, so
+/// the target reports an unverified write — retryable, distinct from the
+/// write error — instead of the write error the stage would charge.
+#[tokio::test]
+async fn ambiguous_contents_put_with_a_failed_verification_is_unverified() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({ "message": "unavailable" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/repos/owner/repo/contents/reports/tech/2026-04-29.md",
+        ))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(504).set_body_json(json!({ "message": "timeout" })))
+        .mount(&server)
+        .await;
+
+    let error = target(&server).publish(&single_report()).await.unwrap_err();
+
+    use rss_ai_news_domain::error::ClassifiedError;
+    assert_eq!(error.error_kind(), "remote_write_unverified", "{error:?}");
+    assert!(error.is_retryable());
+    // The diagnostic names both the write and the failed check.
+    let message = error.to_string();
+    assert!(message.contains("PUT contents"), "{message}");
+    assert!(message.contains("GET ref"), "{message}");
+}
+
+/// R3F-B2 batch path: the PATCH outcome is unknown and the HEAD check is
+/// rate limited; the unverified error carries the check's deadline.
+#[tokio::test]
+async fn ambiguous_ref_update_with_a_rate_limited_verification_keeps_the_deadline() {
+    let server = MockServer::start().await;
+    mount_head(&server, "old-head", "old-tree", Some(1)).await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "600")
+                .set_body_json(json!({ "message": "API rate limit exceeded" })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/git/trees"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "sha": "batch-tree" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/git/commits"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "sha": "batch-commit" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/repos/owner/repo/git/refs/heads/main"))
+        .respond_with(ResponseTemplate::new(502).set_body_json(json!({ "message": "Bad gateway" })))
+        .mount(&server)
+        .await;
+    let before = time::OffsetDateTime::now_utc();
+
+    let error = target(&server).publish_many(&reports()).await.unwrap_err();
+
+    use rss_ai_news_domain::error::ClassifiedError;
+    assert_eq!(error.error_kind(), "remote_write_unverified", "{error:?}");
+    let reset = error.rate_limit_reset().expect("the check's deadline");
+    assert!(reset >= before + time::Duration::seconds(599), "{reset}");
+}
+
 /// R1-P-S2: a batch whose first receipt was recorded before an interruption
 /// is resumed with the one remaining report, which takes the single-report
 /// path. The branch already holds that exact blob, so the receipt names the
@@ -333,8 +407,20 @@ async fn remaining_single_report_already_on_head_records_receipt_without_put() {
     assert_eq!(puts, 0, "an identical blob needs no write");
 }
 
-/// The branch blob matches but HEAD moved to a commit without it: the
-/// normal PUT (with the branch blob sha) still runs.
+async fn put_bodies(server: &MockServer) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.method.as_str() == "PUT")
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .collect()
+}
+
+/// The branch blob matches but HEAD moved to a commit where the file is
+/// gone: the PUT still runs, as a create without `sha` — the sha of the
+/// fixed-HEAD lookup, not the stale one from the first lookup (R3F-S2).
 #[tokio::test]
 async fn matching_branch_blob_not_confirmed_at_head_still_puts() {
     let server = MockServer::start().await;
@@ -359,6 +445,34 @@ async fn matching_branch_blob_not_confirmed_at_head_still_puts() {
     let artifact = target(&server).publish(&single_report()).await.unwrap();
 
     assert_eq!(artifact.commit_sha.as_deref(), Some("put-commit"));
+    let bodies = put_bodies(&server).await;
+    assert_eq!(bodies.len(), 1);
+    assert!(bodies[0].get("sha").is_none(), "{}", bodies[0]);
+}
+
+/// R3F-S2: HEAD moved and the file there is now blob B: the PUT replaces B
+/// (the sha the fixed-HEAD lookup saw), not the stale first-lookup blob.
+#[tokio::test]
+async fn matching_branch_blob_changed_at_head_puts_with_the_heads_sha() {
+    const OTHER_BLOB: &str = "1111111111111111111111111111111111111111";
+    let server = MockServer::start().await;
+    mount_head(&server, "moved-head", "moved-tree", None).await;
+    mount_blob(&server, "tech/2026-04-29.md", "main", HELLO_BLOB).await;
+    mount_blob(&server, "tech/2026-04-29.md", "moved-head", OTHER_BLOB).await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": { "sha": HELLO_BLOB },
+            "commit": { "sha": "put-commit" }
+        })))
+        .mount(&server)
+        .await;
+
+    let artifact = target(&server).publish(&single_report()).await.unwrap();
+
+    assert_eq!(artifact.commit_sha.as_deref(), Some("put-commit"));
+    let bodies = put_bodies(&server).await;
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["sha"], OTHER_BLOB, "{}", bodies[0]);
 }
 
 /// A refused write (4xx) is never checked: it cannot have landed.

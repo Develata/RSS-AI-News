@@ -815,6 +815,154 @@ async fn pg_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advance() 
     assert_eq!(wait, None);
 }
 
+/// R3F-S15 on PostgreSQL: the by-id freeze claim filters the category in SQL.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_by_id_freeze_claim_requires_the_category() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "by-id-cat").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .create_if_new(&new_record("idem-by-id-cat", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    let request = |owner: &str| ClaimRequest {
+        owner: owner.to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+
+    assert!(
+        repo.claim_pending_for_freeze_by_id_in_category(&request("c1"), id, "ml")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let (attempts, lease_owner): (i64, Option<String>) =
+        sqlx::query_as("SELECT attempt_count, lease_owner FROM publish_records WHERE id = $1")
+            .bind(id)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+    assert_eq!((attempts, lease_owner), (0, None), "never claimed");
+    assert_eq!(
+        repo.claim_pending_for_freeze_by_id_in_category(&request("c2"), id, "ai")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// R3F-B2 / S12 on PostgreSQL: a deferred retry keeps the state, clears the
+/// lease, refunds the claim on both counters and persists the wait; a release
+/// for another state changes nothing; `None` clears the wait.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "deferred").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .create_if_new(&new_record("idem-deferred", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE publish_records SET state = 'stored_local' WHERE id = $1")
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    let request = |owner: &str, now: OffsetDateTime| ClaimRequest {
+        owner: owner.to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+    let row = |id: i64| {
+        let pool = ctx.pg_pool().clone();
+        async move {
+            sqlx::query_as::<_, (String, i64, i64, Option<String>, Option<OffsetDateTime>)>(
+                "SELECT state, attempt_count, stage_attempt_count, lease_owner, next_attempt_at \
+                 FROM publish_records WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let first = OffsetDateTime::now_utc();
+    assert_eq!(
+        repo.claim_publish_by_ids(&request("d1", first), PublishState::StoredLocal, &[id])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        !repo
+            .release_deferred_retry(id, "d1", PublishState::Rendered, "x", "x", None, first)
+            .await
+            .unwrap()
+    );
+    let not_before = first + time::Duration::milliseconds(30_500);
+    assert!(
+        repo.release_deferred_retry(
+            id,
+            "d1",
+            PublishState::StoredLocal,
+            "verification incomplete",
+            "remote_write_unverified",
+            Some(not_before),
+            first,
+        )
+        .await
+        .unwrap()
+    );
+    let (state, attempts, stage_attempts, lease_owner, wait) = row(id).await;
+    assert_eq!(
+        (state.as_str(), attempts, stage_attempts, lease_owner),
+        ("stored_local", 0, 0, None)
+    );
+    assert!(wait.is_some());
+    assert!(
+        repo.claim_local_for_remote_publish(&request(
+            "d2",
+            not_before - time::Duration::milliseconds(1)
+        ))
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(
+        repo.claim_publish_by_ids(&request("d3", not_before), PublishState::StoredLocal, &[id])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        repo.release_deferred_retry(
+            id,
+            "d3",
+            PublishState::StoredLocal,
+            "x",
+            "y",
+            None,
+            not_before
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(row(id).await.4, None, "None clears the wait");
+}
+
 /// B2 (ADR 0012) on PostgreSQL under READ COMMITTED: a freeze locks its
 /// articles before the ownership re-check, so it waits for a concurrent
 /// freeze of the same article and then sees that snapshot's committed items
@@ -1112,6 +1260,68 @@ async fn pg_insert_item(ctx: &PgTestContext, record: i64, position: i64, article
     .execute(ctx.pg_pool())
     .await
     .unwrap();
+}
+
+/// R3F-P-B1 on PostgreSQL: three holders of one article, the highest id
+/// published. Both stopped records name the published one as the winner;
+/// once it fails, the lowest id wins and the other names it.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_three_owners_all_name_the_same_top_ranked_winner() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "own-three").await;
+    let records = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let mut ids = Vec::new();
+    for (key, category) in [
+        ("idem-three-a", "ai"),
+        ("idem-three-b", "ml"),
+        ("idem-three-c", "math"),
+    ] {
+        ids.push(
+            records
+                .create_if_new(&new_record(key, category, render, policy))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let (first, second, published) = (ids[0], ids[1], ids[2]);
+    let shared = seed_article(&ctx, "hash-three", "uid-three", "ready_for_publish").await;
+    for id in [first, second, published] {
+        pg_insert_item(&ctx, id, 1, shared).await;
+    }
+    let set_state = |id: i64, state: &'static str| {
+        let pool = ctx.pg_pool().clone();
+        async move {
+            sqlx::query("UPDATE publish_records SET state = $1 WHERE id = $2")
+                .bind(state)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    set_state(first, "stored_local").await;
+    set_state(second, "stored_local").await;
+    set_state(published, "published_remote").await;
+    let items = PublishItemRepo::new_with_storage(ctx.storage_pool().clone());
+    let winner = |id: i64| {
+        let items = &items;
+        async move {
+            items
+                .find_snapshot_ownership_conflict(id)
+                .await
+                .unwrap()
+                .map(|conflict| conflict.owner_record_id)
+        }
+    };
+
+    assert_eq!(winner(first).await, Some(published));
+    assert_eq!(winner(second).await, Some(published));
+
+    set_state(published, "failed").await;
+    assert_eq!(winner(first).await, None);
+    assert_eq!(winner(second).await, Some(first));
 }
 
 /// P-B1 on PostgreSQL: of two (legacy) snapshots sharing an article the

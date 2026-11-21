@@ -13,6 +13,9 @@ dotenvy.workspace = true
 url.workspace = true
 sha2.workspace = true
 jiff.workspace = true
+# Caseless, normalization-insensitive report path comparison (R3F-B3); the
+# locked version is already in the graph via sqlx's `stringprep`.
+unicode-normalization = "0.1.25"
 
 [lints]
 workspace = true

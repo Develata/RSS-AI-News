@@ -259,6 +259,14 @@ pub(super) const RELEASE_FREEZE_CONFLICT_SQL: &str = "UPDATE publish_records SET
 /// counters (no write happened, so it is not an attempt) and record why. The
 /// state is kept so the record can continue if the winner later fails.
 pub(super) const RELEASE_OWNERSHIP_CONFLICT_SQL: &str = "UPDATE publish_records SET lease_owner = NULL, lease_expires_at = NULL, attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, stage_attempt_count = CASE WHEN stage_attempt_count > 0 THEN stage_attempt_count - 1 ELSE 0 END, last_error = $1, last_error_kind = $2, updated_at = $3 WHERE id = $4 AND lease_owner = $5 AND state = $6";
+/// A remote attempt whose cost is not charged to the stage (R3F-B2, R3F-S12):
+/// a write whose outcome is unknown and whose read-only HEAD verification did
+/// not complete, or a rate-limited attempt that persists GitHub's deadline.
+/// Like [`RELEASE_OWNERSHIP_CONFLICT_SQL`] it keeps the state (the record keeps
+/// owning its snapshot's articles), clears the lease and refunds the claim on
+/// both counters; in addition `$7` = the earliest next claim
+/// (`next_attempt_at`, NULL = no wait).
+pub(super) const RELEASE_DEFERRED_RETRY_SQL: &str = "UPDATE publish_records SET lease_owner = NULL, lease_expires_at = NULL, attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, stage_attempt_count = CASE WHEN stage_attempt_count > 0 THEN stage_attempt_count - 1 ELSE 0 END, last_error = $1, last_error_kind = $2, updated_at = $3, next_attempt_at = $7 WHERE id = $4 AND lease_owner = $5 AND state = $6";
 pub(super) const RECLAIM_PUBLISH_LEASES_SQL: &str = r#"
 UPDATE publish_records
 SET lease_owner = NULL, lease_expires_at = NULL, updated_at = $1

@@ -118,6 +118,19 @@ fn forbidden_with_an_http_date_retry_after_is_a_rate_limit_until_that_date() {
     assert!(error.is_retryable());
 }
 
+/// R3F-S11: RFC 9110 §5.6.7 recipients also accept the obsolete RFC 850
+/// and asctime forms; each yields the real deadline, not the 60 s fallback.
+#[test]
+fn obsolete_http_date_forms_of_retry_after_give_the_real_deadline() {
+    let expected = OffsetDateTime::from_unix_timestamp(1_795_336_200).unwrap();
+    for value in ["Sunday, 22-Nov-26 08:30:00 GMT", "Sun Nov 22 08:30:00 2026"] {
+        let hints = hints_with_retry_after(value);
+        assert_eq!(hints.retry_after, Some(RetryAfter::At(expected)), "{value}");
+        let now = expected - time::Duration::hours(2);
+        assert_eq!(hints.reset_at_from(now), expected, "{value}");
+    }
+}
+
 #[test]
 fn unparsable_retry_after_still_marks_a_403_as_rate_limited() {
     let hints = hints_with_retry_after("soon");
@@ -149,6 +162,50 @@ fn past_http_date_retry_after_means_now() {
     let now = OffsetDateTime::now_utc();
     let reset_at = hints_with_retry_after("Sun, 06 Nov 1994 08:49:37 GMT").reset_at_from(now);
     assert_eq!(reset_at, now);
+}
+
+// === R3F-S12: the latest applicable deadline wins ===
+
+fn hints(retry_after: Option<&str>, remaining: Option<i64>, reset: Option<i64>) -> RateLimitHints {
+    let mut headers = http::HeaderMap::new();
+    if let Some(value) = retry_after {
+        headers.insert("retry-after", value.parse().unwrap());
+    }
+    if let Some(value) = remaining {
+        headers.insert("x-ratelimit-remaining", value.to_string().parse().unwrap());
+    }
+    if let Some(value) = reset {
+        headers.insert("x-ratelimit-reset", value.to_string().parse().unwrap());
+    }
+    RateLimitHints::from_headers(&headers)
+}
+
+/// Exhausted quota (`remaining: 0`) binds `x-ratelimit-reset` even when a
+/// shorter `retry-after` is present: waiting only for the latter would retry
+/// into a still-exhausted quota.
+#[test]
+fn exhausted_quota_reset_later_than_retry_after_wins() {
+    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+    let reset = 1_800_000_000 + 3_000;
+    let at = hints(Some("60"), Some(0), Some(reset)).reset_at_from(now);
+    assert_eq!(at, OffsetDateTime::from_unix_timestamp(reset).unwrap());
+}
+
+/// A `retry-after` later than the reset wins too (the latest applies).
+#[test]
+fn retry_after_later_than_an_exhausted_quota_reset_wins() {
+    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+    let at = hints(Some("600"), Some(0), Some(1_800_000_000 + 60)).reset_at_from(now);
+    assert_eq!(at, now + time::Duration::seconds(600));
+}
+
+/// With quota left, `x-ratelimit-reset` is not a wait GitHub asked for: a
+/// secondary limit's `retry-after` alone decides.
+#[test]
+fn reset_does_not_apply_while_quota_remains_and_retry_after_is_given() {
+    let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+    let at = hints(Some("120"), Some(42), Some(1_800_000_000 + 3_000)).reset_at_from(now);
+    assert_eq!(at, now + time::Duration::seconds(120));
 }
 
 #[test]

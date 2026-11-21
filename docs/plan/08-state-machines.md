@@ -202,12 +202,14 @@ retryable 失败**不**作为独立状态。语义上"暂时失败、稍后再�
 各自最多 `retry.publish_max_attempts` 次 claim（`stage_attempt_count`），阶段推进成功即清零；
 某阶段耗尽才转 `failed`。`attempt_count` 为跨阶段累计值，仅供审计。
 
-**退还 claim 的释放**（不是一次发布尝试，两个计数都退、清 lease、保持阶段态，2026-11-22）：空快照（`snapshot_empty`）；
+**退还 claim 的释放**（不是一次发布尝试，两个计数都退、清 lease、保持阶段态，2026-11-22）：远端写入歧义且只读核对未完成
+（`remote_write_unverified`，R3F-B2）与写入了等待期限的限流（`github_rate_limit`，R3F-S12，同时写 `next_attempt_at`）；空快照（`snapshot_empty`）；
 freeze 输掉归属竞争（`article_owned_by_active_snapshot` / `article_state_conflict`）；store_local / remote 写前发现存量
-重复归属的败方（`article_owned_by_active_snapshot`，R1-P-B1）；按 ID freeze 的分类不符（`category_mismatch`，R1-P-S15）。
+重复归属的败方（`article_owned_by_active_snapshot`，R1-P-B1）。按 ID freeze 的分类不符（`category_mismatch`）自 R3F-S15 起根本不领取记录，因此无需退还。
 
-**限流等待**（R1-P-S12）：`next_attempt_at` 非空且未到时，任何阶段的 claim 都不领取该记录；远端限流的 retryable release
-写入它（≤ 1 h），其它 retryable release 与每次阶段推进清空它。见 ADR 0012 §3a。
+**限流等待**（R1-P-S12）：`next_attempt_at` 非空且未到时，任何阶段的 claim 都不领取该记录；远端限流的 release
+写入它（≤ 1 h；写入了等待的限流用 `release_deferred_retry`、不计预算，R3F-S12），核对未完成的歧义写入在核对被限流时也写入它
+（R3F-B2），其它 retryable release 与每次阶段推进清空它。见 ADR 0012 §3a。
 
 ### 6.2 不可变契约
 

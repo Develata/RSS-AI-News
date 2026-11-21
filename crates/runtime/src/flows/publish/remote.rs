@@ -49,15 +49,21 @@ fn verify_deadline(deadline: Instant, lease_seconds: u64) -> Instant {
     deadline + StdDuration::from_secs(lease_seconds) / 10
 }
 
-/// Read-only receipt lookup after a remote timeout; `None` = not verified
-/// (not there, check failed or ran out of time), so the timeout stands.
+/// Read-only receipt lookup after a remote timeout. `Ok` = the destination
+/// holds every report; `RemoteTimeout` = it does not (the timeout stands);
+/// `RemoteWriteUnverified` = the check failed or ran out of time, so whether
+/// the cut-off call wrote is unknown (R3F-B2).
 async fn verify_after_timeout(
     target: &dyn PublishTarget,
     reports: &[RenderedReport],
     until: Instant,
-) -> Option<rss_ai_news_publish::PublishedBatchArtifact> {
+) -> Result<rss_ai_news_publish::PublishedBatchArtifact, PublishError> {
+    let unverified = |verification: PublishError| PublishError::RemoteWriteUnverified {
+        write: Box::new(PublishError::RemoteTimeout),
+        verification: Box::new(verification),
+    };
     if Instant::now() >= until {
-        return None;
+        return Err(unverified(PublishError::RemoteTimeout));
     }
     match tokio::time::timeout_at(until, target.find_published(reports)).await {
         Ok(Ok(Some(batch))) if batch.artifacts.len() == reports.len() => {
@@ -66,19 +72,16 @@ async fn verify_after_timeout(
                 commit_sha = batch.commit_sha.as_deref(),
                 "remote publish timed out but the destination already holds every report"
             );
-            Some(batch)
+            Ok(batch)
         }
-        Ok(Ok(_)) => None,
+        Ok(Ok(_)) => Err(PublishError::RemoteTimeout),
         Ok(Err(error)) => {
-            tracing::warn!(
-                ?error,
-                "post-timeout HEAD check failed; keeping the timeout"
-            );
-            None
+            tracing::warn!(?error, "post-timeout HEAD check failed; outcome unverified");
+            Err(unverified(error))
         }
         Err(_) => {
-            tracing::warn!("post-timeout HEAD check ran out of time; keeping the timeout");
-            None
+            tracing::warn!("post-timeout HEAD check ran out of time; outcome unverified");
+            Err(unverified(PublishError::RemoteTimeout))
         }
     }
 }
@@ -93,18 +96,34 @@ const MAX_RATE_LIMIT_WAIT: Duration = Duration::hours(1);
 /// Capped at `now + MAX_RATE_LIMIT_WAIT`; `None` for other errors and for a
 /// reset that is not in the future (no wait to honour — persisting `now`
 /// would only make a same-millisecond re-claim miss on SQLite's rounding).
+/// Also applies to the rate limit an unverified write's HEAD verification ran
+/// into (R3F-B2, [`PublishError::rate_limit_reset`]).
 fn rate_limit_retry_not_before(
     error: &PublishError,
     now: OffsetDateTime,
 ) -> Option<OffsetDateTime> {
-    let PublishError::GitHubRateLimit { reset_at, .. } = error else {
-        return None;
-    };
-    if *reset_at <= now {
+    let reset_at = error.rate_limit_reset()?;
+    if reset_at <= now {
         return None;
     }
     let latest = now.checked_add(MAX_RATE_LIMIT_WAIT).unwrap_or(now);
-    Some((*reset_at).min(latest))
+    Some(reset_at.min(latest))
+}
+
+/// An attempt released without charging the stage budget — the record keeps
+/// its state and its snapshot's articles, the claim is refunded and only
+/// `next_attempt_at` (if any) delays the next claim:
+/// - R3F-B2: a write whose HEAD verification did not complete;
+/// - R3F-S12: a rate limit whose wait is persisted (`retry_not_before`). The
+///   wait, not the budget, throttles it. A rate limit whose reset is already
+///   past imposes no wait, so it is charged like any retryable failure —
+///   otherwise repeated rate limits would retry for free and unthrottled.
+fn is_deferred_retry(error: &PublishError, retry_not_before: Option<OffsetDateTime>) -> bool {
+    match error {
+        PublishError::RemoteWriteUnverified { .. } => true,
+        PublishError::GitHubRateLimit { .. } => retry_not_before.is_some(),
+        _ => false,
+    }
 }
 
 enum RemotePreparationError {
@@ -374,8 +393,7 @@ impl PublishFlow {
                     verify_deadline(deadline, self.ctx.lease.publish_duration_seconds),
                 )
                 .await
-                .map(|mut batch| batch.artifacts.remove(0))
-                .ok_or(PublishError::RemoteTimeout),
+                .map(|mut batch| batch.artifacts.remove(0)),
             }
         };
         let now = OffsetDateTime::now_utc();
@@ -677,13 +695,14 @@ impl PublishFlow {
             match tokio::time::timeout_at(deadline, target.publish_many(&reports)).await {
                 Ok(result) => result,
                 // The cancelled call may already have written.
-                Err(_) => verify_after_timeout(
-                    target.as_ref(),
-                    &reports,
-                    verify_deadline(deadline, self.ctx.lease.publish_duration_seconds),
-                )
-                .await
-                .ok_or(PublishError::RemoteTimeout),
+                Err(_) => {
+                    verify_after_timeout(
+                        target.as_ref(),
+                        &reports,
+                        verify_deadline(deadline, self.ctx.lease.publish_duration_seconds),
+                    )
+                    .await
+                }
             }
         };
         let now = OffsetDateTime::now_utc();
@@ -863,7 +882,22 @@ impl PublishFlow {
         let message = error.display_user();
         let retry_not_before = rate_limit_retry_not_before(error, now);
         let mut budget_exhausted = false;
-        let release_result = if error.is_retryable() {
+        let deferred = is_deferred_retry(error, retry_not_before);
+        let release_result = if deferred {
+            // Every caller releases a record claimed for the remote stage.
+            self.ctx
+                .publish_record_repo
+                .release_deferred_retry(
+                    publish_record_id,
+                    owner,
+                    PublishState::StoredLocal,
+                    &message,
+                    error.error_kind(),
+                    retry_not_before,
+                    now,
+                )
+                .await
+        } else if error.is_retryable() {
             self.ctx
                 .publish_record_repo
                 .release_retryable_failure_until(
@@ -912,6 +946,8 @@ impl PublishFlow {
                     "phase": phase,
                     "error_kind": error.error_kind(),
                     "budget_exhausted": budget_exhausted,
+                    // R3F-B2 / S12: released without charging the stage budget.
+                    "attempt_refunded": deferred,
                     // R1-P-S1: where a GitHub failure happened, as fields.
                     "operation": error.github_context().and_then(|context| context.operation),
                     "http_status": error.github_context().and_then(|context| context.http_status),

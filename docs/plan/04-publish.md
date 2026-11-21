@@ -199,8 +199,12 @@ path_template = "zh-news/{category_key}/{YYYY}/{YYYYMMDD}.md"  # 覆盖全局；
 中断不会留下截断或半份报告。临时文件名（2026-11-22，R1-P-S8）与报告文件名无关、长度固定且短
 （`.rss-ai-news.<pid>.<纳秒>.<计数>.tmp`，十六进制），接近 255 字节上限的报告名也能发布；`create_new` 遇到已存在的同名文件
 视为他人所有，不写、不删，换名重试（最多 8 次，仍冲突则 `LocalIoError`）；只有本次调用创建成功的临时文件才会在写入失败时被删除。
-权限（R1-P-S9）：替换已有报告时，临时文件以 0600 创建（写入期间不比原文件更宽），rename 前设为原文件的权限，替换后权限不变；
-新报告沿用普通创建的默认权限（0666 去掉 umask），临时文件也以此创建（std 无法读取 umask，且最终文件本就是该权限）。
+权限（R1-P-S9，2026-11-22 R3F-S9 修订）：Unix 上**每个**临时文件（替换与首次创建）都以 0600 创建，写入期间其他用户
+无法打开它（先打开的描述符在之后 chmod 后仍可读，所以必须从创建起就收紧）；写完、rename 前再设最终权限：替换时为原文件的权限
+（替换后权限不变），新报告为该目录下普通创建会得到的权限（0666 去掉 umask，或目录默认 ACL 决定的权限）——std 无法读取 umask、
+调用 `umask(2)` 又会与其它线程竞争，因此用一个空的探测文件（同样的隐藏临时名，`create_new`）读出该权限后立即删除，探测文件
+从不含报告内容。**Windows 限制**：临时文件继承目录 ACL，`set_permissions` 只能复制只读位，被替换文件的显式 DACL 不会保留，
+写入期间临时文件的可读范围也由目录 ACL 决定；需要时应收紧输出目录本身的 ACL。
 
 **已接受风险：输出根内的并发恶意写者（R1-P-B4，2026-11-22 决定暂缓）**。路径检查返回的是路径字符串，创建临时文件与
 `rename` 时操作系统会重新解析各级父目录；若另一个进程能在检查之后、写入之前把已检查的目录换成指向根外的符号链接，
@@ -226,8 +230,11 @@ validate 只用一个样例日期（`2026-01-03`，ADR 0008）渲染，无法发
 实现：[`crates/runtime/src/flows/publish/paths.rs`](../../crates/runtime/src/flows/publish/paths.rs)。
 
 碰撞规则（2026-11-22，R1-P-B5；validate 与 publish-all 共用 `config::validate::report_path_collisions`）：
-按段比较，且**忽略大小写**（Unicode 小写折叠）——`News/{date}.md` 与 `news/{date}.md` 在 macOS / Windows 默认的
-大小写不敏感卷上是同一文件；一个路径是另一个路径的**整段前缀**（`news/2026-01-03` 与 `news/2026-01-03/ml.md`）也算碰撞，
+按段比较，且**忽略大小写与 Unicode 规范化差异**——`News/{date}.md` 与 `news/{date}.md` 在 macOS / Windows 默认的
+大小写不敏感卷上是同一文件；比较键（2026-11-22，R3F-B3，`path_segment_key`）为 NFD → `to_uppercase().to_lowercase()`
+（近似 Unicode 完整大小写折叠：`ſ` → `s`、`ß` → `ss`，单纯小写会漏掉）→ 再 NFD，即近似 Unicode §3.13 的 canonical caseless
+match，因此 `ſ` 与 `s`、组合与分解的 `é` 也算同名（APFS 实测 `04-publiſh.md` 与 `04-publish.md` 指向同一文件）。这是近似，
+不是某一文件系统（APFS / HFS+ / NTFS 各有自己的折叠表）的精确规则，偏向多报碰撞；一个路径是另一个路径的**整段前缀**（`news/2026-01-03` 与 `news/2026-01-03/ml.md`）也算碰撞，
 一个分类要写文件的位置另一个分类需要目录。Git tree 路径本身区分大小写，但每份报告都先落本地，因此统一用更严格的规则。
 根内目录符号链接造成的别名不在此检查之列。
 
@@ -267,7 +274,9 @@ ref 路由（`GET git/ref/heads/{branch}`、`PATCH git/refs/heads/{branch}`）�
 
 单报告幂等（2026-11-22，R1-P-S2）：`GET contents` 取到的既有 blob sha 等于本地内容的 git blob sha 时，先 `GET ref` 取 HEAD
 commit、按该 commit 复核同一路径；一致 → 以 HEAD commit 记回执，不发 PUT。批量发布中途中断（第一条回执已落库）后重跑只剩
-一条报告、走单报告路径时，因此不再重复提交、也不需要写权限。
+一条报告、走单报告路径时，因此不再重复提交、也不需要写权限。复核不一致（HEAD 已移动）时照常 PUT，且 PUT 携带**复核查询**
+看到的结果（2026-11-22，R3F-S2）：该文件现在的 blob sha，或文件已不存在时不带 `sha`（创建），而不是第一次查询的旧 sha——
+GitHub 只接受被替换文件当前的 blob sha。
 
 GitHub 调用失败时，`PublishError::GitHubApiError` / `GitHubAuthFailed` 的消息带上失败的操作
 （`GET contents` / `PUT contents` / `GET ref` / `GET commit` / `POST tree` / `POST commit` / `PATCH ref`）、
@@ -279,7 +288,8 @@ HTTP 状态、GitHub message 的**固定词表摘要**与 `x-github-request-id`�
 `validation failed`、`bad request` 等，大小写不敏感），持久化的只是对应的固定措辞，多个以 `; ` 连接；一个都不认识时写
 `unrecognized GitHub message omitted (<N> bytes)`；无法解码的正文前缀 `unreadable error body: `。重试分类依赖的信号
 （`not a fast-forward`、`rate limit`）属于该词表，且在任何截断之前从完整文本中提取。`x-github-request-id` 只有整值符合
-GitHub 形状（2–8 组、每组 1–16 位十六进制、以 `:` 分隔，实测形如 `828A:4A44E:40DA1B1:CEE6757:6B01CE59`）且不含 token
+GitHub 形状（恰好 5 组、每组 1–16 位十六进制、以 `:` 分隔——GitHub 文档示例与实测均为此形，如
+`828A:4A44E:40DA1B1:CEE6757:6B01CE59`；2026-11-22 R3F-B6 由此前无依据的"2–8 组"收紧，`12:34` 之类不再保留）且不含 token
 时才保留，否则整值丢弃（不再"过滤成合法字符"）。客户端侧的传输错误文本（无服务端内容）最多 512 字节。
 
 结构化请求上下文（2026-11-22，R1-P-S1）：`GitHubAuthFailed` / `GitHubApiError` / `GitHubRateLimit` / `ResponseTooLarge`
@@ -302,7 +312,9 @@ v0.3 引入：`publish_many(reports: &[RenderedReport])` 在一次 commit 内推
 
 **歧义写入的只读核对（2026-11-22，ADR 0012 §3）**：`PATCH ref`（批量）或 `PUT contents`（单报告）发出后遇到传输失败 /
 响应不可读 / 5xx，或 runtime 的远端 deadline 切断了调用时，释放前先 `GET ref` 取 HEAD commit、按该 commit 比对全部 blob；
-一致 → 以 HEAD commit 记成功；否则保留原错误按分类释放。4xx 与限流不核对。
+一致 → 以 HEAD commit 记成功；不一致 → 保留原错误按分类释放。4xx 与限流不核对。
+核对本身出错 / 被限流 / 用完时限 → `RemoteWriteUnverified`（R3F-B2）：保持 `stored_local`、退还本次 claim、不转 `failed`、
+文章归属保留；核对遇限流时其期限写入 `next_attempt_at`。
 
 ### 4.2.2 422 lost-update retry
 
@@ -339,8 +351,10 @@ items 一次性圈走，避免跨 record 互抢。
 详见 commit `9080223` "Fix publish-all record-scoped claims"。
 
 freeze 的选稿按调用方的 `category_key` 进行，因此（R1-P-S15）无 ID 的 `PublishFlow::freeze` 只领取同分类的 pending 记录
-（`claim_pending_for_freeze_in_category`，两方言），按 ID 的 `freeze_record` 若领到的记录分类不同 → 退还 claim、不选稿、
-`Failed { error_kind: "category_mismatch" }`，不会把一个分类的文章冻结进另一个分类的记录。
+（`claim_pending_for_freeze_in_category`，两方言）；按 ID 的 `freeze_record` 把分类写进 claim 的 `WHERE`
+（`claim_pending_for_freeze_by_id_in_category`，两方言，2026-11-22 R3F-S15），分类不符的记录**不会被领取**（也就不会因中断而被计
+预算、被耗尽清扫转 `failed`）。未领到时只读查一次该记录：存在且分类不同（无论当前可领取还是被他人租用）→
+`Failed { error_kind: "category_mismatch" }`，不选稿、不改该记录；否则 `NothingToClaim`。不会把一个分类的文章冻结进另一个分类的记录。
 
 ## 6. rebuild-report
 
@@ -372,12 +386,13 @@ Markdown **byte-equal**；跨渲染器版本（例如 YAML 引号规则调整）
 | 本地落盘失败 | `PublishError::LocalIoError` | `Interrupted` / `WouldBlock` / `TimedOut` → 保持 `rendered` + 计预算；其它 IO 错误（权限、空间等）→ `failed` |
 | 路径越界 / 非法 | `PublishError::InvalidPath` | `failed` |
 | GitHub 401；无限流信号的 403 | `PublishError::GitHubAuthFailed`（`context.http_status` 区分 401 / 403） | `failed` |
-| GitHub 429；带限流信号的 403（`x-ratelimit-remaining: 0`、存在 `retry-after`，或 message 含 "rate limit" / "secondary rate limit"，见 GitHub REST 文档 "Exceeding the rate limit"） | `PublishError::GitHubRateLimit { reset_at }`（`retry-after` > `x-ratelimit-reset` > now+60s；`retry-after` 接受秒数与 IMF-fixdate HTTP 日期两种形式（RFC 9110 §10.2.3），秒数封顶 24 h、受检加法，过去的日期视为 now；只要有 `retry-after` 头（即使无法解析）403 就算限流；message 中的 "rate limit" 从完整文本提取，R1-P-S11） | retryable：维持阶段态 + 计预算；`reset_at`（钳制到 1 h 内）写入 `next_attempt_at`，claim 到点前不领取（R1-P-S12） |
+| GitHub 429；带限流信号的 403（`x-ratelimit-remaining: 0`、存在 `retry-after`，或 message 含 "rate limit" / "secondary rate limit"，见 GitHub REST 文档 "Exceeding the rate limit"） | `PublishError::GitHubRateLimit { reset_at }`（适用期限中最晚者：`retry-after`，以及配额耗尽（`remaining: 0`）或无可用 `retry-after` 时的 `x-ratelimit-reset`；都没有 → now+60s，R3F-S12；`retry-after` 接受秒数与 HTTP 日期（RFC 9110 §10.2.3；日期按 §5.6.7 接受 IMF-fixdate、RFC 850、asctime 三种形式，经 `httpdate` 解析，R3F-S11），秒数封顶 24 h、受检加法，过去的日期视为 now；只要有 `retry-after` 头（即使无法解析）403 就算限流；message 中的 "rate limit" 从完整文本提取，R1-P-S11） | retryable：维持阶段态；`reset_at`（钳制到 1 h 内）写入 `next_attempt_at`，claim 到点前不领取（R1-P-S12）；写入了等待的限流**不计预算**（退还 claim，最后一次预算也不 `failed`），reset 已过去（无等待）则照常计预算（R3F-S12） |
 | GitHub 422 lost-update | `GitHubApiError { status: 422 }`（`is_branch_concurrently_updated`） | 同一次尝试内重新取 HEAD 再试 1 次；第二次 422 为永久错误 → `failed`（不保持 `stored_local`） |
 | 其它 GitHub 4xx（如 400 / 404 / 其它 422） | `GitHubApiError { status }` | `failed` |
 | GitHub 409 | `GitHubApiError { status: 409 }` | 保持 `stored_local` + 计预算 |
-| GitHub 5xx / 传输失败 / 响应读取失败 | `GitHubApiError { status: 5xx }`（传输类归为 503） | 写请求之后的歧义失败先只读核对 HEAD（已落地 → 成功，ADR 0012 §3）；否则保持 `stored_local` + 计预算，本地文件保留 |
-| 远端 deadline（lease 的 80%）超时 | `PublishError::RemoteTimeout` | 先只读核对 HEAD；否则保持 `stored_local` + 计预算 |
+| GitHub 5xx / 传输失败 / 响应读取失败 | `GitHubApiError { status: 5xx }`（传输类归为 503） | 写请求之后的歧义失败先只读核对 HEAD（已落地 → 成功，ADR 0012 §3）；确认未落地 → 保持 `stored_local` + 计预算，本地文件保留 |
+| 远端 deadline（lease 的 80%）超时 | `PublishError::RemoteTimeout` | 先只读核对 HEAD（已落地 → 成功）；确认未落地 → 保持 `stored_local` + 计预算 |
+| 歧义写入 / 远端超时之后的只读核对本身失败、被限流或超时 | `PublishError::RemoteWriteUnverified { write, verification }`（R3F-B2） | 保持 `stored_local`、**退还**本次 claim（不计预算，最后一次预算也不转 `failed`）、文章归属保留；`verification` 为限流时其期限（钳制 1 h）写入 `next_attempt_at`；下一次尝试的写前 HEAD 比对幂等 |
 | 2xx 但超过 16 MiB / 缺必需字段 | `ResponseTooLarge` / `GitHubApiError { status: 502 }` | 前者 `failed`；后者按 5xx 计预算 |
 | 目标漂移：record 的 `remote_target`（init 时写入的 `owner/repo:branch`）≠ 当前配置目标 | `PublishError::RemoteTargetMismatch`（`PublishRemoteStatus::TargetMismatch { stored, current }`） | 发请求前拦截，不重试，state='failed'，`last_error` 含两个目标；恢复配置或 `--force` 由运维决定 |
 
@@ -413,6 +428,10 @@ remote 使用 claim 返回的记录元信息，只加载一次 frozen items，�
 单条/批量调用远端前也各自检查 deadline，已超预算不发起远端调用。
 网络取消不能撤销服务端已经完成的提交，仍依靠既有幂等发布与重试恢复。
 Octocrab connect/read/write timeout 为5/30/30秒，所有 GitHub 响应最多16 MiB（含 base64 Contents 响应）。
+发布客户端关闭 Octocrab 的透明重试（`RetryConfig::None`；0.54 默认 `Simple(3)` 会在传输错误、5xx、429 后立即重发，
+R3F-B1）：每个请求只发一次。已落地写入的重发会被拒（文件已存在而 PUT 不带 `sha` → 422；ref 已移动），从而掩盖首次写入，
+使歧义写入核对（ADR 0012 §3）无从发生；429 的重发会在本次 claim 内消耗限流窗口。重试只由发布阶段负责（阶段预算、
+`next_attempt_at`、写前 HEAD 幂等比对）。代价：读请求的瞬时 5xx / 传输错误也直接计为本阶段的一次失败尝试。
 成功响应超限不可重试；429/5xx 错误页超限仍保留对应 retry 分类。
 GitHub错误消息先解析JSON，再只输出固定词表摘要（见 §4.2，R1-P-B6，取代此前"遮蔽 token + 8 KiB 截断"的做法），
 因此 JSON 转义、回显的报告片段与凭据都不会进入诊断；422 的 fast-forward 冲突分类信号来自完整文本。

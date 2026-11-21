@@ -301,20 +301,29 @@ SET state = 'snapshot_frozen',
 WHERE id = $3 AND lease_owner = $4 AND state = 'pending'
 "#;
 
-/// Same text on both dialects: a published owner wins regardless of id;
-/// among the others the lowest record id wins.
+/// Same text on both dialects. One ranking of the non-failed records holding
+/// an article (R3F-P-B1, ADR 0012 §2): published records first, then the
+/// lowest record id. Record `$1` loses an article to every holder ranked above
+/// it, and the reported owner is the top-ranked one, so every loser names the
+/// same winner (a published holder even when a lower unpublished one exists).
 const SELECT_SNAPSHOT_OWNERSHIP_CONFLICT_SQL: &str = r#"
 SELECT mine.article_id AS article_id, owner_record.id AS owner_record_id
 FROM publish_items mine
+JOIN publish_records mine_record ON mine_record.id = mine.publish_record_id
 JOIN publish_items theirs
   ON theirs.article_id = mine.article_id
  AND theirs.publish_record_id <> mine.publish_record_id
 JOIN publish_records owner_record ON owner_record.id = theirs.publish_record_id
 WHERE mine.publish_record_id = $1
   AND owner_record.state <> 'failed'
-  AND (owner_record.state IN ('published_local', 'published_remote')
-       OR owner_record.id < $1)
-ORDER BY mine.position ASC, mine.article_id ASC, owner_record.id ASC
+  AND (CASE WHEN owner_record.state IN ('published_local', 'published_remote') THEN 0 ELSE 1 END
+         < CASE WHEN mine_record.state IN ('published_local', 'published_remote') THEN 0 ELSE 1 END
+       OR (CASE WHEN owner_record.state IN ('published_local', 'published_remote') THEN 0 ELSE 1 END
+             = CASE WHEN mine_record.state IN ('published_local', 'published_remote') THEN 0 ELSE 1 END
+           AND owner_record.id < mine_record.id))
+ORDER BY mine.position ASC, mine.article_id ASC,
+         CASE WHEN owner_record.state IN ('published_local', 'published_remote') THEN 0 ELSE 1 END ASC,
+         owner_record.id ASC
 LIMIT 1
 "#;
 

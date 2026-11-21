@@ -7,6 +7,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Limited, combinators::BoxBody};
 use octocrab::Octocrab;
+use octocrab::service::middleware::retry::RetryConfig;
 use rss_ai_news_domain::{SecretString, dto::publish::RenderedReport};
 use serde_json::{Value, json};
 
@@ -29,6 +30,16 @@ pub struct GitHubTargetConfig {
     pub commit_message_prefix: String,
 }
 
+/// Both constructors build the client with Octocrab's transparent retries
+/// off (`RetryConfig::None`; the 0.54 default is `Simple(3)`, which resends
+/// any request immediately after a transport error, a 5xx or a 429). Every
+/// request is sent once (R3F-B1): a resend of a write that already landed
+/// would be refused (422 "sha wasn't supplied", a moved ref) and hide the
+/// landed write from the HEAD verification, and a resent 429 would spend
+/// GitHub's rate-limit window inside one claim. Retrying is the publish
+/// stage's job (stage budget, `next_attempt_at`, idempotent pre-write HEAD
+/// check). A client passed to [`GitHubTarget::with_client`] keeps whatever
+/// retry policy its builder chose.
 pub struct GitHubTarget {
     cfg: GitHubTargetConfig,
     client: Arc<Octocrab>,
@@ -37,6 +48,7 @@ pub struct GitHubTarget {
 impl GitHubTarget {
     pub fn new(cfg: GitHubTargetConfig) -> Result<Self, PublishError> {
         let client = Octocrab::builder()
+            .add_retry_config(RetryConfig::None)
             .set_connect_timeout(Some(Duration::from_secs(5)))
             .set_read_timeout(Some(Duration::from_secs(30)))
             .set_write_timeout(Some(Duration::from_secs(30)))
@@ -53,6 +65,7 @@ impl GitHubTarget {
 
     pub fn with_base_uri(cfg: GitHubTargetConfig, base_uri: &str) -> Result<Self, PublishError> {
         let client = Octocrab::builder()
+            .add_retry_config(RetryConfig::None)
             .set_connect_timeout(Some(Duration::from_secs(5)))
             .set_read_timeout(Some(Duration::from_secs(30)))
             .set_write_timeout(Some(Duration::from_secs(30)))
@@ -110,17 +123,27 @@ impl PublishTarget for GitHubTarget {
 
     async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
         let final_path = self.join_path(&report.relative_path)?;
-        let existing_sha = self.existing_sha(&final_path).await?;
+        let local_blob = git_blob_sha(report.markdown_content.as_bytes());
+        let mut existing_sha = self.existing_sha(&final_path).await?;
         // R1-P-S2: the branch already holds this exact blob (an earlier
         // attempt landed, or a batch whose other receipts were recorded is
         // resumed with this one report): confirm it at a fixed HEAD commit and
         // record that commit instead of a PUT. A mismatch at HEAD (the branch
-        // moved in between) falls through to the normal PUT.
-        if existing_sha.as_deref()
-            == Some(git_blob_sha(report.markdown_content.as_bytes()).as_str())
-            && let Some(mut batch) = self.find_published(std::slice::from_ref(report)).await?
-        {
-            return Ok(batch.artifacts.remove(0));
+        // moved in between) falls through to the normal PUT, which then
+        // carries what that fixed-HEAD lookup saw — the file's current blob or
+        // its absence — not the stale first lookup (R3F-S2): GitHub updates
+        // only with the sha of the file being replaced.
+        if existing_sha.as_deref() == Some(local_blob.as_str()) {
+            let head_commit_sha = self.head_commit_sha().await?;
+            let at_head = self.existing_sha_at(&final_path, &head_commit_sha).await?;
+            if at_head.as_deref() == Some(local_blob.as_str()) {
+                return Ok(PublishedArtifact {
+                    local_path: None,
+                    commit_sha: Some(head_commit_sha),
+                    remote_target: Some(self.remote_target_url(&final_path)),
+                });
+            }
+            existing_sha = at_head;
         }
         match self
             .put_file(report, &final_path, existing_sha.as_deref())
@@ -281,8 +304,11 @@ impl GitHubTarget {
     /// P-B2: after an ambiguous write failure, a read-only check of the
     /// branch HEAD decides. HEAD holding every report byte for byte means the
     /// write landed (or the content was already there): record receipts
-    /// against that commit. Otherwise — or if the check itself fails — the
-    /// original error stands and the normal release applies.
+    /// against that commit. HEAD not holding them means the write did not
+    /// land: the original error stands and the normal release applies. A
+    /// check that itself fails (error, rate limit) decides nothing: the
+    /// result is [`PublishError::RemoteWriteUnverified`] (R3F-B2), which the
+    /// stage releases without failing the record.
     async fn recover_ambiguous_write(
         &self,
         error: PublishError,
@@ -304,9 +330,12 @@ impl GitHubTarget {
             Err(check_error) => {
                 tracing::warn!(
                     ?check_error,
-                    "HEAD content check after an ambiguous GitHub write failed; keeping the write error"
+                    "HEAD content check after an ambiguous GitHub write failed; outcome unverified"
                 );
-                Err(error)
+                Err(PublishError::RemoteWriteUnverified {
+                    write: Box::new(error),
+                    verification: Box::new(check_error),
+                })
             }
         }
     }
@@ -655,16 +684,19 @@ fn encode_repo_path(path: &str) -> String {
 }
 
 /// `x-github-request-id`, kept only when the whole value has GitHub's shape
-/// and never when it contains the token (R1-P-B6). Observed ids are five
-/// colon-separated groups of upper-case hex digits, e.g.
-/// `828A:4A44E:40DA1B1:CEE6757:6B01CE59`; 2–8 groups of 1–16 hex digits are
-/// accepted. Anything else (an intermediary's own id, injected text, a
-/// token-shaped value) is dropped rather than filtered into shape.
+/// and never when it contains the token (R1-P-B6). GitHub's documented
+/// example and every observed id are exactly five colon-separated groups of
+/// hex digits, e.g. `828A:4A44E:40DA1B1:CEE6757:6B01CE59`; only that shape
+/// (five groups of 1–16 hex digits) is accepted (R3F-B6) — no published
+/// grammar supports a wider one. Anything else (an intermediary's own id, a
+/// short value such as `12:34`, injected text, a token-shaped value) is
+/// dropped rather than filtered into shape.
 fn github_request_id(headers: &http::HeaderMap, token: &str) -> Option<String> {
+    const GROUPS: usize = 5;
     let value = headers.get("x-github-request-id")?.to_str().ok()?.trim();
     let groups = value.split(':').collect::<Vec<_>>();
     let well_formed = value.len() <= 128
-        && (2..=8).contains(&groups.len())
+        && groups.len() == GROUPS
         && groups.iter().all(|group| {
             (1..=16).contains(&group.len()) && group.bytes().all(|byte| byte.is_ascii_hexdigit())
         });
@@ -905,17 +937,16 @@ pub mod classify {
         }
     }
 
-    /// IMF-fixdate, the HTTP-date form senders must generate
-    /// (`Sun, 06 Nov 1994 08:49:37 GMT`).
+    /// An HTTP-date in any of the three forms RFC 9110 §5.6.7 requires
+    /// recipients to accept (R3F-S11): IMF-fixdate
+    /// (`Sun, 06 Nov 1994 08:49:37 GMT`), the obsolete RFC 850 form
+    /// (`Sunday, 06-Nov-94 08:49:37 GMT`) and asctime
+    /// (`Sun Nov  6 08:49:37 1994`). Parsed by `httpdate` (the parser hyper
+    /// itself uses; already in the lockfile).
     fn parse_http_date(value: &str) -> Option<OffsetDateTime> {
-        // Runtime-parsed description: the workspace `time` has no `macros`.
-        let format = time::format_description::parse_borrowed::<2>(
-            "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT",
-        )
-        .ok()?;
-        time::PrimitiveDateTime::parse(value, &format)
+        httpdate::parse_http_date(value)
             .ok()
-            .map(time::PrimitiveDateTime::assume_utc)
+            .map(OffsetDateTime::from)
     }
 
     impl RateLimitHints {
@@ -929,9 +960,16 @@ pub mod classify {
             }
         }
 
-        /// Earliest retry time at `now`: `retry-after` (seconds capped at
-        /// [`MAX_RETRY_AFTER_SECONDS`], a past date means now), then
-        /// `x-ratelimit-reset`, then one minute.
+        /// Earliest retry time at `now`: the **latest** of the deadlines that
+        /// apply (R3F-S12; GitHub REST docs, "Handle rate limit errors
+        /// appropriately"): `retry-after` (seconds capped at
+        /// [`MAX_RETRY_AFTER_SECONDS`], a past date means now), and
+        /// `x-ratelimit-reset` when the quota is exhausted
+        /// (`x-ratelimit-remaining: 0`) or no usable `retry-after` was sent
+        /// (the earlier fallback). With quota left, the reset is the end of
+        /// the hourly window, not a wait GitHub asked for, so a secondary
+        /// limit's `retry-after` alone decides. Neither → one minute. A reset
+        /// that is not representable is ignored.
         pub fn reset_at_from(&self, now: OffsetDateTime) -> OffsetDateTime {
             let from_retry_after = match self.retry_after {
                 Some(RetryAfter::Seconds(seconds)) => {
@@ -943,13 +981,16 @@ pub mod classify {
                 Some(RetryAfter::At(at)) => Some(at.max(now)),
                 Some(RetryAfter::Unparsable) | None => None,
             };
-            from_retry_after
-                .or_else(|| {
-                    self.reset_epoch_seconds
-                        .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
-                })
-                .or_else(|| now.checked_add(Duration::seconds(60)))
-                .unwrap_or(now)
+            let reset_applies = self.remaining == Some(0) || from_retry_after.is_none();
+            let from_reset = self
+                .reset_epoch_seconds
+                .filter(|_| reset_applies)
+                .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok());
+            match (from_retry_after, from_reset) {
+                (Some(retry_after), Some(reset)) => retry_after.max(reset),
+                (Some(at), None) | (None, Some(at)) => at,
+                (None, None) => now.checked_add(Duration::seconds(60)).unwrap_or(now),
+            }
         }
 
         fn reset_at(&self) -> OffsetDateTime {
@@ -1069,11 +1110,17 @@ mod tests {
             "828A",
             "828A::CEE6757",
             "0123456789ABCDEF0:1",
+            // R3F-B6: only GitHub's documented / observed five-group shape.
+            "12:34",
+            "C0DE:1234:ABCD",
+            "828A:4A44E:40DA1B1:CEE6757",
+            "828A:4A44E:40DA1B1:CEE6757:6B01CE59:1",
+            "828A:4A44E::CEE6757:6B01CE59",
         ] {
             assert_eq!(id(rejected, "ghp_x"), None, "{rejected}");
         }
         // A hex token embedded in an otherwise well-formed id is dropped.
-        assert_eq!(id("ABCD:1234DEADBEEF", "1234DEADBEEF"), None);
+        assert_eq!(id("ABCD:1234DEADBEEF:1:2:3", "1234DEADBEEF"), None);
     }
 
     #[test]

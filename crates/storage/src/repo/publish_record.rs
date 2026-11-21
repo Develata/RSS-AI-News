@@ -148,6 +148,15 @@ pub trait PublishRecordRepository: Send + Sync {
         state: PublishState,
         ids: &[i64],
     ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
+    /// R3F-S15: claims `pending` record `id` only if it belongs to
+    /// `category_key` — the category is part of the claim's `WHERE`, so a
+    /// mismatched call never claims (or charges) another category's record.
+    async fn claim_pending_for_freeze_by_id_in_category(
+        &self,
+        request: &ClaimRequest,
+        id: i64,
+        category_key: &str,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
     async fn claim_local_for_remote_publish_by_ids(
         &self,
         request: &ClaimRequest,
@@ -221,6 +230,22 @@ pub trait PublishRecordRepository: Send + Sync {
         state: PublishState,
         error: &str,
         kind: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+    /// Releases a remote attempt without charging the stage (R3F-B2 / S12):
+    /// lease cleared, claim refunded on both counters, `state` kept,
+    /// `last_error*` set and `next_attempt_at = retry_not_before` (`None`
+    /// clears a wait; SQLite stores it rounded up to the millisecond like
+    /// every deadline). Returns `false` when the lease was lost.
+    #[allow(clippy::too_many_arguments)]
+    async fn release_deferred_retry(
+        &self,
+        id: i64,
+        owner: &str,
+        state: PublishState,
+        error: &str,
+        kind: &str,
+        retry_not_before: Option<OffsetDateTime>,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
     async fn release_permanent_failure(
