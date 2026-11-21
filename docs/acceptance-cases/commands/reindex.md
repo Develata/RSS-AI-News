@@ -69,6 +69,9 @@
 | `reindex_link_hash_invalid_url_counted_errors` | 同上 | 非法 URL 错误计数 |
 | `reindex_content_hash_updates_when_body_text_diff` | 同上 | content_hash 重算 |
 | `reindex_content_hash_skips_unique_conflict` | 同上 | unique conflict 跳过 |
+| `categories_reindex_resumes_only_under_the_same_rule_fingerprint` | `crates/cli/tests/reindex_cmd_tests.rs` | R2-S17 同配置续跑、配置变化拒绝续跑 |
+| `rule_fingerprint_follows_algorithm_inputs_only` | `crates/cli/src/commands/reindex.rs` | R2-S17 指纹输入 |
+| `pg_content_hash_race_after_the_precheck_is_a_row_conflict` | `crates/storage/tests/reindex_job_pg_tests.rs` | R2-S16 预检后并发提交 → 行级 conflict |
 | `reindex_content_hash_unchanged_when_hash_matches` | 同上 | 未变不写 |
 | `reindex_categories_inserts_new_sources` | 同上 | 增量插入 |
 | `reindex_categories_archives_obsolete_sources` | 同上 | 归档旧 source |

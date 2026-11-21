@@ -170,6 +170,117 @@ async fn extract_batch_over_the_lease_is_shrunk_not_rejected() {
         .expect("--skip-fetch runs no extract");
 }
 
+/// Five feed items with distinct summaries (no content dedup).
+fn rss_body_with_items(server_uri: &str, count: usize) -> String {
+    let items: String = (1..=count)
+        .map(|i| {
+            format!(
+                "<item><guid>item-{i}</guid><title>Item {i}</title>\
+                 <link>{server_uri}/article-{i}</link>\
+                 <description>Distinct summary number {i} for fallback.</description>\
+                 <pubDate>Thu, 30 Apr 2026 10:00:00 GMT</pubDate></item>"
+            )
+        })
+        .collect();
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?><rss version=\"2.0\"><channel>\
+         <title>Mock Feed</title><link>{server_uri}</link><description>d</description>\
+         {items}</channel></rss>"
+    )
+}
+
+async fn mount_feed_with_items(server: &MockServer, count: usize) {
+    Mock::given(method("GET"))
+        .and(path("/feed.xml"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(rss_body_with_items(&server.uri(), count)),
+        )
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(r"^/article-\d+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html><body>x</body></html>"))
+        .mount(server)
+        .await;
+}
+
+fn set_lease(root: &Path, seconds: u64) {
+    let app_path = root.join("app.toml");
+    let app = fs::read_to_string(&app_path).unwrap().replace(
+        "fetch_duration_seconds = 600",
+        &format!("fetch_duration_seconds = {seconds}"),
+    );
+    fs::write(&app_path, app).unwrap();
+}
+
+/// R2-S9: the shrunk batch is the one the run claims. 1 concurrent fetch,
+/// 5 s timeout → 10 s per wave; a 30 s lease fits 3 waves, so with one batch
+/// per run exactly 3 of the 5 entries are extracted.
+#[tokio::test]
+async fn the_shrunk_extract_batch_is_the_one_claimed() {
+    let server = MockServer::start().await;
+    mount_feed_with_items(&server, 5).await;
+    let temp = TempDir::new().expect("temp dir");
+    write_config(temp.path(), &server.uri());
+    set_lease(temp.path(), 30);
+    let args = IngestArgs {
+        batch_size: 50,
+        max_batches: Some(1),
+        ..IngestArgs::default()
+    };
+
+    let summary = ingest::run(&cli_for(temp.path(), args.clone()), &args)
+        .await
+        .unwrap();
+
+    assert_eq!(summary.entries_inserted, 5);
+    assert_eq!(
+        summary.articles_persisted + summary.articles_fallback + summary.fetch_failed,
+        3
+    );
+    assert_eq!(
+        summary.exit_code(),
+        rss_ai_news_cli::exit_code::ExitCode::Success
+    );
+}
+
+/// R2-S9: when not even one wave fits the lease, ingest still runs but
+/// extract claims nothing this run, and the run reports it (exit 1).
+#[tokio::test]
+async fn extract_is_skipped_with_an_error_when_no_wave_fits_the_lease() {
+    let server = MockServer::start().await;
+    mount_feed_with_items(&server, 2).await;
+    let temp = TempDir::new().expect("temp dir");
+    write_config(temp.path(), &server.uri());
+    // 10 s per wave > 8 s lease.
+    set_lease(temp.path(), 8);
+    let args = IngestArgs {
+        batch_size: 50,
+        ..IngestArgs::default()
+    };
+
+    let summary = ingest::run(&cli_for(temp.path(), args.clone()), &args)
+        .await
+        .unwrap();
+
+    assert_eq!(summary.entries_inserted, 2, "ingest still ran");
+    assert_eq!(
+        summary.articles_persisted + summary.articles_fallback + summary.fetch_failed,
+        0,
+        "nothing was claimed"
+    );
+    assert_eq!(
+        summary.exit_code(),
+        rss_ai_news_cli::exit_code::ExitCode::RuntimeError
+    );
+    assert!(
+        summary
+            .errors()
+            .iter()
+            .any(|error| error.kind == "extract_lease_too_short")
+    );
+}
+
 fn cli_for(config_dir: &Path, args: IngestArgs) -> Cli {
     Cli {
         config_dir: config_dir.to_path_buf(),

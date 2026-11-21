@@ -11,10 +11,10 @@ ON CONFLICT (policy_version) DO NOTHING
 // Keyset generation (ADR 0011 §5): one page = the first `$n` candidates with
 // `a.id > cursor`; the cursor advances to the last id *scanned* in the page,
 // so a page whose candidates all conflict still moves forward. Each page is
-// two statements in one transaction: the page end, then the insert of every
-// candidate in `(cursor, page_end]`. The insert has no LIMIT: on PostgreSQL
-// (READ COMMITTED) an article committed into that range meanwhile is
-// inserted too instead of being pushed out and skipped by the cursor.
+// two statements in one transaction on SQLite (the write lock is taken first,
+// so nothing commits in between): the page end, then the insert of every
+// candidate in `(cursor, page_end]`. PostgreSQL uses one statement instead
+// (`GENERATE_PAGE_PG_SQL`, R2-S19).
 
 /// SQLite page end. `$2` is `sqlite_utc_seconds(cutoff)`; `created_at` is
 /// normalised to the same whole-second UTC text (see
@@ -28,26 +28,6 @@ SELECT MAX(id) FROM (
     WHERE fs.category_key = $1
       AND a.state <> 'retired'
       AND replace(substr(a.created_at, 1, 19), 'T', ' ') >= $2
-      AND a.id > $3
-      AND NOT EXISTS (
-          SELECT 1 FROM decision_results d
-          WHERE d.article_id = a.id AND d.policy_version = $4 AND d.execution_key = $5
-      )
-    ORDER BY a.id ASC
-    LIMIT $6
-) page
-"#;
-
-/// `$2` is the whole-second cutoff as TIMESTAMPTZ.
-pub(super) const GENERATE_PAGE_END_PG_SQL: &str = r#"
-SELECT MAX(id) FROM (
-    SELECT a.id
-    FROM articles a
-    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
-    JOIN feed_sources fs ON fs.id = fe.source_id
-    WHERE fs.category_key = $1
-      AND a.state <> 'retired'
-      AND a.created_at >= $2
       AND a.id > $3
       AND NOT EXISTS (
           SELECT 1 FROM decision_results d
@@ -81,27 +61,44 @@ ORDER BY a.id ASC
 ON CONFLICT (article_id, policy_version, execution_key) DO NOTHING
 "#;
 
-/// PostgreSQL: as above, `$8` is the whole-second cutoff as TIMESTAMPTZ.
-pub(super) const GENERATE_PENDING_PG_SQL: &str = r#"
-INSERT INTO decision_results (
-    article_id, category_key, policy_version, execution_key, provider, requested_model,
-    laya_max_len, state, created_at, updated_at
+/// PostgreSQL page (R2-S19): one statement, so the candidate ids, the insert
+/// and the page end share one snapshot. Two statements under READ COMMITTED
+/// let a smaller id committed between them slip into `(cursor, page_end]`
+/// and the page insert more than `$9` rows (the ADR 0011 window cap). An id
+/// committed below the cursor meanwhile is not lost: the cursor restarts at
+/// 0 on every run (plan/18 §8.4). Returns `(page_end, inserted)`; `page_end`
+/// is the last id *scanned* (NULL: no candidate), so an all-conflict page
+/// still advances. `$7` is the whole-second cutoff as TIMESTAMPTZ.
+pub(super) const GENERATE_PAGE_PG_SQL: &str = r#"
+WITH page AS (
+    SELECT a.id
+    FROM articles a
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE fs.category_key = $1
+      AND a.state <> 'retired'
+      AND a.created_at >= $7
+      AND a.id > $8
+      AND NOT EXISTS (
+          SELECT 1 FROM decision_results d
+          WHERE d.article_id = a.id AND d.policy_version = $2 AND d.execution_key = $3
+      )
+    ORDER BY a.id ASC
+    LIMIT $9
+),
+inserted AS (
+    INSERT INTO decision_results (
+        article_id, category_key, policy_version, execution_key, provider, requested_model,
+        laya_max_len, state, created_at, updated_at
+    )
+    SELECT id, $1, $2, $3, $4, $5, $6, 'pending', $10, $10
+    FROM page
+    ORDER BY id ASC
+    ON CONFLICT (article_id, policy_version, execution_key) DO NOTHING
+    RETURNING 1
 )
-SELECT a.id, $1, $2, $3, $4, $5, $6, 'pending', $7, $7
-FROM articles a
-JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
-JOIN feed_sources fs ON fs.id = fe.source_id
-WHERE fs.category_key = $1
-  AND a.state <> 'retired'
-  AND a.created_at >= $8
-  AND a.id > $9
-  AND a.id <= $10
-  AND NOT EXISTS (
-      SELECT 1 FROM decision_results d
-      WHERE d.article_id = a.id AND d.policy_version = $2 AND d.execution_key = $3
-  )
-ORDER BY a.id ASC
-ON CONFLICT (article_id, policy_version, execution_key) DO NOTHING
+SELECT (SELECT MAX(id) FROM page) AS page_end,
+       (SELECT COUNT(*) FROM inserted) AS inserted
 "#;
 
 /// SQLite: take the write lock first so the page-end read and the insert are
@@ -303,6 +300,20 @@ WHERE id IN (
 pub(super) const LOAD_ARTICLE_TEXT_SQL: &str = r#"
 SELECT title, substr(body_text, 1, $2) AS body_text FROM articles WHERE id = $1
 "#;
+
+/// SQLite (R2-S20): TEXT may hold an embedded NUL and `substr` stops there,
+/// so the prefix also reports whether the stored bytes contain a NUL
+/// (`instr` on the BLOB cast compares bytes). PostgreSQL TEXT cannot hold NUL.
+pub(super) const LOAD_ARTICLE_TEXT_SQLITE_SQL: &str = r#"
+SELECT title, substr(body_text, 1, $2) AS body_text,
+       instr(CAST(body_text AS BLOB), x'00') > 0 AS has_nul
+FROM articles WHERE id = $1
+"#;
+
+/// SQLite fallback for a NUL-containing body: the whole text, cut to a
+/// character prefix in Rust.
+pub(super) const LOAD_ARTICLE_FULL_TEXT_SQLITE_SQL: &str =
+    "SELECT title, body_text FROM articles WHERE id = $1";
 
 /// Whether any stored raw response has expired (one-row probe).
 pub(super) const EXPIRED_RAW_EXISTS_SQLITE_SQL: &str = r#"

@@ -100,25 +100,27 @@ impl ArticleRepository for FlakyArticleRepo {
     async fn find_by_id(&self, id: i64) -> Result<Option<Article>, StorageError> {
         self.inner.find_by_id(id).await
     }
-    async fn list_persisted_for_ai_task_gen(
+    async fn list_backlog_for_ai_task_gen(
         &self,
         category_key: &str,
+        identity: &rss_ai_news_storage::NewAiResult,
+        window: rss_ai_news_storage::FreshWindow,
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
         self.inner
-            .list_persisted_for_ai_task_gen(category_key, batch_size, after_id)
+            .list_backlog_for_ai_task_gen(category_key, identity, window, batch_size, after_id)
             .await
     }
     async fn list_fresh_for_ai_task_gen(
         &self,
         category_key: &str,
         identity: &rss_ai_news_storage::NewAiResult,
-        published_since: OffsetDateTime,
+        window: rss_ai_news_storage::FreshWindow,
         batch_size: u32,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
         self.inner
-            .list_fresh_for_ai_task_gen(category_key, identity, published_since, batch_size)
+            .list_fresh_for_ai_task_gen(category_key, identity, window, batch_size)
             .await
     }
     async fn list_in_window_for_backfill(

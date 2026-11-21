@@ -235,6 +235,11 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
     let mut outcomes = Vec::with_capacity(domain_targets.len());
     for target in domain_targets {
         let flow = ReindexFlow::new(ctx.clone());
+        let rule_fingerprint = reindex_rule_fingerprint(
+            target,
+            &loaded.app.dedup.link_normalizer_version,
+            &categories,
+        );
         let outcome = run_single_target(
             flow,
             target,
@@ -244,6 +249,7 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
             } else {
                 Vec::new()
             },
+            rule_fingerprint,
             dry_run,
         )
         .await?;
@@ -257,11 +263,71 @@ pub async fn run(cli: &Cli, args: &ReindexArgs) -> Result<ReindexCommandSummary,
     })
 }
 
+/// Algorithm version of each reindex rule (R2-S17). Bump the target's value
+/// whenever the code that recomputes its rows changes (link normalizer /
+/// link hash, article content hash, the categories → `feed_sources`
+/// mapping): a job started under the old algorithm then refuses to resume
+/// instead of finishing with mixed rules.
+pub const LINK_HASH_RULE_VERSION: u32 = 1;
+pub const CONTENT_HASH_RULE_VERSION: u32 = 1;
+pub const CATEGORIES_RULE_VERSION: u32 = 1;
+
+/// The rule identity (`rule_versions.payload_sha256`) a reindex run resumes
+/// by (R2-S17): SHA-256 of a canonical JSON of the target, its algorithm
+/// version and the configuration that decides the rewritten values —
+/// `dedup.link_normalizer_version` for `link_hash`; every configured source
+/// (category, key, display name, feed URL, kind, enabled, priority; sorted)
+/// for `categories`. The same inputs give the same fingerprint; any change
+/// gives another one.
+pub fn reindex_rule_fingerprint(
+    target: DomainReindexTarget,
+    link_normalizer_version: &str,
+    categories: &[CategoryConfig],
+) -> String {
+    let identity = match target {
+        DomainReindexTarget::LinkHash => serde_json::json!({
+            "target": "link_hash",
+            "algorithm": LINK_HASH_RULE_VERSION,
+            "link_normalizer_version": link_normalizer_version,
+        }),
+        DomainReindexTarget::ContentHash => serde_json::json!({
+            "target": "content_hash",
+            "algorithm": CONTENT_HASH_RULE_VERSION,
+        }),
+        DomainReindexTarget::Categories => {
+            let mut sources: Vec<serde_json::Value> = categories
+                .iter()
+                .flat_map(|category| {
+                    category.sources.iter().map(move |source| {
+                        serde_json::json!([
+                            category.category.key,
+                            source.key,
+                            source.display_name,
+                            source.feed_url,
+                            source.feed_kind,
+                            source.enabled,
+                            source.priority,
+                        ])
+                    })
+                })
+                .collect();
+            sources.sort_by_key(|source| source.to_string());
+            serde_json::json!({
+                "target": "categories",
+                "algorithm": CATEGORIES_RULE_VERSION,
+                "sources": sources,
+            })
+        }
+    };
+    sha256_hex(identity.to_string().as_bytes())
+}
+
 async fn run_single_target(
     flow: ReindexFlow,
     target: DomainReindexTarget,
     batch_size: u32,
     categories: Vec<CategoryConfig>,
+    rule_fingerprint: String,
     dry_run: bool,
 ) -> Result<ReindexTargetOutcome, CliError> {
     let target_str = target.to_string();
@@ -276,7 +342,7 @@ async fn run_single_target(
         categories,
         new_rule_version_tag: tag,
         new_rule_version_description: format!("manual reindex for {target_str}"),
-        new_rule_version_sha256: sha256_hex(target_str.as_bytes()),
+        new_rule_version_sha256: rule_fingerprint,
     };
     let summary: ReindexSummary = if dry_run {
         flow.dry_run(opts).await?
@@ -369,6 +435,53 @@ mod tests {
                 .await
                 .expect_err("invalid job_id returns error");
             assert!(matches!(err, CliError::ReindexAbortInvalidJobId { .. }));
+        }
+    }
+
+    fn category(key: &str, url: &str) -> CategoryConfig {
+        let toml = format!(
+            "schema_version = \"1\"\n[category]\nkey = \"{key}\"\ndisplay_name = \"K\"\n\
+             priority = 1\n[[sources]]\nkey = \"s\"\ndisplay_name = \"S\"\n\
+             feed_url = \"{url}\"\nfeed_kind = \"rss\"\npriority = 1\nenabled = true\n"
+        );
+        toml::from_str(&toml).expect("category toml")
+    }
+
+    #[test]
+    fn rule_fingerprint_follows_algorithm_inputs_only() {
+        use DomainReindexTarget::{Categories, ContentHash, LinkHash};
+        let a = category("a", "https://example.com/a.xml");
+        let b = category("b", "https://example.com/b.xml");
+        // Stable and order-independent.
+        assert_eq!(
+            reindex_rule_fingerprint(Categories, "1", &[a.clone(), b.clone()]),
+            reindex_rule_fingerprint(Categories, "1", &[b.clone(), a.clone()])
+        );
+        // A config change that alters the rewritten rows changes it.
+        let moved = category("a", "https://example.com/moved.xml");
+        assert_ne!(
+            reindex_rule_fingerprint(Categories, "1", std::slice::from_ref(&a)),
+            reindex_rule_fingerprint(Categories, "1", &[moved])
+        );
+        assert_ne!(
+            reindex_rule_fingerprint(LinkHash, "1", &[]),
+            reindex_rule_fingerprint(LinkHash, "2", &[])
+        );
+        // Unrelated inputs do not.
+        assert_eq!(
+            reindex_rule_fingerprint(ContentHash, "1", std::slice::from_ref(&a)),
+            reindex_rule_fingerprint(ContentHash, "2", &[])
+        );
+        // Targets never share an identity, and none is the old bare-name hash.
+        let all = [
+            reindex_rule_fingerprint(LinkHash, "1", &[]),
+            reindex_rule_fingerprint(ContentHash, "1", &[]),
+            reindex_rule_fingerprint(Categories, "1", &[]),
+        ];
+        assert_ne!(all[0], all[1]);
+        assert_ne!(all[1], all[2]);
+        for (fingerprint, name) in all.iter().zip(["link_hash", "content_hash", "categories"]) {
+            assert_ne!(*fingerprint, sha256_hex(name.as_bytes()));
         }
     }
 

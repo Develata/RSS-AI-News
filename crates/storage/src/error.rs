@@ -188,8 +188,26 @@ fn is_retryable_db_code(error: &dyn sqlx::error::DatabaseError) -> bool {
     if matches!(code.as_ref(), "5" | "6" | "SQLITE_BUSY" | "SQLITE_LOCKED") {
         return true;
     }
+    // R2-B3: sqlx reports SQLite *extended* result codes (`517
+    // SQLITE_BUSY_SNAPSHOT`, `262 SQLITE_LOCKED_SHAREDCACHE`, …); the primary
+    // code is the low byte. Only applied to errors the SQLite driver raised: a
+    // PG SQLSTATE such as `22021` parses as a number too.
+    if error
+        .try_downcast_ref::<sqlx::sqlite::SqliteError>()
+        .is_some()
+        && is_sqlite_busy_or_locked(code.as_ref())
+    {
+        return true;
+    }
     // PG 复用 is_pg_unavailable_code 的同一份白名单
     is_pg_unavailable_code(error)
+}
+
+/// `(extended_code & 0xff) ∈ {5 SQLITE_BUSY, 6 SQLITE_LOCKED}`
+/// (<https://www.sqlite.org/rescode.html>).
+fn is_sqlite_busy_or_locked(code: &str) -> bool {
+    code.parse::<i32>()
+        .is_ok_and(|code| matches!(code & 0xff, 5 | 6))
 }
 
 #[cfg(test)]
@@ -444,6 +462,17 @@ mod tests {
         let err = classify_db_error(db_err(Some("SQLITE_BUSY"), "busy"), "x", "k");
         assert!(matches!(err, StorageError::Sqlx(_)));
         assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn low_byte_rule_is_only_for_sqlite_driver_errors() {
+        // R2-B3: `22021 & 0xff == 5`, but a non-SQLite error is not SQLite
+        // BUSY. (Real SQLite extended codes: sqlite_error_classification_tests.)
+        assert!(is_sqlite_busy_or_locked("517"));
+        assert!(is_sqlite_busy_or_locked("262"));
+        assert!(!is_sqlite_busy_or_locked("2067"));
+        let err = classify_db_error(db_err(Some("22021"), "invalid byte"), "x", "k");
+        assert!(!err.is_retryable());
     }
 
     // ── 未知 / fallthrough ──

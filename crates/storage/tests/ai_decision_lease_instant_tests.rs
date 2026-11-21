@@ -147,8 +147,14 @@ async fn expired(op: Op, deadline: OffsetDateTime, now: OffsetDateTime) -> bool 
                 batch_size: 10,
                 max_attempts: MAX_ATTEMPTS,
             };
-            // The seeded article was discovered just now: inside any window.
-            ai.claim_pending_fresh(&request, "ai", t0() - Duration::hours(48))
+            // Inside the window ending at the claim's `now` (R2-S1), so the
+            // fresh side's lease predicate is the one exercised.
+            sqlx::query("UPDATE feed_entries SET published_at = ?")
+                .bind(t0() - Duration::hours(1))
+                .execute(&pool)
+                .await
+                .unwrap();
+            ai.claim_pending_shared(&request, "ai", t0() - Duration::hours(48))
                 .await
                 .unwrap()
                 .len()

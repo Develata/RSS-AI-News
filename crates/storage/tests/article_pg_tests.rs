@@ -192,6 +192,15 @@ async fn pg_update_content_hash_then_find_returns_new_hash() {
     assert_eq!(after.content_hash, "hash-new");
 }
 
+fn backlog_identity() -> rss_ai_news_storage::NewAiResult {
+    rss_ai_news_storage::NewAiResult {
+        article_id: 0,
+        prompt_version: 1,
+        output_schema_version: 1,
+        model_id: "model".to_string(),
+    }
+}
+
 #[tokio::test]
 #[ignore = "需要 docker daemon"]
 async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
@@ -217,7 +226,16 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
 
     // batch_size=2 + after_id=0 → 拿 ids[0..2]
     let page1 = repo
-        .list_persisted_for_ai_task_gen("ai", 2, 0)
+        .list_backlog_for_ai_task_gen(
+            "ai",
+            &backlog_identity(),
+            rss_ai_news_storage::FreshWindow {
+                since: OffsetDateTime::now_utc() + time::Duration::days(365),
+                until: OffsetDateTime::now_utc() + time::Duration::days(366),
+            },
+            2,
+            0,
+        )
         .await
         .expect("pg list page1");
     assert_eq!(page1.len(), 2);
@@ -226,7 +244,16 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
 
     // after_id=ids[1] → 拿 ids[2..]
     let page2 = repo
-        .list_persisted_for_ai_task_gen("ai", 2, ids[1])
+        .list_backlog_for_ai_task_gen(
+            "ai",
+            &backlog_identity(),
+            rss_ai_news_storage::FreshWindow {
+                since: OffsetDateTime::now_utc() + time::Duration::days(365),
+                until: OffsetDateTime::now_utc() + time::Duration::days(366),
+            },
+            2,
+            ids[1],
+        )
         .await
         .expect("pg list page2");
     assert_eq!(page2.len(), 1);
@@ -308,9 +335,11 @@ async fn pg_persist_for_entry_is_atomic_and_recognises_own_article() {
             newly_created: false
         }
     );
+    // R2-S6: the entry state follows the stored (readability) article, not
+    // this call's fallback flag.
     assert_eq!(
         entry_state(&ctx, own).await,
-        ("fallback_persisted".to_string(), Some(earlier.article_id))
+        ("persisted".to_string(), Some(earlier.article_id))
     );
 
     let dup = claim_entry(&ctx, source_id, "persist-dup").await;

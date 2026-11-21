@@ -77,121 +77,130 @@ RETURNING id, article_id, prompt_version, output_schema_version, model_id
 
 // ── C9: publish-window ("fresh") share ────────────────────────────────
 // "Fresh" = the article would be eligible if publish froze now:
-// `COALESCE(fe.published_at, fe.discovered_at) >= published_since` (the
-// freeze rule, `flows/publish/freeze.rs::published_since`; no upper bound, so
-// future-dated articles count as fresh). SQLite compares and orders that
-// source time by `julianday()` instant with a text fallback; `$9` is
-// `sqlite_instant_cutoff(published_since)`.
+// `published_since <= COALESCE(fe.published_at, fe.discovered_at) <= now`
+// (the freeze's bounds, `flows/publish/freeze.rs`; R2-S1: a future-dated
+// article is not fresh, today's freeze cannot select it). SQLite compares and
+// orders that source time by `julianday()` instant (a text fallback decides
+// membership only); the window bounds are `sqlite_window_bounds` (rounded
+// inward to whole ms). The
+// backlog claim is the exact complement (R2-B1), so the two sides never
+// compete for the same task.
 
-/// SQLite fresh claim: pending tasks of in-window articles, oldest source
-/// time first (they leave the window first), ties by task id. Lease,
-/// attempt and category predicates are those of [`CLAIM_AI_PENDING_SQLITE_SQL`].
-pub(super) const CLAIM_AI_PENDING_FRESH_SQLITE_SQL: &str = r#"
+// A side is claimed in two steps inside the batch transaction (R2-S2): the
+// ordered candidate ids are selected, then each is claimed by id in that
+// order — `UPDATE … RETURNING` returns rows in an unspecified order, so a
+// single statement would not hand the flow the oldest task first. Binds of
+// the selects: `$1` lease cutoff (`now`; SQLite `sqlite_instant_cutoff`),
+// `$2` attempt budget, `$3` category, `$4` limit, `$5` / `$6` window bounds.
+
+/// SQLite fresh candidates: pending tasks of in-window articles, oldest
+/// source **instant** first (they leave the window first), ties by article
+/// id (Incident 2), then task id. Lease, attempt and category predicates are
+/// those of [`CLAIM_AI_PENDING_SQLITE_SQL`]. The text fallback only decides
+/// membership of values `julianday()` cannot parse; it never orders.
+pub(super) const SELECT_FRESH_CLAIM_CANDIDATES_SQLITE_SQL: &str = r#"
+SELECT aar.id
+FROM article_ai_results aar
+JOIN articles a ON a.id = aar.article_id
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE aar.state = 'pending'
+  AND (aar.lease_expires_at IS NULL
+       OR COALESCE(julianday(aar.lease_expires_at) < julianday($1),
+                   aar.lease_expires_at < $1))
+  AND aar.attempt_count < $2
+  AND fs.category_key = $3
+  AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($5),
+               COALESCE(fe.published_at, fe.discovered_at) >= $5)
+  AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) <= julianday($6),
+               COALESCE(fe.published_at, fe.discovered_at) <= $6)
+ORDER BY julianday(COALESCE(fe.published_at, fe.discovered_at)) ASC, a.id ASC, aar.id ASC
+LIMIT $4
+"#;
+
+/// PG fresh candidates; `FOR UPDATE OF aar SKIP LOCKED` as in
+/// [`CLAIM_AI_PENDING_PG_SQL`] (the locks are held until the batch commits).
+pub(super) const SELECT_FRESH_CLAIM_CANDIDATES_PG_SQL: &str = r#"
+SELECT aar.id
+FROM article_ai_results aar
+JOIN articles a ON a.id = aar.article_id
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE aar.state = 'pending'
+  AND (aar.lease_expires_at IS NULL OR aar.lease_expires_at < $1)
+  AND aar.attempt_count < $2
+  AND fs.category_key = $3
+  AND COALESCE(fe.published_at, fe.discovered_at) >= $5
+  AND COALESCE(fe.published_at, fe.discovered_at) <= $6
+ORDER BY COALESCE(fe.published_at, fe.discovered_at) ASC, a.id ASC, aar.id ASC
+LIMIT $4
+FOR UPDATE OF aar SKIP LOCKED
+"#;
+
+/// SQLite backlog candidates (R2-B1): pending tasks of articles **outside**
+/// the window — the complement of the fresh side — by task id.
+pub(super) const SELECT_BACKLOG_CLAIM_CANDIDATES_SQLITE_SQL: &str = r#"
+SELECT aar.id
+FROM article_ai_results aar
+JOIN articles a ON a.id = aar.article_id
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE aar.state = 'pending'
+  AND (aar.lease_expires_at IS NULL
+       OR COALESCE(julianday(aar.lease_expires_at) < julianday($1),
+                   aar.lease_expires_at < $1))
+  AND aar.attempt_count < $2
+  AND fs.category_key = $3
+  AND NOT (COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($5),
+                    COALESCE(fe.published_at, fe.discovered_at) >= $5)
+           AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) <= julianday($6),
+                        COALESCE(fe.published_at, fe.discovered_at) <= $6))
+ORDER BY aar.id ASC
+LIMIT $4
+"#;
+
+/// PG backlog candidates; locking as in [`SELECT_FRESH_CLAIM_CANDIDATES_PG_SQL`].
+pub(super) const SELECT_BACKLOG_CLAIM_CANDIDATES_PG_SQL: &str = r#"
+SELECT aar.id
+FROM article_ai_results aar
+JOIN articles a ON a.id = aar.article_id
+JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+JOIN feed_sources fs ON fs.id = fe.source_id
+WHERE aar.state = 'pending'
+  AND (aar.lease_expires_at IS NULL OR aar.lease_expires_at < $1)
+  AND aar.attempt_count < $2
+  AND fs.category_key = $3
+  AND NOT (COALESCE(fe.published_at, fe.discovered_at) >= $5
+           AND COALESCE(fe.published_at, fe.discovered_at) <= $6)
+ORDER BY aar.id ASC
+LIMIT $4
+FOR UPDATE OF aar SKIP LOCKED
+"#;
+
+/// Claims one selected candidate (both dialects). The batch transaction
+/// holds the write lock (SQLite `BEGIN IMMEDIATE`) or the row lock (PG), so
+/// the row is still `pending`; the predicate only keeps the statement safe.
+pub(super) const CLAIM_AI_BY_ID_SQL: &str = r#"
 UPDATE article_ai_results
 SET state = 'running',
     lease_owner = $1,
     lease_expires_at = $2,
     attempt_count = attempt_count + 1,
     started_at = COALESCE(started_at, $3),
-    updated_at = $4
-WHERE id IN (
-    SELECT aar.id
-    FROM article_ai_results aar
-    JOIN articles a ON a.id = aar.article_id
-    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
-    JOIN feed_sources fs ON fs.id = fe.source_id
-    WHERE aar.state = 'pending'
-      AND (aar.lease_expires_at IS NULL
-           OR COALESCE(julianday(aar.lease_expires_at) < julianday($5),
-                       aar.lease_expires_at < $5))
-      AND aar.attempt_count < $6
-      AND fs.category_key = $7
-      AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($9),
-                   COALESCE(fe.published_at, fe.discovered_at) >= $9)
-    ORDER BY julianday(COALESCE(fe.published_at, fe.discovered_at)) ASC,
-             COALESCE(fe.published_at, fe.discovered_at) ASC,
-             aar.id ASC
-    LIMIT $8
-)
+    updated_at = $3
+WHERE id = $4 AND state = 'pending'
 RETURNING id, article_id, prompt_version, output_schema_version, model_id
 "#;
 
-/// PG fresh claim; `FOR UPDATE OF aar` as in [`CLAIM_AI_PENDING_PG_SQL`].
-pub(super) const CLAIM_AI_PENDING_FRESH_PG_SQL: &str = r#"
-UPDATE article_ai_results
-SET state = 'running',
-    lease_owner = $1,
-    lease_expires_at = $2,
-    attempt_count = attempt_count + 1,
-    started_at = COALESCE(started_at, $3),
-    updated_at = $4
-WHERE id IN (
-    SELECT aar.id
-    FROM article_ai_results aar
-    JOIN articles a ON a.id = aar.article_id
-    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
-    JOIN feed_sources fs ON fs.id = fe.source_id
-    WHERE aar.state = 'pending'
-      AND (aar.lease_expires_at IS NULL OR aar.lease_expires_at < $5)
-      AND aar.attempt_count < $6
-      AND fs.category_key = $7
-      AND COALESCE(fe.published_at, fe.discovered_at) >= $9
-    ORDER BY COALESCE(fe.published_at, fe.discovered_at) ASC, aar.id ASC
-    LIMIT $8
-    FOR UPDATE OF aar SKIP LOCKED
-)
-RETURNING id, article_id, prompt_version, output_schema_version, model_id
-"#;
+/// C9 / R2-B1 batch-size-1 alternation state (migration 0009).
+pub(super) const SELECT_SHARE_SIDE_SQL: &str =
+    "SELECT last_side FROM ai_fresh_share_state WHERE category_key = $1 AND stage = $2";
 
-/// Batch-size-1 alternation signal for task_gen: is the category's newest AI
-/// task (highest id) for an in-window article? No row → NULL.
-pub(super) const NEWEST_TASK_IS_FRESH_SQLITE_SQL: &str = r#"
-SELECT COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($2),
-                COALESCE(fe.published_at, fe.discovered_at) >= $2)
-FROM article_ai_results aar
-JOIN articles a ON a.id = aar.article_id
-JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
-JOIN feed_sources fs ON fs.id = fe.source_id
-WHERE fs.category_key = $1
-ORDER BY aar.id DESC
-LIMIT 1
-"#;
-
-pub(super) const NEWEST_TASK_IS_FRESH_PG_SQL: &str = r#"
-SELECT COALESCE(fe.published_at, fe.discovered_at) >= $2
-FROM article_ai_results aar
-JOIN articles a ON a.id = aar.article_id
-JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
-JOIN feed_sources fs ON fs.id = fe.source_id
-WHERE fs.category_key = $1
-ORDER BY aar.id DESC
-LIMIT 1
-"#;
-
-/// Batch-size-1 alternation signal for the claim: is the category's most
-/// recently first-claimed task (latest `started_at`) for an in-window
-/// article? Never claimed → NULL.
-pub(super) const LAST_CLAIM_IS_FRESH_SQLITE_SQL: &str = r#"
-SELECT COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($2),
-                COALESCE(fe.published_at, fe.discovered_at) >= $2)
-FROM article_ai_results aar
-JOIN articles a ON a.id = aar.article_id
-JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
-JOIN feed_sources fs ON fs.id = fe.source_id
-WHERE fs.category_key = $1 AND aar.started_at IS NOT NULL
-ORDER BY julianday(aar.started_at) DESC, aar.started_at DESC, aar.id DESC
-LIMIT 1
-"#;
-
-pub(super) const LAST_CLAIM_IS_FRESH_PG_SQL: &str = r#"
-SELECT COALESCE(fe.published_at, fe.discovered_at) >= $2
-FROM article_ai_results aar
-JOIN articles a ON a.id = aar.article_id
-JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
-JOIN feed_sources fs ON fs.id = fe.source_id
-WHERE fs.category_key = $1 AND aar.started_at IS NOT NULL
-ORDER BY aar.started_at DESC, aar.id DESC
-LIMIT 1
+pub(super) const UPSERT_SHARE_SIDE_SQL: &str = r#"
+INSERT INTO ai_fresh_share_state (category_key, stage, last_side, updated_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (category_key, stage)
+DO UPDATE SET last_side = excluded.last_side, updated_at = excluded.updated_at
 "#;
 
 pub(super) const RELEASE_AI_SUCCESS_SQL: &str = r#"
@@ -324,4 +333,13 @@ SELECT CASE WHEN EXISTS (
     FROM article_ai_results
     WHERE article_id = $1 AND state = 'succeeded' AND id != $2
 ) THEN 1 ELSE 0 END
+"#;
+
+/// R2-S3 reconcile: the best score among the article's *other* kept
+/// (`succeeded`, `keep_decision = 1`) results; NULL when there is none. A
+/// missing score counts as 0, as in a success release.
+pub(super) const BEST_OTHER_KEPT_SCORE_SQL: &str = r#"
+SELECT MAX(COALESCE(importance_score, 0))
+FROM article_ai_results
+WHERE article_id = $1 AND state = 'succeeded' AND keep_decision = 1 AND id != $2
 "#;

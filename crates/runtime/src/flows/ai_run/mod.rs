@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_storage::{
-    ClaimRequest, ClaimedAiResult, NewAiResult, build_owner_id, lease_expires_at,
+    ClaimRequest, ClaimedAiResult, FreshWindow, NewAiResult, ShareMark, ShareSide, ShareStage,
+    build_owner_id, lease_expires_at,
 };
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
@@ -34,15 +35,16 @@ impl AiRunFlow {
     /// Phase 1：为 `articles.state='persisted'` 的文章创建 pending AI 任务。
     ///
     /// 一次 pass 推进至多 `task_gen_batch_size` 篇 article（新插入 + 冲突对账，
-    /// 记 `article_advanced`），由两个列表分享（C9，plan/03 §5.1）：
+    /// 记 `article_advanced`），由两个不相交的列表分享（C9，plan/03 §5.1）：
     /// - fresh：publish 窗口内（若此刻 freeze 即可入选）且尚无本身份任务的文章，
     ///   来源时间最早者优先（最先掉出窗口）；
-    /// - backlog：全部 `persisted`，按 id 升序 + keyset 游标（C3：越过冲突后仍留在
-    ///   `persisted` 的行，并对账已有任务行）。
+    /// - backlog：其余 `persisted`（窗口外，或窗口内但已有本身份任务行），按 id
+    ///   升序 + keyset 游标（C3：越过冲突后仍留在 `persisted` 的行，并对账已有任务行）。
     ///
     /// 先行一侧得 `ceil(n/2)`，另一侧得余下，某侧不足时名额转给另一侧（两侧都扫完
-    /// 才少于 n）。n ≥ 2 时 fresh 先行；n = 1 时按该分类最新任务是否 fresh 轮换先行侧，
-    /// 跨 run 交替而不引入新状态。某页出现插入存储错误时本 pass 停止。
+    /// 才少于 n）。n ≥ 2 时 fresh 先行；n = 1 时先行侧是该分类上一次 task_gen
+    /// **实际推进**的文章所属侧的另一侧（`ai_fresh_share_state`，与推进同事务写入，
+    /// R2-B1）。某页出现插入存储错误时本 pass 停止。
     pub async fn task_gen(&self, opts: &AiRunOptions) -> TaskGenSummary {
         let emitter = RunEventEmitter {
             run_id: &self.ctx.run.run_id,
@@ -61,11 +63,16 @@ impl AiRunFlow {
             .await;
 
         let page_size = opts.task_gen_batch_size.max(1);
-        let since = ai_fresh_since((self.ctx.clock)(), opts.candidate_window_hours);
+        // One window for the whole pass, ending at its own `now` (R2-S1).
+        let now = (self.ctx.clock)();
+        let window = FreshWindow {
+            since: ai_fresh_since(now, opts.candidate_window_hours),
+            until: now,
+        };
         let mut summary = TaskGenSummary::default();
         let mut pass = TaskGenPass {
             page_size,
-            since,
+            window,
             backlog_cursor: 0,
             stopped: false,
         };
@@ -73,12 +80,12 @@ impl AiRunFlow {
             match self
                 .ctx
                 .ai_result_repo
-                .newest_task_is_fresh(&opts.category_key, since)
+                .last_served_side(&opts.category_key, ShareStage::TaskGen)
                 .await
             {
-                Ok(newest_fresh) => !newest_fresh.unwrap_or(false),
+                Ok(last) => last != Some(ShareSide::Fresh),
                 Err(error) => {
-                    tracing::error!("failed to read the task_gen alternation signal: {error}");
+                    tracing::error!("failed to read the task_gen alternation state: {error}");
                     summary.list_error = Some(error.error_kind().to_string());
                     pass.stopped = true;
                     true
@@ -163,7 +170,7 @@ impl AiRunFlow {
                         .list_fresh_for_ai_task_gen(
                             &opts.category_key,
                             &identity,
-                            pass.since,
+                            pass.window,
                             pass.page_size,
                         )
                         .await
@@ -171,8 +178,10 @@ impl AiRunFlow {
                 TaskGenSide::Backlog => {
                     self.ctx
                         .article_repo
-                        .list_persisted_for_ai_task_gen(
+                        .list_backlog_for_ai_task_gen(
                             &opts.category_key,
+                            &identity,
+                            pass.window,
                             pass.page_size,
                             pass.backlog_cursor,
                         )
@@ -200,16 +209,33 @@ impl AiRunFlow {
                     article_id: candidate.article_id,
                     ..identity.clone()
                 };
-                match self
-                    .ctx
-                    .ai_result_repo
-                    .insert_pending_and_advance_article(
-                        &item,
-                        i32::from(opts.min_importance_score.get()),
-                        (self.ctx.clock)(),
-                    )
-                    .await
-                {
+                let min_score = i32::from(opts.min_importance_score.get());
+                let now = (self.ctx.clock)();
+                // Batch size 1 records which side the advanced article belongs
+                // to (its own window membership: a backlog reconciliation of
+                // an in-window row counts as fresh), atomically with the
+                // advance (R2-B1).
+                let inserted = if pass.page_size == 1 {
+                    let mark = ShareMark {
+                        category_key: &opts.category_key,
+                        stage: ShareStage::TaskGen,
+                        side: if candidate.in_window {
+                            ShareSide::Fresh
+                        } else {
+                            ShareSide::Backlog
+                        },
+                    };
+                    self.ctx
+                        .ai_result_repo
+                        .insert_pending_advance_and_mark(&item, min_score, now, &mark)
+                        .await
+                } else {
+                    self.ctx
+                        .ai_result_repo
+                        .insert_pending_and_advance_article(&item, min_score, now)
+                        .await
+                };
+                match inserted {
                     Ok(insert) => {
                         if insert.ai_result_id.is_some() {
                             summary.inserted += 1;
@@ -224,7 +250,7 @@ impl AiRunFlow {
                         }
                         if insert.article_advanced {
                             outcome.handled += 1;
-                            if side == TaskGenSide::Fresh {
+                            if candidate.in_window {
                                 summary.fresh_advanced += 1;
                             }
                         }
@@ -238,15 +264,21 @@ impl AiRunFlow {
                     }
                 }
                 if outcome.handled >= quota {
-                    return outcome;
+                    break;
                 }
+            }
+            // R2-S4: an insert error on this page stops the pass on every
+            // exit path (quota met, short page, next page), so no side scans
+            // on after it.
+            if summary.insert_failed > failed_before {
+                pass.stopped = true;
+                return outcome;
+            }
+            if outcome.handled >= quota {
+                return outcome;
             }
             if page_len < pass.page_size as usize {
                 outcome.exhausted = true;
-                return outcome;
-            }
-            if summary.insert_failed > failed_before {
-                pass.stopped = true;
                 return outcome;
             }
             // The fresh list is re-read from its head: rows it returned left
@@ -258,52 +290,20 @@ impl AiRunFlow {
         }
     }
 
-    /// Claims one batch, sharing it between in-window ("fresh") pending tasks
-    /// and all pending tasks by id (C9, plan/03 §5.2): the leading side gets
-    /// `ceil(n/2)`, the other the rest, and a side that runs short passes its
-    /// share on. `n ≥ 2` leads with fresh; `n = 1` leads with the side the
-    /// category's most recent first claim did not serve.
+    /// Claims one batch, shared between in-window ("fresh") pending tasks and
+    /// the rest (C9, plan/03 §5.2), as one storage transaction (R2-B2): a
+    /// failing side rolls the whole batch back instead of stranding claimed
+    /// rows the flow never receives.
     async fn claim_batch(
         &self,
         opts: &AiRunOptions,
         request: &ClaimRequest,
     ) -> Result<Vec<ClaimedAiResult>, rss_ai_news_storage::StorageError> {
-        let repo = &self.ctx.ai_result_repo;
-        let n = request.batch_size;
         let since = ai_fresh_since(request.now, opts.candidate_window_hours);
-        let fresh_first = n > 1
-            || !repo
-                .last_claim_is_fresh(&opts.category_key, since)
-                .await?
-                .unwrap_or(false);
-        let claim = |fresh: bool, limit: u32| {
-            let request = ClaimRequest {
-                batch_size: limit,
-                ..request.clone()
-            };
-            async move {
-                if fresh {
-                    repo.claim_pending_fresh(&request, &opts.category_key, since)
-                        .await
-                } else {
-                    repo.claim_pending(&request, &opts.category_key).await
-                }
-            }
-        };
-        let first_quota = n.div_ceil(2);
-        let mut claimed = claim(fresh_first, first_quota).await?;
-        let first_short = (claimed.len() as u32) < first_quota;
-        let rest = n - claimed.len() as u32;
-        let second = claim(!fresh_first, rest).await?;
-        let second_short = (second.len() as u32) < rest;
-        claimed.extend(second);
-        let left = n - claimed.len() as u32;
-        // "All pending" short means nothing is left at all; fresh short means
-        // no fresh task is left.
-        if left > 0 && !first_short && !(second_short && fresh_first) {
-            claimed.extend(claim(fresh_first, left).await?);
-        }
-        Ok(claimed)
+        self.ctx
+            .ai_result_repo
+            .claim_pending_shared(request, &opts.category_key, since)
+            .await
     }
 
     /// Phase 2：claim pending AI 任务，并发调用 AI、写 artifact、解析并 release。
@@ -469,6 +469,7 @@ impl AiRunFlow {
                     "lease_lost": summary.lease_lost,
                     "release_failed": summary.release_failed,
                     "tasks_panicked": summary.tasks_panicked,
+                    "storage_failed": summary.storage_failed,
                     "batches_executed": summary.batches_executed,
                     "max_batches_reached": summary.max_batches_reached,
                     "retryable_deferred": summary.retryable_deferred,
@@ -497,7 +498,7 @@ enum TaskGenSide {
 /// State shared by the sides of one task_gen pass.
 struct TaskGenPass {
     page_size: u32,
-    since: OffsetDateTime,
+    window: FreshWindow,
     /// C3 keyset cursor of the backlog (id-ordered) list.
     backlog_cursor: i64,
     /// A storage error ended the pass.
@@ -520,6 +521,9 @@ fn ai_fresh_since(now: OffsetDateTime, candidate_window_hours: u32) -> OffsetDat
 impl AiProcessSummary {
     /// Count every outcome; retain only the first 32 failures for diagnostics.
     fn record(&mut self, outcome: AiTaskOutcome) {
+        if outcome.storage_failed {
+            self.storage_failed += 1;
+        }
         match outcome.status {
             AiTaskStatus::Succeeded => self.succeeded += 1,
             AiTaskStatus::Filtered => self.filtered += 1,
@@ -608,6 +612,7 @@ mod tests {
         };
         for _ in 0..10_000 {
             summary.record(AiTaskOutcome {
+                storage_failed: false,
                 article_ai_result_id: 1,
                 article_id: 1,
                 article_advance: None,
@@ -615,6 +620,7 @@ mod tests {
                 error_kind: None,
             });
             summary.record(AiTaskOutcome {
+                storage_failed: false,
                 article_ai_result_id: 1,
                 article_id: 1,
                 article_advance: None,
@@ -623,6 +629,7 @@ mod tests {
             });
         }
         summary.record(AiTaskOutcome {
+            storage_failed: false,
             article_ai_result_id: 1,
             article_id: 1,
             article_advance: None,

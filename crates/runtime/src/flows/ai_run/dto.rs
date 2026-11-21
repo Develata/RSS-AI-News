@@ -85,6 +85,10 @@ pub struct AiProcessSummary {
     pub release_failed: u32,
     /// Tasks that panicked or were cancelled; leases recover on expiry.
     pub tasks_panicked: u32,
+    /// Tasks whose own storage read failed (R2-S5; also counted in the
+    /// retryable / permanent bucket the release landed in). The CLI reports
+    /// them as run failures, like extract's `storage_failed`.
+    pub storage_failed: u32,
     /// 实际执行的批次数（F6-3）。命中 `max_batches` 时等于上限；否则小于上限。
     pub batches_executed: u32,
     /// `true` 表示循环因 `max_batches` 上限退出（仍有 pending 任务）；
@@ -108,6 +112,10 @@ pub struct AiTaskOutcome {
     pub status: AiTaskStatus,
     pub article_advance: Option<AiCompleteArticleAdvance>,
     pub error_kind: Option<String>,
+    /// The run's own database failed for this task (reading the article),
+    /// whatever release followed (R2-S5): an infrastructure error of the run,
+    /// not an AI outcome.
+    pub storage_failed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -378,7 +378,9 @@ impl ExtractFlow {
                         }
                     }
                 }
-                return entry.release_failure(&error, now).await;
+                return entry
+                    .release_failure_after(&error, error.retry_after(), now)
+                    .await;
             }
         };
 
@@ -657,6 +659,18 @@ impl EntryRelease<'_> {
         error: &(dyn ClassifiedError + Sync),
         now: OffsetDateTime,
     ) -> ExtractEntryOutcome {
+        self.release_failure_after(error, None, now).await
+    }
+
+    /// [`Self::release_failure`] with the server's requested wait (a 429's
+    /// `Retry-After`, R2-S10): the cooldown ends at the later of the local
+    /// backoff and `released_at + retry_after`.
+    async fn release_failure_after(
+        &self,
+        error: &(dyn ClassifiedError + Sync),
+        retry_after: Option<StdDuration>,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
         let message = error.display_user();
         let kind = error.error_kind().to_string();
         if !error.is_retryable() {
@@ -677,7 +691,7 @@ impl EntryRelease<'_> {
                 &message,
                 &kind,
                 self.retry.max_attempts,
-                self.retry.next_attempt_at(released_at),
+                self.retry.next_attempt_at(released_at, retry_after),
                 released_at,
             )
             .await
@@ -803,33 +817,40 @@ pub fn extract_lease_budget_seconds(
 }
 
 /// Largest batch size `<= requested` whose [`extract_lease_budget_seconds`]
-/// fits `lease_seconds`, but never less than one wave
-/// (`min(requested, concurrent_fetches)`).
+/// fits `lease_seconds`, in whole waves of `concurrent_fetches`.
 ///
 /// `ingest` shrinks an over-budget batch instead of refusing to start, so a
 /// config that ran before the budget existed (e.g. the old 300 s lease with
 /// the default batch of 50) keeps running and no batch outlives its lease.
-/// When even one wave exceeds the lease the result is one wave; the caller
-/// warns, since only an overlapping run could then reclaim the tail.
+/// `None` when not even one wave fits (R2-S9): any claim could then outlive
+/// its lease, so the caller skips extract for the run and reports it.
+///
+/// Postcondition: `Some(n)` ⇒ `1 <= n <= max(requested, 1)` and
+/// `extract_lease_budget_seconds(n, …) <= lease_seconds`.
 pub fn fit_extract_batch_to_lease(
     requested: u32,
     concurrent_fetches: u32,
     http_timeout_seconds: u64,
     lease_seconds: u64,
-) -> u32 {
+) -> Option<u32> {
     let requested = requested.max(1);
     let concurrent = concurrent_fetches.max(1);
     if extract_lease_budget_seconds(requested, concurrent, http_timeout_seconds) <= lease_seconds {
-        return requested;
+        return Some(requested);
     }
     let per_wave = http_timeout_seconds
         .saturating_add(EXTRACT_WAVE_MARGIN_SECONDS)
         .max(1);
-    let waves = (lease_seconds / per_wave).max(1);
-    u32::try_from(waves)
-        .unwrap_or(u32::MAX)
-        .saturating_mul(concurrent)
-        .min(requested)
+    let waves = lease_seconds / per_wave;
+    if waves == 0 {
+        return None;
+    }
+    Some(
+        u32::try_from(waves)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(concurrent)
+            .min(requested),
+    )
 }
 
 /// Shortest retry cooldown, applied after the first failed attempt.
@@ -846,10 +867,20 @@ struct RetrySchedule {
 }
 
 impl RetrySchedule {
-    /// When a retryable failure released at `now` becomes claimable again.
-    /// The releasing run itself never retries the entry (it stays excluded).
-    fn next_attempt_at(&self, now: OffsetDateTime) -> OffsetDateTime {
-        now + retry_backoff(self.attempt_count)
+    /// When a retryable failure released at `now` becomes claimable again:
+    /// the later of the local backoff and the server's `retry_after`
+    /// (R2-S10). The releasing run itself never retries the entry (it stays
+    /// excluded).
+    fn next_attempt_at(
+        &self,
+        now: OffsetDateTime,
+        retry_after: Option<StdDuration>,
+    ) -> OffsetDateTime {
+        let backoff = now + retry_backoff(self.attempt_count);
+        let server = retry_after
+            .and_then(|wait| Duration::try_from(wait).ok())
+            .and_then(|wait| now.checked_add(wait));
+        server.map_or(backoff, |server| server.max(backoff))
     }
 }
 
@@ -935,18 +966,26 @@ mod tests {
     #[test]
     fn over_budget_batches_shrink_to_whole_waves_that_fit_the_lease() {
         // Fits: unchanged.
-        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 600), 50);
-        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 350), 50);
+        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 600), Some(50));
+        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 350), Some(50));
         // Old default lease 300 s with the default batch: 8 waves × 35 s = 280 s.
-        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 300), 40);
+        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 300), Some(40));
         assert!(extract_lease_budget_seconds(40, 5, 30) <= 300);
         // One concurrent fetch, 5 s timeout, 400 s lease: 40 waves of 10 s.
-        assert_eq!(fit_extract_batch_to_lease(50, 1, 5, 400), 40);
+        assert_eq!(fit_extract_batch_to_lease(50, 1, 5, 400), Some(40));
         // Not even one wave fits: one wave, never zero.
-        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 20), 5);
-        assert_eq!(fit_extract_batch_to_lease(3, 5, 30, 10), 3);
+        // R2-S9: not even one wave fits → no batch at all.
+        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 20), None);
+        assert_eq!(fit_extract_batch_to_lease(3, 5, 30, 10), None);
+        assert_eq!(fit_extract_batch_to_lease(3, 5, 30, 35), Some(3));
         // Zero inputs are clamped like the flow does.
-        assert_eq!(fit_extract_batch_to_lease(0, 0, 10, 0), 1);
+        assert_eq!(fit_extract_batch_to_lease(0, 0, 10, 0), None);
+        assert_eq!(fit_extract_batch_to_lease(0, 0, 10, 15), Some(1));
+        for lease in 0..200 {
+            if let Some(n) = fit_extract_batch_to_lease(50, 3, 7, lease) {
+                assert!(extract_lease_budget_seconds(n, 3, 7) <= lease);
+            }
+        }
     }
 
     #[test]
@@ -969,8 +1008,25 @@ mod tests {
             max_attempts: 5,
             attempt_count,
         };
-        assert_eq!(retry(1).next_attempt_at(now), now + Duration::minutes(10));
-        assert_eq!(retry(3).next_attempt_at(now), now + Duration::minutes(40));
+        assert_eq!(
+            retry(1).next_attempt_at(now, None),
+            now + Duration::minutes(10)
+        );
+        assert_eq!(
+            retry(3).next_attempt_at(now, None),
+            now + Duration::minutes(40)
+        );
+        // R2-S10: the later of backoff and the server's Retry-After.
+        let hour = StdDuration::from_secs(3600);
+        assert_eq!(
+            retry(1).next_attempt_at(now, Some(hour)),
+            now + Duration::hours(1)
+        );
+        let minute = StdDuration::from_secs(60);
+        assert_eq!(
+            retry(1).next_attempt_at(now, Some(minute)),
+            now + Duration::minutes(10)
+        );
     }
 
     #[test]

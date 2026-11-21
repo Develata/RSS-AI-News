@@ -40,6 +40,10 @@ impl ReqwestHtmlFetcher {
         let client = Client::builder()
             .user_agent(USER_AGENT_VALUE)
             .redirect(reqwest::redirect::Policy::limited(5))
+            // R2-S11: no automatic `Referer` on redirects — it would carry
+            // the article URL (query included, e.g. signed links) to another
+            // host. Same rule as the feed client.
+            .referer(false)
             .build()
             .map_err(ExtractorError::from)?;
         Ok(Self {
@@ -48,6 +52,8 @@ impl ReqwestHtmlFetcher {
         })
     }
 
+    /// Uses a caller-built client as is; build it with `.referer(false)`
+    /// like [`Self::new`] (R2-S11).
     pub fn with_client(client: Client, max_body_bytes: u64) -> Self {
         Self {
             client,
@@ -80,6 +86,18 @@ impl HtmlFetcher for ReqwestHtmlFetcher {
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(ToOwned::to_owned);
+        if status.as_u16() == 429 {
+            let retry_after_seconds = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| {
+                    crate::error::parse_retry_after(value, std::time::SystemTime::now())
+                });
+            return Err(ExtractorError::RateLimited {
+                retry_after_seconds,
+            });
+        }
         if !status.is_success() {
             return Err(ExtractorError::HttpStatus {
                 code: status.as_u16(),

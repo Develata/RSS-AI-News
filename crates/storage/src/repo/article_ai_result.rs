@@ -91,31 +91,29 @@ pub trait ArticleAiResultRepository: Send + Sync {
         request: &ClaimRequest,
         category_key: &str,
     ) -> Result<Vec<ClaimedAiResult>, StorageError>;
-    /// C9：同 [`Self::claim_pending`]，但只领取 publish 窗口内（"fresh"）文章的
-    /// pending 任务：`COALESCE(fe.published_at, fe.discovered_at) >=
-    /// published_since`，按该来源时间升序（最先掉出窗口的先领）、任务 id 次序。
-    async fn claim_pending_fresh(
+    /// C9：一个逻辑批次（`request.batch_size` 个名额）由两个不相交的侧分享
+    /// （plan/03 §5.2）：fresh = publish 窗口内文章的 pending 任务
+    /// （`COALESCE(fe.published_at, fe.discovered_at) >= published_since`，来源时间
+    /// 升序——最先掉出窗口的先领）；backlog = 其余 pending 任务（任务 id 升序）。
+    /// 先行侧 `ceil(n/2)`，不足时转给另一侧。n ≥ 2 fresh 先行；n = 1 时先行侧是该
+    /// 分类上一次 claim **实际服务**的另一侧（`ai_fresh_share_state`，R2-B1），
+    /// 本批若领到行则同事务记下其所属侧。
+    ///
+    /// R2-B2：**整批同一事务**，任一侧查询失败则整批回滚——不会留下已 `running`、
+    /// 已计 attempt 却没交给调用方的行；名额为 0 的一侧不发查询。返回顺序即服务顺序。
+    async fn claim_pending_shared(
         &self,
         request: &ClaimRequest,
         category_key: &str,
         published_since: OffsetDateTime,
     ) -> Result<Vec<ClaimedAiResult>, StorageError>;
 
-    /// C9 batch=1 轮换信号（task_gen）：该分类最新（id 最大）的 AI 任务是否属于
-    /// 窗口内文章；分类尚无任务 → `None`。
-    async fn newest_task_is_fresh(
+    /// C9 / R2-B1：该分类该阶段上一次 batch=1 实际服务的一侧；从未记录 → `None`。
+    async fn last_served_side(
         &self,
         category_key: &str,
-        published_since: OffsetDateTime,
-    ) -> Result<Option<bool>, StorageError>;
-
-    /// C9 batch=1 轮换信号（claim）：该分类最近一次首次领取（`started_at` 最大）
-    /// 的任务是否属于窗口内文章；从未领取 → `None`。
-    async fn last_claim_is_fresh(
-        &self,
-        category_key: &str,
-        published_since: OffsetDateTime,
-    ) -> Result<Option<bool>, StorageError>;
+        stage: ShareStage,
+    ) -> Result<Option<ShareSide>, StorageError>;
 
     async fn release_success(
         &self,
@@ -171,6 +169,17 @@ pub trait ArticleAiResultRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<InsertPendingOutcome, StorageError>;
 
+    /// 同 [`Self::insert_pending_and_advance_article`]；article 在本次调用离开
+    /// `persisted` 时，**同事务**把 `mark` 记为该分类该阶段上一次实际服务的一侧
+    /// （C9 batch=1 轮换，R2-B1）。未推进则不记。
+    async fn insert_pending_advance_and_mark(
+        &self,
+        item: &NewAiResult,
+        min_importance_score: i32,
+        now: OffsetDateTime,
+        mark: &ShareMark<'_>,
+    ) -> Result<InsertPendingOutcome, StorageError>;
+
     /// backfill：同事务 INSERT pending 行（冲突跳过），并把仍为 `persisted` 的
     /// article 推进到 `ai_pending`——新插入，或冲突的已有行为 `pending` / `running`
     /// 时。已推进的 article（`ai_done`、`published` 等）保持不变，插入照常保留。
@@ -191,6 +200,71 @@ pub trait ArticleAiResultRepository: Send + Sync {
         min_importance_score: i32,
         now: OffsetDateTime,
     ) -> Result<ReleaseSuccessOutcome, StorageError>;
+}
+
+/// C9 publish window of one selection: an article is fresh when
+/// `since <= COALESCE(fe.published_at, fe.discovered_at) <= until` — the
+/// freeze's own bounds (`published_since(now, window)`, `published_until =
+/// now`, R2-S1). One pass / claim uses one window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreshWindow {
+    pub since: OffsetDateTime,
+    pub until: OffsetDateTime,
+}
+
+/// C9 share side: `Fresh` = inside the publish window, `Backlog` = the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareSide {
+    Fresh,
+    Backlog,
+}
+
+impl ShareSide {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Backlog => "backlog",
+        }
+    }
+
+    pub fn other(self) -> Self {
+        match self {
+            Self::Fresh => Self::Backlog,
+            Self::Backlog => Self::Fresh,
+        }
+    }
+
+    pub(super) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "fresh" => Some(Self::Fresh),
+            "backlog" => Some(Self::Backlog),
+            _ => None,
+        }
+    }
+}
+
+/// The C9 stage whose batch-size-1 alternation a [`ShareSide`] records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareStage {
+    TaskGen,
+    Claim,
+}
+
+impl ShareStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskGen => "task_gen",
+            Self::Claim => "claim",
+        }
+    }
+}
+
+/// "This pass served `side`" for `(category_key, stage)`.
+#[derive(Debug, Clone, Copy)]
+pub struct ShareMark<'a> {
+    pub category_key: &'a str,
+    pub stage: ShareStage,
+    pub side: ShareSide,
 }
 
 #[derive(Debug, Clone)]

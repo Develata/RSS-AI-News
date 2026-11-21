@@ -67,14 +67,30 @@ pub(crate) fn sqlite_instant_cutoff(now: time::OffsetDateTime) -> time::OffsetDa
     now - time::Duration::nanoseconds(i64::from(now.nanosecond() % 1_000_000))
 }
 
+/// SQLite bounds of a C9 window (R2-S1/S2): `julianday()` resolves source
+/// times to the *nearest* millisecond, so both bounds are rounded **inward**
+/// — the start up, the end down (UTC). Membership is exact at millisecond
+/// granularity; a sub-millisecond source time within 0.5 ms of a bound can
+/// still be classified by its rounded value (e.g. `.0006` vs a `.0008` start).
+pub(crate) fn sqlite_window_bounds(
+    window: FreshWindow,
+) -> (time::OffsetDateTime, time::OffsetDateTime) {
+    (
+        sqlite_stored_deadline(window.since),
+        sqlite_instant_cutoff(window.until),
+    )
+}
+
 pub use article::{
     ArticleAiTaskCandidate, ArticleContentHash, ArticleInsertOutcome, ArticleRepo,
     ArticleRepository, BackfillArticleCandidate, ContentHashReindexCandidate, NewArticle,
     UpdateContentHashOutcome,
 };
+pub use article_ai_result::FreshWindow;
 pub use article_ai_result::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
-    ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome,
+    ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome, ShareMark,
+    ShareSide, ShareStage,
 };
 pub use decision_result::{
     ClaimedDecision, DecisionArticle, DecisionAttemptRecord, DecisionExecution, DecisionFailure,
@@ -86,6 +102,7 @@ pub use feed_entry::{
     LinkHashReindexCandidate, NewFeedEntry, RecentFeedEntry, RecentFeedEntryFilter,
     RecentFeedEntryRepository, ResetFailedFilter, ResetFailedOutcome, UpdateLinkHashOutcome,
 };
+pub use feed_source::FeedEndpoint;
 pub use feed_source::{
     FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome, RecentFeedSourceHealth,
     RecentFeedSourceHealthRepository,

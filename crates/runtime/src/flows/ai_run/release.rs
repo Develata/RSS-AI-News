@@ -94,6 +94,7 @@ pub(super) async fn finish_ai_success(
                 )
                 .await;
             AiTaskOutcome {
+                storage_failed: false,
                 article_ai_result_id: claimed.id,
                 article_id: claimed.article_id,
                 status,
@@ -165,6 +166,7 @@ async fn release_not_applied(
         )
         .await;
     AiTaskOutcome {
+        storage_failed: false,
         article_ai_result_id: claimed.id,
         article_id: claimed.article_id,
         status,
@@ -271,6 +273,7 @@ pub(super) async fn release_retryable_ai_failure(
         )
         .await;
     AiTaskOutcome {
+        storage_failed: false,
         article_ai_result_id: claimed.id,
         article_id: claimed.article_id,
         status: if exhausted {
@@ -322,6 +325,7 @@ pub(super) async fn release_permanent_ai_failure(
         )
         .await;
     AiTaskOutcome {
+        storage_failed: false,
         article_ai_result_id: claimed.id,
         article_id: claimed.article_id,
         status: AiTaskStatus::PermanentFailed,

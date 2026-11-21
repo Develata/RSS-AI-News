@@ -341,3 +341,33 @@ async fn pg_lock_timeouts_surface_as_storage_timeouts() {
     holder.rollback().await.unwrap();
     ctx.cleanup().await;
 }
+
+/// R2-S19: the PG page is one statement — at most `limit` rows per page, the
+/// cursor moves to the last id scanned, and the next page continues after it.
+#[tokio::test]
+#[ignore = "needs docker"]
+async fn pg_generation_pages_respect_the_limit_and_advance_the_cursor() {
+    let (ctx, repo, ids) = setup(3).await;
+    let now = OffsetDateTime::now_utc();
+    let long_ago = now - Duration::days(3650);
+
+    let first = repo
+        .generate_pending(&identity(), &laya(), long_ago, 0, 2, now)
+        .await
+        .unwrap();
+    assert_eq!(first.inserted, 2);
+    assert_eq!(first.last_scanned_id, Some(ids[1]));
+    let second = repo
+        .generate_pending(&identity(), &laya(), long_ago, ids[1], 2, now)
+        .await
+        .unwrap();
+    assert_eq!(second.inserted, 1);
+    assert_eq!(second.last_scanned_id, Some(ids[2]));
+    let done = repo
+        .generate_pending(&identity(), &laya(), long_ago, ids[2], 2, now)
+        .await
+        .unwrap();
+    assert_eq!(done.inserted, 0);
+    assert_eq!(done.last_scanned_id, None);
+    ctx.cleanup().await;
+}

@@ -9,6 +9,8 @@ use time::OffsetDateTime;
 
 use crate::{StorageError, classify_db_error};
 
+use super::{sqlite_instant_cutoff, sqlite_stored_deadline};
+
 use super::article::{
     SELECT_ARTICLE_CONTENT_HASH_COLLISION_SQL, SELECT_ARTICLE_CONTENT_HASH_SQL,
     UPDATE_ARTICLE_CONTENT_HASH_SQL,
@@ -21,13 +23,13 @@ use super::reindex_job::{
 };
 use super::reindex_job_sql::{
     ABORT_SQL, ADVANCE_CHECKPOINT_SQL, ADVANCE_TO_COMPLETED_SQL, ASSERT_LEASE_HELD_SQL,
-    CLAIM_BY_ID_SQLITE_SQL, CLAIM_PENDING_SQLITE_SQL, CLAIM_RESUMABLE_SQL,
+    CLAIM_BY_ID_SQLITE_SQL, CLAIM_PENDING_SQLITE_SQL, CLAIM_RESUMABLE_SQLITE_SQL,
     COMPLETE_WITHOUT_CLAIM_SQL, FIND_ACTIVE_JOB_RULE_SQLITE_SQL,
     FIND_ACTIVE_REINDEX_JOB_BY_TARGET_SQL, FIND_REINDEX_JOB_BY_ID_SQL,
     FINISH_REINDEX_DEMOTE_ACTIVE_SQL, FINISH_REINDEX_PROMOTE_PENDING_SQL,
     FINISH_REINDEX_UPDATE_JOB_SQL, INSERT_REINDEX_JOB_PENDING_SQL, INSERT_RULE_VERSION_PENDING_SQL,
     LIST_RUNNING_REINDEX_JOBS_SQL, LOCK_REINDEX_TARGET_SQLITE_SQL, MARK_FAILED_SQL,
-    RECLAIM_EXPIRED_LEASES_SQL,
+    RECLAIM_EXPIRED_LEASES_SQLITE_SQL,
 };
 use crate::{UpdateContentHashOutcome, UpdateLinkHashOutcome};
 
@@ -179,10 +181,10 @@ pub(super) async fn sqlite_claim_pending(
 ) -> Result<Option<ClaimedReindexJob>, StorageError> {
     sqlx::query_as::<_, ClaimedReindexJob>(CLAIM_PENDING_SQLITE_SQL)
         .bind(owner)
-        .bind(lease_expires_at)
+        .bind(sqlite_stored_deadline(lease_expires_at))
         .bind(now)
         .bind(now)
-        .bind(now)
+        .bind(sqlite_instant_cutoff(now))
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)
@@ -197,11 +199,11 @@ pub(super) async fn sqlite_claim_by_id(
 ) -> Result<Option<ClaimedReindexJob>, StorageError> {
     sqlx::query_as::<_, ClaimedReindexJob>(CLAIM_BY_ID_SQLITE_SQL)
         .bind(owner)
-        .bind(lease_expires_at)
+        .bind(sqlite_stored_deadline(lease_expires_at))
         .bind(now)
         .bind(now)
         .bind(id)
-        .bind(now)
+        .bind(sqlite_instant_cutoff(now))
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)
@@ -225,7 +227,7 @@ async fn sqlite_checkpoint_on(
         .bind(checkpoint.now)
         .bind(checkpoint.job_id)
         .bind(checkpoint.owner)
-        .bind(checkpoint.lease_expires_at)
+        .bind(sqlite_stored_deadline(checkpoint.lease_expires_at))
         .execute(conn)
         .await
         .map_err(StorageError::from)?;
@@ -305,9 +307,9 @@ pub(super) async fn sqlite_reclaim_expired_leases(
     pool: &SqlitePool,
     now: OffsetDateTime,
 ) -> Result<u64, StorageError> {
-    let result = sqlx::query(RECLAIM_EXPIRED_LEASES_SQL)
+    let result = sqlx::query(RECLAIM_EXPIRED_LEASES_SQLITE_SQL)
         .bind(now)
-        .bind(now)
+        .bind(sqlite_instant_cutoff(now))
         .execute(pool)
         .await
         .map_err(StorageError::from)?;
@@ -382,11 +384,12 @@ pub(super) async fn sqlite_claim_resumable_by_target(
             }
         }
         Some((job_id, state, ..)) => {
-            let claimed = sqlx::query_as::<_, ClaimedReindexJob>(CLAIM_RESUMABLE_SQL)
+            let claimed = sqlx::query_as::<_, ClaimedReindexJob>(CLAIM_RESUMABLE_SQLITE_SQL)
                 .bind(owner)
-                .bind(lease_expires_at)
+                .bind(sqlite_stored_deadline(lease_expires_at))
                 .bind(now)
                 .bind(job_id)
+                .bind(sqlite_instant_cutoff(now))
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(StorageError::from)?;

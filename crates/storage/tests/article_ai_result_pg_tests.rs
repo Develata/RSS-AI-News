@@ -15,7 +15,7 @@ mod common;
 use common::pg::{PgTestContext, make_pg_test_pool};
 use rss_ai_news_storage::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
-    ClaimRequest, NewAiResult,
+    ClaimRequest, NewAiResult, ShareSide, ShareStage,
 };
 use time::OffsetDateTime;
 
@@ -438,12 +438,15 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
     let articles = ArticleRepo::new_with_storage(ctx.storage_pool().clone());
     let now = OffsetDateTime::now_utc();
     let since = now - time::Duration::hours(48);
+    let window = rss_ai_news_storage::FreshWindow { since, until: now };
     let mut ids = Vec::new();
-    // (tag, source time): old backlog, late fresh, early fresh.
+    // (tag, source time): old backlog, late fresh, early fresh, future (R2-S1:
+    // after the window's end, so backlog).
     for (tag, at) in [
         ("f-old", now - time::Duration::days(10)),
         ("f-late", now - time::Duration::hours(1)),
         ("f-early", now - time::Duration::hours(40)),
+        ("f-future", now + time::Duration::hours(2)),
     ] {
         let id = seed_article(&ctx, tag, "persisted").await;
         sqlx::query(
@@ -464,7 +467,7 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
         model_id: "gpt-4".to_string(),
     };
     let listed = articles
-        .list_fresh_for_ai_task_gen("ai", &identity, since, 10)
+        .list_fresh_for_ai_task_gen("ai", &identity, window, 10)
         .await
         .expect("pg fresh list");
     assert_eq!(
@@ -472,7 +475,22 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
         [ids[2], ids[1]],
         "in-window only, earliest source time first"
     );
-    assert_eq!(ai.newest_task_is_fresh("ai", since).await.unwrap(), None);
+    // R2-B1: the backlog list is the complement (old and future articles).
+    let backlog = articles
+        .list_backlog_for_ai_task_gen("ai", &identity, window, 10, 0)
+        .await
+        .expect("pg backlog list");
+    assert_eq!(
+        backlog
+            .iter()
+            .map(|c| (c.article_id, c.in_window))
+            .collect::<Vec<_>>(),
+        [(ids[0], false), (ids[3], false)]
+    );
+    assert_eq!(
+        ai.last_served_side("ai", ShareStage::Claim).await.unwrap(),
+        None
+    );
 
     let mut tasks = Vec::new();
     for id in &ids {
@@ -486,19 +504,31 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
             .unwrap(),
         );
     }
-    // The anti-join drops articles that already have a task of the identity.
+    // The anti-join drops articles that already have a task of the identity;
+    // the backlog list then reconciles them (in-window rows flagged).
     assert!(
         articles
-            .list_fresh_for_ai_task_gen("ai", &identity, since, 10)
+            .list_fresh_for_ai_task_gen("ai", &identity, window, 10)
             .await
             .unwrap()
             .is_empty()
     );
+    let backlog = articles
+        .list_backlog_for_ai_task_gen("ai", &identity, window, 10, 0)
+        .await
+        .unwrap();
     assert_eq!(
-        ai.newest_task_is_fresh("ai", since).await.unwrap(),
-        Some(true)
+        backlog
+            .iter()
+            .map(|c| (c.article_id, c.in_window))
+            .collect::<Vec<_>>(),
+        [
+            (ids[0], false),
+            (ids[1], true),
+            (ids[2], true),
+            (ids[3], false)
+        ]
     );
-    assert_eq!(ai.last_claim_is_fresh("ai", since).await.unwrap(), None);
 
     let request = ClaimRequest {
         owner: "w".to_string(),
@@ -507,22 +537,37 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
         batch_size: 1,
         max_attempts: 3,
     };
-    let fresh = ai.claim_pending_fresh(&request, "ai", since).await.unwrap();
+    // Batch size 1: no state → fresh first; the served side is recorded.
+    let fresh = ai
+        .claim_pending_shared(&request, "ai", since)
+        .await
+        .unwrap();
     assert_eq!(fresh.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[2]]);
     assert_eq!(
-        ai.last_claim_is_fresh("ai", since).await.unwrap(),
-        Some(true)
+        ai.last_served_side("ai", ShareStage::Claim).await.unwrap(),
+        Some(ShareSide::Fresh)
     );
-    let later = ClaimRequest {
-        now: now + time::Duration::seconds(1),
-        ..request.clone()
-    };
-    let oldest = ai.claim_pending(&later, "ai").await.unwrap();
+    // Next batch leads with the backlog: the out-of-window task.
+    let oldest = ai
+        .claim_pending_shared(&request, "ai", since)
+        .await
+        .unwrap();
     assert_eq!(oldest.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[0]]);
     assert_eq!(
-        ai.last_claim_is_fresh("ai", since).await.unwrap(),
-        Some(false)
+        ai.last_served_side("ai", ShareStage::Claim).await.unwrap(),
+        Some(ShareSide::Backlog)
     );
+    let fresh = ai
+        .claim_pending_shared(&request, "ai", since)
+        .await
+        .unwrap();
+    assert_eq!(fresh.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[1]]);
+    // The future-dated task is backlog, not fresh (R2-S1).
+    let future = ai
+        .claim_pending_shared(&request, "ai", since)
+        .await
+        .unwrap();
+    assert_eq!(future.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[3]]);
     ctx.cleanup().await;
 }
 
@@ -580,6 +625,48 @@ async fn pg_insert_conflict_reconciles_persisted_article_with_existing_row() {
             .unwrap();
         assert_eq!(state, expected, "{tag}");
     }
+
+    // R2-S3: this identity filtered, another identity kept it with score 90.
+    let two = seed_article(&ctx, "rc-two-ids", "persisted").await;
+    for (model, row_state, keep, score) in [
+        ("gpt-4", "filtered", 0, 0),
+        ("other-model", "succeeded", 1, 90),
+    ] {
+        sqlx::query(
+            "INSERT INTO article_ai_results (article_id, prompt_version, output_schema_version, \
+             model_id, state, keep_decision, importance_score) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(two)
+        .bind(prompt_id)
+        .bind(schema_id)
+        .bind(model)
+        .bind(row_state)
+        .bind(keep)
+        .bind(score)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    }
+    let outcome = repo
+        .insert_pending_and_advance_article(
+            &NewAiResult {
+                article_id: two,
+                prompt_version: prompt_id,
+                output_schema_version: schema_id,
+                model_id: "gpt-4".to_string(),
+            },
+            30,
+            now,
+        )
+        .await
+        .expect("pg reconcile with another success");
+    assert!(outcome.reconciled);
+    let state: String = sqlx::query_scalar("SELECT state FROM articles WHERE id = $1")
+        .bind(two)
+        .fetch_one(ctx.pg_pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "ready_for_publish");
 
     // backfill：新插入推进 persisted，已发布 article 保持不变且插入保留。
     let persisted = seed_article(&ctx, "bf-persisted", "persisted").await;
@@ -736,5 +823,59 @@ async fn pg_release_success_and_advance_filtered_publish_skipped() {
         .unwrap();
     assert_eq!(state, "publish_skipped");
 
+    ctx.cleanup().await;
+}
+/// R2-S2 on PG: fresh claims order by source time, ties by **article** id
+/// (not task id), and the batch comes back in that order.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_fresh_claim_orders_by_source_time_then_article_id() {
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "order").await;
+    let ai = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let mut ids = Vec::new();
+    for (tag, hours) in [("o-a", 1), ("o-b", 2), ("o-c", 2)] {
+        let id = seed_article(&ctx, tag, "ai_pending").await;
+        sqlx::query(
+            "UPDATE feed_entries SET published_at = $1 \
+             WHERE id = (SELECT origin_feed_entry_id FROM articles WHERE id = $2)",
+        )
+        .bind(now - time::Duration::hours(hours))
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    // Tasks created in reverse: article C owns the lowest task id.
+    for id in ids.iter().rev() {
+        ai.insert_pending(&NewAiResult {
+            article_id: *id,
+            prompt_version: prompt_id,
+            output_schema_version: schema_id,
+            model_id: "gpt-4".to_string(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    }
+    let request = ClaimRequest {
+        owner: "w".to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 3,
+        max_attempts: 3,
+    };
+
+    let claimed = ai
+        .claim_pending_shared(&request, "ai", now - time::Duration::hours(48))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        claimed.iter().map(|c| c.article_id).collect::<Vec<_>>(),
+        [ids[1], ids[2], ids[0]]
+    );
     ctx.cleanup().await;
 }

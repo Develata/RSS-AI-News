@@ -4,7 +4,9 @@
 
 mod common;
 
-use rss_ai_news_storage::{ArticleRepo, ArticleRepository, EntryPersistOutcome, NewArticle};
+use rss_ai_news_storage::{
+    ArticleRepo, ArticleRepository, EntryPersistOutcome, NewArticle, StorageError,
+};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 
@@ -231,4 +233,96 @@ async fn another_entrys_article_is_a_dedup() {
         )
     );
     assert_eq!(article_count(&f.pool).await, 1);
+}
+// === R2-S6: recovery reuses the article this entry already owns ===
+
+#[tokio::test]
+async fn retry_with_a_changed_body_reuses_the_article_the_entry_owns() {
+    let f = fixture().await;
+    let id = claimed_entry(&f.pool, f.source_id, "s6-body").await;
+    // A pre-upgrade attempt committed H1 then crashed before the release.
+    let first = f
+        .repo
+        .insert_or_get_by_content_hash(&article("h-s6-1", id, f.extractor))
+        .await
+        .unwrap();
+
+    // The retry extracted a different body (H2).
+    let outcome = f
+        .repo
+        .persist_for_entry(
+            &article("h-s6-2", id, f.extractor),
+            OWNER,
+            false,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        EntryPersistOutcome::Persisted {
+            article_id: first.article_id,
+            newly_created: false
+        }
+    );
+    assert_eq!(
+        article_count(&f.pool).await,
+        1,
+        "no second article for the entry"
+    );
+    let (state, article_id, _, _) = entry(&f.pool, id).await;
+    assert_eq!(state, "persisted");
+    assert_eq!(article_id, Some(first.article_id));
+}
+
+#[tokio::test]
+async fn recovery_takes_the_entry_state_from_the_stored_article() {
+    let f = fixture().await;
+    let id = claimed_entry(&f.pool, f.source_id, "s6-fallback").await;
+    // The stored article came from the summary fallback ...
+    let mut stored = article("h-s6-fb", id, f.extractor);
+    stored.extractor_strategy = "summary_fallback".to_string();
+    stored.content_quality = "fallback".to_string();
+    f.repo.insert_or_get_by_content_hash(&stored).await.unwrap();
+
+    // ... the retry got a full body.
+    f.repo
+        .persist_for_entry(
+            &article("h-s6-full", id, f.extractor),
+            OWNER,
+            false,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(entry(&f.pool, id).await.0, "fallback_persisted");
+}
+
+#[tokio::test]
+async fn an_entry_owning_several_articles_is_reported_not_guessed() {
+    let f = fixture().await;
+    let id = claimed_entry(&f.pool, f.source_id, "s6-many").await;
+    for hash in ["h-s6-a", "h-s6-b"] {
+        f.repo
+            .insert_or_get_by_content_hash(&article(hash, id, f.extractor))
+            .await
+            .unwrap();
+    }
+
+    let error = f
+        .repo
+        .persist_for_entry(
+            &article("h-s6-c", id, f.extractor),
+            OWNER,
+            false,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .expect_err("ambiguous ownership");
+
+    assert!(matches!(error, StorageError::Integrity { .. }), "{error:?}");
+    assert_eq!(article_count(&f.pool).await, 2, "nothing written");
+    assert_eq!(entry(&f.pool, id).await.0, "fetching");
 }

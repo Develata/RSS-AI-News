@@ -52,6 +52,9 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `extract_fetch_403_without_summary_fails_permanent` | 同上 | W18 无摘要仍 Failed |
 | `extract_fetch_5xx_with_summary_stays_retryable` | 同上 | W18 可重试不降级 |
 | `extract_fetch_429_with_summary_stays_retryable` | 同上 | 429 可重试、不降级（plan/17 §7） |
+| `cross_host_redirect_sends_no_referer` | `crates/extractor/tests/fetcher_tests.rs` | R2-S11 重定向不带 Referer |
+| `extract_429_cooldown_honours_retry_after` | 同上 | R2-S10 冷却 = max(退避, Retry-After) |
+| `retry_after_seconds_on_429_are_kept` / `retry_after_http_date_on_429_becomes_a_delay` / `missing_or_invalid_retry_after_on_429_is_none` | `crates/extractor/tests/fetcher_tests.rs` | R2-S10 Retry-After 解析 |
 | `status_classification_retries_429_and_5xx_only` | `crates/extractor/src/error.rs`、`crates/feed/src/error.rs`（单元测试） | 仅 429 / 5xx 可重试；403/404/408 不变 |
 | `transient_article_insert_failure_is_retried_with_cooldown` | `crates/runtime/tests/extract_storage_failure_tests.rs` | 瞬时写入失败回队 + 冷却 |
 | `transient_article_insert_failure_on_last_attempt_folds_to_failed` | 同上 | 最后一次尝试折叠 failed |
@@ -67,12 +70,17 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `unscoped_claim_method_keeps_its_contract` | 同上 | 无分类 claim 仍排除归档源 |
 | `pg_claim_is_scoped_to_category_and_active_sources` | `crates/storage/tests/feed_entry_pg_tests.rs` | 同上（PG，需 docker） |
 | `extract_batch_over_the_lease_is_shrunk_not_rejected` | `crates/cli/tests/ingest_cmd_tests.rs` | 批次可能超出 lease → 本次缩到能放进 lease 的整波数并 WARN，不拒绝启动 |
+| `the_shrunk_extract_batch_is_the_one_claimed` | `crates/cli/tests/ingest_cmd_tests.rs` | R2-S9 实际按缩小后的批领取 |
+| `extract_is_skipped_with_an_error_when_no_wave_fits_the_lease` | 同上 | R2-S9 一波都放不下 → 跳过 extract 并退出 1 |
 | `over_budget_batches_shrink_to_whole_waves_that_fit_the_lease` | `crates/runtime/src/flows/extract.rs` | 缩批算术：300 s lease + 默认 50/5/30 → 40；一波都放不下 → 一波 |
 | `lease_budget_counts_waves_times_timeout_plus_margin` | `crates/runtime/src/flows/extract.rs`（单元测试） | 预算公式 |
 | `retry_that_finds_its_own_article_is_persisted_not_dedup` | `crates/runtime/tests/extract_tests.rs` | 自命中记 persisted |
 | `new_article_and_entry_advance_commit_together` | `crates/storage/tests/article_entry_persist_tests.rs` | 同事务提交（SQLite） |
 | `lost_lease_rolls_back_the_article_insert` | 同上 | lease 落空回滚 article |
 | `own_article_from_an_earlier_attempt_counts_as_persisted_not_dedup` | 同上 | 自命中 |
+| `retry_with_a_changed_body_reuses_the_article_the_entry_owns` | `crates/storage/tests/article_entry_persist_tests.rs` | R2-S6 复用已拥有 article |
+| `recovery_takes_the_entry_state_from_the_stored_article` | 同上 | R2-S6 状态按已存 article |
+| `an_entry_owning_several_articles_is_reported_not_guessed` | 同上 | R2-S6 歧义显式报告 |
 | `another_entrys_article_is_a_dedup` | 同上 | 他人 article 仍去重 |
 | `fallback_flag_selects_fallback_persisted` | 同上 | fallback 终态 |
 | `pg_persist_for_entry_is_atomic_and_recognises_own_article` | `crates/storage/tests/article_pg_tests.rs` | 同上（PG，需 docker） |

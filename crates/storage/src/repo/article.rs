@@ -56,6 +56,10 @@ pub enum EntryPersistOutcome {
 #[derive(Debug, Clone, FromRow)]
 pub struct ArticleAiTaskCandidate {
     pub article_id: i64,
+    /// The article is inside the publish window (C9 "fresh" membership).
+    /// Always true on the fresh list; on the backlog list only for rows that
+    /// already have a task of the identity (reconciliation, R2-B1).
+    pub in_window: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -110,25 +114,30 @@ pub trait ArticleRepository: Send + Sync {
 
     async fn find_by_id(&self, id: i64) -> Result<Option<Article>, StorageError>;
 
-    /// task_gen 候选：按 id 升序扫描 `state='persisted'` 的 article。
-    async fn list_persisted_for_ai_task_gen(
+    /// C9 task_gen backlog share（R2-B1）：按 id 升序 + keyset 游标扫描
+    /// `state='persisted'` 中**不属于** fresh 列表的 article——窗口外，或窗口内但
+    /// 已有本身份任务行（C3 冲突对账通道）。与 [`Self::list_fresh_for_ai_task_gen`]
+    /// 不相交、并集为全部 `persisted`，故 backlog 名额不会被尚无任务的窗口内文章占用。
+    async fn list_backlog_for_ai_task_gen(
         &self,
         category_key: &str,
+        identity: &crate::NewAiResult,
+        window: crate::FreshWindow,
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
     /// C9 task_gen fresh share: `persisted` articles of the category inside
-    /// the publish window (`COALESCE(fe.published_at, fe.discovered_at) >=
-    /// published_since`) that have no AI row of `identity` yet, oldest source
+    /// the publish window (`window.since <= COALESCE(fe.published_at,
+    /// fe.discovered_at) <= window.until`, R2-S1) that have no AI row of `identity` yet, oldest source
     /// time first (they leave the window first), ties by id. The anti-join
     /// keeps rows whose task already exists (and may stay `persisted`, e.g.
     /// `permanent_failed`) out of this list; the id-ordered list
-    /// ([`Self::list_persisted_for_ai_task_gen`]) still reconciles them.
+    /// ([`Self::list_backlog_for_ai_task_gen`]) still reconciles them.
     async fn list_fresh_for_ai_task_gen(
         &self,
         category_key: &str,
         identity: &crate::NewAiResult,
-        published_since: OffsetDateTime,
+        window: crate::FreshWindow,
         batch_size: u32,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
     async fn list_in_window_for_backfill(
@@ -204,6 +213,17 @@ RETURNING id
 const SELECT_ARTICLE_ID_BY_CONTENT_HASH_SQL: &str =
     "SELECT id FROM articles WHERE content_hash = $1";
 
+/// R2-S6: the articles a feed entry already owns (at most one is expected;
+/// two are enough to report ambiguity).
+const SELECT_ARTICLES_OWNED_BY_ENTRY_SQL: &str = "SELECT id, extractor_strategy FROM articles WHERE origin_feed_entry_id = $1 ORDER BY id LIMIT 2";
+
+fn ambiguous_entry_ownership(entry_id: i64) -> StorageError {
+    StorageError::Integrity {
+        table: "articles".to_string(),
+        reference: format!("feed entry {entry_id} owns more than one article"),
+    }
+}
+
 const SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL: &str =
     "SELECT id, origin_feed_entry_id FROM articles WHERE content_hash = $1";
 
@@ -216,23 +236,66 @@ FROM articles
 WHERE id = $1
 "#;
 
-const LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL: &str = r#"
-SELECT a.id AS article_id
-FROM articles a
-JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
-JOIN feed_sources fs ON fs.id = fe.source_id
-WHERE a.state = 'persisted'
-  AND a.id > $1
-  AND fs.category_key = $2
-ORDER BY a.id ASC
-LIMIT $3
+/// C9 backlog task_gen list, SQLite (R2-B1): the complement of
+/// [`LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL`] within `persisted` — outside the
+/// window, or inside it with an identity row already (reconciled here).
+/// Window membership as in the fresh list (`$3` / `$8` the SQLite window
+/// bounds).
+const LIST_BACKLOG_FOR_AI_TASK_GEN_SQLITE_SQL: &str = r#"
+SELECT article_id, in_window
+FROM (
+    SELECT a.id AS article_id,
+           (COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($3),
+                     COALESCE(fe.published_at, fe.discovered_at) >= $3)
+            AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) <= julianday($8),
+                         COALESCE(fe.published_at, fe.discovered_at) <= $8)) AS in_window,
+           EXISTS (
+               SELECT 1 FROM article_ai_results r
+               WHERE r.article_id = a.id AND r.prompt_version = $4
+                 AND r.output_schema_version = $5 AND r.model_id = $6
+           ) AS has_identity
+    FROM articles a
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE a.state = 'persisted'
+      AND a.id > $1
+      AND fs.category_key = $2
+) candidates
+WHERE NOT in_window OR has_identity
+ORDER BY article_id ASC
+LIMIT $7
+"#;
+
+const LIST_BACKLOG_FOR_AI_TASK_GEN_PG_SQL: &str = r#"
+SELECT article_id, in_window
+FROM (
+    SELECT a.id AS article_id,
+           (COALESCE(fe.published_at, fe.discovered_at) >= $3
+            AND COALESCE(fe.published_at, fe.discovered_at) <= $8) AS in_window,
+           EXISTS (
+               SELECT 1 FROM article_ai_results r
+               WHERE r.article_id = a.id AND r.prompt_version = $4
+                 AND r.output_schema_version = $5 AND r.model_id = $6
+           ) AS has_identity
+    FROM articles a
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE a.state = 'persisted'
+      AND a.id > $1
+      AND fs.category_key = $2
+) candidates
+WHERE NOT in_window OR has_identity
+ORDER BY article_id ASC
+LIMIT $7
 "#;
 
 /// C9 fresh task_gen list, SQLite: the source time is compared and ordered
-/// by `julianday()` instant with a text fallback; `$2` is
-/// `sqlite_instant_cutoff(published_since)`.
+/// by `julianday()` instant, ties by article id (R2-S2: the raw text never
+/// orders — `10:00+02:00` and `08:00Z` are one instant); a text fallback
+/// decides membership of values `julianday()` cannot parse; `$2` / `$7` are the window
+/// bounds rounded inward to whole milliseconds (`sqlite_window_bounds`).
 const LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL: &str = r#"
-SELECT a.id AS article_id
+SELECT a.id AS article_id, 1 AS in_window
 FROM articles a
 JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
 JOIN feed_sources fs ON fs.id = fe.source_id
@@ -240,25 +303,26 @@ WHERE a.state = 'persisted'
   AND fs.category_key = $1
   AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($2),
                COALESCE(fe.published_at, fe.discovered_at) >= $2)
+  AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) <= julianday($7),
+               COALESCE(fe.published_at, fe.discovered_at) <= $7)
   AND NOT EXISTS (
       SELECT 1 FROM article_ai_results r
       WHERE r.article_id = a.id AND r.prompt_version = $3
         AND r.output_schema_version = $4 AND r.model_id = $5
   )
-ORDER BY julianday(COALESCE(fe.published_at, fe.discovered_at)) ASC,
-         COALESCE(fe.published_at, fe.discovered_at) ASC,
-         a.id ASC
+ORDER BY julianday(COALESCE(fe.published_at, fe.discovered_at)) ASC, a.id ASC
 LIMIT $6
 "#;
 
 const LIST_FRESH_FOR_AI_TASK_GEN_PG_SQL: &str = r#"
-SELECT a.id AS article_id
+SELECT a.id AS article_id, TRUE AS in_window
 FROM articles a
 JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
 JOIN feed_sources fs ON fs.id = fe.source_id
 WHERE a.state = 'persisted'
   AND fs.category_key = $1
   AND COALESCE(fe.published_at, fe.discovered_at) >= $2
+  AND COALESCE(fe.published_at, fe.discovered_at) <= $7
   AND NOT EXISTS (
       SELECT 1 FROM article_ai_results r
       WHERE r.article_id = a.id AND r.prompt_version = $3
@@ -357,18 +421,43 @@ impl ArticleRepository for ArticleRepo {
         }
     }
 
-    async fn list_persisted_for_ai_task_gen(
+    async fn list_backlog_for_ai_task_gen(
         &self,
         category_key: &str,
+        identity: &crate::NewAiResult,
+        window: crate::FreshWindow,
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlite_list_persisted_for_ai_task_gen(p, category_key, batch_size, after_id).await
+                let (since, until) = super::sqlite_window_bounds(window);
+                sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_BACKLOG_FOR_AI_TASK_GEN_SQLITE_SQL)
+                    .bind(after_id)
+                    .bind(category_key)
+                    .bind(since)
+                    .bind(identity.prompt_version)
+                    .bind(identity.output_schema_version)
+                    .bind(&identity.model_id)
+                    .bind(i64::from(batch_size))
+                    .bind(until)
+                    .fetch_all(p)
+                    .await
+                    .map_err(StorageError::from)
             }
             StoragePool::Postgres(p) => {
-                pg_list_persisted_for_ai_task_gen(p, category_key, batch_size, after_id).await
+                sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_BACKLOG_FOR_AI_TASK_GEN_PG_SQL)
+                    .bind(after_id)
+                    .bind(category_key)
+                    .bind(window.since)
+                    .bind(identity.prompt_version)
+                    .bind(identity.output_schema_version)
+                    .bind(&identity.model_id)
+                    .bind(i64::from(batch_size))
+                    .bind(window.until)
+                    .fetch_all(p)
+                    .await
+                    .map_err(StorageError::from)
             }
         }
     }
@@ -377,18 +466,20 @@ impl ArticleRepository for ArticleRepo {
         &self,
         category_key: &str,
         identity: &crate::NewAiResult,
-        published_since: OffsetDateTime,
+        window: crate::FreshWindow,
         batch_size: u32,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
+                let (since, until) = super::sqlite_window_bounds(window);
                 sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL)
                     .bind(category_key)
-                    .bind(super::sqlite_instant_cutoff(published_since))
+                    .bind(since)
                     .bind(identity.prompt_version)
                     .bind(identity.output_schema_version)
                     .bind(&identity.model_id)
                     .bind(i64::from(batch_size))
+                    .bind(until)
                     .fetch_all(p)
                     .await
                     .map_err(StorageError::from)
@@ -396,11 +487,12 @@ impl ArticleRepository for ArticleRepo {
             StoragePool::Postgres(p) => {
                 sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_FRESH_FOR_AI_TASK_GEN_PG_SQL)
                     .bind(category_key)
-                    .bind(published_since)
+                    .bind(window.since)
                     .bind(identity.prompt_version)
                     .bind(identity.output_schema_version)
                     .bind(&identity.model_id)
                     .bind(i64::from(batch_size))
+                    .bind(window.until)
                     .fetch_all(p)
                     .await
                     .map_err(StorageError::from)
@@ -591,32 +683,62 @@ async fn sqlite_persist_for_entry(
     now: OffsetDateTime,
 ) -> Result<EntryPersistOutcome, StorageError> {
     let entry_id = article.origin_feed_entry_id;
-    // The INSERT is the first statement, so the deferred transaction takes the
-    // write lock immediately (no read-then-upgrade busy window).
-    let mut tx = pool.begin().await.map_err(StorageError::from)?;
-    let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_ARTICLE_ON_CONFLICT_SQL)
-        .bind(&article.content_hash)
-        .bind(&article.canonical_link)
-        .bind(&article.title)
-        .bind(&article.body_text)
-        .bind(article.body_html_artifact_id)
-        .bind(&article.extractor_strategy)
-        .bind(article.extractor_version)
-        .bind(&article.content_quality)
-        .bind(article.word_count)
-        .bind(entry_id)
-        .fetch_optional(&mut *tx)
+    // The ownership read comes first, so the write lock is taken up front
+    // (`BEGIN IMMEDIATE`): no read-then-upgrade busy window.
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
         .await
-        .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
-    let existing = match inserted_id {
-        Some(_) => None,
-        None => sqlx::query_as::<_, (i64, i64)>(SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL)
-            .bind(&article.content_hash)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(StorageError::from)?,
+        .map_err(StorageError::from)?;
+    // R2-S6: an earlier attempt (before persist became one transaction) may
+    // have committed an article for this entry and crashed before the
+    // release. Recovery reuses that article and its stored path, whatever
+    // body / path this attempt produced; several owned articles cannot be
+    // resolved here and are reported.
+    let owned = sqlx::query_as::<_, (i64, String)>(SELECT_ARTICLES_OWNED_BY_ENTRY_SQL)
+        .bind(entry_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    let (advance, fallback) = match owned.as_slice() {
+        [] => {
+            let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_ARTICLE_ON_CONFLICT_SQL)
+                .bind(&article.content_hash)
+                .bind(&article.canonical_link)
+                .bind(&article.title)
+                .bind(&article.body_text)
+                .bind(article.body_html_artifact_id)
+                .bind(&article.extractor_strategy)
+                .bind(article.extractor_version)
+                .bind(&article.content_quality)
+                .bind(article.word_count)
+                .bind(entry_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
+            let existing = match inserted_id {
+                Some(_) => None,
+                None => sqlx::query_as::<_, (i64, i64)>(
+                    SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL,
+                )
+                .bind(&article.content_hash)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StorageError::from)?,
+            };
+            (
+                EntryAdvance::decide(inserted_id, existing, entry_id)?,
+                fallback,
+            )
+        }
+        [(article_id, strategy)] => (
+            EntryAdvance::Own {
+                article_id: *article_id,
+                newly_created: false,
+            },
+            strategy == "summary_fallback",
+        ),
+        _ => return Err(ambiguous_entry_ownership(entry_id)),
     };
-    let advance = EntryAdvance::decide(inserted_id, existing, entry_id)?;
     let updated = match advance {
         EntryAdvance::Own { article_id, .. } => {
             sqlx::query(if fallback {
@@ -658,21 +780,6 @@ async fn sqlite_find_by_id(pool: &SqlitePool, id: i64) -> Result<Option<Article>
         .await
         .map_err(StorageError::from)?;
     row.map(Article::try_from).transpose()
-}
-
-async fn sqlite_list_persisted_for_ai_task_gen(
-    pool: &SqlitePool,
-    category_key: &str,
-    batch_size: u32,
-    after_id: i64,
-) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
-    sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL)
-        .bind(after_id)
-        .bind(category_key)
-        .bind(i64::from(batch_size))
-        .fetch_all(pool)
-        .await
-        .map_err(StorageError::from)
 }
 
 async fn sqlite_list_in_window_for_backfill(
@@ -813,29 +920,56 @@ async fn pg_persist_for_entry(
     // wait for it; after its commit ON CONFLICT skips and the SELECT (a new
     // statement snapshot) sees the committed row.
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
-    let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_ARTICLE_ON_CONFLICT_SQL)
-        .bind(&article.content_hash)
-        .bind(&article.canonical_link)
-        .bind(&article.title)
-        .bind(&article.body_text)
-        .bind(article.body_html_artifact_id)
-        .bind(&article.extractor_strategy)
-        .bind(article.extractor_version)
-        .bind(&article.content_quality)
-        .bind(article.word_count)
+    // R2-S6: an earlier attempt (before persist became one transaction) may
+    // have committed an article for this entry and crashed before the
+    // release. Recovery reuses that article and its stored path, whatever
+    // body / path this attempt produced; several owned articles cannot be
+    // resolved here and are reported.
+    let owned = sqlx::query_as::<_, (i64, String)>(SELECT_ARTICLES_OWNED_BY_ENTRY_SQL)
         .bind(entry_id)
-        .fetch_optional(&mut *tx)
+        .fetch_all(&mut *tx)
         .await
-        .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
-    let existing = match inserted_id {
-        Some(_) => None,
-        None => sqlx::query_as::<_, (i64, i64)>(SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL)
-            .bind(&article.content_hash)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(StorageError::from)?,
+        .map_err(StorageError::from)?;
+    let (advance, fallback) = match owned.as_slice() {
+        [] => {
+            let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_ARTICLE_ON_CONFLICT_SQL)
+                .bind(&article.content_hash)
+                .bind(&article.canonical_link)
+                .bind(&article.title)
+                .bind(&article.body_text)
+                .bind(article.body_html_artifact_id)
+                .bind(&article.extractor_strategy)
+                .bind(article.extractor_version)
+                .bind(&article.content_quality)
+                .bind(article.word_count)
+                .bind(entry_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
+            let existing = match inserted_id {
+                Some(_) => None,
+                None => sqlx::query_as::<_, (i64, i64)>(
+                    SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL,
+                )
+                .bind(&article.content_hash)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StorageError::from)?,
+            };
+            (
+                EntryAdvance::decide(inserted_id, existing, entry_id)?,
+                fallback,
+            )
+        }
+        [(article_id, strategy)] => (
+            EntryAdvance::Own {
+                article_id: *article_id,
+                newly_created: false,
+            },
+            strategy == "summary_fallback",
+        ),
+        _ => return Err(ambiguous_entry_ownership(entry_id)),
     };
-    let advance = EntryAdvance::decide(inserted_id, existing, entry_id)?;
     let updated = match advance {
         EntryAdvance::Own { article_id, .. } => {
             sqlx::query(if fallback {
@@ -877,21 +1011,6 @@ async fn pg_find_by_id(pool: &PgPool, id: i64) -> Result<Option<Article>, Storag
         .await
         .map_err(StorageError::from)?;
     row.map(Article::try_from).transpose()
-}
-
-async fn pg_list_persisted_for_ai_task_gen(
-    pool: &PgPool,
-    category_key: &str,
-    batch_size: u32,
-    after_id: i64,
-) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
-    sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_ARTICLES_PERSISTED_FOR_AI_TASK_GEN_SQL)
-        .bind(after_id)
-        .bind(category_key)
-        .bind(i64::from(batch_size))
-        .fetch_all(pool)
-        .await
-        .map_err(StorageError::from)
 }
 
 async fn pg_list_in_window_for_backfill(

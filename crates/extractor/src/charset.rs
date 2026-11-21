@@ -10,7 +10,10 @@
 //! - there is no locale-dependent fallback (browsers guess windows-1252 for
 //!   undeclared non-UTF-8 bytes); if no candidate decodes cleanly the page is
 //!   rejected with [`ExtractorError::ParseFailed`], as before this module;
-//! - the prescan skips comments but does not tokenize attributes fully.
+//! - the prescan follows the spec's tag / attribute consumption (R2-S8), so
+//!   attribute values, quoted `>` and the 1024-byte boundary are handled as a
+//!   browser does; it does not implement the later "changing the encoding
+//!   while parsing" step.
 
 use std::borrow::Cow;
 
@@ -44,10 +47,9 @@ pub fn decode_html<'a>(
         content_type
             .and_then(charset_param)
             .and_then(|label| Encoding::for_label(label.as_bytes())),
-        // A meta-declared UTF-16 label means UTF-8 (WHATWG); `output_encoding`
-        // applies that mapping and leaves every other encoding unchanged.
-        prescan_meta_charset(&bytes[..bytes.len().min(PRESCAN_LIMIT)])
-            .map(Encoding::output_encoding),
+        // The prescan applies the meta fix-ups (UTF-16 → UTF-8,
+        // x-user-defined → windows-1252).
+        prescan_meta_charset(&bytes[..bytes.len().min(PRESCAN_LIMIT)]),
     ];
     for encoding in declared.into_iter().flatten() {
         if tried.contains(&encoding) {
@@ -92,41 +94,118 @@ fn decode_strict<'a>(encoding: &'static Encoding, bytes: &'a [u8]) -> Option<Cow
     encoding.decode_without_bom_handling_and_without_replacement(bytes)
 }
 
-/// `charset` parameter of a `Content-Type` value (case-insensitive name,
-/// optional quotes).
-fn charset_param(content_type: &str) -> Option<&str> {
-    content_type.split(';').skip(1).find_map(|param| {
-        let (name, value) = param.split_once('=')?;
-        if !name.trim().eq_ignore_ascii_case("charset") {
-            return None;
+/// `charset` parameter of a `Content-Type` value (RFC 9110 §5.6.6: name
+/// case-insensitive, value a token or a quoted-string with `\` escapes).
+/// Parameters are split respecting quoted strings, so a `;charset=` inside
+/// another parameter's quoted value is not a charset (R2-S8).
+fn charset_param(content_type: &str) -> Option<String> {
+    let bytes = content_type.as_bytes();
+    // Skip the media type.
+    let mut pos = bytes.iter().position(|&b| b == b';')? + 1;
+    while pos < bytes.len() {
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b';') {
+            pos += 1;
         }
-        let value = value.trim().trim_matches(|c| c == '"' || c == '\'').trim();
-        (!value.is_empty()).then_some(value)
-    })
+        let name_start = pos;
+        while pos < bytes.len() && !matches!(bytes[pos], b'=' | b';') {
+            pos += 1;
+        }
+        let name = content_type[name_start..pos].trim();
+        if bytes.get(pos) != Some(&b'=') {
+            continue;
+        }
+        pos += 1;
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t') {
+            pos += 1;
+        }
+        let mut value = String::new();
+        if bytes.get(pos) == Some(&b'"') {
+            pos += 1;
+            let mut chars = content_type[pos..].char_indices();
+            let mut closed = false;
+            while let Some((offset, ch)) = chars.next() {
+                match ch {
+                    '"' => {
+                        pos += offset + 1;
+                        closed = true;
+                        break;
+                    }
+                    '\\' => {
+                        if let Some((_, escaped)) = chars.next() {
+                            value.push(escaped);
+                        }
+                    }
+                    other => value.push(other),
+                }
+            }
+            if !closed {
+                pos = bytes.len();
+            }
+            // Anything up to the next `;` after a quoted string is ignored.
+            while pos < bytes.len() && bytes[pos] != b';' {
+                pos += 1;
+            }
+        } else {
+            let start = pos;
+            while pos < bytes.len() && bytes[pos] != b';' {
+                pos += 1;
+            }
+            value.push_str(content_type[start..pos].trim());
+        }
+        if name.eq_ignore_ascii_case("charset") {
+            let value = value.trim().to_string();
+            return (!value.is_empty()).then_some(value);
+        }
+    }
+    None
 }
 
-/// Simplified WHATWG prescan: the first `<meta>` tag carrying a `charset`
-/// attribute, or an `http-equiv="content-type"` with a `charset=` in its
-/// content, whose label names a known encoding. Comments are skipped.
+fn is_html_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c')
+}
+
+/// WHATWG "prescan a byte stream to determine its encoding" (HTML §13.2.3.2)
+/// over `head` (the first 1024 bytes). Every tag's attributes are consumed
+/// with the spec's attribute algorithm, so `<meta` text inside another tag's
+/// quoted attribute value and a quoted `>` never confuse it; comments,
+/// `<!…>`, `</…>` and `<?…>` are skipped. Running off the end of `head` in
+/// the middle of a tag aborts the prescan: a declaration not complete within
+/// the first 1024 bytes does not count (R2-S8).
 fn prescan_meta_charset(head: &[u8]) -> Option<&'static Encoding> {
     let mut pos = 0;
     while pos < head.len() {
         let rest = &head[pos..];
         if rest.starts_with(b"<!--") {
-            pos += find(&rest[4..], b"-->").map_or(rest.len(), |end| end + 4 + 3);
+            // The `--` of `-->` may overlap the opening `<!--` (`<!-->`).
+            pos += 2 + find(&rest[2..], b"-->")? + 3;
             continue;
         }
         if rest.len() >= 6
             && rest[0] == b'<'
             && rest[1..5].eq_ignore_ascii_case(b"meta")
-            && matches!(rest[5], b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' | b'/')
+            && (is_html_space(rest[5]) || rest[5] == b'/')
         {
-            let end = rest.iter().position(|&b| b == b'>').unwrap_or(rest.len());
-            let tag = rest[5..end].to_ascii_lowercase();
-            if let Some(encoding) = meta_tag_charset(&tag) {
+            pos += 6;
+            if let Some(encoding) = prescan_meta_tag(head, &mut pos)? {
                 return Some(encoding);
             }
-            pos += end;
+            continue;
+        }
+        let tag_start = match rest {
+            [b'<', b'/', letter, ..] if letter.is_ascii_alphabetic() => Some(2),
+            [b'<', letter, ..] if letter.is_ascii_alphabetic() => Some(1),
+            _ => None,
+        };
+        if let Some(skip) = tag_start {
+            pos += skip;
+            while pos < head.len() && !is_html_space(head[pos]) && head[pos] != b'>' {
+                pos += 1;
+            }
+            while next_attribute(head, &mut pos)?.is_some() {}
+            continue;
+        }
+        if rest.starts_with(b"<!") || rest.starts_with(b"</") || rest.starts_with(b"<?") {
+            pos += rest.iter().position(|&b| b == b'>')? + 1;
             continue;
         }
         pos += 1;
@@ -134,85 +213,149 @@ fn prescan_meta_charset(head: &[u8]) -> Option<&'static Encoding> {
     None
 }
 
-/// Charset of one lowercased `<meta …>` attribute string, if it declares one.
-fn meta_tag_charset(tag: &[u8]) -> Option<&'static Encoding> {
-    if let Some(value) = attribute_value(tag, b"charset") {
-        return Encoding::for_label(value);
-    }
-    let http_equiv = attribute_value(tag, b"http-equiv")?;
-    if http_equiv != b"content-type" {
-        return None;
-    }
-    let content = attribute_value(tag, b"content")?;
-    let at = find(content, b"charset")?;
-    let after = content[at + b"charset".len()..].trim_ascii_start();
-    let after = after.strip_prefix(b"=")?.trim_ascii_start();
-    let after = after
-        .strip_prefix(b"\"")
-        .or_else(|| after.strip_prefix(b"'"))
-        .unwrap_or(after);
-    let end = after
-        .iter()
-        .position(|&b| matches!(b, b'"' | b'\'' | b';' | b' ' | b'\t' | b'\n' | b'\r'))
-        .unwrap_or(after.len());
-    Encoding::for_label(&after[..end])
-}
-
-/// Value of attribute `name` in a lowercased attribute string, parsed as
-/// `name[=value]` pairs whose values may be quoted, so text inside another
-/// attribute's quoted value (`content="…charset=…"`) never matches.
-fn attribute_value<'t>(tag: &'t [u8], name: &[u8]) -> Option<&'t [u8]> {
-    let is_space = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c');
-    let mut pos = 0;
-    while pos < tag.len() {
-        while pos < tag.len() && (is_space(tag[pos]) || tag[pos] == b'/') {
-            pos += 1;
-        }
-        let name_start = pos;
-        while pos < tag.len() && !is_space(tag[pos]) && !matches!(tag[pos], b'=' | b'/') {
-            pos += 1;
-        }
-        let attr_name = &tag[name_start..pos];
-        while pos < tag.len() && is_space(tag[pos]) {
-            pos += 1;
-        }
-        let mut value: &[u8] = b"";
-        if pos < tag.len() && tag[pos] == b'=' {
-            pos += 1;
-            while pos < tag.len() && is_space(tag[pos]) {
-                pos += 1;
-            }
-            match tag.get(pos) {
-                Some(&quote @ (b'"' | b'\'')) => {
-                    let start = pos + 1;
-                    let end = tag[start..]
-                        .iter()
-                        .position(|&b| b == quote)
-                        .map_or(tag.len(), |offset| start + offset);
-                    value = &tag[start..end];
-                    pos = (end + 1).min(tag.len());
-                }
-                _ => {
-                    let start = pos;
-                    while pos < tag.len() && !is_space(tag[pos]) {
-                        pos += 1;
-                    }
-                    value = &tag[start..pos];
-                }
-            }
-        }
-        if attr_name.is_empty() {
-            // A stray `=`: skip it so the loop always advances.
-            pos += 1;
+/// The attributes of one `<meta` tag (`pos` just after `<meta` + one byte).
+/// `None`: the input ended inside the tag (abort). `Some(None)`: no usable
+/// declaration, the scan continues after the tag.
+fn prescan_meta_tag(head: &[u8], pos: &mut usize) -> Option<Option<&'static Encoding>> {
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let mut got_pragma = false;
+    let mut need_pragma: Option<bool> = None;
+    // `Some(None)` = a charset attribute named an unknown label (failure).
+    let mut charset: Option<Option<&'static Encoding>> = None;
+    while let Some((name, value)) = next_attribute(head, pos)? {
+        if seen.contains(&name) {
             continue;
         }
-        if attr_name == name {
-            return Some(value.trim_ascii());
+        seen.push(name.clone());
+        match name.as_slice() {
+            b"http-equiv" if value.eq_ignore_ascii_case(b"content-type") => got_pragma = true,
+            b"content" if charset.is_none() => {
+                if let Some(label) = charset_from_meta_content(&value) {
+                    charset = Some(Encoding::for_label(label));
+                    need_pragma = Some(true);
+                }
+            }
+            b"charset" => {
+                charset = Some(Encoding::for_label(&value));
+                need_pragma = Some(false);
+            }
+            _ => {}
         }
     }
-    None
+    let declared = match need_pragma {
+        None => None,
+        Some(true) if !got_pragma => None,
+        _ => charset.flatten(),
+    };
+    Some(declared.map(meta_encoding))
 }
 
+/// WHATWG meta-declared encoding fix-ups: UTF-16 means UTF-8,
+/// `x-user-defined` means windows-1252.
+fn meta_encoding(encoding: &'static Encoding) -> &'static Encoding {
+    if encoding == encoding_rs::X_USER_DEFINED {
+        encoding_rs::WINDOWS_1252
+    } else {
+        encoding.output_encoding()
+    }
+}
+
+/// WHATWG "get an attribute": `None` when the input ends first (abort),
+/// `Some(None)` at the tag's `>`, else the lowercased name and raw value.
+#[allow(clippy::type_complexity)]
+fn next_attribute(head: &[u8], pos: &mut usize) -> Option<Option<(Vec<u8>, Vec<u8>)>> {
+    while is_html_space(*head.get(*pos)?) || head[*pos] == b'/' {
+        *pos += 1;
+    }
+    if head[*pos] == b'>' {
+        *pos += 1;
+        return Some(None);
+    }
+    let mut name = Vec::new();
+    loop {
+        let b = *head.get(*pos)?;
+        if b == b'=' && !name.is_empty() {
+            *pos += 1;
+            break;
+        }
+        if is_html_space(b) {
+            while is_html_space(*head.get(*pos)?) {
+                *pos += 1;
+            }
+            if head[*pos] != b'=' {
+                return Some(Some((name, Vec::new())));
+            }
+            *pos += 1;
+            break;
+        }
+        if b == b'/' || b == b'>' {
+            return Some(Some((name, Vec::new())));
+        }
+        name.push(b.to_ascii_lowercase());
+        *pos += 1;
+    }
+    while is_html_space(*head.get(*pos)?) {
+        *pos += 1;
+    }
+    let mut value = Vec::new();
+    let b = *head.get(*pos)?;
+    if b == b'"' || b == b'\'' {
+        *pos += 1;
+        loop {
+            let c = *head.get(*pos)?;
+            *pos += 1;
+            if c == b {
+                return Some(Some((name, value)));
+            }
+            value.push(c.to_ascii_lowercase());
+        }
+    }
+    if b == b'>' {
+        return Some(Some((name, value)));
+    }
+    loop {
+        let c = *head.get(*pos)?;
+        if is_html_space(c) || c == b'>' {
+            return Some(Some((name, value)));
+        }
+        value.push(c.to_ascii_lowercase());
+        *pos += 1;
+    }
+}
+
+/// WHATWG "extract a character encoding from a meta element" over a
+/// `content` value.
+fn charset_from_meta_content(content: &[u8]) -> Option<&[u8]> {
+    let mut pos = 0;
+    loop {
+        let at = pos + find(&content[pos..], b"charset")?;
+        pos = at + b"charset".len();
+        while content.get(pos).is_some_and(|&b| is_html_space(b)) {
+            pos += 1;
+        }
+        if content.get(pos) == Some(&b'=') {
+            pos += 1;
+            break;
+        }
+    }
+    while content.get(pos).is_some_and(|&b| is_html_space(b)) {
+        pos += 1;
+    }
+    match *content.get(pos)? {
+        quote @ (b'"' | b'\'') => {
+            let start = pos + 1;
+            let end = start + content[start..].iter().position(|&b| b == quote)?;
+            Some(&content[start..end])
+        }
+        _ => {
+            let end = content[pos..]
+                .iter()
+                .position(|&b| is_html_space(b) || b == b';')
+                .map_or(content.len(), |offset| pos + offset);
+            Some(&content[pos..end])
+        }
+    }
+}
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
@@ -225,8 +368,14 @@ mod tests {
 
     #[test]
     fn charset_param_is_case_insensitive_and_unquoted() {
-        assert_eq!(charset_param("text/html; Charset=\"GBK\""), Some("GBK"));
-        assert_eq!(charset_param("text/html;charset=utf-8"), Some("utf-8"));
+        assert_eq!(
+            charset_param("text/html; Charset=\"GBK\"").as_deref(),
+            Some("GBK")
+        );
+        assert_eq!(
+            charset_param("text/html;charset=utf-8").as_deref(),
+            Some("utf-8")
+        );
         assert_eq!(charset_param("text/html"), None);
         assert_eq!(charset_param("text/html; charset="), None);
     }
@@ -294,6 +443,66 @@ mod tests {
         assert_eq!(
             decode_html(&html, Some("text/html; charset=utf-8")).unwrap(),
             "<meta charset=gbk><p>中文"
+        );
+    }
+    // === R2-S8: faithful prescan ===
+
+    #[test]
+    fn a_meta_inside_another_tags_attribute_value_is_not_a_declaration() {
+        let html = "<div data-example=\"<meta charset=windows-1252>\"></div>\
+                    <meta charset=utf-8><p>café</p>";
+        assert_eq!(decode_html(html.as_bytes(), None).unwrap(), html);
+    }
+
+    #[test]
+    fn a_quoted_gt_does_not_end_the_meta_tag() {
+        let mut html = b"<meta name=\"x>y\" charset=\"gbk\"><p>".to_vec();
+        html.extend_from_slice(&[0xD6, 0xD0, 0xCE, 0xC4]);
+        assert_eq!(
+            decode_html(&html, None).unwrap(),
+            "<meta name=\"x>y\" charset=\"gbk\"><p>中文"
+        );
+    }
+
+    #[test]
+    fn a_declaration_unfinished_at_the_1024_byte_boundary_is_dropped() {
+        // `<meta charset=gbk` fits in the first 1024 bytes, its `>` does not.
+        let decl = b"<meta charset=gbk";
+        let mut html = vec![b' '; PRESCAN_LIMIT - decl.len()];
+        html.extend_from_slice(decl);
+        html.extend_from_slice(b"><p>\xd6\xd0");
+        assert!(decode_html(&html, None).is_err());
+        // The same declaration completed inside the limit is honoured.
+        let mut html = vec![b' '; PRESCAN_LIMIT - decl.len() - 1];
+        html.extend_from_slice(decl);
+        html.extend_from_slice(b"><p>\xd6\xd0");
+        assert!(decode_html(&html, None).unwrap().ends_with("<p>中"));
+    }
+
+    #[test]
+    fn x_user_defined_meta_means_windows_1252() {
+        let html = b"<meta charset=x-user-defined><p>caf\xe9</p>";
+        assert_eq!(
+            decode_html(html, None).unwrap(),
+            "<meta charset=x-user-defined><p>café</p>"
+        );
+    }
+
+    #[test]
+    fn content_type_parameters_respect_quoted_strings() {
+        let html = "<p>café</p>";
+        // `charset=gbk` is inside another parameter's quoted value.
+        assert_eq!(
+            decode_html(html.as_bytes(), Some("text/html; foo=\"bar;charset=gbk\"")).unwrap(),
+            html
+        );
+        assert_eq!(
+            charset_param("text/html; foo=\"a;b\"; charset=\"GBK\"").as_deref(),
+            Some("GBK")
+        );
+        assert_eq!(
+            charset_param("text/html; title=\"x\\\"charset=gbk\"").as_deref(),
+            None
         );
     }
 }

@@ -690,6 +690,8 @@ struct FlakyArticleRepo {
     inner: rss_ai_news_storage::ArticleRepo,
     failures: std::sync::atomic::AtomicUsize,
     error: fn() -> StorageError,
+    /// A one-shot error captured from the real driver (R2-B3); taken first.
+    real: std::sync::Mutex<Option<StorageError>>,
 }
 
 #[async_trait]
@@ -715,6 +717,9 @@ impl rss_ai_news_storage::ArticleRepository for FlakyArticleRepo {
         &self,
         id: i64,
     ) -> Result<Option<rss_ai_news_domain::model::Article>, StorageError> {
+        if let Some(error) = self.real.lock().unwrap().take() {
+            return Err(error);
+        }
         let left = self.failures.load(std::sync::atomic::Ordering::SeqCst);
         if left > 0 {
             self.failures
@@ -723,25 +728,27 @@ impl rss_ai_news_storage::ArticleRepository for FlakyArticleRepo {
         }
         self.inner.find_by_id(id).await
     }
-    async fn list_persisted_for_ai_task_gen(
+    async fn list_backlog_for_ai_task_gen(
         &self,
         category_key: &str,
+        identity: &rss_ai_news_storage::NewAiResult,
+        window: rss_ai_news_storage::FreshWindow,
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<rss_ai_news_storage::ArticleAiTaskCandidate>, StorageError> {
         self.inner
-            .list_persisted_for_ai_task_gen(category_key, batch_size, after_id)
+            .list_backlog_for_ai_task_gen(category_key, identity, window, batch_size, after_id)
             .await
     }
     async fn list_fresh_for_ai_task_gen(
         &self,
         category_key: &str,
         identity: &rss_ai_news_storage::NewAiResult,
-        published_since: OffsetDateTime,
+        window: rss_ai_news_storage::FreshWindow,
         batch_size: u32,
     ) -> Result<Vec<rss_ai_news_storage::ArticleAiTaskCandidate>, StorageError> {
         self.inner
-            .list_fresh_for_ai_task_gen(category_key, identity, published_since, batch_size)
+            .list_fresh_for_ai_task_gen(category_key, identity, window, batch_size)
             .await
     }
     async fn list_in_window_for_backfill(
@@ -801,6 +808,7 @@ fn flaky_flow(
         inner: rss_ai_news_storage::ArticleRepo::new(pool),
         failures: std::sync::atomic::AtomicUsize::new(failures),
         error,
+        real: std::sync::Mutex::new(None),
     });
     AiRunFlow::new(Arc::new(deps))
 }
@@ -1257,10 +1265,11 @@ async fn fresh_share_prefers_articles_that_leave_the_window_first() {
     flow.task_gen(&opts).await;
 
     // Fresh share: the article closest to leaving the window. The backlog
-    // share then takes the lowest id among the rest.
+    // share takes the future-dated article: it is outside the window that
+    // ends now (R2-S1), so it is backlog, not fresh.
     assert_eq!(article_state(&pool, early[0]).await, "ai_pending");
-    assert_eq!(article_state(&pool, late[0]).await, "ai_pending");
-    assert_eq!(article_state(&pool, future[0]).await, "persisted");
+    assert_eq!(article_state(&pool, future[0]).await, "ai_pending");
+    assert_eq!(article_state(&pool, late[0]).await, "persisted");
 }
 
 #[tokio::test]
@@ -1416,4 +1425,419 @@ async fn batch_size_one_claims_alternate_between_fresh_and_older_tasks_across_ru
     }
     assert_eq!(served, [true, false, true, false]);
     assert_eq!(done(old_tasks).await, 2);
+}
+// === R2-B2: one logical claim batch commits or rolls back as a whole ===
+
+#[tokio::test]
+async fn a_failed_second_claim_side_leaves_the_first_side_unclaimed() {
+    let (_dir, pool) = make_test_pool().await;
+    let old = seed_aged(&pool, "b2-old", 1, days_ago(10)).await;
+    let fresh = seed_aged(&pool, "b2-fresh", 1, hours_ago(1)).await;
+    let old_task = pending_tasks(&pool, &old).await[0];
+    let fresh_task = pending_tasks(&pool, &fresh).await[0];
+    // The second side (backlog; n = 2 leads with fresh) fails in the database.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER fail_claim BEFORE UPDATE ON article_ai_results \
+         WHEN NEW.state = 'running' AND OLD.id = {old_task} \
+         BEGIN SELECT RAISE(ABORT, 'injected claim failure'); END;"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let client = Arc::new(MockAiClient::default());
+    client.insert_success(fresh_task, output_json(80)).await;
+    client.insert_success(old_task, output_json(80)).await;
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.process_batch_size = 2;
+    opts.max_attempts = 1;
+
+    let summary = flow.process_ai_tasks(&opts).await;
+
+    assert!(summary.claim_error.is_some());
+    assert_eq!(summary.claimed, 0);
+    // The first side's claim rolled back with the batch: no attempt spent and
+    // no lease held, so the last attempt of the budget is still available.
+    assert_eq!(
+        ai_result_state_and_attempts(&pool, fresh_task).await,
+        ("pending".to_string(), 0)
+    );
+    assert_eq!(
+        ai_result_state_and_attempts(&pool, old_task).await,
+        ("pending".to_string(), 0)
+    );
+
+    sqlx::query("DROP TRIGGER fail_claim")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let summary = flow.process_ai_tasks(&opts).await;
+    assert_eq!(summary.succeeded, 2);
+}
+// === R2-B1: the share survives a moving window, retries and batch 2 ===
+
+/// A flow whose clock the test moves (`clock` is read on every call).
+fn clocked_flow(
+    pool: SqlitePool,
+    client: Arc<MockAiClient>,
+    clock: Arc<std::sync::Mutex<OffsetDateTime>>,
+) -> AiRunFlow {
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let mut deps = common::ai_deps(pool, app, client);
+    deps.clock = Arc::new(move || *clock.lock().unwrap());
+    AiRunFlow::new(Arc::new(deps))
+}
+
+/// Batch 1, one arrival per hourly run whose source time is 47h59m old: the
+/// previous run's article has slid out of the window by the next run. The
+/// backlog article must still be served on the second run.
+#[tokio::test]
+async fn batch_size_one_task_gen_alternation_survives_a_moving_window() {
+    let (_dir, pool) = make_test_pool().await;
+    let t0 = OffsetDateTime::now_utc().replace_nanosecond(0).unwrap();
+    let backlog = seed_aged(&pool, "b1-tg-old", 1, t0 - Duration::days(10)).await[0];
+    let clock = Arc::new(std::sync::Mutex::new(t0));
+    let flow = clocked_flow(
+        pool.clone(),
+        Arc::new(MockAiClient::default()),
+        Arc::clone(&clock),
+    );
+    let mut opts = opts();
+    opts.task_gen_batch_size = 1;
+    for run in 0..4_i64 {
+        let now = t0 + Duration::hours(run);
+        *clock.lock().unwrap() = now;
+        let arrival = seed_persisted_article(&pool, &format!("b1-tg-new-{run}"), "t", "b").await;
+        set_source_time(&pool, arrival, now - Duration::minutes(47 * 60 + 59)).await;
+        flow.task_gen(&opts).await;
+    }
+    assert_eq!(article_state(&pool, backlog).await, "ai_pending");
+}
+
+#[tokio::test]
+async fn batch_size_one_claim_alternation_survives_a_moving_window() {
+    let (_dir, pool) = make_test_pool().await;
+    let t0 = OffsetDateTime::now_utc().replace_nanosecond(0).unwrap();
+    let backlog = seed_aged(&pool, "b1-c-old", 1, t0 - Duration::days(10)).await;
+    let backlog_task = pending_tasks(&pool, &backlog).await[0];
+    let client = Arc::new(MockAiClient::default());
+    client.insert_success(backlog_task, output_json(80)).await;
+    let clock = Arc::new(std::sync::Mutex::new(t0));
+    let flow = clocked_flow(pool.clone(), Arc::clone(&client), Arc::clone(&clock));
+    let mut opts = opts();
+    opts.process_batch_size = 1;
+    opts.max_batches = 1;
+    for run in 0..4_i64 {
+        let now = t0 + Duration::hours(run);
+        *clock.lock().unwrap() = now;
+        let arrival = seed_aged(&pool, &format!("b1-c-new-{run}"), 1, now).await;
+        set_source_time(&pool, arrival[0], now - Duration::minutes(47 * 60 + 59)).await;
+        let task = pending_tasks(&pool, &arrival).await[0];
+        client.insert_success(task, output_json(80)).await;
+        flow.process_ai_tasks(&opts).await;
+    }
+    assert_eq!(ai_result_state(&pool, backlog_task).await, "succeeded");
+}
+
+/// Batch 2: the backlog slot is not handed to a second in-window article
+/// that merely has a lower id.
+#[tokio::test]
+async fn batch_size_two_task_gen_backlog_slot_is_not_taken_by_fresh_articles() {
+    let (_dir, pool) = make_test_pool().await;
+    let fresh = seed_aged(&pool, "b1-tg2-fresh", 2, hours_ago(1)).await;
+    let old = seed_aged(&pool, "b1-tg2-old", 1, days_ago(10)).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 2;
+
+    flow.task_gen(&opts).await;
+
+    assert_eq!(article_state(&pool, old[0]).await, "ai_pending");
+    assert_eq!(with_task(&pool, &fresh).await, 1);
+}
+
+#[tokio::test]
+async fn batch_size_two_claim_backlog_slot_is_not_taken_by_fresh_tasks() {
+    let (_dir, pool) = make_test_pool().await;
+    let fresh = seed_aged(&pool, "b1-c2-fresh", 2, hours_ago(1)).await;
+    let old = seed_aged(&pool, "b1-c2-old", 1, days_ago(10)).await;
+    let fresh_tasks = pending_tasks(&pool, &fresh).await;
+    let old_task = pending_tasks(&pool, &old).await[0];
+    let client = Arc::new(MockAiClient::default());
+    for id in fresh_tasks.iter().chain([&old_task]) {
+        client.insert_success(*id, output_json(80)).await;
+    }
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.process_batch_size = 2;
+    opts.max_batches = 1;
+
+    let summary = flow.process_ai_tasks(&opts).await;
+
+    assert_eq!(summary.claimed, 2);
+    assert_eq!(ai_result_state(&pool, old_task).await, "succeeded");
+}
+
+/// A fresh task that keeps failing retryably is re-claimed on every other
+/// run, so each retry counts as a fresh turn and the backlog keeps moving.
+#[tokio::test]
+async fn batch_size_one_claim_retries_count_as_served_turns() {
+    let (_dir, pool) = make_test_pool().await;
+    let fresh = seed_aged(&pool, "b1-r-fresh", 1, hours_ago(1)).await;
+    let old = seed_aged(&pool, "b1-r-old", 2, days_ago(10)).await;
+    let fresh_task = pending_tasks(&pool, &fresh).await[0];
+    let old_tasks = pending_tasks(&pool, &old).await;
+    // No response for the fresh task: every attempt fails retryably.
+    let client = Arc::new(MockAiClient::default());
+    for id in &old_tasks {
+        client.insert_success(*id, output_json(80)).await;
+    }
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.process_batch_size = 1;
+    opts.max_batches = 1;
+    opts.max_attempts = 10;
+    for _ in 0..4 {
+        flow.process_ai_tasks(&opts).await;
+    }
+    // Runs: fresh, backlog, fresh (retry), backlog.
+    assert_eq!(ai_result_state(&pool, old_tasks[0]).await, "succeeded");
+    assert_eq!(ai_result_state(&pool, old_tasks[1]).await, "succeeded");
+    assert_eq!(
+        ai_result_state_and_attempts(&pool, fresh_task).await,
+        ("pending".to_string(), 2)
+    );
+}
+
+// === R2-B3: a real SQLite extended lock code is retryable end to end ===
+
+/// `SQLITE_BUSY_SNAPSHOT` (517) from the real driver: a deferred reader on
+/// connection A cannot become a writer after B committed (WAL).
+async fn real_busy_snapshot_error() -> StorageError {
+    use sqlx::Connection;
+    let (_dir, pool) = common::make_test_pool_with_connections(2).await;
+    sqlx::query("CREATE TABLE b3_probe (id INTEGER PRIMARY KEY, v INTEGER)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut a = pool.acquire().await.unwrap();
+    let mut b = pool.acquire().await.unwrap();
+    let mut tx = a.begin().await.unwrap();
+    let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM b3_probe")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO b3_probe (v) VALUES (1)")
+        .execute(&mut *b)
+        .await
+        .unwrap();
+    let error = sqlx::query("INSERT INTO b3_probe (v) VALUES (2)")
+        .execute(&mut *tx)
+        .await
+        .expect_err("stale snapshot");
+    match &error {
+        sqlx::Error::Database(db) => assert_eq!(db.code().as_deref(), Some("517")),
+        other => panic!("expected a database error, got {other:?}"),
+    }
+    StorageError::from(error)
+}
+
+#[tokio::test]
+async fn real_sqlite_extended_lock_error_returns_task_to_pending_with_budget_left() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "ai-read-517", "title", "body").await;
+    let client = Arc::new(MockAiClient::default());
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let mut deps = common::ai_deps(pool.clone(), app, client);
+    deps.article_repo = Arc::new(FlakyArticleRepo {
+        inner: rss_ai_news_storage::ArticleRepo::new(pool.clone()),
+        failures: std::sync::atomic::AtomicUsize::new(0),
+        error: || StorageError::Timeout,
+        real: std::sync::Mutex::new(Some(real_busy_snapshot_error().await)),
+    });
+    let flow = AiRunFlow::new(Arc::new(deps));
+    flow.task_gen(&opts()).await;
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+
+    let summary = flow.process_ai_tasks(&opts()).await;
+
+    assert_eq!(summary.retryable_failed, 1);
+    assert_eq!(summary.permanent_failed, 0);
+    assert_eq!(
+        ai_result_state_and_attempts(&pool, ai_result_id).await,
+        ("pending".to_string(), 1)
+    );
+}
+// === R2-S1: the fresh window ends at `now` (the freeze's upper bound) ===
+
+async fn share_state(pool: &SqlitePool, stage: &str) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT last_side FROM ai_fresh_share_state WHERE category_key = 'ai' AND stage = ?",
+    )
+    .bind(stage)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn future_dated_articles_are_not_fresh_for_task_gen() {
+    let (_dir, pool) = make_test_pool().await;
+    // Today's freeze (`published_until = now`) cannot select it.
+    let future = seed_aged(&pool, "s1-future", 1, hours_ago(-2)).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 1;
+
+    let summary = flow.task_gen(&opts).await;
+
+    // Served by the backlog side, not as a fresh article.
+    assert_eq!(summary.fresh_advanced, 0);
+    assert_eq!(article_state(&pool, future[0]).await, "ai_pending");
+    assert_eq!(
+        share_state(&pool, "task_gen").await.as_deref(),
+        Some("backlog")
+    );
+}
+
+#[tokio::test]
+async fn future_dated_tasks_are_not_fresh_for_the_claim() {
+    let (_dir, pool) = make_test_pool().await;
+    let future = seed_aged(&pool, "s1-c-future", 1, hours_ago(-2)).await;
+    let task = pending_tasks(&pool, &future).await[0];
+    let client = Arc::new(MockAiClient::default());
+    client.insert_success(task, output_json(80)).await;
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.process_batch_size = 1;
+    opts.max_batches = 1;
+
+    let summary = flow.process_ai_tasks(&opts).await;
+
+    assert_eq!(summary.claimed, 1);
+    assert_eq!(
+        share_state(&pool, "claim").await.as_deref(),
+        Some("backlog")
+    );
+}
+// === R2-S3: reconciling a persisted article whose own identity is filtered
+// while another identity already succeeded ===
+
+#[tokio::test]
+async fn reconcile_uses_another_identitys_success_when_this_one_was_filtered() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "s3-two-ids", "title", "body").await;
+    // This run's identity filtered the article ...
+    seed_identity_row(&pool, article_id, "filtered", Some((0, false))).await;
+    // ... while another identity already kept it with score 90.
+    sqlx::query(
+        "INSERT INTO article_ai_results (article_id, prompt_version, output_schema_version, \
+         model_id, state, importance_score, keep_decision, summary, tags_json) \
+         VALUES (?, 1, 1, 'other-model', 'succeeded', 90, 1, 'summary', '[\"ai\"]')",
+    )
+    .bind(article_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+
+    let summary = flow.task_gen(&opts()).await;
+
+    assert_eq!(summary.reconciled, 1);
+    // Both identities finished: the article leaves `persisted` for the state
+    // the kept result implies (score 90 ≥ 30).
+    assert_eq!(article_state(&pool, article_id).await, "ready_for_publish");
+}
+
+#[tokio::test]
+async fn reconcile_with_another_low_score_success_reaches_ai_done() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "s3-low", "title", "body").await;
+    seed_identity_row(&pool, article_id, "filtered", Some((0, false))).await;
+    sqlx::query(
+        "INSERT INTO article_ai_results (article_id, prompt_version, output_schema_version, \
+         model_id, state, importance_score, keep_decision, summary, tags_json) \
+         VALUES (?, 1, 1, 'other-model', 'succeeded', 10, 1, 'summary', '[\"ai\"]')",
+    )
+    .bind(article_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+
+    flow.task_gen(&opts()).await;
+
+    assert_eq!(article_state(&pool, article_id).await, "ai_done");
+}
+// === R2-S4: an insert error stops the pass on every page exit path ===
+
+async fn fail_inserts_for(pool: &SqlitePool, article_id: i64) {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER fail_insert BEFORE INSERT ON article_ai_results \
+         WHEN NEW.article_id = {article_id} \
+         BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END;"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_insert_error_on_a_short_page_stops_the_pass() {
+    let (_dir, pool) = make_test_pool().await;
+    let old = seed_aged(&pool, "s4-short-old", 1, days_ago(10)).await;
+    let fresh = seed_aged(&pool, "s4-short-fresh", 1, hours_ago(1)).await;
+    fail_inserts_for(&pool, fresh[0]).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 4;
+
+    let summary = flow.task_gen(&opts).await;
+
+    assert_eq!(summary.insert_failed, 1);
+    // The fresh page ended short after the failure; the backlog side must
+    // not run in this pass (plan/03: the pass stops after that page).
+    assert_eq!(article_state(&pool, old[0]).await, "persisted");
+}
+
+#[tokio::test]
+async fn an_insert_error_before_the_quota_is_met_stops_the_pass() {
+    let (_dir, pool) = make_test_pool().await;
+    let old = seed_aged(&pool, "s4-quota-old", 1, days_ago(10)).await;
+    // The failing article leaves the window first, so it is tried first.
+    let failing = seed_aged(&pool, "s4-quota-fail", 1, hours_ago(40)).await;
+    let next = seed_aged(&pool, "s4-quota-next", 1, hours_ago(1)).await;
+    fail_inserts_for(&pool, failing[0]).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 2; // fresh quota 1, met by `next`
+
+    let summary = flow.task_gen(&opts).await;
+
+    assert_eq!(summary.insert_failed, 1);
+    assert_eq!(article_state(&pool, next[0]).await, "ai_pending");
+    assert_eq!(article_state(&pool, old[0]).await, "persisted");
+}
+// === R2-S5: the run's own storage failures are counted, whatever release ===
+
+#[tokio::test]
+async fn own_storage_read_failures_are_counted_with_budget_left_and_on_the_last_attempt() {
+    for (max_attempts, released) in [(3, "pending"), (1, "permanent_failed")] {
+        let (_dir, pool) = make_test_pool().await;
+        let article_id =
+            seed_persisted_article(&pool, &format!("s5-{max_attempts}"), "title", "body").await;
+        let flow = flaky_flow(pool.clone(), Arc::new(MockAiClient::default()), 1, || {
+            StorageError::Timeout
+        });
+        let mut opts = opts();
+        opts.max_attempts = max_attempts;
+        flow.task_gen(&opts).await;
+        let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+
+        let summary = flow.process_ai_tasks(&opts).await;
+
+        assert_eq!(summary.storage_failed, 1, "max_attempts={max_attempts}");
+        // The release state is kept as it landed.
+        assert_eq!(ai_result_state(&pool, ai_result_id).await, released);
+    }
 }

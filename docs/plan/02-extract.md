@@ -43,10 +43,14 @@ User-Agent 由 fetcher 构造器设置。
 
 ### 2.2 字符集解码（2026-11-21）
 
+HTML 客户端关闭自动 `Referer`（`.referer(false)`，R2-S11）：跨源重定向不会把文章 URL（含签名查询参数）带给另一主机，与 feed 客户端一致。
 fetcher 把响应 `Content-Type` 原样放进 `RawHtmlFetch.content_type`。extract flow 在策略链前调用
 `rss_ai_news_extractor::decode_html(bytes, content_type)`，按 WHATWG 编码嗅探顺序（简化）选候选：
 BOM → `Content-Type` 的 `charset` 参数 → 前 1024 字节内的 `<meta charset>` /
-`<meta http-equiv="Content-Type" content="…charset=…">`（跳过注释；meta 声明的 UTF-16 视为 UTF-8）→ UTF-8。
+`<meta http-equiv="Content-Type" content="…charset=…">`（按 WHATWG 预扫描逐个消费标签与属性：其它标签属性值里的
+`<meta …>` 文本、引号内的 `>` 都不会被误读；跳过注释与 `<!…>` / `</…>` / `<?…>`；声明到第 1024 字节仍未结束则作废；
+meta 声明的 UTF-16 视为 UTF-8、`x-user-defined` 视为 windows-1252；响应头参数按带引号字符串解析，其它参数引号内的
+`charset=` 不算，R2-S8）→ UTF-8。
 每个候选**严格**解码（`encoding_rs`，不插 U+FFFD），失败则试下一个；全部失败为
 `ParseFailed`（走 fallback / `failed`）。与浏览器不同，不按 locale 猜 windows-1252：未声明且非
 UTF-8 的字节维持旧行为失败，避免发布乱码。策略收到的是 UTF-8；`raw_artifacts` 保留原始字节。
@@ -85,7 +89,8 @@ quality 由 strategy 自己决定。AI 阶段会跳过 `Fallback` 行（避免�
 `High` 需 ≥ 300 词且有标题，`Medium` 需 ≥ 100 词，不足为 `ContentTooShort`（其 `chars`
 字段报告字符数而非字节数）。不含 CJK 字符的空白分隔 token 记 1 词（与旧
 `split_whitespace` 计数完全一致）；含 CJK 的 token 内，每段含字母或数字的非 CJK 连续片段记
-1 词，CJK 字符（汉字、平假名、片假名、谚文）合计 `⌊n / 2⌋` 词。中英平行文本约 1.6 个汉字对应
+1 词，CJK 字符（汉字、平假名、片假名、谚文——Unicode 17 `Scripts.txt` 中 Han / Hiragana / Katakana / Hangul 的全部区段，
+含 `〇`、部首、扩展 J、假名补充 / 扩展 / 小假名区与带圈 / 半角形式，外加原有的 `ー`、`・` 等假名标点，R2-B4）合计 `⌊n / 2⌋` 词。中英平行文本约 1.6 个汉字对应
 1 个英文词，取 2 偏保守、并向下取整，故 200 个汉字起为 `Medium`、600 个起为 `High`
 （2026-11-21，修复中文长文被判过短）。韩文本身以空格分词，此规则对韩文约高估 1.5 倍。
 存量 article 的 `word_count` 不回写；`replay --diff` 对旧 CJK 文章会显示字数差异。
@@ -101,6 +106,12 @@ insert-or-get article 与 owner-guarded 的 entry 推进（persisted / fallback_
 owner guard 落空则整体回滚（不留孤儿 article），报 `LeaseLost`。命中的已有 article 若
 `origin_feed_entry_id` 就是本条目（旧版本在 article 提交后、release 前崩溃留下的），记为本条目的
 `persisted`（`newly_created = false`），不再误判为 `dedup_skipped` 指向自己。
+恢复优先（R2-S6）：同一事务内**先**按 `origin_feed_entry_id` 查本条目已拥有的 article（`idx_articles_origin_feed_entry`，
+migration 0009）。恰有一篇时直接复用它，**不**插入本次提取的正文（重试可能得到不同正文哈希 H2，旧做法会再建一篇，
+使同一 entry 拥有两篇 article、task_gen 两篇都处理），entry 状态按已存 article 推导（`extractor_strategy =
+summary_fallback` → `fallback_persisted`，否则 `persisted`），与本次是否走摘要路径无关。拥有多篇时无法判定，
+返回 `StorageError::Integrity`（不可重试，事务回滚，entry 不动），由 extract 按存储故障如实上报。SQLite 该事务改用
+`BEGIN IMMEDIATE`（先读后写，避免升级写锁时 busy）。
 
 命中时已有 article 的字段保持不变（先写者为准，`ON CONFLICT DO NOTHING`）：这次提取新写入的 html artifact
 **不会**补到已有 article 的 `body_html_artifact_id`。已有 article 可能本来就没有 artifact（`on_failure` 下提取成功、
@@ -167,8 +178,10 @@ lease 预算（2026-11-21）：一批 claim 共用一个 `lease.fetch_duration_s
 `http.concurrent_fetches` 分 `ceil(batch / concurrent)` 波处理，每波最多 `http.timeout_seconds`
 加 `EXTRACT_WAVE_MARGIN_SECONDS = 5` 秒解析 / 写库余量。`ingest`（及 `run` 的 ingest 段）在 extract 前计算
 `ceil(batch / concurrent) × (timeout + 5)`；超过 lease 时**不拒绝启动**，而是把本次批大小缩到能放进 lease
-的整波数（`fit_extract_batch_to_lease`，至少一波）并写 WARN；连一波都放不下时按一波运行并 WARN。
-这样升级前能运行的配置（如 lease 300 s + 默认批 50 → 本次按 40）继续运行，且一批不会超出自己的 lease。
+的整波数（`fit_extract_batch_to_lease`）并写 WARN。连一波都放不下时（`timeout + 5 > lease`）本次**不领取**
+extract（任何一批都可能在处理中途被另一 run 回收），ingest 照常运行，命令报 `extract_lease_too_short` 运行错误
+并退出 1（R2-S9，旧做法仍按一波领取）。这样升级前能运行的配置（如 lease 300 s + 默认批 50 → 本次按 40）继续运行，
+且一批不会超出自己的 lease。`+5` 秒是解析 / 写库耗时的估算余量，不是数据库与解析时间的硬上界。
 示例配置的 lease 改为 600 s，默认批大小不再被缩小。
 
 滚动 JoinSet 将存活任务数限制在 `http.concurrent_fetches.max(1)`，不为整个 claim 批次预建等待任务。
@@ -249,7 +262,7 @@ rss-ai-news replay --kind html --key <feed_entry_id> --diff
 | 失败点 | 错误变体 | retryable | 处理 |
 |---|---|---|---|
 | HTML fetch 超时 | `ExtractorError::HttpTimeout` | true | 回 `pending_fetch` + 冷却（§5.3） |
-| HTML 429 | `ExtractorError::HttpStatus { 429 }`（`http_429`） | true | 回 `pending_fetch` + 冷却（§5.3），不消费摘要 |
+| HTML 429 | `ExtractorError::RateLimited { retry_after_seconds }`（`http_429`） | true | 回 `pending_fetch` + 冷却（§5.3），不消费摘要；`next_attempt_at = max(本地退避, 释放时刻 + Retry-After)`——Retry-After 取秒数或 HTTP-date（三种 RFC 9110 格式，过去的日期 = 0），缺失 / 无效则只用本地退避，上限 1 天（R2-S10） |
 | HTML 其余 4xx | `ExtractorError::HttpStatus { 4xx }` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | HTML 5xx | `ExtractorError::HttpStatus { 5xx }` | true | 回 `pending_fetch` + 冷却（§5.3） |
 | payload 过大 | `ExtractorError::TooLarge` | false | 尝试 fallback（W18）；无摘要则 `failed` |

@@ -45,6 +45,9 @@ pub struct IngestCommandSummary {
     /// Extract releases that matched no row because another run reclaimed the
     /// lease; reported, not a run failure (that run owns the entry now).
     pub extract_lease_lost: u32,
+    /// Extract did not run: not even one wave of `concurrent_fetches` fits
+    /// `lease.fetch_duration_seconds` (R2-S9). A run failure (exit 1).
+    pub extract_lease_too_short: bool,
     pub duration_seconds: f64,
 }
 
@@ -69,6 +72,15 @@ impl IngestCommandSummary {
                     "{} extract entries hit a storage failure",
                     self.extract_storage_failed
                 ),
+            });
+        }
+        if self.extract_lease_too_short {
+            errors.push(RenderedError {
+                kind: "extract_lease_too_short".to_string(),
+                message: "extract skipped: one wave of http.concurrent_fetches can outlive \
+                          lease.fetch_duration_seconds; raise the lease or lower \
+                          http.timeout_seconds"
+                    .to_string(),
             });
         }
         if let Some(kind) = &self.extract_claim_error {
@@ -159,24 +171,24 @@ pub(crate) fn preflight(loaded: &LoadedConfig) -> Result<(), CliError> {
 /// The extract batch size for this run: `requested`, shrunk to whole waves
 /// when one batch could outlive its lease (the batch size is a CLI argument,
 /// so this is decided per run, like the AI lease budget). Shrinking instead of
-/// failing keeps configs that ran before the budget existed running.
-fn extract_batch_size(loaded: &LoadedConfig, requested: u32) -> u32 {
+/// failing keeps configs that ran before the budget existed running. `None`
+/// when not even one wave fits (R2-S9): extract is skipped for the run.
+fn extract_batch_size(loaded: &LoadedConfig, requested: u32) -> Option<u32> {
     let app = &loaded.app;
     let concurrent = app.http.concurrent_fetches;
     let timeout = app.http.timeout_seconds;
     let lease = app.lease.fetch_duration_seconds;
-    let fitted = fit_extract_batch_to_lease(requested, concurrent, timeout, lease);
-    let budget = extract_lease_budget_seconds(fitted, concurrent, timeout);
-    if budget > lease {
-        tracing::warn!(
+    let Some(fitted) = fit_extract_batch_to_lease(requested, concurrent, timeout, lease) else {
+        tracing::error!(
             stage = "extract",
-            batch_size = fitted,
-            budget_seconds = budget,
+            one_wave_seconds = extract_lease_budget_seconds(1, concurrent, timeout),
             lease_seconds = lease,
-            "even one wave of concurrent_fetches can outlive lease.fetch_duration_seconds; \
-             raise the lease or lower http.timeout_seconds"
+            "extract skipped: one wave of concurrent_fetches can outlive \
+             lease.fetch_duration_seconds; raise the lease or lower http.timeout_seconds"
         );
-    } else if fitted < requested {
+        return None;
+    };
+    if fitted < requested {
         tracing::warn!(
             stage = "extract",
             requested_batch_size = requested,
@@ -186,7 +198,7 @@ fn extract_batch_size(loaded: &LoadedConfig, requested: u32) -> u32 {
              (ceil(batch / concurrent_fetches) x (http.timeout_seconds + margin))"
         );
     }
-    fitted
+    Some(fitted)
 }
 
 /// Ingest (and extract unless `--skip-fetch`) on an already loaded config and
@@ -204,14 +216,18 @@ pub(crate) async fn run_loaded(
         IngestFlow::with_source_secrets(ctx.clone(), categories, loaded.source_secrets.clone());
     let ingest_summary = ingest_flow.run(IngestOptions::default()).await;
 
-    let extract_summary = if args.skip_fetch {
-        ExtractSummary::default()
+    let batch_size = if args.skip_fetch {
+        None
     } else {
+        extract_batch_size(loaded, args.batch_size)
+    };
+    let extract_lease_too_short = !args.skip_fetch && batch_size.is_none();
+    let extract_summary = if let Some(batch_size) = batch_size {
         let extract_flow =
             ExtractFlow::new(build_extract_deps(loaded, pool, ctx.run.clone()).await?);
         extract_flow
             .run(ExtractOptions {
-                batch_size: extract_batch_size(loaded, args.batch_size),
+                batch_size,
                 max_attempts: loaded.app.retry.feed_entry_max_attempts,
                 // F6-3: 从 app.runtime.max_batches_per_run 取生效值。
                 // `--max-batches` 已经由 CliOverrides::apply_to_app
@@ -222,6 +238,8 @@ pub(crate) async fn run_loaded(
                 category_key: loaded.cli_overrides.category_filter.clone(),
             })
             .await
+    } else {
+        ExtractSummary::default()
     };
 
     Ok(IngestCommandSummary {
@@ -239,6 +257,7 @@ pub(crate) async fn run_loaded(
         sources_storage_failed: ingest_summary.sources_storage_failed,
         extract_storage_failed: extract_summary.storage_failed,
         extract_lease_lost: extract_summary.lease_lost,
+        extract_lease_too_short,
         duration_seconds: started.elapsed().as_secs_f64(),
     })
 }
@@ -263,6 +282,7 @@ mod tests {
             sources_storage_failed: 0,
             extract_storage_failed: 0,
             extract_lease_lost: 0,
+            extract_lease_too_short: false,
             duration_seconds: 0.0,
         }
     }
