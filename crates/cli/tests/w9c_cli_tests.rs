@@ -603,6 +603,7 @@ fn run_summary() -> RunCommandSummary {
             sources_storage_failed: 0,
             extract_storage_failed: 0,
             extract_lease_lost: 0,
+            extract_lease_too_short: false,
             duration_seconds: 1.0,
         }),
         ai_run: Some(ai_summary()),
