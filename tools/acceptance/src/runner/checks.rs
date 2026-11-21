@@ -123,42 +123,74 @@ fn collect_markdown_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<(), 
     Ok(())
 }
 
-/// Files that pin the Rust toolchain outside `rust-toolchain.toml`, with the
-/// number of literal pins each must contain. The counts make a format change
-/// (a pin this parser no longer recognises) fail instead of passing vacuously.
-pub(crate) const TOOLCHAIN_PIN_FILES: &[(&str, usize)] = &[
-    (".github/workflows/ci.yml", 1),
-    (".github/workflows/release.yml", 1),
-    (".github/workflows/audit.yml", 1),
-    (".github/workflows/maintenance.yml", 2),
-    ("docker/Dockerfile", 1),
-];
+/// The workflow directory scanned for toolchain installs (every `*.yml` /
+/// `*.yaml` file, so a new workflow cannot escape the check) and the
+/// Dockerfile whose builder image pins the toolchain.
+pub(crate) const WORKFLOW_DIR: &str = ".github/workflows";
+pub(crate) const TOOLCHAIN_DOCKERFILE: &str = "docker/Dockerfile";
 
-/// Every literal toolchain pin in `TOOLCHAIN_PIN_FILES` must equal the
-/// `channel` of `rust-toolchain.toml`, the single source of truth.
+/// The only expression a `toolchain:` input may use instead of the literal
+/// channel; the file must then define `RUST_TOOLCHAIN` as that literal.
+pub(crate) const TOOLCHAIN_ENV_REFERENCE: &str = "${{ env.RUST_TOOLCHAIN }}";
+
+/// Every toolchain the workflows install and the Dockerfile builds with must
+/// be the `channel` of `rust-toolchain.toml`, the single source of truth
+/// (R3-9). In each workflow: every `RUST_TOOLCHAIN:` is that literal, every
+/// `toolchain:` input is the literal or exactly [`TOOLCHAIN_ENV_REFERENCE`]
+/// (backed by such a definition), and there is one `toolchain:` input per
+/// `dtolnay/rust-toolchain` step. Any other expression fails: it could
+/// resolve to another compiler. The Dockerfile has exactly one `FROM rust:`.
 pub(crate) fn check_toolchain_pins(repo_root: &Path) -> Result<(), String> {
     let toolchain = fs::read_to_string(repo_root.join("rust-toolchain.toml"))
         .map_err(|error| format!("cannot read rust-toolchain.toml: {error}"))?;
     let channel = toolchain_channel(&toolchain)
         .ok_or_else(|| "rust-toolchain.toml has no `channel = \"...\"`".to_string())?;
     let mut problems = Vec::new();
-    for (file, expected_count) in TOOLCHAIN_PIN_FILES {
-        let content = fs::read_to_string(repo_root.join(file))
-            .map_err(|error| format!("cannot read {file}: {error}"))?;
-        let pins = toolchain_pins(&content);
-        if pins.len() != *expected_count {
+
+    let mut workflows = fs::read_dir(repo_root.join(WORKFLOW_DIR))
+        .map_err(|error| format!("cannot read {WORKFLOW_DIR}: {error}"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("cannot read {WORKFLOW_DIR}: {error}"))?;
+    workflows.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "yml" || extension == "yaml")
+    });
+    workflows.sort();
+    if workflows.is_empty() {
+        problems.push(format!("{WORKFLOW_DIR}: no workflow files found"));
+    }
+    for path in &workflows {
+        let name = format!(
+            "{WORKFLOW_DIR}/{}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        let content =
+            fs::read_to_string(path).map_err(|error| format!("cannot read {name}: {error}"))?;
+        problems.extend(workflow_toolchain_problems(&name, &content, &channel));
+    }
+
+    let dockerfile = fs::read_to_string(repo_root.join(TOOLCHAIN_DOCKERFILE))
+        .map_err(|error| format!("cannot read {TOOLCHAIN_DOCKERFILE}: {error}"))?;
+    let images = toolchain_lines(&dockerfile)
+        .into_iter()
+        .filter(|line| line.kind == PinKind::RustImage)
+        .collect::<Vec<_>>();
+    if images.len() != 1 {
+        problems.push(format!(
+            "{TOOLCHAIN_DOCKERFILE}: found {} `FROM rust:` image(s), expected 1",
+            images.len()
+        ));
+    }
+    for image in images {
+        if image.value != channel {
             problems.push(format!(
-                "{file}: found {} toolchain pin(s), expected {expected_count} \
-                 (update TOOLCHAIN_PIN_FILES if the layout changed on purpose)",
-                pins.len()
+                "{TOOLCHAIN_DOCKERFILE}:{}: pins {}, expected {channel}",
+                image.line, image.value
             ));
         }
-        for (line, value) in pins {
-            if value != channel {
-                problems.push(format!("{file}:{line}: pins {value}, expected {channel}"));
-            }
-        }
     }
+
     if problems.is_empty() {
         Ok(())
     } else {
@@ -166,6 +198,109 @@ pub(crate) fn check_toolchain_pins(repo_root: &Path) -> Result<(), String> {
             "toolchain pins drift from rust-toolchain.toml: {problems:?}"
         ))
     }
+}
+
+/// The problems of one workflow file (see [`check_toolchain_pins`]).
+fn workflow_toolchain_problems(file: &str, content: &str, channel: &str) -> Vec<String> {
+    let lines = toolchain_lines(content);
+    let mut problems = Vec::new();
+    let mut env_defined = false;
+    let mut inputs = 0_usize;
+    let mut installs = 0_usize;
+    for pin in &lines {
+        match pin.kind {
+            PinKind::EnvDefinition => {
+                env_defined = true;
+                if pin.value != channel {
+                    problems.push(format!(
+                        "{file}:{}: RUST_TOOLCHAIN is {}, expected the literal {channel}",
+                        pin.line, pin.value
+                    ));
+                }
+            }
+            PinKind::Input => {
+                inputs += 1;
+                if pin.value != channel && pin.value != TOOLCHAIN_ENV_REFERENCE {
+                    problems.push(format!(
+                        "{file}:{}: toolchain input is {}, expected {channel} or {TOOLCHAIN_ENV_REFERENCE}",
+                        pin.line, pin.value
+                    ));
+                }
+            }
+            PinKind::Install => installs += 1,
+            PinKind::RustImage => {}
+        }
+    }
+    let uses_reference = lines
+        .iter()
+        .any(|pin| pin.kind == PinKind::Input && pin.value == TOOLCHAIN_ENV_REFERENCE);
+    if uses_reference && !env_defined {
+        problems.push(format!(
+            "{file}: uses {TOOLCHAIN_ENV_REFERENCE} without defining RUST_TOOLCHAIN"
+        ));
+    }
+    if inputs != installs {
+        problems.push(format!(
+            "{file}: {installs} dtolnay/rust-toolchain step(s) but {inputs} toolchain input(s)"
+        ));
+    }
+    problems
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinKind {
+    /// `RUST_TOOLCHAIN: <value>`.
+    EnvDefinition,
+    /// `toolchain: <value>` (an action input).
+    Input,
+    /// `uses: dtolnay/rust-toolchain@…` (value: the ref).
+    Install,
+    /// The version of a Dockerfile `FROM rust:X-…` image, with or without an
+    /// `@sha256:` digest.
+    RustImage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PinLine {
+    line: usize,
+    kind: PinKind,
+    value: String,
+}
+
+/// Toolchain-relevant lines with their 1-based line numbers; values are
+/// unquoted and stripped of a trailing ` # comment`. Comment lines are skipped.
+fn toolchain_lines(content: &str) -> Vec<PinLine> {
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let line = line.trim();
+            if line.starts_with('#') {
+                return None;
+            }
+            let (kind, value) = if let Some(image) = line.strip_prefix("FROM rust:") {
+                let tag = image.split_whitespace().next()?;
+                let tag = tag.split('@').next()?;
+                (PinKind::RustImage, tag.split('-').next()?.to_string())
+            } else if let Some(value) = line.strip_prefix("RUST_TOOLCHAIN:") {
+                (PinKind::EnvDefinition, value_of(value))
+            } else if let Some(value) = line.strip_prefix("toolchain:") {
+                (PinKind::Input, value_of(value))
+            } else {
+                let action = line
+                    .strip_prefix("- uses:")
+                    .or_else(|| line.strip_prefix("uses:"))?
+                    .trim();
+                let reference = action.strip_prefix("dtolnay/rust-toolchain@")?;
+                (PinKind::Install, value_of(reference))
+            };
+            Some(PinLine {
+                line: index + 1,
+                kind,
+                value,
+            })
+        })
+        .collect()
 }
 
 fn toolchain_channel(toolchain: &str) -> Option<String> {
@@ -178,33 +313,8 @@ fn toolchain_channel(toolchain: &str) -> Option<String> {
     })
 }
 
-/// Literal toolchain pins with their 1-based line numbers: workflow
-/// `RUST_TOOLCHAIN: "X"` / `toolchain: 'X'` values (expressions such as
-/// `${{ env.RUST_TOOLCHAIN }}` are references, not pins) and the version of a
-/// Dockerfile `FROM rust:X-…` image, with or without an `@sha256:` digest.
-fn toolchain_pins(content: &str) -> Vec<(usize, String)> {
-    content
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let line = line.trim();
-            let value = if let Some(image) = line.strip_prefix("FROM rust:") {
-                let tag = image.split_whitespace().next()?;
-                let tag = tag.split('@').next()?;
-                tag.split('-').next()?.to_string()
-            } else {
-                let value = line
-                    .strip_prefix("RUST_TOOLCHAIN:")
-                    .or_else(|| line.strip_prefix("toolchain:"))?;
-                let value = unquote(value.split(" #").next()?);
-                if value.contains("${{") {
-                    return None;
-                }
-                value.to_string()
-            };
-            Some((index + 1, value))
-        })
-        .collect()
+fn value_of(raw: &str) -> String {
+    unquote(raw.split(" #").next().unwrap_or_default()).to_string()
 }
 
 fn unquote(value: &str) -> &str {
@@ -467,10 +577,12 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    use super::{TOOLCHAIN_PIN_FILES, check_toolchain_pins, toolchain_pins};
+    use super::{PinKind, check_toolchain_pins, toolchain_lines};
 
-    /// A scratch repository holding every toolchain pin file.
-    fn toolchain_repo(name: &str, channel: &str, pins: &[(&str, &str)]) -> std::path::PathBuf {
+    const INSTALL: &str = "      - uses: dtolnay/rust-toolchain@abc # master\n        with:\n";
+
+    /// A scratch repository with the given workflow files and Dockerfile.
+    fn toolchain_repo(name: &str, channel: &str, files: &[(&str, String)]) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
             "rss-ai-news-acceptance-toolchain-{name}-{}",
             std::process::id()
@@ -485,33 +597,30 @@ mod tests {
             format!("[toolchain]\nchannel = \"{channel}\"\n"),
         )
         .unwrap();
-        for (file, content) in pins {
+        for (file, content) in files {
             fs::write(root.join(file), content).unwrap();
         }
         root
     }
 
-    fn consistent_pins(version: &str) -> Vec<(&'static str, String)> {
+    fn consistent_files(version: &str) -> Vec<(&'static str, String)> {
         vec![
             (
                 ".github/workflows/ci.yml",
                 format!(
-                    "env:\n  RUST_TOOLCHAIN: \"{version}\"\njobs:\n  test:\n    steps:\n      \
-                     - uses: dtolnay/rust-toolchain@abc # master\n        with:\n          \
-                     toolchain: ${{{{ env.RUST_TOOLCHAIN }}}}\n"
+                    "env:\n  RUST_TOOLCHAIN: \"{version}\" # keep equal\njobs:\n  test:\n    steps:\n\
+                     {INSTALL}          toolchain: ${{{{ env.RUST_TOOLCHAIN }}}}\n"
                 ),
             ),
             (
-                ".github/workflows/release.yml",
-                format!("env:\n  RUST_TOOLCHAIN: \"{version}\" # keep equal\n"),
-            ),
-            (
                 ".github/workflows/audit.yml",
-                format!("        with:\n          toolchain: '{version}'\n"),
+                format!("{INSTALL}          toolchain: '{version}'\n"),
             ),
             (
                 ".github/workflows/maintenance.yml",
-                format!("          toolchain: '{version}'\n          toolchain: '{version}'\n"),
+                format!(
+                    "{INSTALL}          toolchain: '{version}'\n{INSTALL}          toolchain: '{version}'\n"
+                ),
             ),
             (
                 "docker/Dockerfile",
@@ -520,71 +629,115 @@ mod tests {
         ]
     }
 
-    fn write_repo(
-        name: &str,
-        channel: &str,
-        pins: &[(&'static str, String)],
-    ) -> std::path::PathBuf {
-        let borrowed = pins
-            .iter()
-            .map(|(file, content)| (*file, content.as_str()))
-            .collect::<Vec<_>>();
-        toolchain_repo(name, channel, &borrowed)
+    fn check_with(name: &str, edit: impl FnOnce(&mut Vec<(&'static str, String)>)) -> String {
+        let mut files = consistent_files("1.97.0");
+        edit(&mut files);
+        let root = toolchain_repo(name, "1.97.0", &files);
+        let result = check_toolchain_pins(&root);
+        fs::remove_dir_all(root).unwrap();
+        result.err().unwrap_or_default()
     }
 
     #[test]
-    fn toolchain_pins_recognise_every_pin_form() {
-        let pins = toolchain_pins(
+    fn toolchain_lines_recognise_every_pin_form() {
+        let lines = toolchain_lines(
             "  RUST_TOOLCHAIN: \"1.97.0\"\n  toolchain: '1.97.0'\n  toolchain: ${{ env.X }}\n\
              # toolchain: '9.9.9'\nFROM rust:1.97.0-slim-bookworm@sha256:ab AS chef\n\
-             FROM debian:bookworm-slim AS runtime\n",
+             FROM debian:bookworm-slim AS runtime\n      - uses: dtolnay/rust-toolchain@abc # m\n",
         );
+        let kinds = lines
+            .iter()
+            .map(|pin| (pin.line, pin.kind, pin.value.as_str()))
+            .collect::<Vec<_>>();
         assert_eq!(
-            pins,
+            kinds,
             vec![
-                (1, "1.97.0".to_string()),
-                (2, "1.97.0".to_string()),
-                (5, "1.97.0".to_string())
+                (1, PinKind::EnvDefinition, "1.97.0"),
+                (2, PinKind::Input, "1.97.0"),
+                (3, PinKind::Input, "${{ env.X }}"),
+                (5, PinKind::RustImage, "1.97.0"),
+                (7, PinKind::Install, "abc"),
             ]
         );
     }
 
     #[test]
     fn toolchain_check_accepts_consistent_pins() {
-        let root = write_repo("ok", "1.97.0", &consistent_pins("1.97.0"));
-        assert_eq!(check_toolchain_pins(&root), Ok(()));
-        fs::remove_dir_all(root).unwrap();
+        assert_eq!(check_with("ok", |_| {}), "");
     }
 
     #[test]
     fn toolchain_check_rejects_a_drifted_pin() {
-        let mut pins = consistent_pins("1.97.0");
-        pins[4].1 = "FROM rust:1.96.0-slim-bookworm AS chef\n".to_string();
-        let root = write_repo("drift", "1.97.0", &pins);
-        let error = check_toolchain_pins(&root).unwrap_err();
+        let error = check_with("drift", |files| {
+            files[3].1 = "FROM rust:1.96.0-slim-bookworm AS chef\n".to_string();
+        });
         assert!(
             error.contains("docker/Dockerfile:1: pins 1.96.0, expected 1.97.0"),
             "{error}"
         );
-        fs::remove_dir_all(root).unwrap();
     }
 
-    /// A pin the parser no longer finds (format change, deleted line) must
-    /// fail rather than leave the check with nothing to compare.
+    /// R3-9: an expression other than the checked env reference could
+    /// resolve to another compiler; it used to be skipped as "not a pin".
     #[test]
-    fn toolchain_check_rejects_a_missing_pin() {
-        let mut pins = consistent_pins("1.97.0");
-        pins[3].1 = "          toolchain: '1.97.0'\n".to_string();
-        let root = write_repo("missing", "1.97.0", &pins);
-        let error = check_toolchain_pins(&root).unwrap_err();
+    fn toolchain_check_rejects_an_unchecked_expression() {
+        let error = check_with("expr", |files| {
+            files[1].1 = format!("{INSTALL}          toolchain: ${{{{ '1.96.0' }}}}\n");
+        });
+        assert!(
+            error.contains(".github/workflows/audit.yml:3: toolchain input is ${{ '1.96.0' }}"),
+            "{error}"
+        );
+        let error = check_with("env-expr", |files| {
+            files[0].1 = files[0].1.replace("\"1.97.0\"", "${{ vars.RUST }}");
+        });
+        assert!(
+            error.contains("RUST_TOOLCHAIN is ${{ vars.RUST }}"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn toolchain_check_rejects_a_reference_without_a_definition() {
+        let error = check_with("undefined", |files| {
+            files[1].1 = format!("{INSTALL}          toolchain: ${{{{ env.RUST_TOOLCHAIN }}}}\n");
+        });
         assert!(
             error.contains(
-                ".github/workflows/maintenance.yml: found 1 toolchain pin(s), expected 2"
+                ".github/workflows/audit.yml: uses ${{ env.RUST_TOOLCHAIN }} without defining"
             ),
             "{error}"
         );
-        fs::remove_dir_all(root).unwrap();
-        assert_eq!(TOOLCHAIN_PIN_FILES.len(), consistent_pins("x").len());
+    }
+
+    /// An install step without a toolchain input (format change, deleted
+    /// line) must fail rather than leave the check with nothing to compare.
+    #[test]
+    fn toolchain_check_rejects_an_install_without_input() {
+        let error = check_with("missing", |files| {
+            files[2].1 = format!("{INSTALL}          toolchain: '1.97.0'\n{INSTALL}");
+        });
+        assert!(
+            error.contains(
+                ".github/workflows/maintenance.yml: 2 dtolnay/rust-toolchain step(s) but 1 toolchain input(s)"
+            ),
+            "{error}"
+        );
+    }
+
+    /// Every workflow file is scanned, not a fixed list.
+    #[test]
+    fn toolchain_check_scans_new_workflow_files() {
+        let error = check_with("new-file", |files| {
+            files.push((
+                ".github/workflows/nightly.yaml",
+                format!("{INSTALL}          toolchain: '1.96.0'\n"),
+            ));
+        });
+        assert!(
+            error.contains(".github/workflows/nightly.yaml:3"),
+            "{error}"
+        );
     }
 
     /// The repository itself must pass, so the lane fails on real drift only.
