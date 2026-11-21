@@ -116,6 +116,11 @@ rss-ai-news replay --kind feed   --id 678
 replay 因此不换用别的策略解析，而是在读取任何 artifact 之前返回契约错误 `REPLAY_HTML_NO_STRATEGY`
 （`RuntimeError::Config`，exit 1），提示加回 `"readability"`。`feed` / `ai` 不受策略配置影响。
 
+`html` 的字符集：与线上 `run_strategy_chain` 相同，先用 `decode_html` 把留档的原始字节解码成 UTF-8 再交给策略。artifact
+不保存响应的 Content-Type，所以 replay 只能按 BOM → `<meta charset>` / http-equiv 预扫描 → UTF-8 判定；只在 HTTP 头里声明
+charset 的非 UTF-8 页面在 replay 中可能解码失败或与线上不同（已知限制）。锁定测试：
+`flows::replay::tests::html_replay_decodes_a_meta_declared_gbk_page`（meta 声明 GBK 的页面标题解码为中文）。
+
 `html` 的标题回退（R3-18）：策略在页面没有标题时用 `task.title_raw`。有对应 feed entry 时 replay 传该 entry 的
 `title_raw`（线上抽取传的就是它），否则传占位 `(replay)`（`REPLAY_PLACEHOLDER_TITLE`）；只读 projection 一并返回该列。
 

@@ -17,7 +17,7 @@ use rss_ai_news_domain::{
     model::RawArtifact,
     state::{ArtifactKind, FeedKind},
 };
-use rss_ai_news_extractor::ContentStrategy;
+use rss_ai_news_extractor::{ContentStrategy, decode_html};
 use rss_ai_news_feed::parse_feed;
 use rss_ai_news_storage::{HtmlReplaySource, ReplayProjectionRepository};
 
@@ -291,15 +291,22 @@ impl ReplayFlow {
     /// The configured chain, in order: the first strategy that extracts wins,
     /// else the last strategy's error (with Readability alone, exactly its
     /// result). Callers ensure the chain is not empty.
+    ///
+    /// Like live extraction (`run_strategy_chain`), the stored original bytes
+    /// are decoded to UTF-8 first. The response's Content-Type is not kept
+    /// with the artifact, so the charset comes from the BOM or the page's
+    /// `<meta>` declaration, else UTF-8; a page whose charset only its HTTP
+    /// header declared can replay differently (documented in plan/10).
     fn extract_html(
         &self,
         task: &ArticleFetchTask,
         bytes: &[u8],
         base_uri: &str,
     ) -> Result<ExtractedArticle, RuntimeError> {
+        let html = decode_html(bytes, None)?;
         let mut last_error = None;
         for strategy in &self.deps.html_strategies {
-            match strategy.extract(task, bytes, base_uri) {
+            match strategy.extract(task, html.as_bytes(), base_uri) {
                 Ok(article) => return Ok(article),
                 Err(error) => last_error = Some(error),
             }
@@ -633,6 +640,41 @@ mod tests {
             };
             assert_eq!(article.title, title, "key {key}");
         }
+    }
+
+    /// A GBK page declared by `<meta charset>` replays to readable text, as
+    /// live extraction decodes it.
+    #[tokio::test]
+    async fn html_replay_decodes_a_meta_declared_gbk_page() {
+        // "中文标题" in GBK.
+        const GBK_TITLE: &[u8] = &[0xD6, 0xD0, 0xCE, 0xC4, 0xB1, 0xEA, 0xCC, 0xE2];
+        let paragraph =
+            "Replay keeps the original bytes so the parse can be re-run offline. ".repeat(20);
+        let mut page = b"<html><head><meta charset=\"gbk\"><title>".to_vec();
+        page.extend_from_slice(GBK_TITLE);
+        page.extend_from_slice(b"</title></head><body><article><h1>");
+        page.extend_from_slice(GBK_TITLE);
+        page.extend_from_slice(
+            format!("</h1><p>{paragraph}</p><p>{paragraph}</p></article></body></html>").as_bytes(),
+        );
+        assert!(
+            std::str::from_utf8(&page).is_err(),
+            "fixture must not be UTF-8"
+        );
+
+        let fixture = Fixture::new().await;
+        let entry = fixture.entry("gbk").await;
+        fixture.html_artifact(&entry.to_string(), page).await;
+        let outcome = fixture
+            .flow(Arc::new(RecordingStrategy::default()))
+            .execute(&html(ReplaySelector::Key(entry.to_string()), false))
+            .await
+            .expect("replay")
+            .expect("artifact found");
+        let ReplayParsed::Html { article, .. } = outcome.parsed else {
+            panic!("html replay must parse as html");
+        };
+        assert_eq!(article.title, "中文标题");
     }
 
     /// `--diff` reaches the article through the entry, including a dedup
