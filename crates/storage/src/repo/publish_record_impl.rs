@@ -20,10 +20,11 @@ use super::{
         ADVANCE_LOCAL_SQL, ADVANCE_REMOTE_SQL, ADVANCE_RENDERED_SQL, ADVANCE_SNAPSHOT_SQL,
         CREATE_IF_NEW_SQL, PROMOTE_ARTICLE_PUBLISHED_SQL, PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL,
         RECLAIM_PUBLISH_LEASES_SQL, RECLAIM_PUBLISH_LEASES_SQLITE_SQL, RELEASE_EMPTY_SNAPSHOT_SQL,
-        RELEASE_PERMANENT_FAILURE_SQL, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL,
-        SELECT_PUBLISH_RECORD_BY_ID, SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY,
-        TERMINALIZE_EXHAUSTED_PUBLISH_SQL, TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL,
-        claim_publish_pg, claim_publish_sqlite, sqlite_lease_cutoff, sqlite_stored_deadline,
+        RELEASE_FREEZE_CONFLICT_SQL, RELEASE_PERMANENT_FAILURE_SQL,
+        RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL, SELECT_PUBLISH_RECORD_BY_ID,
+        SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY, TERMINALIZE_EXHAUSTED_PUBLISH_SQL,
+        TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL, claim_publish_pg, claim_publish_sqlite,
+        sqlite_lease_cutoff, sqlite_stored_deadline,
     },
 };
 
@@ -188,6 +189,39 @@ impl PublishRecordRepository for PublishRecordRepo {
                 .map(|result| result.rows_affected()),
         }
         .map_err(StorageError::from)?;
+        Ok(affected == 1)
+    }
+
+    async fn release_freeze_conflict(
+        &self,
+        id: i64,
+        owner: &str,
+        error: &str,
+        kind: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let affected = match self.storage_pool() {
+            StoragePool::Sqlite(p) => sqlx::query(RELEASE_FREEZE_CONFLICT_SQL)
+                .bind(error)
+                .bind(kind)
+                .bind(now)
+                .bind(id)
+                .bind(owner)
+                .execute(p)
+                .await
+                .map_err(StorageError::from)?
+                .rows_affected(),
+            StoragePool::Postgres(p) => sqlx::query(RELEASE_FREEZE_CONFLICT_SQL)
+                .bind(error)
+                .bind(kind)
+                .bind(now)
+                .bind(id)
+                .bind(owner)
+                .execute(p)
+                .await
+                .map_err(StorageError::from)?
+                .rows_affected(),
+        };
         Ok(affected == 1)
     }
 

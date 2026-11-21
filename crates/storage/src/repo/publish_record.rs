@@ -176,6 +176,17 @@ pub trait PublishRecordRepository: Send + Sync {
         owner: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
+    /// Releases a `pending` record whose freeze lost an article (ownership or
+    /// state conflict) back to claimable `pending`, refunding the claim.
+    /// Returns `false` when the lease was lost.
+    async fn release_freeze_conflict(
+        &self,
+        id: i64,
+        owner: &str,
+        error: &str,
+        kind: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
     async fn release_permanent_failure(
         &self,
         id: i64,

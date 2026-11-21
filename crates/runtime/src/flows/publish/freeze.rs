@@ -270,11 +270,40 @@ impl PublishFlow {
             Ok(FreezeSnapshotOutcome {
                 status: FreezeSnapshotStatus::ArticleStateConflict { article_id },
                 ..
-            }) => PublishFreezeOutcome {
-                publish_record_id: claimed.id,
-                status: PublishFreezeStatus::ArticleConflict { article_id },
-                item_count: 0,
-            },
+            }) => {
+                let message =
+                    format!("article {article_id} is no longer persisted or ready_for_publish");
+                self.release_article_conflict(
+                    claimed.id,
+                    &owner,
+                    article_id,
+                    &message,
+                    "article_state_conflict",
+                    &emitter,
+                )
+                .await
+            }
+            Ok(FreezeSnapshotOutcome {
+                status:
+                    FreezeSnapshotStatus::ArticleOwnershipConflict {
+                        article_id,
+                        owner_record_id,
+                    },
+                ..
+            }) => {
+                let message = format!(
+                    "article {article_id} is already in active publish record {owner_record_id}"
+                );
+                self.release_article_conflict(
+                    claimed.id,
+                    &owner,
+                    article_id,
+                    &message,
+                    "article_owned_by_active_snapshot",
+                    &emitter,
+                )
+                .await
+            }
             Err(error) => {
                 // The freeze transaction rolled back; a transient storage error
                 // keeps the record `pending` (budgeted retry), not `failed`.
@@ -288,6 +317,65 @@ impl PublishFlow {
                     item_count: 0,
                 }
             }
+        }
+    }
+}
+
+impl PublishFlow {
+    /// The freeze transaction rolled back because an article was taken by
+    /// another snapshot or changed state after selection (ADR 0012). Nothing
+    /// was written; release the lease at once (never hold it on a conflict)
+    /// and refund the claim, so the next run re-selects without that article.
+    async fn release_article_conflict(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        article_id: i64,
+        message: &str,
+        kind: &str,
+        emitter: &RunEventEmitter<'_>,
+    ) -> PublishFreezeOutcome {
+        let released = self
+            .ctx
+            .publish_record_repo
+            .release_freeze_conflict(
+                publish_record_id,
+                owner,
+                message,
+                kind,
+                OffsetDateTime::now_utc(),
+            )
+            .await;
+        match &released {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(publish_record_id, "freeze conflict release lost the lease")
+            }
+            Err(error) => tracing::warn!(
+                publish_record_id,
+                ?error,
+                "freeze conflict release failed; lease recovery remains available"
+            ),
+        }
+        emitter
+            .emit(
+                "publish_failed",
+                "warn",
+                Some("publish_record"),
+                Some(publish_record_id),
+                message,
+                Some(json!({
+                    "phase": PHASE,
+                    "error_kind": kind,
+                    "article_id": article_id,
+                    "released": matches!(released, Ok(true)),
+                })),
+            )
+            .await;
+        PublishFreezeOutcome {
+            publish_record_id,
+            status: PublishFreezeStatus::ArticleConflict { article_id },
+            item_count: 0,
         }
     }
 }

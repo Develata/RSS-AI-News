@@ -27,6 +27,7 @@
 - 远端 publish 成功后 article → `Published`；批次成功后 record → `PublishedRemote`
 - **lease 按时刻判定**：SQLite 上 publish_records 的 claim / reclaim / sweep 用 `julianday()` 比较（lease 写入向上、now 向下取整到毫秒），lease 绝不提前过期；PG 用 `timestamptz`
 - **重试预算按阶段计**：每阶段最多 `publish_max_attempts` 次 claim（`stage_attempt_count`，推进即清零）；`attempt_count` 为累计审计值
+- **快照归属**：选稿排除已在其它未失败记录（活动快照）中的文章；freeze 事务内复查，输掉竞争 → 回滚、立即释放 lease、退还 claim，下轮不含该文章；记录 `failed` 释放归属；AI-off 下未被持有的 `ready_for_publish` 遗留文章可直接冻结
 - **record 隔离**：`publish` 与 `publish-all` 的每个阶段（freeze / render / store-local / publish-remote）都只 claim init 得到的 `publish_record_id`；
   单分类 `publish` 不得领取或推进其他分类残留的记录。例外：每阶段 claim 前的全局 maintenance
   （lease 过期 reclaim + 预算耗尽 sweep → `failed`）按设计作用于全表，不区分分类
@@ -66,6 +67,12 @@
 | `exhausting_one_stage_budget_fails_the_record` | 同上 | 单阶段 2 次失败 → failed |
 | `sqlite_0008_gives_existing_rows_a_fresh_stage_budget_and_rolls_back` | `crates/storage/tests/publish_stage_budget_migration_tests.rs` | 存量行迁移 + down（PG 同名 `pg_…`） |
 | `pg_publish_budget_is_per_stage` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 按阶段预算 |
+| `selection_excludes_articles_owned_by_an_active_snapshot_until_it_fails` | `crates/storage/tests/publish_freeze_tests.rs` | 选稿排除活动快照文章，failed 释放 |
+| `freeze_snapshot_rejects_article_owned_by_another_active_snapshot` | 同上 | freeze 事务内复查归属 |
+| `freeze_snapshot_keeps_unowned_ready_article_and_promotes_persisted_one` | 同上 | AI-off 遗留 ready 文章不整批回滚（S9） |
+| `freeze_losing_an_article_releases_lease_without_charging_budget_and_retries_without_it` | `crates/runtime/tests/publish_freeze_tests.rs` | 冲突立即释放 lease、不耗预算、下轮排除 |
+| `pg_concurrent_freeze_of_the_same_article_serialises_on_the_article_lock` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 并发 freeze 由文章行锁串行化 |
+| `pg_ai_off_selection_excludes_article_owned_by_active_snapshot` | 同上 | PG AI-off 选稿排除 |
 | `freeze_transient_candidate_load_error_keeps_record_pending_and_next_run_freezes` | 同上 | 瞬时存储错误保态、下轮继续 |
 | `freeze_permanent_candidate_load_error_fails_record` | 同上 | 不可重试存储错误 → failed |
 | `render_advances_snapshot_frozen_to_rendered_when_items_exist` | `crates/runtime/tests/publish_render_tests.rs` | render happy |
