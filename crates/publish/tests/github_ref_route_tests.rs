@@ -155,7 +155,7 @@ async fn transport_failure_after_the_ref_patch_is_verified_against_head() {
                 })
                 .unwrap_or(0);
             let mut body = vec![0_u8; length];
-            let _ = socket.read_exact(&mut body).await;
+            socket.read_exact(&mut body).await.unwrap();
             let (status, reply) = if line.starts_with("PATCH ") {
                 patches += 1;
                 // Applied, but the answer never arrives.
@@ -193,8 +193,8 @@ async fn transport_failure_after_the_ref_patch_is_verified_against_head() {
                 "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
                 reply.len()
             );
-            let _ = socket.write_all(response.as_bytes()).await;
-            let _ = socket.shutdown().await;
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
             if ref_reads >= 2 && line.contains("/ai/2026-11-22.md?ref=new-commit ") {
                 break;
             }
