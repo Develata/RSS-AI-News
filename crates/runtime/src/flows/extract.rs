@@ -27,6 +27,10 @@ pub struct ExtractOptions {
     /// 由 CLI 从 `app.runtime.max_batches_per_run` 传入（F6-3）。
     /// 详见 docs-backup/design/config-schema.md §4.4。
     pub max_batches: u32,
+    /// Only claim entries of this category's sources (`ingest --category`,
+    /// plan/09 §2); `None` = every category. Entries of non-active sources are
+    /// never claimed.
+    pub category_key: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -224,7 +228,11 @@ impl ExtractFlow {
             let claimed = match self
                 .ctx
                 .feed_entry_repo
-                .claim_pending_fetch(&request, &excluded.iter().copied().collect::<Vec<_>>())
+                .claim_pending_fetch_in_scope(
+                    &request,
+                    &excluded.iter().copied().collect::<Vec<_>>(),
+                    opts.category_key.as_deref(),
+                )
                 .await
             {
                 Ok(claimed) => claimed,

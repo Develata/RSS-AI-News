@@ -60,6 +60,10 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `success_release_that_misses_reports_lease_lost` | 同上 | 成功 release 落空不报 Persisted |
 | `failed_permanent_release_reports_release_failed` | `crates/runtime/tests/extract_storage_failure_tests.rs` | release 报错为 ReleaseFailed + storage_failed |
 | `extract_storage_failures_fail_the_run_but_lost_leases_do_not` | `crates/cli/src/commands/ingest.rs`（单元测试） | extract 存储失败进入退出码 |
+| `category_scoped_extract_leaves_other_category_backlog_untouched` | `crates/runtime/tests/extract_tests.rs` | `ingest -C` 不碰其他分类积压 |
+| `claim_is_scoped_to_category_and_active_sources` | `crates/storage/tests/feed_entry_claim_scope_tests.rs` | 分类 + active 源过滤（SQLite） |
+| `unscoped_claim_method_keeps_its_contract` | 同上 | 无分类 claim 仍排除归档源 |
+| `pg_claim_is_scoped_to_category_and_active_sources` | `crates/storage/tests/feed_entry_pg_tests.rs` | 同上（PG，需 docker） |
 | `extract_writes_html_artifact_before_strategy` | 同上 | artifact 顺序 |
 | `max_batches_caps_loop_and_reports_reached_flag` | 同上 | 限批生效 |
 | `max_batches_zero_means_unlimited_until_queue_drained` | 同上 | 0 = 不限 |

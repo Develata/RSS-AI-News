@@ -120,14 +120,19 @@ impl FeedEntryRepository for FeedEntryRepo {
         RecentFeedEntryRepository::list_recent(self, filter).await
     }
 
-    async fn claim_pending_fetch(
+    async fn claim_pending_fetch_in_scope(
         &self,
         request: &ClaimRequest,
         exclude_ids: &[i64],
+        category_key: Option<&str>,
     ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
         match &self.pool {
-            StoragePool::Sqlite(p) => sqlite_claim_pending_fetch(p, request, exclude_ids).await,
-            StoragePool::Postgres(p) => pg_claim_pending_fetch(p, request, exclude_ids).await,
+            StoragePool::Sqlite(p) => {
+                sqlite_claim_pending_fetch(p, request, exclude_ids, category_key).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_claim_pending_fetch(p, request, exclude_ids, category_key).await
+            }
         }
     }
 
@@ -352,6 +357,7 @@ async fn sqlite_claim_pending_fetch(
     pool: &SqlitePool,
     request: &ClaimRequest,
     exclude_ids: &[i64],
+    category_key: Option<&str>,
 ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
     let cutoff = cooldown_cutoff(request.now);
     sqlx::query_as::<_, ClaimedFeedEntry>(CLAIM_PENDING_FETCH_SQLITE_SQL)
@@ -363,6 +369,7 @@ async fn sqlite_claim_pending_fetch(
         .bind(i64::from(request.batch_size))
         .bind(json_id_array(exclude_ids))
         .bind(cutoff)
+        .bind(category_key)
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)
@@ -674,6 +681,7 @@ async fn pg_claim_pending_fetch(
     pool: &PgPool,
     request: &ClaimRequest,
     exclude_ids: &[i64],
+    category_key: Option<&str>,
 ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
     sqlx::query_as::<_, ClaimedFeedEntry>(CLAIM_PENDING_FETCH_PG_SQL)
         .bind(&request.owner)
@@ -684,6 +692,7 @@ async fn pg_claim_pending_fetch(
         .bind(i64::from(request.batch_size))
         .bind(exclude_ids)
         .bind(cooldown_cutoff(request.now))
+        .bind(category_key)
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)

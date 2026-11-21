@@ -119,6 +119,8 @@ loop:
      WHERE state='pending_fetch' AND (lease_expires_at IS NULL OR lease_expires_at < now)
        AND (next_attempt_at IS NULL OR next_attempt_at <= now)
        AND id NOT IN excluded
+       AND source_id IN (SELECT id FROM feed_sources
+                         WHERE status='active' AND (:category IS NULL OR category_key=:category))
      ORDER BY discovered_at ASC LIMIT N RETURNING *
   2. 对每行：
      a. HTTP GET → raw HTML（超时/大小边界）
@@ -133,6 +135,10 @@ loop:
   3. claim 为空 → break；达到 max_batches → break；否则继续
      （retryable 失败**不**终止循环，见 §5.3）
 ```
+
+claim 只领取 `status='active'` 源的条目；`ingest --category X` 时只领取分类 X 的条目（2026-11-21，此前
+extract 不看分类与源状态，会抓取并改写其他分类及暂停源的积压）。暂停 / 归档源的待抓条目保持
+`pending_fetch`，源恢复 active 后照常领取。
 
 ### 5.1 batch_size 与 max_batches
 

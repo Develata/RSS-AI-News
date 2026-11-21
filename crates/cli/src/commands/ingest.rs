@@ -181,6 +181,8 @@ pub(crate) async fn run_loaded(
                 // 覆盖到该字段（F5-6），所以此处只是把 CLI > config > 默认
                 // 三层解析的结果直传到 flow。
                 max_batches: loaded.app.runtime.max_batches_per_run,
+                // `--category` scopes extract like it scopes ingest (plan/09 §2).
+                category_key: loaded.cli_overrides.category_filter.clone(),
             })
             .await
     };

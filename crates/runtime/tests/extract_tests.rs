@@ -78,6 +78,7 @@ async fn extract_persists_new_article_on_success() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<i64>) =
@@ -133,6 +134,7 @@ async fn extract_dedup_skipped_when_content_hash_matches_existing_article() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<i64>, Option<String>) =
@@ -176,6 +178,7 @@ async fn extract_falls_back_to_summary_when_strategy_chain_fails() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<i64>) =
@@ -212,6 +215,7 @@ async fn extract_marks_failed_when_strategy_and_fallback_both_fail() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let state: String = sqlx::query_scalar("SELECT state FROM feed_entries WHERE id = ?")
@@ -256,6 +260,7 @@ async fn extract_fetch_403_with_summary_persists_fallback() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<i64>) =
@@ -299,6 +304,7 @@ async fn extract_fetch_403_without_summary_fails_permanent() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<String>) =
@@ -373,6 +379,7 @@ async fn extract_fetch_5xx_with_summary_stays_retryable() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<String>) =
@@ -404,6 +411,7 @@ async fn extract_releases_retryable_on_5xx() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, i64, Option<String>) = sqlx::query_as(
@@ -449,6 +457,7 @@ async fn extract_retryable_on_final_attempt_folds_to_failed() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, i64, Option<String>) = sqlx::query_as(
@@ -493,6 +502,7 @@ async fn extract_marks_failed_on_4xx() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<String>) =
@@ -524,6 +534,7 @@ async fn extract_writes_html_artifact_before_strategy() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let artifact_count: i64 = sqlx::query_scalar(
@@ -562,6 +573,7 @@ async fn on_failure_retention_keeps_html_only_when_extraction_fails() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
         let artifact_count: i64 =
@@ -597,6 +609,7 @@ async fn on_failure_retention_links_html_to_the_summary_fallback_article() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let artifact_id: i64 = sqlx::query_scalar(
@@ -642,6 +655,7 @@ async fn on_failure_retention_keeps_html_when_a_strategy_is_retryable() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let artifact_count: i64 =
@@ -690,6 +704,7 @@ async fn always_retention_keeps_html_even_when_a_strategy_panics() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let artifact_count: i64 =
@@ -859,6 +874,7 @@ async fn max_batches_caps_loop_and_reports_reached_flag() {
             batch_size: 1,
             max_attempts: 1,
             max_batches: 2,
+            category_key: None,
         })
         .await;
 
@@ -901,6 +917,7 @@ async fn max_batches_zero_means_unlimited_until_queue_drained() {
             batch_size: 1,
             max_attempts: 1,
             max_batches: 0,
+            category_key: None,
         })
         .await;
 
@@ -974,6 +991,7 @@ async fn extract_live_tasks_are_bounded_by_concurrency() {
             batch_size: 20,
             max_attempts: 3,
             max_batches: 1,
+            category_key: None,
         })
         .await;
     assert_eq!(summary.claimed, 20);
@@ -1152,6 +1170,7 @@ fn opts(batch_size: u32, max_batches: u32) -> ExtractOptions {
         batch_size,
         max_attempts: 5,
         max_batches,
+        category_key: None,
     }
 }
 
@@ -1464,4 +1483,51 @@ async fn success_release_that_misses_reports_lease_lost() {
         "{summary:?}"
     );
     assert_eq!(entry_row(&pool, entry).await.0, "pending_fetch");
+}
+
+/// A10：`ingest -C ai` 的 extract 只领取 `ai` 分类的条目；其他分类的积压
+/// 不被抓取、不被修改（plan/09 §2）。
+#[tokio::test]
+async fn category_scoped_extract_leaves_other_category_backlog_untouched() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_a) = setup_base(&pool).await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_b = common::insert_source_with_category(
+        &pool,
+        config_id,
+        "other",
+        "other-source",
+        "https://example.com/other.xml",
+    )
+    .await;
+    let in_a = seed_pending_fetch_entry(&pool, source_a, "uid-a", "hash-a", None).await;
+    let in_b = seed_pending_fetch_entry(&pool, source_b, "uid-b", "hash-b", None).await;
+    let flow = flow(
+        pool.clone(),
+        responses([
+            (in_a, Ok(raw(in_a, b"<html>a</html>"))),
+            (in_b, Ok(raw(in_b, b"<html>b</html>"))),
+        ]),
+        vec![per_entry_success_strategy()],
+    );
+
+    let summary = flow
+        .run(ExtractOptions {
+            category_key: Some("ai".to_string()),
+            ..opts(10, 0)
+        })
+        .await;
+    let row_b: (String, i64) =
+        sqlx::query_as("SELECT state, attempt_count FROM feed_entries WHERE id = ?")
+            .bind(in_b)
+            .fetch_one(&pool)
+            .await
+            .expect("entry b");
+
+    assert_eq!((summary.claimed, summary.persisted), (1, 1), "{summary:?}");
+    assert_eq!(
+        row_b,
+        ("pending_fetch".to_string(), 0),
+        "category B untouched"
+    );
 }

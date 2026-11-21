@@ -170,12 +170,15 @@ impl FeedEntryRepository for FlakyFeedEntryRepo {
     ) -> Result<Vec<RecentFeedEntry>, StorageError> {
         FeedEntryRepository::list_recent(&self.inner, filter).await
     }
-    async fn claim_pending_fetch(
+    async fn claim_pending_fetch_in_scope(
         &self,
         request: &ClaimRequest,
         exclude_ids: &[i64],
+        category_key: Option<&str>,
     ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
-        self.inner.claim_pending_fetch(request, exclude_ids).await
+        self.inner
+            .claim_pending_fetch_in_scope(request, exclude_ids, category_key)
+            .await
     }
     async fn release_success(
         &self,
@@ -370,6 +373,7 @@ fn opts(max_attempts: u32) -> ExtractOptions {
         batch_size: 1,
         max_attempts,
         max_batches: 0,
+        category_key: None,
     }
 }
 
