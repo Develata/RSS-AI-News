@@ -134,3 +134,62 @@ async fn body_at_limit_is_preserved_exactly() {
         .expect("exact limit succeeds");
     assert_eq!(response.body_bytes, HTML_BODY.as_bytes());
 }
+
+// === R2-S10: 429 carries the server's Retry-After ===
+
+async fn status_429(retry_after: Option<&str>) -> ExtractorError {
+    let server = MockServer::start().await;
+    let mut response = ResponseTemplate::new(429);
+    if let Some(value) = retry_after {
+        response = response.insert_header("Retry-After", value);
+    }
+    Mock::given(method("GET"))
+        .and(path("/limited"))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+    ReqwestHtmlFetcher::new(1024)
+        .unwrap()
+        .fetch_html(&task(&server, "/limited"))
+        .await
+        .expect_err("429")
+}
+
+#[tokio::test]
+async fn retry_after_seconds_on_429_are_kept() {
+    let error = status_429(Some("3600")).await;
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(3600)));
+    assert_eq!(
+        rss_ai_news_domain::error::ClassifiedError::error_kind(&error),
+        "http_429"
+    );
+    assert!(rss_ai_news_domain::error::ClassifiedError::is_retryable(
+        &error
+    ));
+}
+
+#[tokio::test]
+async fn retry_after_http_date_on_429_becomes_a_delay() {
+    let at = std::time::SystemTime::now() + Duration::from_secs(1800);
+    let error = status_429(Some(&httpdate::fmt_http_date(at))).await;
+    let delay = error.retry_after().expect("delay");
+    // HTTP dates have whole-second precision.
+    assert!(
+        delay >= Duration::from_secs(1790) && delay <= Duration::from_secs(1801),
+        "{delay:?}"
+    );
+}
+
+#[tokio::test]
+async fn missing_or_invalid_retry_after_on_429_is_none() {
+    assert_eq!(status_429(None).await.retry_after(), None);
+    assert_eq!(status_429(Some("soon")).await.retry_after(), None);
+    assert_eq!(status_429(Some("-5")).await.retry_after(), None);
+    // A date in the past means "now": no extra wait.
+    assert_eq!(
+        status_429(Some("Sun, 06 Nov 1994 08:49:37 GMT"))
+            .await
+            .retry_after(),
+        Some(Duration::ZERO)
+    );
+}

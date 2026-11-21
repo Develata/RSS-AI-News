@@ -192,7 +192,7 @@ INSERT 直接写入 `feed_entries`：数据库以 `(source_id, feed_entry_uid)` 
 | 失败点 | 错误变体 | retryable | 处理 |
 |---|---|---|---|
 | HTTP 超时 | `FeedError::HttpTimeout` | true | source 跳过，下次再试 |
-| 429 | `FeedError::HttpStatus { 429 }`（`http_429`） | true | 同超时 |
+| 429 | `FeedError::HttpStatus { 429 }`（`http_429`） | true | 同超时。**已知限制（R2-S10，延后）**：feed 侧不保存 `Retry-After`，下一轮 run 可能在服务器要求的等待期内再次请求；跨 run 生效需要 `feed_sources` 新列，留作后续迁移。extract 侧已按 Retry-After 冷却（[02-extract](./02-extract.md)） |
 | 其余 4xx | `FeedError::HttpStatus { 4xx }` | false | source 仍 active，但本次跳过 |
 | 5xx | `FeedError::HttpStatus { 5xx }` | true | 同超时 |
 | 过大 (`> max_payload_bytes`) | `FeedError::TooLarge` | false | source 跳过 |

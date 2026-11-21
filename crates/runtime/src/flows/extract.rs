@@ -378,7 +378,9 @@ impl ExtractFlow {
                         }
                     }
                 }
-                return entry.release_failure(&error, now).await;
+                return entry
+                    .release_failure_after(&error, error.retry_after(), now)
+                    .await;
             }
         };
 
@@ -657,6 +659,18 @@ impl EntryRelease<'_> {
         error: &(dyn ClassifiedError + Sync),
         now: OffsetDateTime,
     ) -> ExtractEntryOutcome {
+        self.release_failure_after(error, None, now).await
+    }
+
+    /// [`Self::release_failure`] with the server's requested wait (a 429's
+    /// `Retry-After`, R2-S10): the cooldown ends at the later of the local
+    /// backoff and `released_at + retry_after`.
+    async fn release_failure_after(
+        &self,
+        error: &(dyn ClassifiedError + Sync),
+        retry_after: Option<StdDuration>,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
         let message = error.display_user();
         let kind = error.error_kind().to_string();
         if !error.is_retryable() {
@@ -677,7 +691,7 @@ impl EntryRelease<'_> {
                 &message,
                 &kind,
                 self.retry.max_attempts,
-                self.retry.next_attempt_at(released_at),
+                self.retry.next_attempt_at(released_at, retry_after),
                 released_at,
             )
             .await
@@ -853,10 +867,20 @@ struct RetrySchedule {
 }
 
 impl RetrySchedule {
-    /// When a retryable failure released at `now` becomes claimable again.
-    /// The releasing run itself never retries the entry (it stays excluded).
-    fn next_attempt_at(&self, now: OffsetDateTime) -> OffsetDateTime {
-        now + retry_backoff(self.attempt_count)
+    /// When a retryable failure released at `now` becomes claimable again:
+    /// the later of the local backoff and the server's `retry_after`
+    /// (R2-S10). The releasing run itself never retries the entry (it stays
+    /// excluded).
+    fn next_attempt_at(
+        &self,
+        now: OffsetDateTime,
+        retry_after: Option<StdDuration>,
+    ) -> OffsetDateTime {
+        let backoff = now + retry_backoff(self.attempt_count);
+        let server = retry_after
+            .and_then(|wait| Duration::try_from(wait).ok())
+            .and_then(|wait| now.checked_add(wait));
+        server.map_or(backoff, |server| server.max(backoff))
     }
 }
 
@@ -984,8 +1008,25 @@ mod tests {
             max_attempts: 5,
             attempt_count,
         };
-        assert_eq!(retry(1).next_attempt_at(now), now + Duration::minutes(10));
-        assert_eq!(retry(3).next_attempt_at(now), now + Duration::minutes(40));
+        assert_eq!(
+            retry(1).next_attempt_at(now, None),
+            now + Duration::minutes(10)
+        );
+        assert_eq!(
+            retry(3).next_attempt_at(now, None),
+            now + Duration::minutes(40)
+        );
+        // R2-S10: the later of backoff and the server's Retry-After.
+        let hour = StdDuration::from_secs(3600);
+        assert_eq!(
+            retry(1).next_attempt_at(now, Some(hour)),
+            now + Duration::hours(1)
+        );
+        let minute = StdDuration::from_secs(60);
+        assert_eq!(
+            retry(1).next_attempt_at(now, Some(minute)),
+            now + Duration::minutes(10)
+        );
     }
 
     #[test]

@@ -261,7 +261,7 @@ rss-ai-news replay --kind html --key <feed_entry_id> --diff
 | 失败点 | 错误变体 | retryable | 处理 |
 |---|---|---|---|
 | HTML fetch 超时 | `ExtractorError::HttpTimeout` | true | 回 `pending_fetch` + 冷却（§5.3） |
-| HTML 429 | `ExtractorError::HttpStatus { 429 }`（`http_429`） | true | 回 `pending_fetch` + 冷却（§5.3），不消费摘要 |
+| HTML 429 | `ExtractorError::RateLimited { retry_after_seconds }`（`http_429`） | true | 回 `pending_fetch` + 冷却（§5.3），不消费摘要；`next_attempt_at = max(本地退避, 释放时刻 + Retry-After)`——Retry-After 取秒数或 HTTP-date（三种 RFC 9110 格式，过去的日期 = 0），缺失 / 无效则只用本地退避，上限 1 天（R2-S10） |
 | HTML 其余 4xx | `ExtractorError::HttpStatus { 4xx }` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | HTML 5xx | `ExtractorError::HttpStatus { 5xx }` | true | 回 `pending_fetch` + 冷却（§5.3） |
 | payload 过大 | `ExtractorError::TooLarge` | false | 尝试 fallback（W18）；无摘要则 `failed` |

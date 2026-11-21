@@ -356,6 +356,51 @@ async fn extract_fetch_429_with_summary_stays_retryable() {
     assert!(row.2.is_some(), "cooldown honoured");
 }
 
+/// R2-S10: the cooldown is the later of the local backoff and the server's
+/// Retry-After (3600 s here > the 10 min first backoff; 60 s < it).
+#[tokio::test]
+async fn extract_429_cooldown_honours_retry_after() {
+    for (retry_after, expect_at_least) in [(3600_u64, 3600_i64), (60, 600)] {
+        let (_dir, pool) = make_test_pool().await;
+        let (_rule_id, source_id) = setup_base(&pool).await;
+        let entry_id = seed_pending_fetch_entry(
+            &pool,
+            source_id,
+            &format!("uid-429-ra-{retry_after}"),
+            &format!("hash-429-ra-{retry_after}"),
+            None,
+        )
+        .await;
+        let flow = flow(
+            pool.clone(),
+            responses([(
+                entry_id,
+                Err(ExtractorError::RateLimited {
+                    retry_after_seconds: Some(retry_after),
+                }),
+            )]),
+            vec![success_strategy("unused")],
+        );
+        let before = time::OffsetDateTime::now_utc();
+
+        flow.run(opts(1, 0)).await;
+
+        let (kind, next): (Option<String>, time::OffsetDateTime) = sqlx::query_as(
+            "SELECT last_error_kind, next_attempt_at FROM feed_entries WHERE id = ?",
+        )
+        .bind(entry_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(kind.as_deref(), Some("http_429"));
+        let wait = (next - before).whole_seconds();
+        assert!(
+            wait >= expect_at_least && wait <= expect_at_least + 5,
+            "retry_after={retry_after}: waits {wait}s"
+        );
+    }
+}
+
 #[tokio::test]
 async fn extract_fetch_5xx_with_summary_stays_retryable() {
     let (_dir, pool) = make_test_pool().await;

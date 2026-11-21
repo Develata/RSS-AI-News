@@ -80,6 +80,18 @@ impl HtmlFetcher for ReqwestHtmlFetcher {
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(ToOwned::to_owned);
+        if status.as_u16() == 429 {
+            let retry_after_seconds = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| {
+                    crate::error::parse_retry_after(value, std::time::SystemTime::now())
+                });
+            return Err(ExtractorError::RateLimited {
+                retry_after_seconds,
+            });
+        }
         if !status.is_success() {
             return Err(ExtractorError::HttpStatus {
                 code: status.as_u16(),
