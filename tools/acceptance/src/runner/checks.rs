@@ -388,6 +388,9 @@ const COMPOSE_VERSION_VARIABLE: &str = "${RSS_AI_NEWS_VERSION:-";
 /// Every image version named in `DEPLOYMENT_VERSION_FILES` must be the
 /// release candidate, each file must name at least one (so a format change
 /// cannot pass vacuously), and the compose file must not hard-code one.
+/// The compose file's effective scheduler image (the
+/// `services.rss-ai-news-scheduler.image` value, not a comment) must also be
+/// exactly [`compose_scheduler_image`] (R3-10).
 pub(crate) fn check_deployment_image_versions(
     repo_root: &Path,
     expected: &str,
@@ -400,7 +403,7 @@ pub(crate) fn check_deployment_image_versions(
         if references.is_empty() {
             problems.push(format!("{file}: names no {IMAGE_PREFIX}<version> image"));
         }
-        let compose = file.ends_with(".yml");
+        let compose = *file == COMPOSE_FILE;
         for reference in references {
             if compose && !reference.from_variable {
                 problems.push(format!(
@@ -415,6 +418,19 @@ pub(crate) fn check_deployment_image_versions(
                 ));
             }
         }
+        if compose {
+            let wanted = compose_scheduler_image(expected);
+            match compose_service_images(&content, COMPOSE_SCHEDULER_SERVICE).as_slice() {
+                [(_, image)] if *image == wanted => {}
+                [(line, image)] => problems.push(format!(
+                    "{file}:{line}: services.{COMPOSE_SCHEDULER_SERVICE}.image is {image}, expected {wanted}"
+                )),
+                images => problems.push(format!(
+                    "{file}: expected one services.{COMPOSE_SCHEDULER_SERVICE}.image, found {}",
+                    images.len()
+                )),
+            }
+        }
     }
     if problems.is_empty() {
         Ok(())
@@ -423,6 +439,63 @@ pub(crate) fn check_deployment_image_versions(
             "deployment image versions do not match {expected}: {problems:?}"
         ))
     }
+}
+
+pub(crate) const COMPOSE_FILE: &str = "docker/docker-compose.scheduler.yml";
+pub(crate) const COMPOSE_SCHEDULER_SERVICE: &str = "rss-ai-news-scheduler";
+
+/// The one accepted value of the compose scheduler service's `image:`: the
+/// version variable with the candidate as its complete default, and the
+/// `-scheduler` suffix.
+pub(crate) fn compose_scheduler_image(expected: &str) -> String {
+    format!("{IMAGE_PREFIX}{COMPOSE_VERSION_VARIABLE}{expected}}}-scheduler")
+}
+
+/// `(line, value)` of every `image:` key directly under `services.<service>`
+/// in a compose file, by indentation (comment and blank lines ignored, a
+/// trailing ` # comment` and quotes stripped). Nested keys of the service
+/// (e.g. under `environment:`) are not its image.
+fn compose_service_images(content: &str, service: &str) -> Vec<(usize, String)> {
+    let mut images = Vec::new();
+    let mut in_services = false;
+    // Indent of the service's key line, and of its direct children.
+    let mut service_indent: Option<usize> = None;
+    let mut child_indent: Option<usize> = None;
+    for (index, raw) in content.lines().enumerate() {
+        let trimmed = raw.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = raw.len() - trimmed.len();
+        let key_line = trimmed.trim_end();
+        if indent == 0 {
+            in_services = key_line == "services:";
+            service_indent = None;
+            continue;
+        }
+        if !in_services {
+            continue;
+        }
+        if let Some(own) = service_indent
+            && indent <= own
+        {
+            service_indent = None;
+        }
+        if service_indent.is_none() {
+            if key_line == format!("{service}:") {
+                service_indent = Some(indent);
+                child_indent = None;
+            }
+            continue;
+        }
+        let children = *child_indent.get_or_insert(indent);
+        if indent == children
+            && let Some(value) = trimmed.strip_prefix("image:")
+        {
+            images.push((index + 1, value_of(value)));
+        }
+    }
+    images
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -435,22 +508,31 @@ struct ImageVersionReference {
 /// `ghcr.io/develata/rss-ai-news:X.Y.Z[-scheduler]` and
 /// `ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-X.Y.Z}[-scheduler]`
 /// references with 1-based line numbers. Other tags (`<tag>`, `latest`) are
-/// not version pins.
+/// not version pins. The whole tag is the version: `0.10.4-rc.1` is reported
+/// as such, not read as its `0.10.4` prefix (R3-10); only a `-scheduler`
+/// suffix and a sentence-ending `.` are stripped.
 fn image_version_references(content: &str) -> Vec<ImageVersionReference> {
+    let is_tag_char = |ch: char| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_';
     let mut references = Vec::new();
     for (index, line) in content.lines().enumerate() {
         for (offset, _) in line.match_indices(IMAGE_PREFIX) {
             let tag = &line[offset + IMAGE_PREFIX.len()..];
-            let (tag, from_variable) = match tag.strip_prefix(COMPOSE_VERSION_VARIABLE) {
-                Some(rest) => (rest, true),
-                None => (tag, false),
+            let (version, from_variable) = match tag.strip_prefix(COMPOSE_VERSION_VARIABLE) {
+                Some(rest) => {
+                    let Some((default, after)) = rest.split_once('}') else {
+                        continue;
+                    };
+                    let suffix_end = after.find(|ch| !is_tag_char(ch)).unwrap_or(after.len());
+                    (format!("{default}{}", &after[..suffix_end]), true)
+                }
+                None => {
+                    let end = tag.find(|ch| !is_tag_char(ch)).unwrap_or(tag.len());
+                    (tag[..end].to_string(), false)
+                }
             };
-            let version = tag
-                .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
-                .next()
-                .unwrap_or_default()
-                .trim_end_matches('.');
-            if version.split('.').count() == 3 && version.split('.').all(|part| !part.is_empty()) {
+            let version = version.trim_end_matches('.');
+            let version = version.strip_suffix("-scheduler").unwrap_or(version);
+            if version.starts_with(|ch: char| ch.is_ascii_digit()) {
                 references.push(ImageVersionReference {
                     line: index + 1,
                     version: version.to_string(),
@@ -748,9 +830,20 @@ mod tests {
     }
 
     use super::{
-        DEPLOYMENT_VERSION_FILES, check_deployment_image_versions, image_version_references,
+        COMPOSE_SCHEDULER_SERVICE, DEPLOYMENT_VERSION_FILES, check_deployment_image_versions,
+        compose_scheduler_image, compose_service_images, image_version_references,
         workspace_version,
     };
+
+    /// A compose file whose scheduler service uses `image`, with the
+    /// candidate version also named in a comment above it.
+    fn compose_with(image: &str) -> String {
+        format!(
+            "# docker run ghcr.io/develata/rss-ai-news:${{RSS_AI_NEWS_VERSION:-0.10.4}} migrate run\n\
+             services:\n  {COMPOSE_SCHEDULER_SERVICE}:\n    # image: the scheduler image\n\
+             \x20   image: {image}\n    environment:\n      - image: not-the-service-image\n"
+        )
+    }
 
     #[test]
     fn image_version_references_parse_literal_and_variable_tags() {
@@ -758,7 +851,9 @@ mod tests {
             "image: ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4}-scheduler\n\
              | `ghcr.io/develata/rss-ai-news:<tag>` | `ghcr.io/develata/rss-ai-news:latest` |\n\
              docker run ghcr.io/develata/rss-ai-news:0.7.0 \\\n\
-             see ghcr.io/develata/rss-ai-news:0.10.4.\n",
+             see ghcr.io/develata/rss-ai-news:0.10.4.\n\
+             ghcr.io/develata/rss-ai-news:0.10.4-rc.1 and ghcr.io/develata/rss-ai-news:0.10.4-scheduler\n\
+             ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4-rc.1}-scheduler\n",
         );
         let found = references
             .iter()
@@ -775,8 +870,65 @@ mod tests {
             vec![
                 (1, "0.10.4", true),
                 (3, "0.7.0", false),
-                (4, "0.10.4", false)
+                (4, "0.10.4", false),
+                (5, "0.10.4-rc.1", false),
+                (5, "0.10.4", false),
+                (6, "0.10.4-rc.1", true)
             ]
+        );
+    }
+
+    #[test]
+    fn compose_service_image_ignores_comments_and_nested_keys() {
+        let compose = compose_with("ghcr.io/develata/rss-ai-news:latest-scheduler # pinned");
+        assert_eq!(
+            compose_service_images(&compose, COMPOSE_SCHEDULER_SERVICE),
+            vec![(
+                5,
+                "ghcr.io/develata/rss-ai-news:latest-scheduler".to_string()
+            )]
+        );
+        assert!(compose_service_images("image: x\n", COMPOSE_SCHEDULER_SERVICE).is_empty());
+    }
+
+    /// R3-10: the comment names the candidate, but the service runs another
+    /// image; formerly the whole-text scan passed it.
+    #[test]
+    fn deployment_versions_check_the_effective_compose_image() {
+        for (name, image, expected_error) in [
+            (
+                "latest",
+                "ghcr.io/develata/rss-ai-news:latest-scheduler",
+                "services.rss-ai-news-scheduler.image is ghcr.io/develata/rss-ai-news:latest-scheduler",
+            ),
+            (
+                "runtime",
+                "ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4}",
+                "services.rss-ai-news-scheduler.image is ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4},",
+            ),
+            (
+                "rc",
+                "ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4-rc.1}-scheduler",
+                "names 0.10.4-rc.1, expected 0.10.4",
+            ),
+            (
+                "other-variable",
+                "ghcr.io/develata/rss-ai-news:${OTHER:-0.10.4}-scheduler",
+                "services.rss-ai-news-scheduler.image is",
+            ),
+        ] {
+            let root = deployment_repo(
+                name,
+                &compose_with(image),
+                "ghcr.io/develata/rss-ai-news:0.10.4\n",
+            );
+            let error = check_deployment_image_versions(&root, "0.10.4").unwrap_err();
+            assert!(error.contains(expected_error), "{name}: {error}");
+            fs::remove_dir_all(root).unwrap();
+        }
+        assert_eq!(
+            compose_scheduler_image("0.10.4"),
+            "ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4}-scheduler"
         );
     }
 
@@ -805,7 +957,7 @@ mod tests {
     fn deployment_versions_accept_the_candidate() {
         let root = deployment_repo(
             "ok",
-            "image: ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4}-scheduler\n",
+            &compose_with("ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4}-scheduler"),
             "  ghcr.io/develata/rss-ai-news:0.10.4 \\\n",
         );
         assert_eq!(check_deployment_image_versions(&root, "0.10.4"), Ok(()));
@@ -816,13 +968,13 @@ mod tests {
     fn deployment_versions_reject_stale_hard_coded_and_missing_versions() {
         let root = deployment_repo(
             "stale",
-            "image: ghcr.io/develata/rss-ai-news:0.7.0-scheduler\n",
+            &compose_with("ghcr.io/develata/rss-ai-news:0.7.0-scheduler"),
             "no image here\n",
         );
         let error = check_deployment_image_versions(&root, "0.10.4").unwrap_err();
         for expected in [
-            "docker/docker-compose.scheduler.yml:1: hard-codes 0.7.0",
-            "docker/docker-compose.scheduler.yml:1: names 0.7.0, expected 0.10.4",
+            "docker/docker-compose.scheduler.yml:5: hard-codes 0.7.0",
+            "docker/docker-compose.scheduler.yml:5: names 0.7.0, expected 0.10.4",
             "docs/plan/12-deployment.md: names no ghcr.io/develata/rss-ai-news:<version> image",
         ] {
             assert!(error.contains(expected), "{expected} not in {error}");

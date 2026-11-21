@@ -52,7 +52,9 @@ cargo acceptance run --lane release --expected-version 0.10.4
 | `sqlite` | ✓ | ✓ | release binary、SQLite migrate run/check、CLI contract smokes |
 | `postgres` |  | ✓ | storage `--ignored`（只跑 PG / Docker 用例，普通用例由 workspace lane 覆盖）与 CLI migrate parity；要求 `DATABASE_URL` + Docker |
 | `docker` |  | ✓ | runtime/debug/scheduler build 与 container smokes |
-| `release` | ✓ | ✓ | workspace/lock/binary/README/version identity、部署镜像版本（compose `RSS_AI_NEWS_VERSION` 默认值与部署文档示例，`deployment-versions`）与 Git diff check |
+| `release` | ✓ | ✓ | workspace/lock/binary/README/version identity、部署镜像版本（compose `RSS_AI_NEWS_VERSION` 默认值与部署文档示例，`deployment-versions`；compose 另单独校验
+`services.rss-ai-news-scheduler.image` 的实际值必须恰为 `ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-<候选>}-scheduler`，
+注释不算数，`0.10.4-rc.1` 之类整段 tag 不再按数字前缀读成 `0.10.4`）与 Git diff check |
 
 ## CLI JSON 输出契约 gate
 
