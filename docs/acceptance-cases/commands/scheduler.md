@@ -54,7 +54,7 @@ scheduler 镜像与 entrypoint 的验收**没有**专门的 Rust 测试；验收
 |---|---|
 | 镜像构建可重复 | `.github/workflows/ci.yml` 的 `docker-build` job |
 | 双镜像发布 | `.github/workflows/release.yml`（push tag 触发） |
-| env 模式真实执行一个 job、含空格参数不被拆分 | `ci.yml` `docker-build` 的 `smoke scheduler runs a job` 步骤与 docker lane 的 `docker-scheduler-job-contract`：每 2 s 一次的 7 段表达式，命令 `validate-config 'spaced arg'`（clap 在读配置前即拒绝，无副作用），断言 `docker logs` 含 `unexpected argument 'spaced arg'`，最多等 75 s |
+| env 模式真实执行一个 job、含空格参数不被拆分 | `ci.yml` `docker-build` 的 `smoke scheduler runs a job` 步骤与 docker lane 的 `docker-scheduler-job-contract`：每 2 s 一次的 7 段表达式，命令 `validate-config 'spaced arg'`（clap 在读配置前即拒绝，无副作用），断言 75 s 期限内的 `docker logs` 轮询见到 `unexpected argument 'spaced arg'`（期限后读到的日志只作诊断，不判通过） |
 | 目录型 / 悬空符号链接 crontab 拒绝、指向文件的符号链接可用、换行与回车拒绝、空文件降级、缺 env 失败、文件模式优先 | `docker/scheduler-entrypoint-test.sh`（static lane 的 `scheduler-entrypoint` 步骤；把 entrypoint 复制一份、supercronic 换成打印参数的 stub 后运行，不启动真实调度） |
 | 触发命令 single-shot 语义 | 由 runtime 镜像的全套 Rust 测试间接覆盖（每次 cron 触发即一次完整 run） |
 

@@ -108,29 +108,52 @@ Jobs：
   `release-promotion.sh existing` 读 registry，已存在且 `org.opencontainers.image.revision` 等于本次 commit 的版本 tag 直接复用其
   digest、不重建（重建会因 `org.opencontainers.image.created` 变化得到新 digest），只补建缺失的一侧；已存在但来自别的 commit
   （或版本 label 不符）则失败、不覆盖。job 级 `concurrency: release-publish-<repo>-<tag>`，同一版本的重跑串行。
+  第一次推送之前（持有该版本的锁时）先用 `release-promotion.sh tag-commit` 核对 `git ls-remote origin refs/tags/vV
+  'refs/tags/vV^{}'`：远端 tag 解引用后的 commit 必须等于本次 run 的 `GITHUB_SHA`，tag 缺失或已指向别的 commit 即停止、不推任何
+  镜像（R3G-B4）。原因：重跑沿用原始 `GITHUB_SHA`，`vV` 若已移到新 commit，旧 run 会先占用不可变的版本 tag，使新 commit 的
+  正常 run 无法发布。核对与推送之间仍有一个很短的窗口（tag 恰在其间移动），无法在 workflow 内消除；tag 保护规则才能根除。
 - `promote-tags`（`needs: [publish-image]`）—— 用
   [`.github/scripts/release-promotion.sh`](../../.github/scripts/release-promotion.sh) `reconcile` 把别名**对齐到最高的已发布
   stable 版本**，与触发它的是哪个 tag 无关（R3-2 / R3-3 / R3-4 / R3-22）：
-  - 输入：`git ls-remote --tags`（annotated tag 取 `^{}` 行的 commit）。只认 `vX.Y.Z`，每段为 `0` 或无前导零的数字。
-  - "已发布"：`V` 与 `V-scheduler` 两个版本 tag 都在 registry 中，且版本 label = `V`、revision label = 该 tag 的 commit；只有一侧镜像
+  - 输入：`git ls-remote --tags`（annotated tag 取 `^{}` 行的 commit）。只认 `vX.Y.Z`，每段为 `0` 或无前导零的数字，位数不限（与 Rust 验收的
+    `validate_version` 同一规则）；比较时逐段先比位数、再按数字串比较，不经浮点数，超过 2^53 也精确（R3G-S8）。
+  - "已发布"：`V` 与 `V-scheduler` 两个版本 tag 都在 registry 中，版本 label 分别**恰为** `V` 与 `V-scheduler`（metadata-action
+    生成的值，不再剥掉 `-scheduler` 后比较，因此两个 tag 互相指错的镜像不算发布，`existing` 也不会复用，R3G-B2），revision label 都
+    = 该 tag 的 commit；只有一侧镜像
     的版本（发布未完成或失败）跳过，取下一个更低的版本。digest 一律从 registry 按版本 tag 读，不信任上一 job 的输出。
   - 目标：`latest[-scheduler]` → 全局最高已发布版本；`X.Y[-scheduler]` → 触发版本所在线与 `latest` 所在线各自的最高已发布版本。
     因此较低版本的 run 也会把 `latest` / `2.0` 推到更高版本（排队中被挤掉的高版本 run 不再造成漏晋升）。
   - 不回退：别名当前的 `org.opencontainers.image.version` label 高于目标时保持不动（例如更高的 tag 被删除后重跑旧 tag）。
-    存在但没有合法版本 label 的别名、任何非"tag 不存在"的读取错误都会使 job 失败且不再写入（fail closed）。
+    别名同样按角色校验 label（runtime 别名恰为 `C`、scheduler 别名恰为 `C-scheduler`）；保持不动的较高一对还须 revision 相同，
+    且 digest 分别等于 `C` / `C-scheduler` 精确版本 tag 的 digest（精确 tag 缺失也算失败），否则 job 失败、零写入（R3G-B2）。
+    先读后写（R3G-B3）：本次涉及的**全部**别名（每条线的 runtime 与 scheduler）在第一次写入前读完并校验；存在但没有合法版本
+    label 的别名、任何非"tag 不存在"的读取错误、或一对别名按计划会停在不同版本，都使 job 失败且**零写入**（fail closed）。
   - 写入：每条线先写 runtime 别名再写 scheduler 别名，`docker buildx imagetools create --prefer-index=false`（单一来源按原样
     复制，别名 digest = 版本 tag digest；不加该参数时普通 manifest 会被包成新 index、digest 改变），写后逐个读回比对 digest。
     两次写之间被取消 / 超时 / 第二次写失败时，别名可能暂时一新一旧（registry 写入无法原子化）；**重跑该 promote-tags job**
-    （或之后任一 release 的 promote-tags）会幂等补齐。最后若 runtime 与 scheduler 别名停在不同版本，job 失败。
+    会幂等补齐（R3G-S3）。每次 reconcile 只处理三组别名：`latest`、触发版本所在的 `X.Y` 线、`latest` 所在的 `X.Y` 线，所以
+    别的 release 的 run 只在受影响的别名属于这三组时才能代为补齐：`latest` 与其所在线可由任一 release 的 run 补齐，其他
+    `X.Y` 线必须重跑**该 `X.Y` 线**某个 release 的 promote-tags。最后若 runtime 与 scheduler 别名停在不同版本，job 失败。
+    中断后若较高的 `vC` tag 又被删除，低版本的重跑会看到一侧别名停在 `C`（高于目标，保持不动）、另一侧仍旧，于是按"会停在不同
+    版本"零写入失败，不能自动补齐。恢复前提是 `C` / `C-scheduler` 两个精确版本镜像仍在 registry：把 `vC` 按原 commit 重新推送
+    （`git push origin <commit>:refs/tags/vC`；commit 不变，版本 tag 的 revision 校验仍成立），推送会触发 `vC` 的新 release run，
+    其 publish-image 复用已有版本 tag、promote-tags 补齐别名；或由维护者用
+    `docker buildx imagetools create --prefer-index=false -t <image>:<alias>-scheduler <image>@<C-scheduler 的 digest>` 把落后的
+    一侧对齐到 `C`，再重跑该别名所在 `X.Y` 线（`latest` 时任一）现行 release 的 promote-tags 复核。
   - 串行：job 级 `concurrency: release-promote-<repo>`、`cancel-in-progress: false`、`queue: max`（最多 100 个等待中的 run，按
     FIFO；默认的单个 pending 名额会让后到的 run 取消正在等待的 run）。`queue` 属于 GitHub 的 job concurrency schema，actionlint
-    1.7.12 尚不认识，见 `.github/actionlint.yaml`。正确性不依赖排队：每次 reconcile 都对齐到最高已发布版本；排队溢出或被人工
-    取消时，重跑任一 release 的 promote-tags 即可。
+    1.7.12 尚不认识，见 `.github/actionlint.yaml`。`latest` 的正确性不依赖排队：每次 reconcile 都把它对齐到最高已发布版本。
+    排队溢出或被人工取消的 run 若是某条 `X.Y` 线的唯一晋升，则必须重跑**该 `X.Y` 线**某个 release 的 promote-tags；别的线的
+    run 不会处理它（R3G-S3）。
   - Buildx CLI 由 `setup-buildx-action` 固定为 `v0.38.2`（两个镜像 job 相同）。
   - 测试：static lane 的 `release-promotion` 步骤用文件后端的假 registry（`release-registry-fake.sh`）离线覆盖上述规则，含低版本 run
     晋升最高版本、删除更高 tag 不回退、别名 label 校验、读错误零写入、scheduler 写失败后重跑补齐、重跑复用版本 tag。真实适配器
-    `release-registry.sh`（imagetools + jq）已在本地 `registry:2` 上对带 provenance 的 index 与普通 manifest 验证；GHCR 上的行为
-    （尤其 tag 不存在时的报错文本）要到首个真实 tag 才能确认。
+    `release-registry.sh`（imagetools + jq）的"缺失"判定只看该 tag 自身的顶层 manifest 请求（`imagetools inspect --raw`，
+    Buildx v0.38.2 只解析并取顶层 manifest）：只有它报 `not found` / `manifest unknown` 才算 tag 不存在；顶层已解析后，digest、
+    子 manifest 或镜像 config 的任何读取失败（containerd 对缺失子对象同样报 `not found`）都是读错误、使 job 失败（R3G-B1）。
+    同一测试脚本用 stub `docker` 覆盖这两类情形；本地 `registry:2`（Buildx v0.38.1）上也实测过：缺失 tag 退出 3，删去镜像
+    config blob 后旧实现误报缺失（退出 3）、现实现退出 1。适配器此前已在本地 `registry:2` 上对带 provenance 的 index 与普通
+    manifest 验证；GHCR 上的行为（尤其 tag 不存在时的报错文本）要到首个真实 tag 才能确认。
   四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit 不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
 
 ### 修复前 release run 的重跑边界（R3-1）
@@ -146,8 +169,9 @@ GitHub 重跑一个 workflow run 时沿用**原始**的 commit、ref 与该 comm
   有 write 角色、不给其他仓库授权；`GITHUB_TOKEN` 的 `packages: write` 只在现行 `release.yml` 的两个镜像 job 上声明。
 - 想从技术上排除旧 run 被重跑，只能删除这些 run（`gh run delete <run-id>`）。这会同时删除其日志与发布证据链接，属于不可逆的
   批量删除，需由维护者单独决定；本仓库目前**不**这样做，靠上面的约定。
-- 若旧 run 已被误重跑：重跑任一现行 release 的 `promote-tags` job。reconcile 只认别名的版本 label 与已发布版本，会把被旧 run
-  拉低的 `latest` / `X.Y` 重新对齐到最高已发布版本。旧 run 还会重建并覆盖它自己的 `X.Y.Z` / `X.Y.Z-scheduler`（digest 因重建
+- 若旧 run 已被误重跑：重跑一个现行 release 的 `promote-tags` job，且该 release 须属于被旧 run 拉低的那条 `X.Y` 线（它同时
+  补齐 `latest`）；该线若没有现行 release，`latest` 可由任一现行 release 补齐，那条 `X.Y` 线则只能等该线的下一个 release 或由
+  维护者手工对齐（R3G-S3）。reconcile 只认别名的版本 label 与已发布版本，会把被旧 run 拉低的别名重新对齐到最高已发布版本。旧 run 还会重建并覆盖它自己的 `X.Y.Z` / `X.Y.Z-scheduler`（digest 因重建
   而改变，revision label 不变），这无法自动撤回，需在该版本的 release report 中记录新 digest。
 
 ## 镜像 tag 规则

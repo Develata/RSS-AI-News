@@ -57,9 +57,14 @@ SHA-256 指纹计算 → 多阶段校验（structural / general / command-specif
 | `rsshub_base_url_placeholder_alias_without_base_url_fails` | 同上 | `{RSSHUB_BASE_URL}` 缺 base |
 | `rsshub_base_url_placeholder_alias_with_base_url_is_valid` | 同上 | 别名展开 |
 | `structural_checks_ignore_invalid_rsshub_base_url_expansion` | 同上 | 结构阶段不看 env 展开（R3-5） |
-| `structural_checks_still_reject_a_malformed_rsshub_template` | 同上 | 模板本身非法仍拒 |
+| `structural_checks_accept_a_template_whose_validity_depends_on_the_base` | 同上 | 结构阶段不用固定探针解析占位符模板（R3G-B5） |
+| `structural_checks_still_reject_an_empty_feed_url` | 同上 | 空 feed_url 仍拒 |
+| `general_checks_accept_a_port_like_suffix_after_a_path_prefixed_base`、`general_checks_reject_a_port_like_suffix_after_a_bare_base` | 同上 | 用真实 base 判定模板 |
 | `general_checks_reject_an_invalid_rsshub_base_url_expansion` | 同上 | 展开后非法 URL |
+| `general_checks_reject_an_expansion_without_an_http_scheme` | 同上 | 展开后非 http(s) / 无 host（`feeds.internal:1200`） |
 | `ingest_command_checks_reject_a_feed_url_broken_by_expansion` | 同上 | ingest preflight 查实际 URL |
+| `ingest_command_checks_reject_an_expansion_without_an_http_scheme` | 同上 | ingest preflight 对展开 URL 要求 http(s) + host |
+| `custom_scheme_rsshub_expansion_fails_validate_config_and_ingest_only` | `crates/config/src/loader.rs` | 端到端：结构加载通过，`validate-config` 与 ingest preflight 拒绝 |
 | `run_with_invalid_rsshub_base_url_still_publishes_stored_articles` | `crates/cli/tests/run_cmd_tests.rs` | `run` 仍发布存量文章 |
 | `duplicate_category_key_fails` | 同上 | 重复 key |
 | `invalid_feed_url_fails` | 同上 | URL 非法 |

@@ -235,10 +235,9 @@ export FAKE_FAIL_INSPECT
 reconcile 0.10.4 <"$work/tags"
 expect_rc 1
 unset FAKE_FAIL_INSPECT
-# The runtime alias is read and written before the scheduler alias is read:
-# the failure must stop before anything else is written.
-lines="$(wc -l <"$FAKE_REGISTRY/writes.log" | tr -d ' ')"
-[ "$lines" -le 1 ] || fail "$lines writes after a read error"
+# Every alias is read before the first write (R3G-B3): a failed read of the
+# scheduler alias leaves the runtime alias unwritten too.
+no_writes
 FAKE_FAIL_INSPECT=0.10.4
 export FAKE_FAIL_INSPECT
 : >"$FAKE_REGISTRY/writes.log"
@@ -246,6 +245,40 @@ rm -f "$FAKE_REGISTRY/tags/latest"
 reconcile 0.10.4 <"$work/tags"
 expect_rc 1
 no_writes
+done_case
+
+start "an invalid scheduler alias stops the run before the runtime alias is written"
+case_failures=$failures
+publish 0.10.4 c4
+publish 0.10.5 c5
+point latest 0.10.4
+point 0.10 0.10.4
+printf '%s\n' 'garbage cx' >"$FAKE_REGISTRY/blobs/sha256:garbage"
+printf 'sha256:garbage\n' >"$FAKE_REGISTRY/tags/latest-scheduler"
+{ tag 0.10.4 c4; tag 0.10.5 c5; } >"$work/tags"
+reconcile 0.10.5 <"$work/tags"
+expect_rc 1
+no_writes
+[ "$(cat "$FAKE_REGISTRY/tags/latest")" = sha256:rt-0.10.4 ] || fail "runtime alias moved"
+# A second run fails the same way and still writes nothing (no split pair).
+reconcile 0.10.5 <"$work/tags"
+expect_rc 1
+no_writes
+done_case
+
+start "an invalid alias of a later line stops the run before any line is written"
+case_failures=$failures
+publish 0.10.4 c4
+publish 0.10.5 c5
+point latest 0.10.4
+point 0.10 0.10.4
+printf '%s\n' 'garbage cx' >"$FAKE_REGISTRY/blobs/sha256:garbage"
+printf 'sha256:garbage\n' >"$FAKE_REGISTRY/tags/0.10-scheduler"
+{ tag 0.10.4 c4; tag 0.10.5 c5; } >"$work/tags"
+reconcile 0.10.5 <"$work/tags"
+expect_rc 1
+no_writes
+alias_at latest 0.10.4
 done_case
 
 start "an interrupted promotion (scheduler write failed) is completed by a re-run"
@@ -288,6 +321,85 @@ point 1.4 1.4.3
 tag 1.4.3 c143 >"$work/tags"
 reconcile 1.4.3 <"$work/tags"
 expect_rc 1
+no_writes
+done_case
+
+# swap_version_tags VERSION: V points at the scheduler image and vice versa.
+swap_version_tags() {
+    printf 'sha256:sc-%s\n' "$1" >"$FAKE_REGISTRY/tags/$1"
+    printf 'sha256:rt-%s\n' "$1" >"$FAKE_REGISTRY/tags/$1-scheduler"
+}
+
+start "swapped version tags are not a released version"
+case_failures=$failures
+publish 0.10.4 c4
+swap_version_tags 0.10.4
+tag 0.10.4 c4 >"$work/tags"
+reconcile 0.10.4 <"$work/tags"
+expect_rc 1
+no_writes
+done_case
+
+start "swapped aliases are never moved or kept"
+case_failures=$failures
+publish 0.10.4 c4
+publish 0.10.5 c5
+printf 'sha256:sc-0.10.4\n' >"$FAKE_REGISTRY/tags/latest"
+printf 'sha256:rt-0.10.4\n' >"$FAKE_REGISTRY/tags/latest-scheduler"
+{ tag 0.10.4 c4; tag 0.10.5 c5; } >"$work/tags"
+reconcile 0.10.5 <"$work/tags"
+expect_rc 1
+no_writes
+# The same swap at a newer version than the target is not kept either.
+point 0.10 0.10.4
+printf 'sha256:sc-0.10.5\n' >"$FAKE_REGISTRY/tags/latest"
+printf 'sha256:rt-0.10.5\n' >"$FAKE_REGISTRY/tags/latest-scheduler"
+tag 0.10.4 c4 >"$work/tags"
+reconcile 0.10.4 <"$work/tags"
+expect_rc 1
+no_writes
+done_case
+
+start "a retained higher pair with different revisions fails"
+case_failures=$failures
+publish 1.4.3 c143
+publish 1.4.4 c144
+point latest 1.4.4
+point 1.4 1.4.4
+printf '1.4.4-scheduler other\n' >"$FAKE_REGISTRY/blobs/sha256:sc-other"
+printf 'sha256:sc-other\n' >"$FAKE_REGISTRY/tags/latest-scheduler"
+tag 1.4.3 c143 >"$work/tags"
+reconcile 1.4.3 <"$work/tags"
+expect_rc 1
+no_writes
+done_case
+
+start "a retained higher pair must be the exact version tags' images"
+case_failures=$failures
+publish 1.4.3 c143
+publish 1.4.4 c144
+point latest 1.4.4
+point 1.4 1.4.4
+# Same labels as 1.4.4, another image (e.g. a rebuild pushed to the alias).
+printf '1.4.4 c144\n' >"$FAKE_REGISTRY/blobs/sha256:rt-rebuilt"
+printf 'sha256:rt-rebuilt\n' >"$FAKE_REGISTRY/tags/latest"
+tag 1.4.3 c143 >"$work/tags"
+reconcile 1.4.3 <"$work/tags"
+expect_rc 1
+no_writes
+done_case
+
+start "a retained higher pair without its version tags fails closed"
+case_failures=$failures
+publish 1.4.3 c143
+publish 1.4.4 c144
+point latest 1.4.4
+point 1.4 1.4.4
+rm "$FAKE_REGISTRY/tags/1.4.4" "$FAKE_REGISTRY/tags/1.4.4-scheduler"
+tag 1.4.3 c143 >"$work/tags"
+reconcile 1.4.3 <"$work/tags"
+expect_rc 1
+no_writes
 done_case
 
 start "prerelease tags are ignored"
@@ -309,6 +421,48 @@ alias_at latest 1.4.3
 alias_at 1.4 1.4.3
 reconcile 01.4.99 <"$work/tags"
 expect_rc 2
+done_case
+
+# 2^53 + 1 and 2^53 are equal as doubles: components must compare exactly,
+# with no digit cap (R3G-S8, same rule as the Rust acceptance validator).
+start "components beyond 2^53 and 9 digits compare exactly"
+case_failures=$failures
+big_hi=9007199254740993.0.0
+big_lo=9007199254740992.0.0
+publish "$big_hi" chi
+publish "$big_lo" clo
+publish 1000000000.0.0 cg
+{ tag "$big_lo" clo; tag "$big_hi" chi; tag 1000000000.0.0 cg; } >"$work/tags"
+reconcile "$big_lo" <"$work/tags"
+expect_rc 0
+alias_at latest "$big_hi"
+alias_at 9007199254740992.0 "$big_lo"
+alias_at 9007199254740993.0 "$big_hi"
+done_case
+
+start "an alias beyond 2^53 is not moved down to a version it rounds to"
+case_failures=$failures
+publish "$big_hi" chi
+publish "$big_lo" clo
+point latest "$big_hi"
+point 9007199254740992.0 "$big_lo"
+tag "$big_lo" clo >"$work/tags"
+reconcile "$big_lo" <"$work/tags"
+expect_rc 0
+alias_at latest "$big_hi"
+no_writes
+done_case
+
+start "same-length components compare digit by digit"
+case_failures=$failures
+publish 1.19.0 c119
+publish 1.20.0 c120
+publish 1.9.0 c19
+{ tag 1.9.0 c19; tag 1.19.0 c119; tag 1.20.0 c120; } >"$work/tags"
+reconcile 1.9.0 <"$work/tags"
+expect_rc 0
+alias_at latest 1.20.0
+alias_at 1.9 1.9.0
 done_case
 
 start "version missing from the listing fails"
@@ -366,6 +520,168 @@ start "an existing version tag from another commit is never overwritten"
 case_failures=$failures
 publish 0.10.4 other
 existing 0.10.4 c4
+expect_rc 1
+done_case
+
+start "swapped version tags from the same commit are never reused"
+case_failures=$failures
+publish 0.10.4 c4
+swap_version_tags 0.10.4
+existing 0.10.4 c4
+expect_rc 1
+done_case
+
+start "a runtime tag with a scheduler label is never reused"
+case_failures=$failures
+publish 0.10.4 c4
+printf '0.10.4-scheduler c4\n' >"$FAKE_REGISTRY/blobs/sha256:rt-0.10.4"
+existing 0.10.4 c4
+expect_rc 1
+done_case
+
+# --- tag-commit (the remote tag still names the run's commit) ---------------
+
+tag_commit() {
+    set +e
+    out="$(sh "$script" tag-commit "$1" "$2" <"$work/tags" 2>"$work/stderr")"
+    rc=$?
+    set -e
+}
+
+start "tag-commit: a lightweight tag at the run's commit passes"
+case_failures=$failures
+tag 1.0.0 c100 >"$work/tags"
+tag_commit 1.0.0 c100
+expect_rc 0
+done_case
+
+start "tag-commit: an annotated tag is compared by its peeled commit"
+case_failures=$failures
+{
+    printf 'tagobject\trefs/tags/v1.0.0\n'
+    printf 'c100\trefs/tags/v1.0.0^{}\n'
+} >"$work/tags"
+tag_commit 1.0.0 c100
+expect_rc 0
+tag_commit 1.0.0 tagobject
+expect_rc 1
+done_case
+
+start "tag-commit: a tag moved to another commit stops the publish"
+case_failures=$failures
+tag 1.0.0 c-moved >"$work/tags"
+tag_commit 1.0.0 c100
+expect_rc 1
+done_case
+
+start "tag-commit: a deleted tag stops the publish"
+case_failures=$failures
+: >"$work/tags"
+tag_commit 1.0.0 c100
+expect_rc 1
+# Only the exact tag counts, not a prerelease or longer name at that commit.
+{ tag 1.0.0-rc.1 c100; tag 11.0.0 c100; } >"$work/tags"
+tag_commit 1.0.0 c100
+expect_rc 1
+done_case
+
+start "tag-commit: a malformed version is rejected"
+case_failures=$failures
+tag 1.0.0 c100 >"$work/tags"
+tag_commit 1.0 c100
+expect_rc 2
+done_case
+
+# --- release-registry.sh (the real adapter) with a stub docker ---------------
+# The stub answers `docker buildx imagetools inspect <ref> <flags>` per mode
+# (raw = `--raw`, manifest = `--format '{{json .Manifest}}'`, image =
+# `--format '{{json .Image}}'`) from $STUB_DOCKER/<mode>.{rc,out,err}; a mode
+# without an .rc file succeeds with its .out.
+
+adapter="$here/release-registry.sh"
+mkdir -p "$work/bin"
+cat >"$work/bin/docker" <<'STUB'
+#!/usr/bin/env sh
+set -eu
+[ "$1 $2 $3" = "buildx imagetools inspect" ] || { echo "stub docker: unexpected $*" >&2; exit 2; }
+shift 4
+case "$*" in
+    --raw) mode=raw ;;
+    "--format {{json .Manifest}}") mode=manifest ;;
+    "--format {{json .Image}}") mode=image ;;
+    *) echo "stub docker: unexpected flags $*" >&2; exit 2 ;;
+esac
+echo "$mode" >>"$STUB_DOCKER/calls"
+[ ! -f "$STUB_DOCKER/$mode.err" ] || cat "$STUB_DOCKER/$mode.err" >&2
+[ ! -f "$STUB_DOCKER/$mode.out" ] || cat "$STUB_DOCKER/$mode.out"
+exit "$(cat "$STUB_DOCKER/$mode.rc" 2>/dev/null || echo 0)"
+STUB
+chmod +x "$work/bin/docker"
+
+# Starts an adapter case whose registry holds one healthy image.
+start_adapter() {
+    description="adapter: $1"
+    case_no=$((case_no + 1))
+    STUB_DOCKER="$work/$case_no"
+    export STUB_DOCKER
+    mkdir -p "$STUB_DOCKER"
+    : >"$STUB_DOCKER/calls"
+    echo '{"schemaVersion":2}' >"$STUB_DOCKER/raw.out"
+    echo '{"digest":"sha256:abc"}' >"$STUB_DOCKER/manifest.out"
+    echo '{"config":{"Labels":{"org.opencontainers.image.version":"1.2.3","org.opencontainers.image.revision":"c123"}}}' \
+        >"$STUB_DOCKER/image.out"
+    case_failures=$failures
+}
+
+# stub_fail MODE RC MESSAGE
+stub_fail() {
+    echo "$2" >"$STUB_DOCKER/$1.rc"
+    echo "$3" >"$STUB_DOCKER/$1.err"
+    rm -f "$STUB_DOCKER/$1.out"
+}
+
+adapter_inspect() {
+    set +e
+    out="$(PATH="$work/bin:$PATH" sh "$adapter" inspect "$IMAGE:1.2.3" 2>"$work/stderr")"
+    rc=$?
+    set -e
+}
+
+start_adapter "an existing tag prints digest, version and revision"
+adapter_inspect
+expect_rc 0
+[ "$out" = "sha256:abc 1.2.3 c123" ] || fail "got '$out'"
+done_case
+
+start_adapter "a top-level 'not found' is a missing tag"
+stub_fail raw 1 "ERROR: $IMAGE:1.2.3: not found"
+adapter_inspect
+expect_rc 3
+done_case
+
+start_adapter "a top-level 'manifest unknown' is a missing tag"
+stub_fail raw 1 "ERROR: unexpected status 404: MANIFEST_UNKNOWN: manifest unknown"
+adapter_inspect
+expect_rc 3
+done_case
+
+start_adapter "a top-level auth or network error is a read error"
+stub_fail raw 1 "ERROR: unexpected status 401 Unauthorized"
+adapter_inspect
+expect_rc 1
+done_case
+
+# Buildx loads child manifests and image configs for `--format`; once the
+# top-level manifest resolved, their "not found" must not read as a missing tag.
+start_adapter "a child manifest 'not found' after the top level resolved is a read error"
+stub_fail manifest 1 "ERROR: sha256:child: not found"
+adapter_inspect
+expect_rc 1
+done_case
+
+start_adapter "an image config 'not found' after the top level resolved is a read error"
+stub_fail image 1 "ERROR: blob sha256:config: not found"
+adapter_inspect
 expect_rc 1
 done_case
 

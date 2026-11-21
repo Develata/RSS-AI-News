@@ -123,7 +123,8 @@ jobs:
   # Two stages; the policy lives in .github/scripts/release-promotion.sh
   # (tested offline by the static lane against a fake registry):
   #   1. publish-image pushes only the immutable version tags (X.Y.Z and
-  #      X.Y.Z-scheduler). A re-run reuses a version tag already built from
+  #      X.Y.Z-scheduler), and only while the remote tag still names this
+  #      run's commit (R3G-B4). A re-run reuses a version tag already built from
   #      this commit instead of rebuilding it (a rebuild would get a new
   #      digest: the `created` label changes), builds only a missing one, and
   #      fails on one built from another commit (R3-7).
@@ -165,6 +166,17 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Under the per-version lock, before the first push: the remote tag must
+      # still name this run's commit. A re-run keeps the original GITHUB_SHA;
+      # if vX.Y.Z moved meanwhile, pushing would claim the immutable version
+      # tag for the old commit and block the new commit's run (R3G-B4).
+      - name: the tag still names this commit
+        run: |
+          set -euo pipefail
+          ref="refs/tags/${GITHUB_REF_NAME}"
+          git ls-remote origin "$ref" "${ref}^{}" \
+            | sh .github/scripts/release-promotion.sh tag-commit "${GITHUB_REF_NAME#v}" "$GITHUB_SHA"
 
       # Digests of version tags already built from this commit (empty = build).
       - id: existing
@@ -242,10 +254,11 @@ jobs:
       packages: write
     # One reconcile at a time across tags. `queue: max` keeps up to 100
     # waiting runs instead of the default single pending slot, in which a
-    # later (possibly lower) tag's run would cancel a waiting one. Correctness
-    # does not depend on it: every run reconciles latest to the highest
-    # released version, and a cancelled or dropped run is completed by
-    # re-running any release's promote-tags job (docs/operations/ci-and-release.md).
+    # later (possibly lower) tag's run would cancel a waiting one. latest does
+    # not depend on it: every run reconciles latest to the highest released
+    # version. A run touches only latest, its trigger's X.Y line and latest's
+    # line, so a cancelled or dropped run is completed by re-running a release
+    # of the affected X.Y line (docs/operations/ci-and-release.md, R3G-S3).
     # `queue` is in GitHub's workflow schema for job concurrency; actionlint
     # 1.7.12 does not know it yet (.github/actionlint.yaml).
     concurrency:
