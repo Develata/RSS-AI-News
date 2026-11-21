@@ -314,7 +314,12 @@ active rule resolver 保证 reindex 中途 `active_rule(kind)` 仍返回旧 acti
   但 lease 已过期——reclaim 是 best-effort），规则 `kind` + `payload_sha256` 与本次请求一致即由本 worker
   领取并从 `last_processed_id` 之后继续（`reindex_resumed` 事件）；没有活动 job 才新建
   （`start_reindex_tx`）。`version_tag` 只是 CLI 每次自动生成的标签（`reindex-<target>-<unix-ts>`），
-  不参与匹配，否则普通重跑永远无法续跑。规则不一致或另一 worker 持有存活 lease → 显式
+  不参与匹配，否则普通重跑永远无法续跑。`payload_sha256` 由 CLI 生成（`reindex_rule_fingerprint`，R2-S17）：
+  对 target、该 target 的算法版本常量（`LINK_HASH_RULE_VERSION` / `CONTENT_HASH_RULE_VERSION` /
+  `CATEGORIES_RULE_VERSION`，改算法时递增）与决定改写结果的配置（`link_hash`：`dedup.link_normalizer_version`；
+  `categories`：全部 source 的分类、key、显示名、feed URL、kind、enabled、priority，排序后）做规范 JSON 的 SHA-256。
+  此前只散列 target 名，算法或配置变化后旧 checkpoint 仍会被续跑、同一作业混用两套规则。升级前崩溃留下的
+  活动 job 用的是旧身份，续跑会被拒绝，需 `reindex --abort <id>` 后重跑。规则不一致或另一 worker 持有存活 lease → 显式
   `StorageError::Conflict { table: "reindex_jobs" }`，信息含 `reindex --abort <id>`，不改任何行。
 - 每批一个事务：先执行 owner-guarded 的 checkpoint UPDATE（`last_processed_id` + 续租
   `lease_expires_at`，同时取得 SQLite 写锁 / PG job 行锁，使 abort / reclaim 与本批串行化），再改写本批
