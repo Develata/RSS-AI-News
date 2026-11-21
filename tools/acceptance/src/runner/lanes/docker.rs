@@ -6,6 +6,7 @@ use std::{
 
 use super::super::{
     executor::LaneExecutor,
+    process::run_bounded,
     resources::{DockerCleanup, prepare_smoke_workspace},
     util::{program_exists, strings},
 };
@@ -88,7 +89,7 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         0,
     );
     if !executor.dry_run() && executor.can_continue() {
-        wait_for_scheduler_job(&container);
+        wait_for_scheduler_job(&container, executor.step_timeout());
     }
     let inspect = executor.command(
         "docker-scheduler-running",
@@ -165,21 +166,92 @@ const SCHEDULER_SMOKE_COMMAND: &str = "RSS_CRON_COMMAND=validate-config 'spaced 
 const SCHEDULER_SMOKE_MARKER: &str = "unexpected argument 'spaced arg'";
 const SCHEDULER_SMOKE_TIMEOUT: Duration = Duration::from_secs(75);
 
+/// Log lines read per poll; the smoke job's error is among the first lines.
+const SCHEDULER_SMOKE_LOG_TAIL: &str = "200";
+
 /// Polls the container's logs until the smoke job has run or the timeout
 /// passes; the logs step and its contract check report the outcome.
-fn wait_for_scheduler_job(container: &str) {
-    let deadline = Instant::now() + SCHEDULER_SMOKE_TIMEOUT;
-    while Instant::now() < deadline {
-        let ran = Command::new("docker")
-            .args(["logs", container])
-            .output()
-            .is_ok_and(|output| {
-                String::from_utf8_lossy(&output.stdout).contains(SCHEDULER_SMOKE_MARKER)
-                    || String::from_utf8_lossy(&output.stderr).contains(SCHEDULER_SMOKE_MARKER)
-            });
-        if ran {
-            return;
+fn wait_for_scheduler_job(container: &str, step_timeout: Duration) {
+    wait_for_marker(
+        || {
+            let mut command = Command::new("docker");
+            command.args(["logs", "--tail", SCHEDULER_SMOKE_LOG_TAIL, container]);
+            command
+        },
+        SCHEDULER_SMOKE_MARKER,
+        SCHEDULER_SMOKE_TIMEOUT,
+        step_timeout,
+    );
+}
+
+/// Runs `poll` until its output contains `marker` or `total` has passed.
+/// Every poll goes through [`run_bounded`] (capped output, killed process
+/// tree) with the smaller of the remaining time and `step_timeout`, so one
+/// hanging poll cannot outlive the deadline (R3-15). Returns whether the
+/// marker was seen.
+fn wait_for_marker(
+    poll: impl Fn() -> Command,
+    marker: &str,
+    total: Duration,
+    step_timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + total;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
         }
-        thread::sleep(Duration::from_secs(1));
+        let seen = run_bounded(poll(), remaining.min(step_timeout)).is_ok_and(|finished| {
+            finished.stdout.text.contains(marker) || finished.stderr.text.contains(marker)
+        });
+        if seen {
+            return true;
+        }
+        thread::sleep(
+            Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        process::Command,
+        time::{Duration, Instant},
+    };
+
+    use super::wait_for_marker;
+
+    fn sh(script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[test]
+    fn marker_in_either_stream_ends_the_wait() {
+        assert!(wait_for_marker(
+            || sh("echo ran: marker >&2"),
+            "marker",
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        ));
+    }
+
+    /// A poll that never returns is killed at the overall deadline.
+    #[test]
+    fn a_hanging_poll_does_not_outlive_the_deadline() {
+        let started = Instant::now();
+        assert!(!wait_for_marker(
+            || sh("sleep 30"),
+            "marker",
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }
