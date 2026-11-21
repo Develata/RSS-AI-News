@@ -20,6 +20,7 @@
 - **store-local**：写本地文件 + 推进 article 到 `Published`（无远端目标时）/ 保持文章不动（有远端目标待 push）；
   - 分类 `path_template` override 生效
 - **publish-remote**：批量提交一个 commit 覆盖多 publish_records；422 lost-update 自动重试一次；429 保持状态可重试
+- **本地原子写**：临时文件 fsync 后 rename 覆盖；越出输出根的符号链接（父目录或目标）被拒绝
 - **path 防穿越**：含 `..` / 反斜杠 / 无日期 token 的模板在 validate 阶段就报错（详见 [./06-config-loading.md](./06-config-loading.md)）
 - 远端 publish 成功后 article → `Published`；批次成功后 record → `PublishedRemote`
 - **record 隔离**：`publish` 与 `publish-all` 的每个阶段（freeze / render / store-local / publish-remote）都只 claim init 得到的 `publish_record_id`；
@@ -86,6 +87,11 @@
 | `status_403_without_rate_limit_signal_maps_to_auth_failed` | 同上 | 普通 403 |
 | `local_fs_target_rejects_path_with_parent_traversal` | `crates/publish/tests/local_target_tests.rs` | 路径穿越拒绝 |
 | `local_fs_target_creates_parent_directories` | 同上 | 父目录自建 |
+| `local_fs_target_replaces_existing_report_without_truncating_it_in_place` | 同上 | 临时文件 + rename，不原地截断 |
+| `local_fs_target_rejects_parent_symlink_escaping_the_root` | 同上 | 越界父目录链接拒绝 |
+| `local_fs_target_rejects_destination_symlink_escaping_the_root` | 同上 | 越界目标链接拒绝 |
+| `local_fs_target_follows_symlinks_that_stay_inside_the_root` | 同上 | 根内链接照常 |
+| `interrupted_write_before_commit_leaves_old_report_intact` | `crates/publish/src/local.rs` | 中断写保留旧报告 |
 | `publish_category_never_claims_another_categorys_pending_record` | `crates/cli/tests/publish_cmd_tests.rs` | 命令层跨分类 record 隔离 |
 | `pg_claim_by_ids_skips_row_locked_by_another_transaction` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 按 ID claim `SKIP LOCKED` 不阻塞 |
 | `publish_store_local_failure_is_reported_as_failure` | 同上 | 本地写失败 → exit 1 |

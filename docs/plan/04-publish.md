@@ -145,6 +145,10 @@ path_template = "docs/zh-news/{category_key}/{report_date}.md"  # 覆盖全局
 
 支持的占位符：`{category_key}` / `{CATEGORY_KEY}` / `{report_date}` / `{render_version}`。
 
+写入语义（2026-11-21）：先在目标目录内写隐藏临时文件并 fsync，再 `rename` 覆盖目标（Unix 上随后 fsync 目录），
+中断不会留下截断或半份报告。路径逐级在输出根（canonical）之下解析：既有符号链接仅在其 canonical 目标仍位于
+输出根内时才跟随；越界的父目录链接或目标链接 → `PublishError::InvalidPath`，根外不创建任何目录或文件。
+
 ### 4.1.1 跨分类碰撞检测
 
 `validate-config` 校验：所有分类的 effective path_template 渲染后**不**应碰撞。
