@@ -156,6 +156,10 @@
 | `local_fs_target_rejects_destination_symlink_escaping_the_root` | 同上 | 越界目标链接拒绝 |
 | `local_fs_target_follows_symlinks_that_stay_inside_the_root` | 同上 | 根内链接照常 |
 | `interrupted_write_before_commit_leaves_old_report_intact` | `crates/publish/src/local.rs` | 中断写保留旧报告 |
+| `taken_temp_name_is_neither_written_nor_removed` | 同上 | 临时名被占用：不碰他人文件，换名 |
+| `every_temp_name_taken_is_an_error_that_removes_nothing` | 同上 | 重试耗尽报错且不删任何文件 |
+| `temp_names_are_short_and_unique` | 同上 | 临时名短且唯一 |
+| `local_fs_target_publishes_a_report_whose_name_is_near_the_name_limit` | `crates/publish/tests/local_target_tests.rs` | 240 字节文件名可发布、无残留临时文件 |
 | `publish_force_creates_unique_non_active_render_versions_on_a_fresh_db` | `crates/cli/tests/publish_cmd_tests.rs` | --force 每次唯一且非 active |
 | `bootstrap_refuses_a_superseded_default_rule_when_none_is_active` | `crates/runtime/tests/publish_rule_bootstrap_tests.rs` | 无 active render 规则（default 已 superseded）→ 建记录前报错 |
 | `bootstrap_refuses_a_superseded_default_selection_policy` | 同上 | selection_policy 同规则 |
