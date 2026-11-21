@@ -38,6 +38,7 @@ jobs:
   verify-test:
     name: acceptance static + workspace
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -56,6 +57,7 @@ jobs:
   verify-release:
     name: acceptance sqlite + release (tag version)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -74,6 +76,7 @@ jobs:
   verify-postgres:
     name: acceptance postgres
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     services:
@@ -107,6 +110,7 @@ jobs:
   verify-audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -130,6 +134,7 @@ jobs:
     name: publish runtime + scheduler version tags to GHCR
     needs: [verify-test, verify-release, verify-postgres, verify-audit]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -201,6 +206,7 @@ jobs:
     name: promote latest / X.Y tags
     needs: [publish-image]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       packages: write

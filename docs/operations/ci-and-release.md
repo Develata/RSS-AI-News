@@ -37,6 +37,11 @@ Dockerfile 改用 cache mount 后，改代码的 docker job 中位数由 2.2 min
 旧基线（2026-09-11 前 5 次运行中位数，五 job 布局）：整次 CI 326s，`test-pg` ≈282s，其中 storage PG 测试 181s、
 release build 52s。PG 测试保持 `--test-threads=1`：本地实测 1 线程 108s、4 线程 99s，收益不足以承担连接争用风险。
 
+权限与超时：`ci.yml` 顶层 `permissions: contents: read`（CI 不写仓库或 registry；`audit.yml` / `maintenance.yml` 同样只读，
+`release.yml` 只给两个镜像 job `packages: write`）。每个 job 都设 `timeout-minutes`（默认 360 min），约为实测耗时的 3 倍：
+`test` 30（实测 8–11 min）、`test-pg` 30（6–10.5 min）、`docker-build` 25（3.5–8 min）、audit / security 10、perf 60；
+release 的 verify-* 与 `publish-image` 30、`verify-audit` 与 `promote-tags` 10。
+
 CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks 触发 `cargo fmt`）。
 
 ## 依赖安全审计（cargo audit）
