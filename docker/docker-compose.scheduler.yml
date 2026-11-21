@@ -16,13 +16,12 @@
 #   3. `docker compose up -d` 启动。entrypoint 不 migrate，但第一条写命令（如 run）
 #      会自动应用 pending migrations；推荐首次启动前与每次升级前先显式 migrate（见下）
 #
-# 注意：本 compose 仅启动 scheduler 长驻容器；显式 migrate / 手动 doctor
-# 使用同目录 `.env` 与 mounts 直接运行 runtime image：
-#   docker run --rm --env-file .env \
-#     -v "$(pwd)/configs:/app/configs:ro" \
-#     -v "$(pwd)/data:/app/data" \
-#     ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4} \
-#     --config-dir /app/configs migrate run
+# 注意：本 compose 仅启动 scheduler 长驻容器；显式 migrate / 手动 doctor 用同一服务一次性运行，
+# 这样镜像版本（RSS_AI_NEWS_VERSION 经 compose 从 .env 插值）、挂载、网络与环境都与 scheduler 一致
+# （单独 `docker run` 时镜像名由宿主 shell 展开，与 .env 的版本可能不同）：
+#   docker compose -f docker-compose.scheduler.yml run --rm --no-deps \
+#     --entrypoint /usr/local/bin/rss-ai-news \
+#     rss-ai-news-scheduler --config-dir /app/configs migrate run
 
 networks:
   1panel-network:

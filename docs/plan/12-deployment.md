@@ -145,6 +145,17 @@ supercronic 把每个 cron job 的 stdout/stderr 透传到自身 stdout，
 会拒绝执行。
 
 ```bash
+# 与 scheduler 同一个 compose 服务：镜像版本（.env 的 RSS_AI_NEWS_VERSION，经 compose 插值）、挂载、网络与
+# 环境变量都与常驻容器一致；只把 entrypoint 换成 CLI 本身。
+docker compose -f docker-compose.scheduler.yml run --rm --no-deps \
+  --entrypoint /usr/local/bin/rss-ai-news \
+  rss-ai-news-scheduler --config-dir /app/configs migrate run
+```
+
+不用 compose 的 single-shot 部署才直接跑 runtime 镜像；此时镜像 tag 由宿主 shell 写死，`--env-file` 只把变量传进容器、
+不参与镜像名展开，所以 tag 必须手动写成与 scheduler 相同的版本（R3-11）：
+
+```bash
 docker run --rm --env-file .env \
   -v "$(pwd)/configs:/app/configs:ro" \
   -v "$(pwd)/data:/app/data" \

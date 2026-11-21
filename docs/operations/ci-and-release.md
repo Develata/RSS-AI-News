@@ -197,20 +197,22 @@ workflow 只发布 GHCR images，不创建 GitHub Release。release 完成后把
 部署侧：
 
 ```bash
-# 拉新版
-docker pull ghcr.io/develata/rss-ai-news:0.7.0
-
-# 若有 schema 变化，先 migrate（不动 scheduler 容器）
-docker run --rm --env-file .env \
-  -v "$(pwd)/configs:/app/configs:ro" \
-  -v "$(pwd)/data:/app/data" \
-  ghcr.io/develata/rss-ai-news:0.7.0 \
-  --config-dir /app/configs migrate run
-
-# 升级 scheduler
+# 1. 在 .env 里把 RSS_AI_NEWS_VERSION 改成新版本（compose 对版本、挂载、网络只有这一处选择）
+# 2. 拉新版
 docker compose -f docker-compose.scheduler.yml pull
+
+# 3. 若有 schema 变化，先用同一服务一次性 migrate（不动正在运行的 scheduler 容器）；
+#    entrypoint 换成 CLI，版本与随后启动的 scheduler 相同
+docker compose -f docker-compose.scheduler.yml run --rm --no-deps \
+  --entrypoint /usr/local/bin/rss-ai-news \
+  rss-ai-news-scheduler --config-dir /app/configs migrate run
+
+# 4. 升级 scheduler
 docker compose -f docker-compose.scheduler.yml up -d --force-recreate
 ```
+
+不要用单独的 `docker run <image>:X.Y.Z … migrate run` 配合 compose 部署：那里的镜像 tag 由宿主 shell 展开，`--env-file .env`
+只把变量传进容器，只改 `.env` 时迁移与启动会用不同版本的二进制（R3-11）。
 
 ## 已知发布事件
 
