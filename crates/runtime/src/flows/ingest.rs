@@ -9,7 +9,7 @@ use rss_ai_news_domain::link_normalizer::normalize_link;
 use rss_ai_news_domain::model::FeedSource;
 use rss_ai_news_domain::state::{FeedKind, FeedSourceStatus};
 use rss_ai_news_feed::parse_feed;
-use rss_ai_news_storage::{FeedEntryInsertOutcome, NewFeedEntry, StorageError};
+use rss_ai_news_storage::{FeedEndpoint, FeedEntryInsertOutcome, NewFeedEntry, StorageError};
 use serde_json::json;
 use time::OffsetDateTime;
 use tokio::task::JoinSet;
@@ -359,6 +359,12 @@ impl IngestFlow {
             storage_failed: false,
         };
 
+        // R2-S12: write-backs are guarded by the endpoint this request uses.
+        let endpoint_url = task.feed_url.clone();
+        let endpoint = FeedEndpoint {
+            feed_url: &endpoint_url,
+            feed_kind: task.feed_kind,
+        };
         let fetch_request = FeedFetchRequest {
             source_id: task.source_id,
             category_key: task.category_key,
@@ -385,17 +391,22 @@ impl IngestFlow {
                         Some(json!({ "error_kind": error.error_kind() })),
                     )
                     .await;
-                if let Err(storage_error) = require_row(
+                if let Err(storage_error) = write_back(
+                    &ctx,
                     ctx.feed_source_repo
                         .update_after_fetch_failure(
                             task.source_id,
+                            endpoint,
                             now,
                             &message,
                             error.error_kind(),
                         )
                         .await,
                     task.source_id,
-                ) {
+                    endpoint,
+                )
+                .await
+                {
                     tracing::warn!(
                         source_id = task.source_id,
                         "failed to update source failure: {storage_error}"
@@ -410,10 +421,12 @@ impl IngestFlow {
         if raw.not_modified {
             // A 304 need not repeat the validators: keep the stored ones when
             // absent so the next request stays conditional (AC-P-01).
-            if let Err(error) = require_row(
+            match write_back(
+                &ctx,
                 ctx.feed_source_repo
                     .update_after_not_modified(
                         task.source_id,
+                        endpoint,
                         raw.etag.as_deref(),
                         raw.last_modified.as_deref(),
                         now,
@@ -421,15 +434,25 @@ impl IngestFlow {
                     )
                     .await,
                 task.source_id,
-            ) {
-                // The source state was not recorded: not a success.
-                tracing::warn!(
-                    source_id = task.source_id,
-                    "failed to update source success: {error}"
-                );
-                outcome.error_kind = Some(error.error_kind().to_string());
-                outcome.storage_failed = true;
-                return outcome;
+                endpoint,
+            )
+            .await
+            {
+                Ok(WriteBack::Applied) => {}
+                Ok(WriteBack::Stale) => {
+                    outcome.error_kind = Some(STALE_ENDPOINT_KIND.to_string());
+                    return outcome;
+                }
+                Err(error) => {
+                    // The source state was not recorded: not a success.
+                    tracing::warn!(
+                        source_id = task.source_id,
+                        "failed to update source success: {error}"
+                    );
+                    outcome.error_kind = Some(error.error_kind().to_string());
+                    outcome.storage_failed = true;
+                    return outcome;
+                }
             }
             outcome.status = IngestSourceStatus::NotModified;
             return outcome;
@@ -447,12 +470,22 @@ impl IngestFlow {
                     Some(json!({ "error_kind": "missing_payload" })),
                 )
                 .await;
-            if let Err(error) = require_row(
+            if let Err(error) = write_back(
+                &ctx,
                 ctx.feed_source_repo
-                    .update_after_fetch_failure(task.source_id, now, message, "missing_payload")
+                    .update_after_fetch_failure(
+                        task.source_id,
+                        endpoint,
+                        now,
+                        message,
+                        "missing_payload",
+                    )
                     .await,
                 task.source_id,
-            ) {
+                endpoint,
+            )
+            .await
+            {
                 tracing::warn!(
                     source_id = task.source_id,
                     "failed to update source failure: {error}"
@@ -490,17 +523,22 @@ impl IngestFlow {
                         Some(json!({ "error_kind": error.error_kind() })),
                     )
                     .await;
-                if let Err(storage_error) = require_row(
+                if let Err(storage_error) = write_back(
+                    &ctx,
                     ctx.feed_source_repo
                         .update_after_fetch_failure(
                             task.source_id,
+                            endpoint,
                             now,
                             &message,
                             error.error_kind(),
                         )
                         .await,
                     task.source_id,
-                ) {
+                    endpoint,
+                )
+                .await
+                {
                     tracing::warn!(
                         source_id = task.source_id,
                         "failed to update source failure: {storage_error}"
@@ -526,12 +564,22 @@ impl IngestFlow {
                     Some(json!({ "error_kind": error.error_kind() })),
                 )
                 .await;
-            if let Err(storage_error) = require_row(
+            if let Err(storage_error) = write_back(
+                &ctx,
                 ctx.feed_source_repo
-                    .update_after_fetch_failure(task.source_id, now, &message, error.error_kind())
+                    .update_after_fetch_failure(
+                        task.source_id,
+                        endpoint,
+                        now,
+                        &message,
+                        error.error_kind(),
+                    )
                     .await,
                 task.source_id,
-            ) {
+                endpoint,
+            )
+            .await
+            {
                 tracing::warn!(
                     source_id = task.source_id,
                     "failed to update source persistence failure: {storage_error}"
@@ -542,10 +590,12 @@ impl IngestFlow {
             return outcome;
         }
 
-        if let Err(error) = require_row(
+        match write_back(
+            &ctx,
             ctx.feed_source_repo
                 .update_after_fetch_success(
                     task.source_id,
+                    endpoint,
                     raw.etag.as_deref(),
                     raw.last_modified.as_deref(),
                     now,
@@ -553,16 +603,27 @@ impl IngestFlow {
                 )
                 .await,
             task.source_id,
-        ) {
-            // Entries are stored, but the source's fetch state (etag,
-            // last_success_at) is not: report the source as a storage failure.
-            tracing::warn!(
-                source_id = task.source_id,
-                "failed to update source success: {error}"
-            );
-            outcome.error_kind = Some(error.error_kind().to_string());
-            outcome.storage_failed = true;
-            return outcome;
+            endpoint,
+        )
+        .await
+        {
+            Ok(WriteBack::Applied) => {}
+            Ok(WriteBack::Stale) => {
+                outcome.error_kind = Some(STALE_ENDPOINT_KIND.to_string());
+                return outcome;
+            }
+            Err(error) => {
+                // Entries are stored, but the source's fetch state (etag,
+                // last_success_at) is not: report the source as a storage
+                // failure.
+                tracing::warn!(
+                    source_id = task.source_id,
+                    "failed to update source success: {error}"
+                );
+                outcome.error_kind = Some(error.error_kind().to_string());
+                outcome.storage_failed = true;
+                return outcome;
+            }
         }
 
         outcome.status = IngestSourceStatus::Succeeded;
@@ -578,13 +639,42 @@ fn source_row_missing(source_id: i64) -> StorageError {
     }
 }
 
-/// Source write-backs return `Ok(false)` when they matched no row: nothing was
-/// recorded, which is a storage failure of that source, like an `Err`.
-fn require_row(result: Result<bool, StorageError>, source_id: i64) -> Result<(), StorageError> {
+/// `error_kind` of a source whose response arrived after config moved it to
+/// another endpoint (R2-S12): neither a success nor a storage failure.
+const STALE_ENDPOINT_KIND: &str = "endpoint_changed";
+
+/// How a guarded source write-back landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteBack {
+    Applied,
+    /// The row exists but no longer has the request's endpoint: the response
+    /// is stale and was not recorded (R2-S12).
+    Stale,
+}
+
+/// Source write-backs return `Ok(false)` when they matched no row. A row
+/// whose endpoint differs from the request's has been moved by config
+/// (stale response); otherwise nothing was recorded, a storage failure of
+/// that source like an `Err`.
+async fn write_back(
+    ctx: &IngestDeps,
+    result: Result<bool, StorageError>,
+    source_id: i64,
+    endpoint: FeedEndpoint<'_>,
+) -> Result<WriteBack, StorageError> {
     if result? {
-        Ok(())
-    } else {
-        Err(source_row_missing(source_id))
+        return Ok(WriteBack::Applied);
+    }
+    match ctx.feed_source_repo.find_by_id(source_id).await? {
+        Some(row) if row.feed_url != endpoint.feed_url || row.feed_kind != endpoint.feed_kind => {
+            tracing::warn!(
+                source_id,
+                "feed source moved to another endpoint during the request; response not recorded"
+            );
+            Ok(WriteBack::Stale)
+        }
+        // Gone, or unchanged yet unmatched: nothing was recorded.
+        _ => Err(source_row_missing(source_id)),
     }
 }
 

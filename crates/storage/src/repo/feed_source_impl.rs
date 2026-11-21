@@ -16,8 +16,8 @@ use time::OffsetDateTime;
 use crate::{StorageError, StoragePool, classify_db_error};
 
 use super::feed_source::{
-    FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome, RecentFeedSourceHealth,
-    RecentFeedSourceHealthRepository,
+    FeedEndpoint, FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome,
+    RecentFeedSourceHealth, RecentFeedSourceHealthRepository,
 };
 use super::feed_source_sql::{
     LEASE_GUARD_UPDATE_REINDEX_JOBS_SQL, LIST_FEED_SOURCES_ALL_SQL,
@@ -149,6 +149,7 @@ impl FeedSourceRepository for FeedSourceRepo {
     async fn update_after_fetch_success(
         &self,
         id: i64,
+        endpoint: FeedEndpoint<'_>,
         etag: Option<&str>,
         last_modified: Option<&str>,
         fetched_at: OffsetDateTime,
@@ -160,6 +161,7 @@ impl FeedSourceRepository for FeedSourceRepo {
                     p,
                     UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL,
                     id,
+                    endpoint,
                     etag,
                     last_modified,
                     fetched_at,
@@ -172,6 +174,7 @@ impl FeedSourceRepository for FeedSourceRepo {
                     p,
                     UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL,
                     id,
+                    endpoint,
                     etag,
                     last_modified,
                     fetched_at,
@@ -185,6 +188,7 @@ impl FeedSourceRepository for FeedSourceRepo {
     async fn update_after_not_modified(
         &self,
         id: i64,
+        endpoint: FeedEndpoint<'_>,
         etag: Option<&str>,
         last_modified: Option<&str>,
         fetched_at: OffsetDateTime,
@@ -196,6 +200,7 @@ impl FeedSourceRepository for FeedSourceRepo {
                     p,
                     UPDATE_FEED_SOURCE_AFTER_NOT_MODIFIED_SQL,
                     id,
+                    endpoint,
                     etag,
                     last_modified,
                     fetched_at,
@@ -208,6 +213,7 @@ impl FeedSourceRepository for FeedSourceRepo {
                     p,
                     UPDATE_FEED_SOURCE_AFTER_NOT_MODIFIED_SQL,
                     id,
+                    endpoint,
                     etag,
                     last_modified,
                     fetched_at,
@@ -221,16 +227,21 @@ impl FeedSourceRepository for FeedSourceRepo {
     async fn update_after_fetch_failure(
         &self,
         id: i64,
+        endpoint: FeedEndpoint<'_>,
         fetched_at: OffsetDateTime,
         error_msg: &str,
         error_kind: &str,
     ) -> Result<bool, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlite_update_after_fetch_failure(p, id, fetched_at, error_msg, error_kind).await
+                sqlite_update_after_fetch_failure(
+                    p, id, endpoint, fetched_at, error_msg, error_kind,
+                )
+                .await
             }
             StoragePool::Postgres(p) => {
-                pg_update_after_fetch_failure(p, id, fetched_at, error_msg, error_kind).await
+                pg_update_after_fetch_failure(p, id, endpoint, fetched_at, error_msg, error_kind)
+                    .await
             }
         }
     }
@@ -447,6 +458,7 @@ async fn sqlite_update_after_fetch_success(
     pool: &SqlitePool,
     sql: &'static str,
     id: i64,
+    endpoint: FeedEndpoint<'_>,
     etag: Option<&str>,
     last_modified: Option<&str>,
     fetched_at: OffsetDateTime,
@@ -459,6 +471,8 @@ async fn sqlite_update_after_fetch_success(
         .bind(success_at)
         .bind(fetched_at)
         .bind(id)
+        .bind(endpoint.feed_url)
+        .bind(feed_kind_to_str(endpoint.feed_kind))
         .execute(pool)
         .await
         .map_err(StorageError::from)?;
@@ -468,6 +482,7 @@ async fn sqlite_update_after_fetch_success(
 async fn sqlite_update_after_fetch_failure(
     pool: &SqlitePool,
     id: i64,
+    endpoint: FeedEndpoint<'_>,
     fetched_at: OffsetDateTime,
     error_msg: &str,
     error_kind: &str,
@@ -478,6 +493,8 @@ async fn sqlite_update_after_fetch_failure(
         .bind(error_kind)
         .bind(fetched_at)
         .bind(id)
+        .bind(endpoint.feed_url)
+        .bind(feed_kind_to_str(endpoint.feed_kind))
         .execute(pool)
         .await
         .map_err(StorageError::from)?;
@@ -655,6 +672,7 @@ async fn pg_update_after_fetch_success(
     pool: &PgPool,
     sql: &'static str,
     id: i64,
+    endpoint: FeedEndpoint<'_>,
     etag: Option<&str>,
     last_modified: Option<&str>,
     fetched_at: OffsetDateTime,
@@ -667,6 +685,8 @@ async fn pg_update_after_fetch_success(
         .bind(success_at)
         .bind(fetched_at)
         .bind(id)
+        .bind(endpoint.feed_url)
+        .bind(feed_kind_to_str(endpoint.feed_kind))
         .execute(pool)
         .await
         .map_err(StorageError::from)?;
@@ -676,6 +696,7 @@ async fn pg_update_after_fetch_success(
 async fn pg_update_after_fetch_failure(
     pool: &PgPool,
     id: i64,
+    endpoint: FeedEndpoint<'_>,
     fetched_at: OffsetDateTime,
     error_msg: &str,
     error_kind: &str,
@@ -686,6 +707,8 @@ async fn pg_update_after_fetch_failure(
         .bind(error_kind)
         .bind(fetched_at)
         .bind(id)
+        .bind(endpoint.feed_url)
+        .bind(feed_kind_to_str(endpoint.feed_kind))
         .execute(pool)
         .await
         .map_err(StorageError::from)?;

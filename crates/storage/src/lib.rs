@@ -41,7 +41,7 @@ pub use repo::{
     RunEventRepository, StartReindexTxOutcome, TerminalAdvanceOutcome, TerminalAdvanceStatus,
     UpdateContentHashOutcome, UpdateLinkHashOutcome,
 };
-pub use repo::{FreshWindow, ShareMark, ShareSide, ShareStage};
+pub use repo::{FeedEndpoint, FreshWindow, ShareMark, ShareSide, ShareStage};
 pub use repo::{
     HtmlReplaySource, ReplayArticleDigest, ReplayProjectionRepo, ReplayProjectionRepository,
 };

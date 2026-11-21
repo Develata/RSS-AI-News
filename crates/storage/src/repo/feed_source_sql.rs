@@ -166,6 +166,11 @@ SET updated_at = $1
 WHERE id = $2 AND state = 'running' AND lease_owner = $3
 "#;
 
+// R2-S12: every fetch write-back (200, 304, failure) is guarded by the
+// endpoint the request was sent to. If config moved the source to another
+// `feed_url` / `feed_kind` while the request was in flight (and reset its
+// validators), the stale response matches no row instead of handing the old
+// endpoint's ETag to the new one.
 pub(super) const UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL: &str = r#"
 UPDATE feed_sources
 SET etag = $1,
@@ -176,7 +181,7 @@ SET etag = $1,
     last_error = NULL,
     last_error_kind = NULL,
     updated_at = $5
-WHERE id = $6
+WHERE id = $6 AND feed_url = $7 AND feed_kind = $8
 "#;
 
 /// 304 write-back: same as [`UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL`]
@@ -193,7 +198,7 @@ SET etag = COALESCE($1, etag),
     last_error = NULL,
     last_error_kind = NULL,
     updated_at = $5
-WHERE id = $6
+WHERE id = $6 AND feed_url = $7 AND feed_kind = $8
 "#;
 
 pub(super) const UPDATE_FEED_SOURCE_AFTER_FETCH_FAILURE_SQL: &str = r#"
@@ -203,5 +208,5 @@ SET last_fetched_at = $1,
     last_error = $2,
     last_error_kind = $3,
     updated_at = $4
-WHERE id = $5
+WHERE id = $5 AND feed_url = $6 AND feed_kind = $7
 "#;

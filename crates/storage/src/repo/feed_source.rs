@@ -109,9 +109,13 @@ pub trait FeedSourceRepository: Send + Sync {
         owner: &str,
         now: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError>;
+    /// Fetch write-backs (200 / 304 / failure) match only while the row still
+    /// has `endpoint` (R2-S12): `Ok(false)` = the row is gone or config moved
+    /// it to another endpoint during the request (a stale response).
     async fn update_after_fetch_success(
         &self,
         id: i64,
+        endpoint: FeedEndpoint<'_>,
         etag: Option<&str>,
         last_modified: Option<&str>,
         fetched_at: OffsetDateTime,
@@ -122,6 +126,7 @@ pub trait FeedSourceRepository: Send + Sync {
     async fn update_after_not_modified(
         &self,
         id: i64,
+        endpoint: FeedEndpoint<'_>,
         etag: Option<&str>,
         last_modified: Option<&str>,
         fetched_at: OffsetDateTime,
@@ -130,10 +135,18 @@ pub trait FeedSourceRepository: Send + Sync {
     async fn update_after_fetch_failure(
         &self,
         id: i64,
+        endpoint: FeedEndpoint<'_>,
         fetched_at: OffsetDateTime,
         error_msg: &str,
         error_kind: &str,
     ) -> Result<bool, StorageError>;
+}
+
+/// The endpoint a feed request was sent to (R2-S12 write-back guard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeedEndpoint<'a> {
+    pub feed_url: &'a str,
+    pub feed_kind: rss_ai_news_domain::state::FeedKind,
 }
 
 #[derive(Debug, Clone)]

@@ -26,6 +26,12 @@ use rss_ai_news_storage::{
 };
 use time::OffsetDateTime;
 
+/// The endpoint the seeded sources are created with (R2-S12 guard).
+const SEEDED: rss_ai_news_storage::FeedEndpoint<'static> = rss_ai_news_storage::FeedEndpoint {
+    feed_url: "https://example.com/feed.xml",
+    feed_kind: rss_ai_news_domain::state::FeedKind::Rss,
+};
+
 fn sample_feed_source(category: &str, source: &str, config_version: i64) -> FeedSource {
     let now = OffsetDateTime::now_utc();
     FeedSource {
@@ -323,12 +329,12 @@ async fn pg_not_modified_update_keeps_validators_the_304_omits() {
         .await
         .unwrap();
     let now = OffsetDateTime::now_utc();
-    repo.update_after_fetch_success(id, Some("e1"), Some("lm1"), now, now)
+    repo.update_after_fetch_success(id, SEEDED, Some("e1"), Some("lm1"), now, now)
         .await
         .unwrap();
 
     assert!(
-        repo.update_after_not_modified(id, None, None, now, now)
+        repo.update_after_not_modified(id, SEEDED, None, None, now, now)
             .await
             .unwrap()
     );
@@ -336,7 +342,7 @@ async fn pg_not_modified_update_keeps_validators_the_304_omits() {
     assert_eq!(row.etag.as_deref(), Some("e1"));
     assert_eq!(row.last_modified.as_deref(), Some("lm1"));
 
-    repo.update_after_not_modified(id, None, Some("lm2"), now, now)
+    repo.update_after_not_modified(id, SEEDED, None, Some("lm2"), now, now)
         .await
         .unwrap();
     let row = repo.find_by_id(id).await.unwrap().unwrap();
@@ -360,10 +366,10 @@ async fn pg_config_upsert_keeps_runtime_state_unless_the_endpoint_changes() {
         .await
         .unwrap();
     let id = repo.find_by_keys("ai", "a14").await.unwrap().unwrap().id;
-    repo.update_after_fetch_success(id, Some("e1"), Some("lm1"), now, now)
+    repo.update_after_fetch_success(id, SEEDED, Some("e1"), Some("lm1"), now, now)
         .await
         .unwrap();
-    repo.update_after_fetch_failure(id, now, "boom", "http_5xx")
+    repo.update_after_fetch_failure(id, SEEDED, now, "boom", "http_5xx")
         .await
         .unwrap();
 

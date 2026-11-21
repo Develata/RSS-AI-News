@@ -101,6 +101,7 @@ pub use feed_entry::{
     LinkHashReindexCandidate, NewFeedEntry, RecentFeedEntry, RecentFeedEntryFilter,
     RecentFeedEntryRepository, ResetFailedFilter, ResetFailedOutcome, UpdateLinkHashOutcome,
 };
+pub use feed_source::FeedEndpoint;
 pub use feed_source::{
     FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome, RecentFeedSourceHealth,
     RecentFeedSourceHealthRepository,

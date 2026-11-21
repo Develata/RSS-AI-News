@@ -3,6 +3,12 @@ mod common;
 use rss_ai_news_storage::{FeedSourceRepo, FeedSourceRepository};
 use time::OffsetDateTime;
 
+/// The endpoint the seeded sources are created with (R2-S12 guard).
+const SEEDED: rss_ai_news_storage::FeedEndpoint<'static> = rss_ai_news_storage::FeedEndpoint {
+    feed_url: "https://example.com/feed.xml",
+    feed_kind: rss_ai_news_domain::state::FeedKind::Rss,
+};
+
 use common::{make_test_pool, seed_source};
 
 type SourceFetchState = (
@@ -22,11 +28,11 @@ async fn update_after_fetch_success_clears_error_and_zeroes_failures() {
     let repo = FeedSourceRepo::new(pool.clone());
     let now = OffsetDateTime::now_utc();
 
-    repo.update_after_fetch_failure(source_id, now, "boom", "http_5xx")
+    repo.update_after_fetch_failure(source_id, SEEDED, now, "boom", "http_5xx")
         .await
         .expect("failure update should succeed");
     let updated = repo
-        .update_after_fetch_success(source_id, Some("etag"), Some("last-mod"), now, now)
+        .update_after_fetch_success(source_id, SEEDED, Some("etag"), Some("last-mod"), now, now)
         .await
         .expect("success update should succeed");
     let row: SourceFetchState = sqlx::query_as(
@@ -58,10 +64,10 @@ async fn update_after_fetch_failure_increments_failures() {
     let repo = FeedSourceRepo::new(pool.clone());
     let now = OffsetDateTime::now_utc();
 
-    repo.update_after_fetch_failure(source_id, now, "first", "http_5xx")
+    repo.update_after_fetch_failure(source_id, SEEDED, now, "first", "http_5xx")
         .await
         .expect("first failure update should succeed");
-    repo.update_after_fetch_failure(source_id, now, "second", "http_5xx")
+    repo.update_after_fetch_failure(source_id, SEEDED, now, "second", "http_5xx")
         .await
         .expect("second failure update should succeed");
     let row: (i64, Option<String>, Option<String>) = sqlx::query_as(
@@ -84,11 +90,11 @@ async fn update_after_unknown_id_returns_false() {
     let now = OffsetDateTime::now_utc();
 
     let success = repo
-        .update_after_fetch_success(999, None, None, now, now)
+        .update_after_fetch_success(999, SEEDED, None, None, now, now)
         .await
         .expect("success update should not error");
     let failure = repo
-        .update_after_fetch_failure(999, now, "missing", "not_found")
+        .update_after_fetch_failure(999, SEEDED, now, "missing", "not_found")
         .await
         .expect("failure update should not error");
 
@@ -105,10 +111,10 @@ async fn not_modified_update_keeps_validators_the_304_omits() {
     let source_id = seed_source(&pool).await;
     let repo = FeedSourceRepo::new(pool.clone());
     let now = OffsetDateTime::now_utc();
-    repo.update_after_fetch_success(source_id, Some("\"v1\""), Some("lm-1"), now, now)
+    repo.update_after_fetch_success(source_id, SEEDED, Some("\"v1\""), Some("lm-1"), now, now)
         .await
         .unwrap();
-    repo.update_after_fetch_failure(source_id, now, "boom", "http_5xx")
+    repo.update_after_fetch_failure(source_id, SEEDED, now, "boom", "http_5xx")
         .await
         .unwrap();
 
@@ -124,7 +130,7 @@ async fn not_modified_update_keeps_validators_the_304_omits() {
     };
 
     assert!(
-        repo.update_after_not_modified(source_id, None, None, now, now)
+        repo.update_after_not_modified(source_id, SEEDED, None, None, now, now)
             .await
             .unwrap()
     );
@@ -138,13 +144,13 @@ async fn not_modified_update_keeps_validators_the_304_omits() {
         )
     );
 
-    repo.update_after_not_modified(source_id, Some("\"v2\""), None, now, now)
+    repo.update_after_not_modified(source_id, SEEDED, Some("\"v2\""), None, now, now)
         .await
         .unwrap();
     assert_eq!(validators(pool.clone()).await.0.as_deref(), Some("\"v2\""));
 
     // 200 without validators: replace semantics (the new representation has none).
-    repo.update_after_fetch_success(source_id, None, None, now, now)
+    repo.update_after_fetch_success(source_id, SEEDED, None, None, now, now)
         .await
         .unwrap();
     let (etag, last_modified, _, _) = validators(pool.clone()).await;
@@ -152,9 +158,63 @@ async fn not_modified_update_keeps_validators_the_304_omits() {
 
     assert!(
         !repo
-            .update_after_not_modified(999, None, None, now, now)
+            .update_after_not_modified(999, SEEDED, None, None, now, now)
             .await
             .unwrap(),
         "missing row reports false"
+    );
+}
+
+/// R2-S12: a response for the old endpoint arrives after config moved the
+/// source (and reset its validators): none of the write-backs lands.
+#[tokio::test]
+async fn write_backs_for_a_moved_endpoint_match_no_row() {
+    let (_dir, pool) = make_test_pool().await;
+    let source_id = seed_source(&pool).await;
+    let repo = FeedSourceRepo::new(pool.clone());
+    let now = OffsetDateTime::now_utc();
+    // Config sync moved the source to another feed while request A was out.
+    sqlx::query("UPDATE feed_sources SET feed_url = 'https://example.com/b.xml' WHERE id = ?")
+        .bind(source_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert!(
+        !repo
+            .update_after_not_modified(source_id, SEEDED, Some("\"a-etag\""), None, now, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .update_after_fetch_success(source_id, SEEDED, Some("\"a-etag\""), None, now, now)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .update_after_fetch_failure(source_id, SEEDED, now, "boom", "http_5xx")
+            .await
+            .unwrap()
+    );
+    let (etag, failures): (Option<String>, i64) =
+        sqlx::query_as("SELECT etag, consecutive_failures FROM feed_sources WHERE id = ?")
+            .bind(source_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(etag, None, "B did not get A's ETag");
+    assert_eq!(failures, 0);
+
+    // The current endpoint still records normally.
+    let moved = rss_ai_news_storage::FeedEndpoint {
+        feed_url: "https://example.com/b.xml",
+        ..SEEDED
+    };
+    assert!(
+        repo.update_after_not_modified(source_id, moved, Some("\"b\""), None, now, now)
+            .await
+            .unwrap()
     );
 }

@@ -62,8 +62,13 @@ enabled = true
 - `If-Modified-Since: <last_modified>`
 
 返回 304 = 跳过本次抓取，状态机 transition 数为 0。304 写回走 `update_after_not_modified`：304 未带的
-`ETag` / `Last-Modified` 保留库中旧值（`COALESCE`，RFC 9110 §15.4.5 允许 304 不重复验证器），带了则更新；
-200 写回仍是替换语义（以新表示的验证器为准）。
+`ETag` / `Last-Modified` 保留库中旧值（`COALESCE`；RFC 9110 §15.4.5 规定：若同一请求的 200 会带 `ETag`，304 也必须带；
+其余验证器可省略，故省略时沿用旧值），带了则更新；200 写回仍是替换语义（以新表示的验证器为准）。
+
+端点保护（R2-S12）：200 / 304 / 失败三种写回都带上**请求发出时**的端点 `(feed_url, feed_kind)` 作为条件
+（`FeedEndpoint`）。请求在途时配置把同一 source 改到另一端点（并清空验证器），旧响应的写回命中 0 行，不会把 A 的 ETag
+交给 B，也不会把 B 记为抓取成功；ingest 再读一次该行，端点确实已变则记为过期响应（`error_kind = endpoint_changed`，
+source 计 failed，不计存储故障）；行不存在或端点未变却未命中仍按存储完整性故障上报。
 
 ### 3.2 超时与重试
 

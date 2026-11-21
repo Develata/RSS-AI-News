@@ -872,3 +872,57 @@ async fn ingest_summary_retains_only_bounded_failure_samples() {
     assert_eq!(summary.tasks_panicked, 0);
     assert_eq!(summary.failure_samples.len(), 32);
 }
+
+/// R2-S12: config moves the source to endpoint B while the request to A is
+/// in flight; A's 304 is a stale response — B does not get A's ETag, and the
+/// source is reported failed (`endpoint_changed`), not as a storage failure.
+#[tokio::test]
+async fn a_response_for_a_moved_endpoint_is_stale_not_recorded() {
+    let (_dir, pool) = make_test_pool().await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
+    let flow = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&["s1"]),
+        responses([(
+            source_id,
+            MockResponse {
+                delay: Duration::from_millis(300),
+                ..not_modified(source_id)
+            },
+        )]),
+    );
+    let mover = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            sqlx::query(
+                "UPDATE feed_sources SET feed_url = 'https://example.com/b.xml', etag = NULL \
+                 WHERE id = ?",
+            )
+            .bind(source_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        })
+    };
+
+    let summary = flow.run(IngestOptions::default()).await;
+    mover.await.unwrap();
+
+    assert_eq!(summary.sources_not_modified, 0);
+    assert_eq!(summary.sources_failed, 1);
+    assert_eq!(summary.sources_storage_failed, 0);
+    assert_eq!(
+        summary.failure_samples[0].error_kind.as_deref(),
+        Some("endpoint_changed")
+    );
+    let etag: Option<String> = sqlx::query_scalar("SELECT etag FROM feed_sources WHERE id = ?")
+        .bind(source_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(etag, None);
+}
