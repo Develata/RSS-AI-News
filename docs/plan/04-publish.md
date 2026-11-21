@@ -263,8 +263,8 @@ ref 路由（`GET git/ref/heads/{branch}`、`PATCH git/refs/heads/{branch}`）�
 `A-Z a-z 0-9 - . _ ~` 保留字面），分隔符 `/` 保留；`ref` 作为编码后的查询参数（`release/2026` → `release%2F2026`）。
 记录与产物里的路径（`remote_target`、Git tree JSON 的 `path`、输出文件名）仍是逻辑路径，不编码。
 来由（2026-11-21 事故；R1-P-S17 把观测与推断分开写）：
-- **生产事实**：当天只有科技新闻有非空快照，冻结 9 条、本地写出 `output/科技新闻/2026/20261121.md`；publish record 932
-  经 4 次尝试后 `failed`，`last_error` 为 "github api error: status 400"，`remote_published_at` / `commit_sha` 为空。
+- **生产事实**：当天唯一非空的报告位于中文分类目录下，本地写出成功；其 publish record 经多次尝试后 `failed`，
+  `last_error` 为 "github api error: status 400"，`remote_published_at` / `commit_sha` 为空。
   当时的 `publish_failed` 事件既没记失败的操作（GET 还是 PUT），也没记 GitHub request id；生产请求行和返回 400 的网络节点
   均未留证。
 - **对照试验**（另行、只读、针对仓库内一份已存在的中文路径报告）：请求目标含字面 UTF-8 时返回 400，同一路径百分号编码后
