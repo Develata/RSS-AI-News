@@ -141,12 +141,30 @@
 - **已知限制：`--force` 记录无法定向续跑（R1-P-S5，2026-11-22 记录，暂不新增 CLI 入口）**。force 记录的 render version
   是一次性的 `pending` trace 行。若它在 freeze 之后、预算未耗尽时停住（例如远端短暂失败），普通 `publish --date <那天>`
   取 active render 版本、再次 `--force` 又新建 trace 行，两者的幂等键都不是原记录，原记录不会被续跑，而它持有的文章被
-  归属规则排除在之后的报告之外（同日即可发生）。上文"按日期重跑"的办法对 force 记录无效。**人工处理**：确认该记录
-  （`SELECT id, state, render_version FROM publish_records WHERE render_version IN (SELECT id FROM rule_versions WHERE
-  version_tag LIKE 'force-%')`）后把它置为 `failed` 释放文章——`UPDATE publish_records SET state = 'failed',
-  lease_owner = NULL, lease_expires_at = NULL, last_error_kind = 'operator_failed' WHERE id = <id> AND state <> 'failed'`
-  ——再按需重新 `publish --date <那天> --force`。按记录 ID（或原 render version）定向续跑的入口（如 `publish --record <id>`，
-  沿用原目标与快照）列为后续行动。
+  归属规则排除在之后的报告之外（同日即可发生）。上文"按日期重跑"的办法对 force 记录无效。**人工处理**（2026-11-22 改为原子守卫，R3F-B4）：
+  1. 找出候选：`SELECT id, state, render_version, remote_target, local_path, lease_owner, lease_expires_at FROM publish_records
+     WHERE state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local') AND render_version IN (SELECT id FROM rule_versions
+     WHERE kind = 'render' AND version_tag LIKE 'force-%')`。
+  2. **先核实远端回执**：`stored_local` 记录（尤其 `last_error_kind = remote_write_unverified` / `remote_timeout`）的远端写入
+     可能已落地而回执未落库。在目标分支 HEAD 上比对报告路径的 blob 与本地文件（`git hash-object <local_path>`，GitHub
+     `GET contents/<path>?ref=<branch>` 的 `sha`）。**已存在则不要置 `failed`**：其文章已在远端发布，置 `failed` 会释放归属、
+     让它们重新入选；保留记录，等待定向续跑入口（见后续行动）。
+  3. 只对确认未发布、且没有进程正在处理（无有效 lease）的记录，在事务中执行下面的守卫式 UPDATE。守卫在同一条语句里
+     复核"仍是未终态、仍是 force 记录、无有效 lease"，查询与更新之间完成的发布或新领取都会让它更新 0 行；
+     `RETURNING id` 必须**恰好返回一行**，否则 `ROLLBACK` 并重新从第 1 步检查。
+     - SQLite（3.35+，lease 按时刻比较，与 reclaim 相同的 `julianday` 谓词；无法解析的 lease 文本使谓词为 NULL、不更新）：
+       `BEGIN IMMEDIATE; UPDATE publish_records SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL,
+       last_error_kind = 'operator_failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = <id>
+       AND state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local') AND render_version IN (SELECT id FROM
+       rule_versions WHERE kind = 'render' AND version_tag LIKE 'force-%') AND (lease_expires_at IS NULL OR
+       julianday(lease_expires_at) < julianday('now')) RETURNING id;` → 恰好一行 `COMMIT;`，否则 `ROLLBACK;`
+     - PostgreSQL：`BEGIN; UPDATE publish_records SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL,
+       last_error_kind = 'operator_failed', updated_at = now() WHERE id = <id> AND state IN ('pending', 'snapshot_frozen',
+       'rendered', 'stored_local') AND render_version IN (SELECT id FROM rule_versions WHERE kind = 'render' AND version_tag
+       LIKE 'force-%') AND (lease_expires_at IS NULL OR lease_expires_at < now()) RETURNING id;` → 恰好一行 `COMMIT;`，
+       否则 `ROLLBACK;`
+  4. 再按需重新 `publish --date <那天> --force`。
+  按记录 ID（或原 render version）定向续跑的入口（如 `publish --record <id>`，沿用原目标与快照）列为后续行动。
 - **已知限制：旧版 `stored_local` 记录的本地字节（R1-P-S10，B8）**。`f420d95` 及更早版本渲染时用调用方时间生成本地文件，
   另一次采样写入 `rendered_at`；升级后远端阶段与 rebuild-report 从 `rendered_at` 重渲染，因此模板含 `{generated_at}` 时，
   升级前已 `stored_local` 的记录推到 GitHub 的字节可能与本地文件不同（相差的只是该时间戳），0008 也没有原时间可供恢复。
