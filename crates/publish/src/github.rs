@@ -246,18 +246,14 @@ impl GitHubTarget {
             .await
             .map_err(classify::classify_octocrab_error)?;
         let status = response.status().as_u16();
-        let reset_epoch = response
-            .headers()
-            .get("X-RateLimit-Reset")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<i64>().ok());
+        let rate_limit = classify::RateLimitHints::from_headers(response.headers());
         let body = read_response_body(response).await?;
 
         if !(200..300).contains(&status) {
-            return Err(classify::classify_github_status(
+            return Err(classify::classify_github_response(
                 status,
                 response_message(status, &body, self.cfg.token.expose_secret()),
-                reset_epoch,
+                &rate_limit,
             ));
         }
 
@@ -271,18 +267,14 @@ impl GitHubTarget {
             .await
             .map_err(classify::classify_octocrab_error)?;
         let status = response.status().as_u16();
-        let reset_epoch = response
-            .headers()
-            .get("X-RateLimit-Reset")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<i64>().ok());
+        let rate_limit = classify::RateLimitHints::from_headers(response.headers());
         let body = read_response_body(response).await?;
 
         if !(200..300).contains(&status) {
-            return Err(classify::classify_github_status(
+            return Err(classify::classify_github_response(
                 status,
                 response_message(status, &body, self.cfg.token.expose_secret()),
-                reset_epoch,
+                &rate_limit,
             ));
         }
 
@@ -296,18 +288,14 @@ impl GitHubTarget {
             .await
             .map_err(classify::classify_octocrab_error)?;
         let status = response.status().as_u16();
-        let reset_epoch = response
-            .headers()
-            .get("X-RateLimit-Reset")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<i64>().ok());
+        let rate_limit = classify::RateLimitHints::from_headers(response.headers());
         let body = read_response_body(response).await?;
 
         if !(200..300).contains(&status) {
-            return Err(classify::classify_github_status(
+            return Err(classify::classify_github_response(
                 status,
                 response_message(status, &body, self.cfg.token.expose_secret()),
-                reset_epoch,
+                &rate_limit,
             ));
         }
 
@@ -413,20 +401,16 @@ impl GitHubTarget {
             .await
             .map_err(classify::classify_octocrab_error)?;
         let status = response.status().as_u16();
-        let reset_epoch = response
-            .headers()
-            .get("X-RateLimit-Reset")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<i64>().ok());
+        let rate_limit = classify::RateLimitHints::from_headers(response.headers());
         if status == 404 {
             return Ok(None);
         }
         let body = read_response_body(response).await?;
         if !(200..300).contains(&status) {
-            return Err(classify::classify_github_status(
+            return Err(classify::classify_github_response(
                 status,
                 response_message(status, &body, self.cfg.token.expose_secret()),
-                reset_epoch,
+                &rate_limit,
             ));
         }
 
@@ -462,18 +446,14 @@ impl GitHubTarget {
             .await
             .map_err(classify::classify_octocrab_error)?;
         let status = response.status().as_u16();
-        let reset_epoch = response
-            .headers()
-            .get("X-RateLimit-Reset")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<i64>().ok());
+        let rate_limit = classify::RateLimitHints::from_headers(response.headers());
         let body = read_response_body(response).await?;
 
         if !(200..300).contains(&status) {
-            return Err(classify::classify_github_status(
+            return Err(classify::classify_github_response(
                 status,
                 response_message(status, &body, self.cfg.token.expose_secret()),
-                reset_epoch,
+                &rate_limit,
             ));
         }
 
@@ -498,21 +478,19 @@ async fn read_response_body(
     response: http::Response<BoxBody<Bytes, octocrab::Error>>,
 ) -> Result<Bytes, PublishError> {
     let status = response.status().as_u16();
-    let reset_epoch = response
-        .headers()
-        .get("X-RateLimit-Reset")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<i64>().ok());
+    let rate_limit = classify::RateLimitHints::from_headers(response.headers());
     let too_large = || {
         if (200..300).contains(&status) {
             PublishError::ResponseTooLarge {
                 limit: MAX_RESPONSE_BODY_BYTES,
             }
         } else {
-            classify::classify_github_status(
+            // The oversized body is never read, so a 403 rate limit can only
+            // be recognised from its headers here.
+            classify::classify_github_response(
                 status,
                 format!("response body exceeded {MAX_RESPONSE_BODY_BYTES} bytes"),
-                reset_epoch,
+                &rate_limit,
             )
         }
     };
@@ -627,20 +605,86 @@ pub mod classify {
         }
     }
 
+    /// Rate-limit headers of a GitHub REST response (GitHub docs, "Rate
+    /// limits for the REST API" → "Exceeding the rate limit"): a primary limit
+    /// answers 403/429 with `x-ratelimit-remaining: 0` and `x-ratelimit-reset`;
+    /// a secondary limit may send `retry-after` (seconds).
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct RateLimitHints {
+        pub reset_epoch_seconds: Option<i64>,
+        pub remaining: Option<i64>,
+        pub retry_after_seconds: Option<i64>,
+    }
+
+    impl RateLimitHints {
+        pub fn from_headers(headers: &http::HeaderMap) -> Self {
+            let number = |name: &str| {
+                headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.trim().parse::<i64>().ok())
+            };
+            Self {
+                reset_epoch_seconds: number("x-ratelimit-reset"),
+                remaining: number("x-ratelimit-remaining"),
+                retry_after_seconds: number("retry-after"),
+            }
+        }
+
+        fn reset_at(&self) -> OffsetDateTime {
+            let now = OffsetDateTime::now_utc();
+            self.retry_after_seconds
+                .filter(|seconds| *seconds >= 0)
+                .map(|seconds| now + Duration::seconds(seconds))
+                .or_else(|| {
+                    self.reset_epoch_seconds
+                        .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
+                })
+                .unwrap_or_else(|| now + Duration::seconds(60))
+        }
+    }
+
+    /// A 403 is a rate limit (retryable) rather than a permission failure when
+    /// the quota is exhausted, a `retry-after` is present, or GitHub's message
+    /// names a (secondary) rate limit.
+    fn is_rate_limited_403(message: &str, hints: &RateLimitHints) -> bool {
+        hints.remaining == Some(0)
+            || hints.retry_after_seconds.is_some()
+            || message.to_ascii_lowercase().contains("rate limit")
+    }
+
+    pub fn classify_github_response(
+        status: u16,
+        message: String,
+        hints: &RateLimitHints,
+    ) -> PublishError {
+        match status {
+            403 if is_rate_limited_403(&message, hints) => PublishError::GitHubRateLimit {
+                reset_at: hints.reset_at(),
+            },
+            401 | 403 => PublishError::GitHubAuthFailed(message),
+            429 => PublishError::GitHubRateLimit {
+                reset_at: hints.reset_at(),
+            },
+            _ => PublishError::GitHubApiError { status, message },
+        }
+    }
+
+    /// Status + message + `x-ratelimit-reset` only; see
+    /// [`classify_github_response`] for the header-aware variant.
     pub fn classify_github_status(
         status: u16,
         message: String,
         reset_epoch_seconds: Option<i64>,
     ) -> PublishError {
-        match status {
-            401 | 403 => PublishError::GitHubAuthFailed(message),
-            429 => PublishError::GitHubRateLimit {
-                reset_at: reset_epoch_seconds
-                    .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
-                    .unwrap_or_else(|| OffsetDateTime::now_utc() + Duration::seconds(60)),
+        classify_github_response(
+            status,
+            message,
+            &RateLimitHints {
+                reset_epoch_seconds,
+                ..RateLimitHints::default()
             },
-            _ => PublishError::GitHubApiError { status, message },
-        }
+        )
     }
 }
 

@@ -32,7 +32,8 @@
   → 保持当前阶段态、释放 lease、计入重试预算（耗尽才转 `failed`），`last_error_kind` 为存储错误类别；
   下一次运行可继续推进。不可重试的存储错误 → `failed`
 - store-local 目录不可写 → record → `Failed`，errors 表登记；命令 summary 该阶段 `verdict=failed`、`status=fail`、exit 1
-- 远端 401 → `GithubAuthFailed`（终态，不重试）
+- 远端 401，或无限流信号的 403 → `GithubAuthFailed`（终态，不重试）
+- 远端 403 且 `x-ratelimit-remaining: 0` / 带 `retry-after` / message 提到 rate limit → `GithubRateLimit`（可重试）
 - 远端 429 → `GithubRateLimit`，state 保持、article 不晋升
 - 远端 422 重试达上限 → 仍报错，record 保持 `StoredLocal`
 - promote target article 已被其它流转推进 → `ArticleConflict`
@@ -78,6 +79,11 @@
 | `publish_many_surfaces_422_after_max_retries` | 同上 | 422 超限 |
 | `auth_failure_maps_to_github_auth_failed` | 同上 | 401 映射 |
 | `rate_limit_maps_to_github_rate_limit` | 同上 | 429 映射 |
+| `forbidden_with_exhausted_quota_maps_to_retryable_rate_limit` | 同上 | 403 + remaining=0 → 限流 |
+| `forbidden_with_retry_after_maps_to_retryable_rate_limit` | 同上 | 403 + retry-after → 限流 |
+| `forbidden_without_rate_limit_signals_maps_to_auth_failed` | 同上 | 普通 403 → 认证失败 |
+| `status_403_naming_a_rate_limit_maps_to_rate_limit` | `crates/publish/tests/github_classify_tests.rs` | message 含 (secondary) rate limit |
+| `status_403_without_rate_limit_signal_maps_to_auth_failed` | 同上 | 普通 403 |
 | `local_fs_target_rejects_path_with_parent_traversal` | `crates/publish/tests/local_target_tests.rs` | 路径穿越拒绝 |
 | `local_fs_target_creates_parent_directories` | 同上 | 父目录自建 |
 | `publish_category_never_claims_another_categorys_pending_record` | `crates/cli/tests/publish_cmd_tests.rs` | 命令层跨分类 record 隔离 |

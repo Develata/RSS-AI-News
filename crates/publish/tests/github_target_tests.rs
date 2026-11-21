@@ -347,6 +347,84 @@ async fn rate_limit_maps_to_github_rate_limit() {
     ));
 }
 
+/// GitHub answers an exhausted primary quota with 403 and
+/// `x-ratelimit-remaining: 0`; that is a retryable rate limit, not bad auth.
+#[tokio::test]
+async fn forbidden_with_exhausted_quota_maps_to_retryable_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(GITHUB_PATH))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .insert_header("x-ratelimit-remaining", "0")
+                .insert_header("x-ratelimit-reset", "1800")
+                .set_body_json(json!({ "message": "Forbidden" })),
+        )
+        .mount(&server)
+        .await;
+    let target = target(&server);
+
+    let error = target.publish(&sample_report()).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        PublishError::GitHubRateLimit { reset_at }
+            if reset_at == OffsetDateTime::from_unix_timestamp(1_800).unwrap()
+    ));
+    assert!(error.is_retryable());
+}
+
+/// Secondary rate limits may carry only `retry-after`.
+#[tokio::test]
+async fn forbidden_with_retry_after_maps_to_retryable_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(GITHUB_PATH))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .insert_header("retry-after", "120")
+                .set_body_json(json!({ "message": "Forbidden" })),
+        )
+        .mount(&server)
+        .await;
+    let target = target(&server);
+    let before = OffsetDateTime::now_utc();
+
+    let error = target.publish(&sample_report()).await.unwrap_err();
+
+    match &error {
+        PublishError::GitHubRateLimit { reset_at } => {
+            assert!(*reset_at >= before + time::Duration::seconds(120));
+        }
+        other => panic!("expected rate limit, got {other:?}"),
+    }
+    assert!(error.is_retryable());
+}
+
+/// A plain permission refusal stays a permanent auth failure.
+#[tokio::test]
+async fn forbidden_without_rate_limit_signals_maps_to_auth_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(GITHUB_PATH))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .insert_header("x-ratelimit-remaining", "4999")
+                .set_body_json(json!({ "message": "Resource not accessible by integration" })),
+        )
+        .mount(&server)
+        .await;
+    let target = target(&server);
+
+    let error = target.publish(&sample_report()).await.unwrap_err();
+
+    assert!(matches!(
+        &error,
+        PublishError::GitHubAuthFailed(reason) if reason == "Resource not accessible by integration"
+    ));
+    assert!(!error.is_retryable());
+}
+
 #[tokio::test]
 async fn server_error_maps_to_retryable_api_error() {
     let server = MockServer::start().await;

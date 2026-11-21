@@ -230,7 +230,8 @@ Markdown **byte-equal**；跨渲染器版本（例如 YAML 引号规则调整）
 | freeze 时 UNIQUE 冲突 | `PublishError::AlreadyExists` | 返 idempotent outcome，不视为失败 |
 | 阶段内读库 / 冻结写入失败 | `ReportError::Storage` / `StorageError`（保留类型） | 按 `is_retryable()`：可重试 → 维持阶段态 + 计预算（耗尽 → `failed`）；否则 `failed` |
 | 本地落盘失败 | `PublishError::LocalStoreFailed` | state='failed'，无 retry |
-| GitHub 401/403 | `PublishError::GitHubAuthFailed` | state='failed' |
+| GitHub 401；无限流信号的 403 | `PublishError::GitHubAuthFailed` | state='failed' |
+| GitHub 429；带限流信号的 403（`x-ratelimit-remaining: 0`、存在 `retry-after`，或 message 含 "rate limit" / "secondary rate limit"，见 GitHub REST 文档 "Exceeding the rate limit"） | `PublishError::GitHubRateLimit { reset_at }`（`retry-after` > `x-ratelimit-reset` > now+60s） | retryable：维持阶段态 + 计预算 |
 | GitHub 422 lost-update | `is_branch_concurrently_updated` | retry 1 次，仍失败 → state='failed' |
 | GitHub 5xx | `PublishError::GitHubApiError {5xx}` | state='failed'，本地文件保留 |
 | GitHub timeout | `PublishError::GitHubApiError` | state='failed' |
