@@ -369,6 +369,99 @@ existing 0.10.4 c4
 expect_rc 1
 done_case
 
+# --- release-registry.sh (the real adapter) with a stub docker ---------------
+# The stub answers `docker buildx imagetools inspect <ref> <flags>` per mode
+# (raw = `--raw`, manifest = `--format '{{json .Manifest}}'`, image =
+# `--format '{{json .Image}}'`) from $STUB_DOCKER/<mode>.{rc,out,err}; a mode
+# without an .rc file succeeds with its .out.
+
+adapter="$here/release-registry.sh"
+mkdir -p "$work/bin"
+cat >"$work/bin/docker" <<'STUB'
+#!/usr/bin/env sh
+set -eu
+[ "$1 $2 $3" = "buildx imagetools inspect" ] || { echo "stub docker: unexpected $*" >&2; exit 2; }
+shift 4
+case "$*" in
+    --raw) mode=raw ;;
+    "--format {{json .Manifest}}") mode=manifest ;;
+    "--format {{json .Image}}") mode=image ;;
+    *) echo "stub docker: unexpected flags $*" >&2; exit 2 ;;
+esac
+echo "$mode" >>"$STUB_DOCKER/calls"
+[ ! -f "$STUB_DOCKER/$mode.err" ] || cat "$STUB_DOCKER/$mode.err" >&2
+[ ! -f "$STUB_DOCKER/$mode.out" ] || cat "$STUB_DOCKER/$mode.out"
+exit "$(cat "$STUB_DOCKER/$mode.rc" 2>/dev/null || echo 0)"
+STUB
+chmod +x "$work/bin/docker"
+
+# Starts an adapter case whose registry holds one healthy image.
+start_adapter() {
+    description="adapter: $1"
+    case_no=$((case_no + 1))
+    STUB_DOCKER="$work/$case_no"
+    export STUB_DOCKER
+    mkdir -p "$STUB_DOCKER"
+    : >"$STUB_DOCKER/calls"
+    echo '{"schemaVersion":2}' >"$STUB_DOCKER/raw.out"
+    echo '{"digest":"sha256:abc"}' >"$STUB_DOCKER/manifest.out"
+    echo '{"config":{"Labels":{"org.opencontainers.image.version":"1.2.3","org.opencontainers.image.revision":"c123"}}}' \
+        >"$STUB_DOCKER/image.out"
+    case_failures=$failures
+}
+
+# stub_fail MODE RC MESSAGE
+stub_fail() {
+    echo "$2" >"$STUB_DOCKER/$1.rc"
+    echo "$3" >"$STUB_DOCKER/$1.err"
+    rm -f "$STUB_DOCKER/$1.out"
+}
+
+adapter_inspect() {
+    set +e
+    out="$(PATH="$work/bin:$PATH" sh "$adapter" inspect "$IMAGE:1.2.3" 2>"$work/stderr")"
+    rc=$?
+    set -e
+}
+
+start_adapter "an existing tag prints digest, version and revision"
+adapter_inspect
+expect_rc 0
+[ "$out" = "sha256:abc 1.2.3 c123" ] || fail "got '$out'"
+done_case
+
+start_adapter "a top-level 'not found' is a missing tag"
+stub_fail raw 1 "ERROR: $IMAGE:1.2.3: not found"
+adapter_inspect
+expect_rc 3
+done_case
+
+start_adapter "a top-level 'manifest unknown' is a missing tag"
+stub_fail raw 1 "ERROR: unexpected status 404: MANIFEST_UNKNOWN: manifest unknown"
+adapter_inspect
+expect_rc 3
+done_case
+
+start_adapter "a top-level auth or network error is a read error"
+stub_fail raw 1 "ERROR: unexpected status 401 Unauthorized"
+adapter_inspect
+expect_rc 1
+done_case
+
+# Buildx loads child manifests and image configs for `--format`; once the
+# top-level manifest resolved, their "not found" must not read as a missing tag.
+start_adapter "a child manifest 'not found' after the top level resolved is a read error"
+stub_fail manifest 1 "ERROR: sha256:child: not found"
+adapter_inspect
+expect_rc 1
+done_case
+
+start_adapter "an image config 'not found' after the top level resolved is a read error"
+stub_fail image 1 "ERROR: blob sha256:config: not found"
+adapter_inspect
+expect_rc 1
+done_case
+
 if [ "$failures" -ne 0 ]; then
     echo "$failures release-promotion check(s) failed" >&2
     exit 1

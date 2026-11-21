@@ -3,7 +3,10 @@
 # backed by `docker buildx imagetools` and jq.
 #
 #   inspect <image>:<tag>  -> `<digest> <version-label> <revision-label>`; exit 3
-#                             when the tag does not exist.
+#                             only when the tag's own top-level manifest request
+#                             answers "not found" / "manifest unknown"; once it
+#                             resolves, any digest / child / config read
+#                             failure is a read error (R3G-B1).
 #   copy <image>@<digest> <image>:<tag>
 #                          -> `imagetools create --prefer-index=false`: a single
 #                             source manifest or index is copied as is, so the
@@ -25,15 +28,23 @@ case "$command" in
         ref="$2"
         err="$(mktemp)"
         trap 'rm -f "$err"' EXIT
-        if ! manifest="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' 2>"$err")"; then
-            # Only an explicit "does not exist" answer counts as absent; any
-            # other failure (auth, network, rate limit) is a read error.
+        # Existence is decided by the top-level manifest request alone (R3G-B1).
+        # `--raw` resolves the tag and fetches only that manifest (Buildx
+        # v0.38.2 `Printer.Print` returns before any child manifest or config
+        # is loaded), so a "not found" here is about the tag itself. Any other
+        # failure (auth, network, rate limit) is a read error.
+        if ! docker buildx imagetools inspect "$ref" --raw >/dev/null 2>"$err"; then
             if grep -Eqi 'not found|manifest unknown' "$err"; then
                 exit 3
             fi
             cat "$err" >&2
             die "inspect $ref failed"
         fi
+        # The tag exists. `--format` also loads child manifests and image
+        # configs, whose errors say "not found" too: from here on every
+        # failure is a hard error, never "missing".
+        manifest="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}')" ||
+            die "reading the manifest of $ref failed (the tag exists)"
         digest="$(printf '%s' "$manifest" | jq -er '.digest')" || die "no digest for $ref"
         # Read the labels from the resolved digest, not the tag again, so a tag
         # moved in between cannot mix two images' facts. `.Image` is the image

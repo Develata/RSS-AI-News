@@ -129,8 +129,12 @@ Jobs：
   - Buildx CLI 由 `setup-buildx-action` 固定为 `v0.38.2`（两个镜像 job 相同）。
   - 测试：static lane 的 `release-promotion` 步骤用文件后端的假 registry（`release-registry-fake.sh`）离线覆盖上述规则，含低版本 run
     晋升最高版本、删除更高 tag 不回退、别名 label 校验、读错误零写入、scheduler 写失败后重跑补齐、重跑复用版本 tag。真实适配器
-    `release-registry.sh`（imagetools + jq）已在本地 `registry:2` 上对带 provenance 的 index 与普通 manifest 验证；GHCR 上的行为
-    （尤其 tag 不存在时的报错文本）要到首个真实 tag 才能确认。
+    `release-registry.sh`（imagetools + jq）的"缺失"判定只看该 tag 自身的顶层 manifest 请求（`imagetools inspect --raw`，
+    Buildx v0.38.2 只解析并取顶层 manifest）：只有它报 `not found` / `manifest unknown` 才算 tag 不存在；顶层已解析后，digest、
+    子 manifest 或镜像 config 的任何读取失败（containerd 对缺失子对象同样报 `not found`）都是读错误、使 job 失败（R3G-B1）。
+    同一测试脚本用 stub `docker` 覆盖这两类情形；本地 `registry:2`（Buildx v0.38.1）上也实测过：缺失 tag 退出 3，删去镜像
+    config blob 后旧实现误报缺失（退出 3）、现实现退出 1。适配器此前已在本地 `registry:2` 上对带 provenance 的 index 与普通
+    manifest 验证；GHCR 上的行为（尤其 tag 不存在时的报错文本）要到首个真实 tag 才能确认。
   四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit 不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
 
 ### 修复前 release run 的重跑边界（R3-1）
