@@ -254,10 +254,11 @@ jobs:
       packages: write
     # One reconcile at a time across tags. `queue: max` keeps up to 100
     # waiting runs instead of the default single pending slot, in which a
-    # later (possibly lower) tag's run would cancel a waiting one. Correctness
-    # does not depend on it: every run reconciles latest to the highest
-    # released version, and a cancelled or dropped run is completed by
-    # re-running any release's promote-tags job (docs/operations/ci-and-release.md).
+    # later (possibly lower) tag's run would cancel a waiting one. latest does
+    # not depend on it: every run reconciles latest to the highest released
+    # version. A run touches only latest, its trigger's X.Y line and latest's
+    # line, so a cancelled or dropped run is completed by re-running a release
+    # of the affected X.Y line (docs/operations/ci-and-release.md, R3G-S3).
     # `queue` is in GitHub's workflow schema for job concurrency; actionlint
     # 1.7.12 does not know it yet (.github/actionlint.yaml).
     concurrency:
