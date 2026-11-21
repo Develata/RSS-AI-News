@@ -292,6 +292,50 @@ async fn publish_force_creates_unique_non_active_render_versions_on_a_fresh_db()
     assert_eq!(status, "active");
 }
 
+/// B12: without --date the report date is today in the effective target
+/// timezone, and an unknown zone is a config error before any write.
+#[tokio::test]
+async fn publish_default_date_uses_the_effective_timezone_and_rejects_unknown_zones() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config(temp.path(), &db_path, &temp.path().join("output"));
+    migrated_pool(&db_path).await.close().await;
+
+    let mut cli = cli_for(temp.path(), "ai");
+    cli.timezone = Some("Mars/Olympus_Mons".to_string());
+    cli.command = Command::Publish(PublishArgs {
+        date: None,
+        local_only: true,
+        force: false,
+    });
+    let error = publish::run(&cli, publish_args(&cli))
+        .await
+        .expect_err("unknown zone");
+    assert_eq!(error.exit_code(), ExitCode::ConfigError, "{error}");
+    let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
+    let records: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM publish_records")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(records, 0, "nothing may be written for an unknown zone");
+    pool.close().await;
+
+    for zone in ["Pacific/Kiritimati", "Pacific/Pago_Pago"] {
+        cli.timezone = Some(zone.to_string());
+        let expected = rss_ai_news_runtime::flows::publish::default_report_date(
+            OffsetDateTime::now_utc(),
+            zone,
+        )
+        .unwrap();
+        let summary = publish::run(&cli, publish_args(&cli))
+            .await
+            .expect("publish");
+        // +14:00 and -11:00 are on different calendar days for most of each
+        // UTC day; a UTC default would make both equal to the UTC date.
+        assert_eq!(summary.date, expected, "{zone}");
+    }
+}
+
 #[tokio::test]
 async fn ai_run_without_category_runs_every_category_and_reports_each_failure() {
     let temp = TempDir::new().expect("temp dir");

@@ -356,14 +356,32 @@ pub mod timezone_check {
         }
 
         async fn run(&self) -> CheckOutcome {
+            // Same IANA lookup as validate-config and the default report date.
             let trimmed = self.timezone.trim();
             if trimmed.is_empty() {
                 CheckOutcome::Fail("empty timezone".to_string())
-            } else if trimmed.contains('/') || trimmed.eq_ignore_ascii_case("UTC") {
+            } else if jiff::tz::TimeZone::get(trimmed).is_ok() {
                 CheckOutcome::Ok(trimmed.to_string())
             } else {
-                CheckOutcome::Warn(format!("{trimmed} (basic validation only)"))
+                CheckOutcome::Fail(format!("{trimmed} is not an IANA time zone"))
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn real_zone_passes_and_made_up_zone_fails() {
+            assert!(matches!(
+                TimezoneCheck::new("Asia/Shanghai".into()).run().await,
+                CheckOutcome::Ok(_)
+            ));
+            assert!(matches!(
+                TimezoneCheck::new("Mars/Olympus_Mons".into()).run().await,
+                CheckOutcome::Fail(_)
+            ));
         }
     }
 }

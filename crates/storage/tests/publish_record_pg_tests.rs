@@ -579,7 +579,8 @@ async fn pg_lease_predicates_treat_subsecond_lease_as_live() {
     let lease_until = now + time::Duration::milliseconds(500);
     sqlx::query(
         "UPDATE publish_records SET state = 'stored_local', lease_owner = 'holder', \
-         lease_expires_at = $1, attempt_count = CASE WHEN id = $2 THEN 5 ELSE 1 END \
+         lease_expires_at = $1, attempt_count = CASE WHEN id = $2 THEN 5 ELSE 1 END, \
+         stage_attempt_count = CASE WHEN id = $2 THEN 5 ELSE 1 END \
          WHERE id IN ($2, $3)",
     )
     .bind(lease_until)
@@ -614,4 +615,226 @@ async fn pg_lease_predicates_treat_subsecond_lease_as_live() {
     let later = now + time::Duration::seconds(1);
     assert_eq!(repo.terminalize_exhausted(5, later).await.unwrap(), 1);
     assert_eq!(repo.reclaim_expired_leases(later).await.unwrap(), 1);
+}
+
+/// B1 (ADR 0012) on PostgreSQL: the budget is per stage. With
+/// `max_attempts = 1` a record still advances freeze → render (the advance
+/// resets the stage counter), and one retryable failure in the render stage
+/// exhausts that stage's budget.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_publish_budget_is_per_stage() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "stage-budget").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .create_if_new(&new_record("idem-stage-budget", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    let request = |owner: &str| ClaimRequest {
+        owner: owner.to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 1,
+    };
+    assert_eq!(
+        repo.claim_publish_by_ids(&request("freeze"), PublishState::Pending, &[id])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        repo.release_advance(
+            id,
+            "freeze",
+            PublishState::Pending,
+            PublishState::SnapshotFrozen,
+            PublishTimestampField::SnapshotFrozenAt,
+            now,
+            PublishAdvanceExtras::default(),
+        )
+        .await
+        .unwrap()
+    );
+    let counters = || async {
+        sqlx::query_as::<_, (String, i64, i64)>(
+            "SELECT state, attempt_count, stage_attempt_count FROM publish_records WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(ctx.pg_pool())
+        .await
+        .unwrap()
+    };
+    assert_eq!(counters().await, ("snapshot_frozen".to_string(), 1, 0));
+
+    let claimed = repo
+        .claim_frozen_for_render(&request("render"))
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1, "a new stage starts with a fresh budget");
+    let outcome = repo
+        .release_retryable_failure(id, "render", "boom", "db_timeout", 1, now)
+        .await
+        .unwrap();
+
+    assert!(outcome.released && outcome.exhausted);
+    assert_eq!(counters().await, ("failed".to_string(), 2, 1));
+}
+
+/// B2 (ADR 0012) on PostgreSQL under READ COMMITTED: a freeze locks its
+/// articles before the ownership re-check, so it waits for a concurrent
+/// freeze of the same article and then sees that snapshot's committed items
+/// instead of both freezes passing the check.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_concurrent_freeze_of_the_same_article_serialises_on_the_article_lock() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "ownership").await;
+    let records = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let rival = records
+        .create_if_new(&new_record("idem-own-rival", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let ours = records
+        .create_if_new(&new_record("idem-own-ours", "ml", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    records
+        .claim_publish_by_ids(
+            &ClaimRequest {
+                owner: "frz-ours".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 1,
+                max_attempts: 5,
+            },
+            PublishState::Pending,
+            &[ours],
+        )
+        .await
+        .unwrap();
+    let article = seed_article(&ctx, "hash-own", "uid-own", "ready_for_publish").await;
+
+    // The rival freeze holds the article lock and has written its items.
+    let mut rival_tx = ctx.pg_pool().begin().await.unwrap();
+    sqlx::query("SELECT id FROM articles WHERE id = $1 FOR UPDATE")
+        .bind(article)
+        .execute(&mut *rival_tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO publish_items (publish_record_id, position, article_id, frozen_title, \
+         frozen_summary, frozen_tags_json, frozen_canonical_link, frozen_source_display_name) \
+         VALUES ($1, 1, $2, 't', 's', '[]', 'https://example.com', 'src')",
+    )
+    .bind(rival)
+    .bind(article)
+    .execute(&mut *rival_tx)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE publish_records SET state = 'snapshot_frozen' WHERE id = $1")
+        .bind(rival)
+        .execute(&mut *rival_tx)
+        .await
+        .unwrap();
+
+    let items = PublishItemRepo::new_with_storage(ctx.storage_pool().clone());
+    let ours_freeze = tokio::spawn(async move {
+        items
+            .freeze_snapshot(
+                ours,
+                "frz-ours",
+                vec![FreezeSnapshotItem {
+                    position: 1,
+                    article_id: article,
+                    article_ai_result_id: None,
+                    frozen_title: "t".to_string(),
+                    frozen_summary: "s".to_string(),
+                    frozen_tags_json: "[]".to_string(),
+                    frozen_score: None,
+                    frozen_canonical_link: "https://example.com".to_string(),
+                    frozen_source_display_name: "src".to_string(),
+                }],
+                Vec::new(),
+                OffsetDateTime::now_utc(),
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !ours_freeze.is_finished(),
+        "our freeze must wait for the rival's article lock"
+    );
+    rival_tx.commit().await.unwrap();
+
+    let outcome = ours_freeze.await.unwrap().unwrap();
+
+    assert_eq!(
+        outcome.status,
+        FreezeSnapshotStatus::ArticleOwnershipConflict {
+            article_id: article,
+            owner_record_id: rival,
+        }
+    );
+    let (state, owned): (String, i64) = sqlx::query_as(
+        "SELECT state, (SELECT COUNT(*) FROM publish_items WHERE publish_record_id = $1) \
+         FROM publish_records WHERE id = $1",
+    )
+    .bind(ours)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    assert_eq!((state.as_str(), owned), ("pending", 0));
+}
+
+/// B2 selection on PostgreSQL: an article in a non-failed snapshot is not a
+/// candidate (AI-off SQL is dialect-specific).
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_ai_off_selection_excludes_article_owned_by_active_snapshot() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "own-select").await;
+    let records = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let owner_record = records
+        .create_if_new(&new_record("idem-own-select", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let article = seed_article(&ctx, "hash-own-sel", "uid-own-sel", "ready_for_publish").await;
+    sqlx::query(
+        "INSERT INTO publish_items (publish_record_id, position, article_id, frozen_title, \
+         frozen_summary, frozen_tags_json, frozen_canonical_link, frozen_source_display_name) \
+         VALUES ($1, 1, $2, 't', 's', '[]', 'https://example.com', 'src')",
+    )
+    .bind(owner_record)
+    .bind(article)
+    .execute(ctx.pg_pool())
+    .await
+    .unwrap();
+    let items = PublishItemRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let select = || {
+        items.select_ai_off_passthrough_candidates(
+            "ai",
+            now - time::Duration::days(1),
+            now + time::Duration::days(1),
+            NonZeroU32::new(10).unwrap(),
+        )
+    };
+    for (state, expected) in [("stored_local", 0), ("failed", 1)] {
+        sqlx::query("UPDATE publish_records SET state = $1 WHERE id = $2")
+            .bind(state)
+            .bind(owner_record)
+            .execute(ctx.pg_pool())
+            .await
+            .unwrap();
+        assert_eq!(select().await.unwrap().len(), expected, "owner {state}");
+    }
 }

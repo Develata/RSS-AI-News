@@ -12,6 +12,7 @@
 ### 命中条件（success path）
 
 - **init**：基于 `(category_key, report_date)` 幂等键创建/复用 `publish_records.Pending` 行
+- **默认报告日期**：未给 `--date` 时取运行时刻在有效目标时区（`--timezone` / `[publish].target_timezone`）下的日期，非 UTC；未知时区 → 配置错误（exit 78），不写库
 - **freeze**：将命中 `[publish].min_importance_score` × `include_unscored` × `candidate_window_hours` 的 article 冻结为 `publish_items`；
   - AI 路径：选 `ArticleState=ReadyForPublish`
   - AI-off 直通：`Persisted` article 在同 tx 内提升为候选（无需 ai_result）
@@ -26,6 +27,8 @@
 - **path 防穿越**：含 `..` / 反斜杠 / 无日期 token 的模板在 validate 阶段就报错（详见 [./06-config-loading.md](./06-config-loading.md)）
 - 远端 publish 成功后 article → `Published`；批次成功后 record → `PublishedRemote`
 - **lease 按时刻判定**：SQLite 上 publish_records 的 claim / reclaim / sweep 用 `julianday()` 比较（lease 写入向上、now 向下取整到毫秒），lease 绝不提前过期；PG 用 `timestamptz`
+- **重试预算按阶段计**：每阶段最多 `publish_max_attempts` 次 claim（`stage_attempt_count`，推进即清零）；`attempt_count` 为累计审计值
+- **快照归属**：选稿排除已在其它未失败记录（活动快照）中的文章；freeze 事务内复查，输掉竞争 → 回滚、立即释放 lease、退还 claim，下轮不含该文章；记录 `failed` 释放归属；AI-off 下未被持有的 `ready_for_publish` 遗留文章可直接冻结
 - **record 隔离**：`publish` 与 `publish-all` 的每个阶段（freeze / render / store-local / publish-remote）都只 claim init 得到的 `publish_record_id`；
   单分类 `publish` 不得领取或推进其他分类残留的记录。例外：每阶段 claim 前的全局 maintenance
   （lease 过期 reclaim + 预算耗尽 sweep → `failed`）按设计作用于全表，不区分分类
@@ -41,6 +44,7 @@
 - 远端 403 且 `x-ratelimit-remaining: 0` / 带 `retry-after` / message 提到 rate limit → `GithubRateLimit`（可重试）
 - 远端 429 → `GithubRateLimit`，state 保持、article 不晋升
 - 远端 422 重试达上限 → 仍报错，record 保持 `StoredLocal`
+- 多报告批次重试：HEAD 已逐字节包含整批内容（上次 ref 更新落地、响应丢失）→ 不新建 commit，回执指向该 HEAD
 - promote target article 已被其它流转推进 → `ArticleConflict`
 - 目标漂移：`stored_local` 记录的 `remote_target`（`owner/repo:branch`）与当前配置的远端目标不同 →
   不发任何请求，`TargetMismatch { stored, current }`，record → `failed`（`last_error_kind=remote_target_mismatch`）；
@@ -60,6 +64,17 @@
 | `freeze_after_empty_snapshot_publishes_articles_that_arrive_later` | 同上 | 空跑不耗预算、后到文章可发布 |
 | `freeze_returns_nothing_to_claim_when_no_pending_records` | 同上 | 空闲 |
 | `freeze_skips_articles_without_correct_category_key` | 同上 | category 隔离 |
+| `small_budget_completes_all_four_stages_without_failures` | `crates/runtime/tests/publish_stage_budget_tests.rs` | 按阶段预算：max=2 无故障走完四阶段 |
+| `one_retryable_failure_per_stage_is_absorbed_by_that_stage_budget` | 同上 | 单阶段 1 次失败可重试 |
+| `exhausting_one_stage_budget_fails_the_record` | 同上 | 单阶段 2 次失败 → failed |
+| `sqlite_0008_gives_existing_rows_a_fresh_stage_budget_and_rolls_back` | `crates/storage/tests/publish_stage_budget_migration_tests.rs` | 存量行迁移 + down（PG 同名 `pg_…`） |
+| `pg_publish_budget_is_per_stage` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 按阶段预算 |
+| `selection_excludes_articles_owned_by_an_active_snapshot_until_it_fails` | `crates/storage/tests/publish_freeze_tests.rs` | 选稿排除活动快照文章，failed 释放 |
+| `freeze_snapshot_rejects_article_owned_by_another_active_snapshot` | 同上 | freeze 事务内复查归属 |
+| `freeze_snapshot_keeps_unowned_ready_article_and_promotes_persisted_one` | 同上 | AI-off 遗留 ready 文章不整批回滚（S9） |
+| `freeze_losing_an_article_releases_lease_without_charging_budget_and_retries_without_it` | `crates/runtime/tests/publish_freeze_tests.rs` | 冲突立即释放 lease、不耗预算、下轮排除 |
+| `pg_concurrent_freeze_of_the_same_article_serialises_on_the_article_lock` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 并发 freeze 由文章行锁串行化 |
+| `pg_ai_off_selection_excludes_article_owned_by_active_snapshot` | 同上 | PG AI-off 选稿排除 |
 | `freeze_transient_candidate_load_error_keeps_record_pending_and_next_run_freezes` | 同上 | 瞬时存储错误保态、下轮继续 |
 | `freeze_permanent_candidate_load_error_fails_record` | 同上 | 不可重试存储错误 → failed |
 | `render_advances_snapshot_frozen_to_rendered_when_items_exist` | `crates/runtime/tests/publish_render_tests.rs` | render happy |
@@ -82,6 +97,10 @@
 | `publish_many_creates_one_commit_for_multiple_reports` | `crates/publish/tests/github_target_tests.rs` | target 层 batch |
 | `publish_many_retries_once_after_non_fast_forward_then_succeeds` | 同上 | 422 重试 |
 | `publish_many_surfaces_422_after_max_retries` | 同上 | 422 超限 |
+| `retry_after_lost_ref_update_response_records_existing_head_without_new_commit` | `crates/publish/tests/github_batch_idempotency_tests.rs` | ref 更新已落地但响应丢失：重试不新建 commit，按 HEAD 记回执 |
+| `one_differing_blob_still_creates_a_commit` | 同上 | 任一 blob 不一致照常提交 |
+| `blob_lookup_error_is_not_treated_as_already_published` | 同上 | 查询出错不当作已发布 |
+| `git_blob_sha_matches_git_hash_object` | `crates/publish/src/github.rs` | blob sha 与 `git hash-object` 一致（含中文） |
 | `auth_failure_maps_to_github_auth_failed` | 同上 | 401 映射 |
 | `chinese_path_leaves_the_client_percent_encoded_on_get_and_put` | `crates/publish/tests/github_contents_path_tests.rs` | 中文路径请求行按段编码（原始字节） |
 | `create_chinese_path_sends_encoded_get_then_put_without_sha` | 同上 | 新建：GET 404 → PUT 无 sha；ref 编码 |
@@ -107,6 +126,9 @@
 | `publish_force_creates_unique_non_active_render_versions_on_a_fresh_db` | `crates/cli/tests/publish_cmd_tests.rs` | --force 每次唯一且非 active |
 | `publish_all_refuses_categories_whose_paths_collide_on_the_report_date` | `crates/cli/tests/publish_cmd_tests.rs` | 真实日期路径碰撞在写入前拦截 |
 | `month_day_and_day_month_templates_collide_on_eleven_eleven` | `crates/runtime/src/flows/publish/paths.rs` | 11-11 碰撞 / 其它日期不碰撞 |
+| `publish_default_date_uses_the_effective_timezone_and_rejects_unknown_zones` | `crates/cli/tests/publish_cmd_tests.rs` | 默认日期按目标时区；未知时区写库前报错 |
+| `shanghai_after_midnight_is_the_local_date_not_the_utc_date` | `crates/runtime/src/flows/publish/report_date.rs` | 2026-11-21T00:30+08:00 → 2026-11-21（另含负偏移、夏令时、未知时区用例） |
+| `real_iana_zones_are_accepted_and_made_up_ones_rejected` | `crates/config/src/validate/checks.rs` | validate 按 IANA 库校验 |
 | `publish_category_never_claims_another_categorys_pending_record` | `crates/cli/tests/publish_cmd_tests.rs` | 命令层跨分类 record 隔离 |
 | `sqlite_lease_predicates_compare_instants_not_rfc3339_text` | `crates/storage/tests/publish_stage_recovery_tests.rs` | SQLite lease 谓词按时刻（.5Z vs 整秒 now） |
 | `sqlite_claim_lease_is_not_expired_before_its_instant` | 同上 | claim 写入的 lease 不提前过期 |

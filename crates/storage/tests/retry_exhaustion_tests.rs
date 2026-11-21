@@ -450,9 +450,13 @@ async fn seed_publish_record(pool: &SqlitePool, key: &str, state: &str, attempts
         .await
         .expect("create should succeed")
         .expect("record should be new");
-    sqlx::query("UPDATE publish_records SET state = ?, attempt_count = ? WHERE id = ?")
-        .bind(state)
-        .bind(attempts)
+    // Attempts spent in the current stage (per-stage budget, ADR 0012).
+    sqlx::query(
+        "UPDATE publish_records SET state = ?, attempt_count = ?, stage_attempt_count = ? WHERE id = ?",
+    )
+    .bind(state)
+    .bind(attempts)
+    .bind(attempts)
         .bind(id)
         .execute(pool)
         .await

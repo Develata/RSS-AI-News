@@ -203,8 +203,13 @@ impl GitHubTarget {
     ) -> Result<PublishedBatchArtifact, PublishError> {
         let mut tree_entries = Vec::with_capacity(reports.len());
         let mut artifacts = Vec::with_capacity(reports.len());
+        let mut expected_blobs = Vec::with_capacity(reports.len());
         for report in reports {
             let final_path = self.join_path(&report.relative_path)?;
+            expected_blobs.push((
+                final_path.clone(),
+                git_blob_sha(report.markdown_content.as_bytes()),
+            ));
             tree_entries.push(json!({
                 "path": final_path,
                 "mode": "100644",
@@ -219,6 +224,22 @@ impl GitHubTarget {
         }
 
         let (head_commit_sha, base_tree_sha) = self.head_commit_and_tree().await?;
+        // Idempotent retry (B9): if an earlier attempt's ref update landed but
+        // its response was lost, HEAD already holds every report byte for
+        // byte. Record receipts against that commit instead of stacking a
+        // second commit on top of it.
+        if self
+            .head_contains_blobs(&head_commit_sha, &expected_blobs)
+            .await?
+        {
+            for artifact in &mut artifacts {
+                artifact.commit_sha = Some(head_commit_sha.clone());
+            }
+            return Ok(PublishedBatchArtifact {
+                artifacts,
+                commit_sha: Some(head_commit_sha),
+            });
+        }
         let tree_sha = self.create_tree(&base_tree_sha, tree_entries).await?;
         let commit_message = format!(
             "{} {} reports",
@@ -400,12 +421,41 @@ impl GitHubTarget {
         )
     }
 
+    /// `true` only if every `(path, blob sha)` is present at `commit_sha` with
+    /// exactly that blob. A missing path, a non-file entry or a differing blob
+    /// means "not yet published"; a lookup error propagates (never read as
+    /// "already there"). Queried at the fetched commit, not the branch name,
+    /// so the answer refers to the same commit the receipts will name.
+    async fn head_contains_blobs(
+        &self,
+        commit_sha: &str,
+        expected: &[(String, String)],
+    ) -> Result<bool, PublishError> {
+        for (final_path, blob_sha) in expected {
+            let found = self.existing_sha_at(final_path, commit_sha).await?;
+            if found.as_deref() != Some(blob_sha.as_str()) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     async fn existing_sha(&self, final_path: &str) -> Result<Option<String>, PublishError> {
+        self.existing_sha_at(final_path, &self.cfg.branch).await
+    }
+
+    /// Blob sha of `final_path` at `git_ref` (branch or commit), `None` if the
+    /// path does not exist there.
+    async fn existing_sha_at(
+        &self,
+        final_path: &str,
+        git_ref: &str,
+    ) -> Result<Option<String>, PublishError> {
         const OPERATION: &str = "GET contents";
         let route = format!(
             "{}?ref={}",
             self.contents_route(final_path),
-            encode_component(&self.cfg.branch)
+            encode_component(git_ref)
         );
         let response = self.client._get(route.as_str()).await;
         if matches!(&response, Ok(response) if response.status().as_u16() == 404) {
@@ -456,6 +506,20 @@ impl GitHubTarget {
 }
 
 type GitHubResponse = http::Response<BoxBody<Bytes, octocrab::Error>>;
+
+/// Git's blob object id: SHA-1 over `"blob {len}\0"` followed by the bytes
+/// (what `git hash-object` prints and what GitHub reports as a file's `sha`).
+fn git_blob_sha(content: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(format!("blob {}\0", content.len()).as_bytes());
+    hasher.update(content);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 /// RFC 3986 `unreserved` bytes stay literal; every other byte of the UTF-8
 /// text (including `/`, space, `%`, `#`, `?`) becomes `%XX`. Applied exactly
@@ -750,6 +814,18 @@ mod tests {
             assert!(message.len() <= 8 * 1024);
             let error = classify::classify_github_status(422, message, None);
             assert_eq!(is_branch_concurrently_updated(&error), expected);
+        }
+    }
+
+    #[test]
+    fn git_blob_sha_matches_git_hash_object() {
+        // `printf '<content>' | git hash-object --stdin`
+        for (content, expected) in [
+            ("", "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"),
+            ("# hello\n", "8954bb97349bfe2a7799e6a7a64c6f747c635d6c"),
+            ("# 科技新闻\n", "e4762c1311ca20160f4ae15f8732880b5162e5b5"),
+        ] {
+            assert_eq!(git_blob_sha(content.as_bytes()), expected, "{content:?}");
         }
     }
 

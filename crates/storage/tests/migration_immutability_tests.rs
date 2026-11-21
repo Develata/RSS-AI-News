@@ -73,6 +73,14 @@ const PINNED_UP_MIGRATIONS: &[(&str, &str)] = &[
         "migrations/postgres/0007_feed_entry_retry_cooldown.up.sql",
         "a53362425f3bb21a1e44bd83e217d977776b1d59f42c9c7ee69f4ed89ef17c56",
     ),
+    (
+        "migrations/sqlite/0008_publish_stage_budget_and_item_article_index.up.sql",
+        "fc2828122d403b93a09ffdb3196322d6c6a866605db9a6c9d55a5bdd7a1fd5b6",
+    ),
+    (
+        "migrations/postgres/0008_publish_stage_budget_and_item_article_index.up.sql",
+        "9d13b40ab1753066ba251ca5e45979f4b3e0d342644c3a40ee0b0b5dc759b90b",
+    ),
 ];
 
 fn repo_root() -> std::path::PathBuf {

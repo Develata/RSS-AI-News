@@ -188,7 +188,7 @@ reclaim / `terminalize_exhausted` / 原始响应 TTL 清理的 `raw_response_exp
 测试 `ai_decision_lease_instant_tests.rs`）。其余 lease 表（`reindex_jobs`）与 doctor 的同类谓词仍是
 字典序比较，待单独修复。
 
-**`attempt_count` 不重置**，作为重试预算的硬约束。
+**`attempt_count` 不重置**，作为重试预算的硬约束。publish_records 例外：预算读 `stage_attempt_count`（阶段推进清零），`attempt_count` 只累计审计（[11 §4.1](./11-error-and-recovery.md)）。
 
 涉及 lease 的表：`feed_entries` / `article_ai_results` / `publish_records` / `reindex_jobs` / `decision_results`（0006，见 ADR 0011）。
 
@@ -265,6 +265,7 @@ schema 变更只能新增迁移，且 SQLite / PostgreSQL 两个方言同时提�
 | 0005 | `0005_artifact_reference_indexes` | raw artifact 引用列索引（artifact 过期时的反查） |
 | 0006 | `0006_decision_results` | decision_policies / decision_results（typed-decision shadow，[ADR 0011](../adr/0011-decision-run-shadow-runner.md)） |
 | 0007 | `0007_feed_entry_retry_cooldown` | `feed_entries.next_attempt_at`：extract retryable 失败的冷却截止点（[02-extract §5.3](./02-extract.md)） |
+| 0008 | `0008_publish_stage_budget_and_item_article_index` | `publish_records.stage_attempt_count`（按阶段计的发布重试预算，存量行为 0）+ `idx_publish_items_article`（快照归属查询）；[ADR 0012](../adr/0012-per-stage-publish-budget-and-snapshot-ownership.md) |
 
 ### 7.2 migrate 子命令
 

@@ -5,7 +5,9 @@ use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishFreezeStatus, PublishInitOptions, PublishInitOutcome,
     PublishRemoteOptions, PublishRemoteStatus, PublishRenderOptions, PublishRenderStatus,
     PublishStoreLocalOptions, PublishStoreLocalStatus, RuntimeError,
-    flows::publish::{ForceRenderTrace, PublishRuleVersions, bootstrap_publish_rule_versions},
+    flows::publish::{
+        ForceRenderTrace, PublishRuleVersions, bootstrap_publish_rule_versions, default_report_date,
+    },
 };
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -180,10 +182,17 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
     )?;
     let categories: Vec<CategoryConfig> = loaded.categories_filtered().cloned().collect();
     let category = super::ai_run::select_category(cli, &categories)?;
-    let date = args.date.clone().unwrap_or_else(today_utc);
-    if args.date.is_some() {
-        let _ = parse_date_start(args.date.as_deref())?;
-    }
+    let date = match &args.date {
+        Some(date) => {
+            let _ = parse_date_start(Some(date))?;
+            date.clone()
+        }
+        // The run's date in the effective target timezone (B12), not UTC.
+        None => default_report_date(
+            OffsetDateTime::now_utc(),
+            &loaded.app.publish.target_timezone,
+        )?,
+    };
     let pool = open_write_storage(&loaded).await?;
     let ctx = build_publish_deps(&loaded, &pool, args.local_only)?;
     let rule_version_repo = rss_ai_news_storage::RuleVersionRepo::new_with_storage(pool.clone());
@@ -440,14 +449,4 @@ pub(crate) fn stage(stage: &str, status: &str, verdict: StageVerdict) -> Publish
         status: status.to_string(),
         verdict,
     }
-}
-
-pub(crate) fn today_utc() -> String {
-    let date = OffsetDateTime::now_utc().date();
-    format!(
-        "{:04}-{:02}-{:02}",
-        date.year(),
-        u8::from(date.month()),
-        date.day()
-    )
 }

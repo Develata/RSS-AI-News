@@ -107,8 +107,16 @@ Reindex 无预算（claim 不过滤 attempt_count，失败 `mark_failed` 直转�
 - reclaim（lease 过期）时**不**改值
 - 这样保证：worker 崩溃 / lease 过期不会刷预算，预算严格反映尝试次数
 - **唯一例外**：Publish freeze 选不到候选（`SnapshotEmpty`）时退还本次 claim 计入的 1 次
-  （`release_empty_snapshot`，记录回 `pending`）。空快照不是一次发布尝试，否则同日反复空跑会耗尽预算、
+  （`release_empty_snapshot`，记录回 `pending`；两个计数都退）。空快照不是一次发布尝试，否则同日反复空跑会耗尽预算、
   被 sweep 转 `failed`（见 [./08-state-machines.md](./08-state-machines.md) §6.1）
+
+**Publish 按阶段计预算（2026-11-21，migration 0008，[ADR 0012](../adr/0012-per-stage-publish-budget-and-snapshot-ownership.md)）**：
+publish_records 有两个计数。`attempt_count` 仍按上述契约累计（审计用，成功不清零）；
+`stage_attempt_count` 是当前阶段的预算：每次 claim 与 `attempt_count` 一起 +1，**每次阶段推进成功**
+（freeze / render / store_local / remote 的 advance）清零。claim 过滤、retryable release 折叠与耗尽 sweep
+都用 `stage_attempt_count` 对比 `retry.publish_max_attempts`。因此 `publish_max_attempts = N` 表示
+"每个阶段最多 N 次尝试"，`N = 1` 的无故障运行也能走完四个阶段；旧的"四阶段共享预算"不再成立。
+0008 之前的行迁移后 `stage_attempt_count = 0`（当前阶段重新拿到完整预算；终态行不受影响）。
 
 ## 5. exit code 速查
 

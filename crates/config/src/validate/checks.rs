@@ -775,21 +775,32 @@ fn category_source_file(category: &CategoryConfig) -> String {
     format!("categories/{}.toml", category.category.key)
 }
 
-// Strict IANA parsing is intentionally deferred until the project adds a timezone
-// database dependency. This whitelist covers shipped fixtures and common targets,
-// then rejects blank or malformed strings with whitespace.
+/// `target_timezone` must name a zone in the IANA time zone database (the
+/// system zoneinfo when present, else the copy bundled with jiff). The same
+/// lookup computes the default report date at runtime, so a zone accepted here
+/// always resolves there. Formerly a whitelist plus an `Area/Location` shape
+/// check, which accepted any well-formed but nonexistent name.
 fn is_supported_timezone(timezone: &str) -> bool {
-    matches!(
-        timezone,
-        "UTC"
-            | "Asia/Shanghai"
-            | "Asia/Tokyo"
-            | "Asia/Singapore"
-            | "Europe/London"
-            | "Europe/Berlin"
-            | "America/New_York"
-            | "America/Los_Angeles"
-    ) || (timezone.contains('/')
-        && !timezone.trim().is_empty()
-        && !timezone.chars().any(char::is_whitespace))
+    jiff::tz::TimeZone::get(timezone).is_ok()
+}
+
+#[cfg(test)]
+mod timezone_tests {
+    use super::is_supported_timezone;
+
+    #[test]
+    fn real_iana_zones_are_accepted_and_made_up_ones_rejected() {
+        for zone in [
+            "UTC",
+            "Asia/Shanghai",
+            "America/New_York",
+            "Europe/Berlin",
+            "Asia/Kolkata",
+        ] {
+            assert!(is_supported_timezone(zone), "{zone}");
+        }
+        for zone in ["Mars/Olympus_Mons", "Asia/Shang hai", "", "+08:00"] {
+            assert!(!is_supported_timezone(zone), "{zone:?}");
+        }
+    }
 }

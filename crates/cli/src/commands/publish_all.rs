@@ -7,7 +7,7 @@ use rss_ai_news_runtime::{
     PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRenderOptions, RuntimeError,
     flows::publish::{
         ForceRenderTrace, PublishRuleVersions, ReportPathSpec, bootstrap_publish_rule_versions,
-        check_report_path_collisions,
+        check_report_path_collisions, default_report_date,
     },
 };
 use rss_ai_news_storage::StoragePool;
@@ -20,7 +20,7 @@ use crate::{
         backfill::parse_date_start,
         publish::{
             PublishStageOutcome, StageVerdict, run_local_stages, stage, stage_errors, stage_trail,
-            stages_exit_code, today_utc,
+            stages_exit_code,
         },
     },
     context_factory::{build_publish_deps, open_write_storage},
@@ -135,7 +135,15 @@ pub(crate) async fn run_loaded(
         .categories_filtered()
         .cloned()
         .collect::<Vec<CategoryConfig>>();
-    let date = args.date.clone().unwrap_or_else(today_utc);
+    // `preflight` validated an explicit --date; otherwise the run's date in
+    // the effective target timezone (B12), not UTC.
+    let date = match &args.date {
+        Some(date) => date.clone(),
+        None => default_report_date(
+            OffsetDateTime::now_utc(),
+            &loaded.app.publish.target_timezone,
+        )?,
+    };
     // validate-config checks path collisions on one sample date only; render
     // the real paths for this run's date before any DB or file write.
     let path_templates = categories

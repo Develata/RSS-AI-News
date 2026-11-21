@@ -58,6 +58,7 @@
 | [0009](./0009-boundary-resource-hardening.md) | 边界与资源加固 | accepted |
 | [0010](./0010-typed-decision-capability.md) | typed-decision 能力（Jev / Laya），Phase A | accepted |
 | [0011](./0011-decision-run-shadow-runner.md) | decision-run 影子运行，Phase B | accepted |
+| [0012](./0012-per-stage-publish-budget-and-snapshot-ownership.md) | 发布按阶段计重试预算 + 文章的快照归属（含多报告重试幂等、按目标时区取默认报告日期） | accepted |
 
 ## 与其它目录的关系
 

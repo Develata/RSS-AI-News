@@ -45,6 +45,13 @@ LIMIT max_items_per_report;
 AI 关闭模式（`ai.enabled=false` + `include_unscored=true`）下还包含 `state='persisted'` 行，
 同事务升格到 `ready_for_publish`。
 
+**快照归属（2026-11-21，[ADR 0012](../adr/0012-per-stage-publish-budget-and-snapshot-ownership.md)）**：
+一篇文章同一时刻至多属于一份**活动快照**——即 `publish_items` 中出现该文章、且所属 `publish_records.state <> 'failed'`
+的记录（`published_*` 记录的文章已是 `published`，自然不再入选）。三条选稿 SQL（AI 路径；AI-off 的 SQLite / PG 两版）
+都排除已被活动快照持有的文章；记录转 `failed` 即释放其文章，下一份报告可重新选入。
+AI-off 下，未被持有的 `ready_for_publish` 遗留文章（先前快照失败后留下）照常入选、保持原状态冻结，
+与待升格的 `persisted` 文章区分处理，不会因此整批回滚。
+
 ### 2.2 冻结：PublishRecord + PublishItem
 
 ```sql
@@ -63,10 +70,25 @@ WHERE article_id IN (...);
 UPDATE publish_records SET state='snapshot_frozen' WHERE id=?;
 ```
 
+实际事务顺序（`freeze_snapshot`，两方言一致）：① 带 owner/state 守卫的 record → `snapshot_frozen`（首条语句即写，
+SQLite 由此持有写锁、串行化并发 freeze）；② PG 按 id 顺序 `SELECT … FOR UPDATE` 锁住快照内的文章（并发 freeze 同一文章时后者等待，
+随后在 READ COMMITTED 下看见前者已提交的 items；固定顺序避免死锁）；③ 事务内复查归属，被其它活动快照持有 →
+回滚，`ArticleOwnershipConflict`；④ AI-off 文章：`persisted` → `ready_for_publish`，已是 `ready_for_publish` 则保持，
+其它状态 → 回滚，`ArticleStateConflict`；⑤ 写 publish_items、提交。
+冲突时 runtime 立即释放 lease（`release_freeze_conflict`：记录回 `pending`、两个计数都退还、写 `last_error_kind`
+= `article_owned_by_active_snapshot` / `article_state_conflict`），不发生任何外部写入；本次 freeze 阶段结果为
+`ArticleConflict`（exit 1），下一次运行重新选稿时不再包含该文章。
+
 **冻结契约**：`publish_items.frozen_*` 列**只读不改**。即使 article 后续被 backfill 改了 AI 结果，
 已冻结的 PublishItem 仍引用旧值。
 
 ### 2.3 幂等
+
+报告日期：`--date` 显式给定时按给定值；省略时 `publish` / `publish-all` 取本次运行时刻（每次运行采样一次）在
+**有效目标时区**（`--timezone`，否则 `[publish].target_timezone`）下的日历日期，而不是 UTC 日期
+（`runtime::flows::publish::default_report_date`）。例：`Asia/Shanghai` 下 2026-11-21 00:30 运行 → `2026-11-21`。
+时区须为 IANA 时区库中存在的名称（jiff 查询：有系统 zoneinfo 用系统库，否则用内置库；validate-config、doctor 与运行时同一查询）；
+未知时区在任何写入之前报错，绝不回退到 UTC。
 
 唯一约束 `(category_key, report_date, render_version)`。重复 freeze 同一组合返回
 `PublishInitOutcome::AlreadyExists`。
@@ -210,6 +232,12 @@ HTTP 状态、已脱敏的 GitHub message 与 `x-github-request-id`（若有）�
 
 v0.3 引入：`publish_many(reports: &[RenderedReport])` 在一次 commit 内推送多个 report。
 减少 commit 噪音 + 节省 API 配额。
+
+**重试幂等（2026-11-21，ADR 0012）**：取到 HEAD commit 后、建 tree/commit 之前，按该 commit sha（不是分支名）
+对批内每个路径 `GET contents?ref=<head commit>`，与本地按 git 规则（SHA-1 over `blob <len>\0` + 内容）算出的 blob sha 比对。
+**全部**路径都存在且 blob 一致 → 视为上一次尝试的 ref 更新已落地（响应丢失），直接以该 HEAD commit 记回执（每份报告一条、按输入顺序），
+不再新建 commit；任何一个路径缺失 / 不一致 → 照常建 commit；查询出错 → 本次失败（按原分类重试），绝不当作"已发布"。
+仅覆盖多报告批次；单报告走 Contents API（§4.2 上文），不在此列。
 
 ### 4.2.2 422 lost-update retry
 

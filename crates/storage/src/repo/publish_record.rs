@@ -156,7 +156,7 @@ pub trait PublishRecordRepository: Send + Sync {
         now: OffsetDateTime,
         extras: PublishAdvanceExtras,
     ) -> Result<bool, StorageError>;
-    /// W15 §3 折叠：retryable 失败按 `attempt_count >= max_attempts` 在 SQL 内
+    /// W15 §3 折叠：retryable 失败按 `stage_attempt_count >= max_attempts` 在 SQL 内
     /// 决定维持原阶段态 / 转 `failed`。`last_error*` 写真实底层错误。
     async fn release_retryable_failure(
         &self,
@@ -176,6 +176,17 @@ pub trait PublishRecordRepository: Send + Sync {
         owner: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
+    /// Releases a `pending` record whose freeze lost an article (ownership or
+    /// state conflict) back to claimable `pending`, refunding the claim.
+    /// Returns `false` when the lease was lost.
+    async fn release_freeze_conflict(
+        &self,
+        id: i64,
+        owner: &str,
+        error: &str,
+        kind: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
     async fn release_permanent_failure(
         &self,
         id: i64,
@@ -186,8 +197,8 @@ pub trait PublishRecordRepository: Send + Sync {
     ) -> Result<bool, StorageError>;
     async fn reclaim_expired_leases(&self, now: OffsetDateTime) -> Result<u64, StorageError>;
     /// W15 §4 sweep：阶段态（pending/snapshot_frozen/rendered/stored_local）+
-    /// `attempt_count >= max_attempts` + lease 空/过期 → `failed`。预算四阶段
-    /// 共享。保留既有 `last_error*`。返回转终态的行数。
+    /// `stage_attempt_count >= max_attempts` + lease 空/过期 → `failed`。预算按
+    /// 阶段计（ADR 0012）。保留既有 `last_error*`。返回转终态的行数。
     async fn terminalize_exhausted(
         &self,
         max_attempts: u32,

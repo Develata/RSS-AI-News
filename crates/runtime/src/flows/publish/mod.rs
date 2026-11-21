@@ -26,11 +26,13 @@ pub(crate) use freeze::published_since;
 mod paths;
 mod remote;
 mod render;
+mod report_date;
 mod rule_versions;
 mod store_local;
 
 pub use dto::*;
 pub use paths::{ReportPathSpec, check_report_path_collisions};
+pub use report_date::default_report_date;
 pub use rule_versions::{ForceRenderTrace, PublishRuleVersions, bootstrap_publish_rule_versions};
 
 pub struct PublishFlow {
@@ -149,7 +151,7 @@ impl PublishFlow {
     /// Releases a claimed record after a stage failure, by classification:
     /// retryable errors (e.g. a transient [`rss_ai_news_storage::StorageError`]
     /// wrapped in [`ReportError::Storage`]) keep the stage state and are charged
-    /// to the shared retry budget (W15 §3, folded to `failed` in SQL once
+    /// to the current stage's retry budget (ADR 0012, folded to `failed` in SQL once
     /// exhausted); everything else is a permanent `failed`. A transient DB blip
     /// must never become the day's terminal verdict, because the idempotency
     /// key would then return the failed record on every later run.
