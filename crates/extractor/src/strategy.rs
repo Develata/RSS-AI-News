@@ -197,8 +197,7 @@ fn is_cjk(ch: char) -> bool {
             | '\u{3400}'..='\u{4DBF}'   // CJK extension A
             | '\u{4E00}'..='\u{9FFF}'   // CJK unified ideographs
             | '\u{F900}'..='\u{FAFF}'   // CJK compatibility ideographs
-            | '\u{20000}'..='\u{323AF}' // CJK extensions B–H
-            | '\u{2F800}'..='\u{2FA1F}' // CJK compatibility supplement
+            | '\u{20000}'..='\u{323AF}' // CJK extensions B–H + compatibility supplement
             | '\u{1100}'..='\u{11FF}'   // Hangul jamo
             | '\u{3130}'..='\u{318F}'   // Hangul compatibility jamo
             | '\u{A960}'..='\u{A97F}'   // Hangul jamo extended-A
