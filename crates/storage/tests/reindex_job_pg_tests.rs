@@ -523,3 +523,125 @@ async fn pg_resume_claims_same_rule_and_batch_rolls_back_without_lease() {
     assert!(job_row.lease_expires_at.unwrap() > lease_expires(now));
     ctx.cleanup().await;
 }
+
+/// R2-S16: a content hash committed by another transaction between the
+/// collision pre-check and the UPDATE (READ COMMITTED) is a per-row
+/// `Conflict`, not a failed batch: the savepoint keeps the transaction, the
+/// checkpoint and the other rows.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_content_hash_race_after_the_precheck_is_a_row_conflict() {
+    use rss_ai_news_storage::{ReindexBatchCheckpoint, UpdateContentHashOutcome};
+
+    let ctx = make_pg_test_pool().await;
+    let repo = ReindexJobRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let cfg: i64 = sqlx::query_scalar(
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status) \
+         VALUES ('config', 'cfg-race', 'c', 'sha-cfg-race', 'superseded') RETURNING id",
+    )
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    let source: i64 = sqlx::query_scalar(
+        "INSERT INTO feed_sources (category_key, source_key, display_name, feed_url, feed_kind, \
+            config_version) VALUES ('ai', 'race', 'R', 'https://example.com/f.xml', 'rss', $1) \
+         RETURNING id",
+    )
+    .bind(cfg)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    let ext: i64 = sqlx::query_scalar(
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status) \
+         VALUES ('extractor', 'ext-race', 'e', 'sha-ext-race', 'superseded') RETURNING id",
+    )
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    let mut articles = Vec::new();
+    for tag in ["a", "b"] {
+        let entry: i64 = sqlx::query_scalar(
+            "INSERT INTO feed_entries (source_id, feed_entry_uid, normalized_link, link_hash, \
+                title_raw, discovered_at, state, dedup_decision) \
+             VALUES ($1, $2, $3, $2, 't', $4, 'pending_fetch', 'fresh') RETURNING id",
+        )
+        .bind(source)
+        .bind(format!("race-{tag}"))
+        .bind(format!("https://example.com/{tag}"))
+        .bind(now)
+        .fetch_one(ctx.pg_pool())
+        .await
+        .unwrap();
+        let article: i64 = sqlx::query_scalar(
+            "INSERT INTO articles (content_hash, canonical_link, title, body_text, \
+                extractor_strategy, extractor_version, content_quality, origin_feed_entry_id) \
+             VALUES ($1, 'https://example.com/a', 't', 'b', 'readability', $2, 'high', $3) \
+             RETURNING id",
+        )
+        .bind(format!("old-{tag}"))
+        .bind(ext)
+        .bind(entry)
+        .fetch_one(ctx.pg_pool())
+        .await
+        .unwrap();
+        articles.push((article, entry));
+    }
+    let job = repo
+        .start_reindex_tx("reindex", "tag-race", "d", "sha-race", "content_hash", now)
+        .await
+        .unwrap();
+    repo.claim_by_id(job.job_id, "w", now, lease_expires(now))
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Another transaction takes `racing` for article B, uncommitted: the
+    // batch's pre-check cannot see it, its UPDATE waits on the unique index.
+    let mut other = ctx.pg_pool().begin().await.unwrap();
+    sqlx::query("UPDATE articles SET content_hash = 'racing' WHERE id = $1")
+        .bind(articles[1].0)
+        .execute(&mut *other)
+        .await
+        .unwrap();
+    let batch = {
+        let repo = repo.clone();
+        let rows = vec![
+            (articles[0].0, "racing".to_string()),
+            (articles[1].0, "old-b".to_string()),
+        ];
+        let checkpoint_id = articles[1].1;
+        tokio::spawn(async move {
+            repo.apply_content_hash_batch(
+                ReindexBatchCheckpoint {
+                    job_id: job.job_id,
+                    owner: "w",
+                    last_processed_id: checkpoint_id,
+                    now,
+                    lease_expires_at: lease_expires(now),
+                },
+                &rows,
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    other.commit().await.unwrap();
+
+    let outcomes = tokio::time::timeout(std::time::Duration::from_secs(10), batch)
+        .await
+        .expect("batch finishes")
+        .unwrap()
+        .expect("a unique violation on one row does not fail the batch");
+
+    assert_eq!(
+        outcomes,
+        Some(vec![
+            UpdateContentHashOutcome::Conflict,
+            UpdateContentHashOutcome::Updated,
+        ])
+    );
+    let job_row = repo.find_by_id(job.job_id).await.unwrap().unwrap();
+    assert_eq!(job_row.last_processed_id, Some(articles[1].1));
+    ctx.cleanup().await;
+}

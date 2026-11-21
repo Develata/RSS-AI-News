@@ -5,7 +5,7 @@
 //! claim 路径用 `FOR UPDATE SKIP LOCKED`（§6.4）。SQL const 见
 //! [`super::reindex_job_sql`]。
 
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 use time::OffsetDateTime;
 
 use crate::{StorageError, classify_db_error};
@@ -443,8 +443,8 @@ pub(super) async fn pg_apply_content_hash_batch(
     }
     let mut outcomes = Vec::with_capacity(updates.len());
     for (id, new_content_hash) in updates {
-        // Pre-checks instead of catching the unique violation: a failed
-        // statement would abort the whole PG transaction.
+        // Pre-checks first (the common case needs no savepoint); the UPDATE's
+        // own unique violation is still caught below.
         let current = sqlx::query_scalar::<_, String>(SELECT_ARTICLE_CONTENT_HASH_SQL)
             .bind(id)
             .fetch_optional(&mut *tx)
@@ -464,14 +464,33 @@ pub(super) async fn pg_apply_content_hash_batch(
                 if taken {
                     UpdateContentHashOutcome::Conflict
                 } else {
-                    sqlx::query(UPDATE_ARTICLE_CONTENT_HASH_SQL)
+                    // R2-S16: READ COMMITTED — another transaction may commit
+                    // this hash between the pre-check and the UPDATE. The
+                    // UPDATE runs in a savepoint so its unique violation only
+                    // rolls back this row (a failed statement would abort the
+                    // whole transaction, checkpoint included).
+                    let mut savepoint = (&mut *tx).begin().await.map_err(StorageError::from)?;
+                    let updated = sqlx::query(UPDATE_ARTICLE_CONTENT_HASH_SQL)
                         .bind(new_content_hash)
                         .bind(checkpoint.now)
                         .bind(id)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(StorageError::from)?;
-                    UpdateContentHashOutcome::Updated
+                        .execute(&mut *savepoint)
+                        .await;
+                    match updated {
+                        Ok(_) => {
+                            savepoint.commit().await.map_err(StorageError::from)?;
+                            UpdateContentHashOutcome::Updated
+                        }
+                        Err(error) => {
+                            match classify_db_error(error, "articles", new_content_hash) {
+                                StorageError::Conflict { .. } => {
+                                    savepoint.rollback().await.map_err(StorageError::from)?;
+                                    UpdateContentHashOutcome::Conflict
+                                }
+                                other => return Err(other),
+                            }
+                        }
+                    }
                 }
             }
         };

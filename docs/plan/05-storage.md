@@ -297,7 +297,9 @@ prompt：`prompt_version` 语义见 [./03-ai.md](./03-ai.md) §3.2，历史文�
 - `link_hash` — 重算所有 feed_entries.link_hash（升级 normalizer 算法时）；每次 move 在事务内
   串行化写路径，对 old/new groups 按最小 id 原子重选 canonical；candidate 非最小 id 时计入
   `conflict_skipped`，collision chain 不留下 shadow-only group
-- `content_hash` — 重算所有 articles.content_hash（升级正文规范化算法时）
+- `content_hash` — 重算所有 articles.content_hash（升级正文规范化算法时）。PG 上预检与 UPDATE 之间另一事务提交同一 hash
+  （READ COMMITTED）时，该行的 UPDATE 在 savepoint 内执行，唯一约束冲突只回滚这一行并记 `conflict_skipped`，
+  批次与 checkpoint 照常提交（R2-S16）
 - `categories` — 重算 article→category 关联（升级分类规则时）
 
 active rule resolver 保证 reindex 中途 `active_rule(kind)` 仍返回旧 active 行，不污染读路径。
