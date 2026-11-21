@@ -299,7 +299,9 @@ prompt：`prompt_version` 语义见 [./03-ai.md](./03-ai.md) §3.2，历史文�
   `conflict_skipped`，collision chain 不留下 shadow-only group
 - `content_hash` — 重算所有 articles.content_hash（升级正文规范化算法时）。PG 上预检与 UPDATE 之间另一事务提交同一 hash
   （READ COMMITTED）时，该行的 UPDATE 在 savepoint 内执行，唯一约束冲突只回滚这一行并记 `conflict_skipped`，
-  批次与 checkpoint 照常提交（R2-S16）
+  批次与 checkpoint 照常提交（R2-S16）。只吸收 SQLSTATE `23505` 且约束名为 `articles_content_hash_key` 的冲突；其它错误（含
+  别的唯一约束，例如触发器报告的 `23505`）使整批失败、外层事务回滚、checkpoint 不前进（R3E-S16）。SQLite 写路径串行，
+  UPDATE 的任何错误本来就整批失败
 - `categories` — 重算 article→category 关联（升级分类规则时）。每次 owner-guarded 的配置写入（upsert / archive）
   在同一事务内把 job 的 `lease_expires_at` 续到 `now + lease`（R2-S18），与 hash target 的 checkpoint 续租一致；
   此前只刷新 `updated_at`，而 reclaim 只看 `lease_expires_at`，同步总时长超过初始租期即可被另一 worker 接手

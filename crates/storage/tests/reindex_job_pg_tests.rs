@@ -645,3 +645,130 @@ async fn pg_content_hash_race_after_the_precheck_is_a_row_conflict() {
     assert_eq!(job_row.last_processed_id, Some(articles[1].1));
     ctx.cleanup().await;
 }
+/// R3E-S16: only a unique violation of the articles `content_hash`
+/// constraint is a row conflict. A `23505` naming another constraint (here
+/// raised by a test-only trigger) fails the batch: nothing commits, the
+/// checkpoint does not advance.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_content_hash_batch_propagates_a_non_target_unique_violation() {
+    use rss_ai_news_storage::ReindexBatchCheckpoint;
+
+    let ctx = make_pg_test_pool().await;
+    let repo = ReindexJobRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let cfg: i64 = sqlx::query_scalar(
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status) \
+         VALUES ('config', 'cfg-s16', 'c', 'sha-cfg-s16', 'superseded') RETURNING id",
+    )
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    let source: i64 = sqlx::query_scalar(
+        "INSERT INTO feed_sources (category_key, source_key, display_name, feed_url, feed_kind, \
+            config_version) VALUES ('ai', 's16', 'S', 'https://example.com/s16.xml', 'rss', $1) \
+         RETURNING id",
+    )
+    .bind(cfg)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    let ext: i64 = sqlx::query_scalar(
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status) \
+         VALUES ('extractor', 'ext-s16', 'e', 'sha-ext-s16', 'superseded') RETURNING id",
+    )
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    let entry: i64 = sqlx::query_scalar(
+        "INSERT INTO feed_entries (source_id, feed_entry_uid, normalized_link, link_hash, \
+            title_raw, discovered_at, state, dedup_decision) \
+         VALUES ($1, 's16', 'https://example.com/s16', 's16', 't', $2, 'pending_fetch', 'fresh') \
+         RETURNING id",
+    )
+    .bind(source)
+    .bind(now)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    let article: i64 = sqlx::query_scalar(
+        "INSERT INTO articles (content_hash, canonical_link, title, body_text, \
+            extractor_strategy, extractor_version, content_quality, origin_feed_entry_id) \
+         VALUES ('old-s16', 'https://example.com/a', 't', 'b', 'readability', $1, 'high', $2) \
+         RETURNING id",
+    )
+    .bind(ext)
+    .bind(entry)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION s16_other_unique() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF NEW.content_hash = 'trigger-dup' THEN \
+             RAISE EXCEPTION 'duplicate key value violates unique constraint' \
+               USING ERRCODE = 'unique_violation', CONSTRAINT = 'some_other_key'; \
+           END IF; \
+           RETURN NEW; \
+         END $$",
+    )
+    .execute(ctx.pg_pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER s16_other_unique BEFORE UPDATE ON articles \
+         FOR EACH ROW EXECUTE FUNCTION s16_other_unique()",
+    )
+    .execute(ctx.pg_pool())
+    .await
+    .unwrap();
+    let job = repo
+        .start_reindex_tx("reindex", "tag-s16", "d", "sha-s16", "content_hash", now)
+        .await
+        .unwrap();
+    repo.claim_by_id(job.job_id, "w", now, lease_expires(now))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let result = repo
+        .apply_content_hash_batch(
+            ReindexBatchCheckpoint {
+                job_id: job.job_id,
+                owner: "w",
+                last_processed_id: entry,
+                now,
+                lease_expires_at: lease_expires(now),
+            },
+            &[(article, "trigger-dup".to_string())],
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "non-target 23505 must fail the batch: {result:?}"
+    );
+    let job_row = repo.find_by_id(job.job_id).await.unwrap().unwrap();
+    assert_eq!(job_row.last_processed_id, None, "checkpoint not committed");
+    let hash: String = sqlx::query_scalar("SELECT content_hash FROM articles WHERE id = $1")
+        .bind(article)
+        .fetch_one(ctx.pg_pool())
+        .await
+        .unwrap();
+    assert_eq!(hash, "old-s16");
+    // The target constraint's real name, as the repo matches it.
+    let unique: Vec<String> = sqlx::query_scalar(
+        "SELECT conname::text FROM pg_constraint \
+         WHERE conrelid = 'articles'::regclass AND contype = 'u'",
+    )
+    .fetch_all(ctx.pg_pool())
+    .await
+    .unwrap();
+    assert!(
+        unique
+            .iter()
+            .any(|name| name == "articles_content_hash_key"),
+        "{unique:?}"
+    );
+    ctx.cleanup().await;
+}
