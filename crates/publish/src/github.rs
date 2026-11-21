@@ -948,9 +948,16 @@ pub mod classify {
             }
         }
 
-        /// Earliest retry time at `now`: `retry-after` (seconds capped at
-        /// [`MAX_RETRY_AFTER_SECONDS`], a past date means now), then
-        /// `x-ratelimit-reset`, then one minute.
+        /// Earliest retry time at `now`: the **latest** of the deadlines that
+        /// apply (R3F-S12; GitHub REST docs, "Handle rate limit errors
+        /// appropriately"): `retry-after` (seconds capped at
+        /// [`MAX_RETRY_AFTER_SECONDS`], a past date means now), and
+        /// `x-ratelimit-reset` when the quota is exhausted
+        /// (`x-ratelimit-remaining: 0`) or no usable `retry-after` was sent
+        /// (the earlier fallback). With quota left, the reset is the end of
+        /// the hourly window, not a wait GitHub asked for, so a secondary
+        /// limit's `retry-after` alone decides. Neither → one minute. A reset
+        /// that is not representable is ignored.
         pub fn reset_at_from(&self, now: OffsetDateTime) -> OffsetDateTime {
             let from_retry_after = match self.retry_after {
                 Some(RetryAfter::Seconds(seconds)) => {
@@ -962,13 +969,16 @@ pub mod classify {
                 Some(RetryAfter::At(at)) => Some(at.max(now)),
                 Some(RetryAfter::Unparsable) | None => None,
             };
-            from_retry_after
-                .or_else(|| {
-                    self.reset_epoch_seconds
-                        .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
-                })
-                .or_else(|| now.checked_add(Duration::seconds(60)))
-                .unwrap_or(now)
+            let reset_applies = self.remaining == Some(0) || from_retry_after.is_none();
+            let from_reset = self
+                .reset_epoch_seconds
+                .filter(|_| reset_applies)
+                .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok());
+            match (from_retry_after, from_reset) {
+                (Some(retry_after), Some(reset)) => retry_after.max(reset),
+                (Some(at), None) | (None, Some(at)) => at,
+                (None, None) => now.checked_add(Duration::seconds(60)).unwrap_or(now),
+            }
         }
 
         fn reset_at(&self) -> OffsetDateTime {

@@ -110,6 +110,10 @@
 | `publish_remote_rate_limit_keeps_state_and_articles` | 同上 | 429 |
 | `publish_remote_rate_limit_persists_the_reset_and_skips_claims_until_then` | 同上 | 限流 reset 写入 `next_attempt_at`；期内重跑不领取、不请求；到点后发布 |
 | `publish_remote_rate_limit_wait_is_clamped_to_one_hour` | 同上 | 远期 reset 钳制到 1 h |
+| `publish_remote_rate_limit_with_a_wait_does_not_spend_the_last_attempt` | 同上 | 写入等待的限流不计预算：末次预算仍 `stored_local`、退还 claim，到点后发布（R3F-S12） |
+| `exhausted_quota_reset_later_than_retry_after_wins` | `crates/publish/tests/github_classify_tests.rs` | 配额耗尽时取 `retry-after` 与 reset 中较晚者 |
+| `retry_after_later_than_an_exhausted_quota_reset_wins` | 同上 | 较晚的 `retry-after` 胜出 |
+| `reset_does_not_apply_while_quota_remains_and_retry_after_is_given` | 同上 | 仍有配额时 reset 不适用，只看 `retry-after` |
 | `sqlite_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advance` | `crates/storage/tests/publish_stage_recovery_tests.rs` | SQLite 两类 claim 按时刻遵守等待；推进 / 普通 release 清空 |
 | `pg_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advance` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 同语义 |
 | `publish_remote_auth_failed_is_terminal_without_promoting_articles` | 同上 | 401 终态 |

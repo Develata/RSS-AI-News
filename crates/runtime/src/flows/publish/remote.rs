@@ -110,11 +110,20 @@ fn rate_limit_retry_not_before(
     Some(reset_at.min(latest))
 }
 
-/// R3F-B2: an attempt released without charging the stage budget — the
-/// record keeps its state and its snapshot's articles, the claim is refunded
-/// and only `next_attempt_at` (if any) delays the next claim.
-fn is_deferred_retry(error: &PublishError) -> bool {
-    matches!(error, PublishError::RemoteWriteUnverified { .. })
+/// An attempt released without charging the stage budget — the record keeps
+/// its state and its snapshot's articles, the claim is refunded and only
+/// `next_attempt_at` (if any) delays the next claim:
+/// - R3F-B2: a write whose HEAD verification did not complete;
+/// - R3F-S12: a rate limit whose wait is persisted (`retry_not_before`). The
+///   wait, not the budget, throttles it. A rate limit whose reset is already
+///   past imposes no wait, so it is charged like any retryable failure —
+///   otherwise repeated rate limits would retry for free and unthrottled.
+fn is_deferred_retry(error: &PublishError, retry_not_before: Option<OffsetDateTime>) -> bool {
+    match error {
+        PublishError::RemoteWriteUnverified { .. } => true,
+        PublishError::GitHubRateLimit { .. } => retry_not_before.is_some(),
+        _ => false,
+    }
 }
 
 enum RemotePreparationError {
@@ -873,7 +882,7 @@ impl PublishFlow {
         let message = error.display_user();
         let retry_not_before = rate_limit_retry_not_before(error, now);
         let mut budget_exhausted = false;
-        let deferred = is_deferred_retry(error);
+        let deferred = is_deferred_retry(error, retry_not_before);
         let release_result = if deferred {
             // Every caller releases a record claimed for the remote stage.
             self.ctx
@@ -937,7 +946,7 @@ impl PublishFlow {
                     "phase": phase,
                     "error_kind": error.error_kind(),
                     "budget_exhausted": budget_exhausted,
-                    // R3F-B2: released without charging the stage budget.
+                    // R3F-B2 / S12: released without charging the stage budget.
                     "attempt_refunded": deferred,
                     // R1-P-S1: where a GitHub failure happened, as fields.
                     "operation": error.github_context().and_then(|context| context.operation),

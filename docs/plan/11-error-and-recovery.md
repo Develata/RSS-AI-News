@@ -119,8 +119,9 @@ publish_records 有两个计数。`attempt_count` 仍按上述契约累计（审
 "每个阶段最多 N 次尝试"，`N = 1` 的无故障运行也能走完四个阶段；旧的"四阶段共享预算"不再成立。
 0008 之前的行迁移后 `stage_attempt_count = 0`（当前阶段重新拿到完整预算；终态行不受影响）。
 
-**限流等待（2026-11-22，R1-P-S12）**：远端 `GitHubRateLimit` 的 retryable release 同时写 `next_attempt_at`
-（GitHub 给的最早重试时刻，钳制到 1 小时内），claim 在此之前不领取该记录（不耗预算、不发请求）；
+**限流等待（2026-11-22，R1-P-S12 / R3F-S12）**：远端 `GitHubRateLimit` 的 release 同时写 `next_attempt_at`
+（GitHub 给的适用期限中最晚的重试时刻，钳制到 1 小时内），claim 在此之前不领取该记录（不耗预算、不发请求）；
+写入了等待的限流尝试本身也不计阶段预算（退还 claim、保持阶段态），reset 已过去的限流照常计预算；
 任一阶段推进或非限流的 retryable release 清空它。见 ADR 0012 §3a。
 
 ## 5. exit code 速查

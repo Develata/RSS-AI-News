@@ -809,6 +809,47 @@ async fn publish_remote_rate_limit_persists_the_reset_and_skips_claims_until_the
     assert_eq!(third.status, PublishRemoteStatus::PublishedRemote);
 }
 
+/// R3F-S12: a rate-limited attempt whose wait is persisted is not charged to
+/// the stage budget (the wait is enforced by `next_attempt_at`), so even the
+/// last attempt keeps the record `stored_local` and its articles owned.
+#[tokio::test]
+async fn publish_remote_rate_limit_with_a_wait_does_not_spend_the_last_attempt() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+    let target = Arc::new(RateLimitedOnce {
+        reset_at: OffsetDateTime::now_utc() + time::Duration::minutes(10),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut app = app_config(RetentionPolicy::Always, 1);
+    app.retry.publish_max_attempts = 1;
+    let flow = PublishFlow::new(Arc::new(publish_deps(
+        pool.clone(),
+        Arc::new(app),
+        Arc::new(LocalFsTarget::new(std::env::temp_dir())),
+        Some(target),
+    )));
+
+    let first = flow.publish_remote_record(id, remote_opts()).await;
+
+    assert!(
+        matches!(&first.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "github_rate_limit"),
+        "{:?}",
+        first.status
+    );
+    assert_record_state(&pool, id, "stored_local").await;
+    assert_eq!(record_counters(&pool, id).await, (0, 0, None), "refunded");
+    assert_referenced_articles_state(&pool, id, "ready_for_publish").await;
+    // After the wait the record is claimable with its full budget.
+    sqlx::query("UPDATE publish_records SET next_attempt_at = ? WHERE id = ?")
+        .bind(OffsetDateTime::now_utc() - time::Duration::seconds(1))
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let second = flow.publish_remote_record(id, remote_opts()).await;
+    assert_eq!(second.status, PublishRemoteStatus::PublishedRemote);
+}
+
 /// A reset far in the future is clamped to one hour: the record keeps owning
 /// its articles, so it must not be parked for longer.
 #[tokio::test]
@@ -830,10 +871,10 @@ async fn publish_remote_rate_limit_wait_is_clamped_to_one_hour() {
             .await
             .unwrap();
     let wait = wait.unwrap();
-    assert!(
-        wait <= OffsetDateTime::now_utc() + time::Duration::hours(1),
-        "{wait}"
-    );
+    // SQLite stores deadlines rounded up to the next whole millisecond.
+    let bound =
+        OffsetDateTime::now_utc() + time::Duration::hours(1) + time::Duration::milliseconds(1);
+    assert!(wait <= bound, "{wait} > {bound}");
 }
 
 // === P-B6: persisted diagnostics never carry server-echoed text ===
