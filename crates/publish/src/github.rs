@@ -294,8 +294,11 @@ impl GitHubTarget {
     /// P-B2: after an ambiguous write failure, a read-only check of the
     /// branch HEAD decides. HEAD holding every report byte for byte means the
     /// write landed (or the content was already there): record receipts
-    /// against that commit. Otherwise — or if the check itself fails — the
-    /// original error stands and the normal release applies.
+    /// against that commit. HEAD not holding them means the write did not
+    /// land: the original error stands and the normal release applies. A
+    /// check that itself fails (error, rate limit) decides nothing: the
+    /// result is [`PublishError::RemoteWriteUnverified`] (R3F-B2), which the
+    /// stage releases without failing the record.
     async fn recover_ambiguous_write(
         &self,
         error: PublishError,
@@ -317,9 +320,12 @@ impl GitHubTarget {
             Err(check_error) => {
                 tracing::warn!(
                     ?check_error,
-                    "HEAD content check after an ambiguous GitHub write failed; keeping the write error"
+                    "HEAD content check after an ambiguous GitHub write failed; outcome unverified"
                 );
-                Err(error)
+                Err(PublishError::RemoteWriteUnverified {
+                    write: Box::new(error),
+                    verification: Box::new(check_error),
+                })
             }
         }
     }

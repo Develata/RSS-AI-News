@@ -398,3 +398,103 @@ async fn sqlite_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advanc
             .unwrap();
     assert_eq!(wait, None);
 }
+
+async fn state_counters_lease(pool: &SqlitePool, id: i64) -> (String, i64, i64, Option<String>) {
+    sqlx::query_as(
+        "SELECT state, attempt_count, stage_attempt_count, lease_owner FROM publish_records WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// R3F-B2 / S12: a deferred retry keeps the stage state, clears the lease,
+/// refunds the claim on both counters and persists the wait (a sub-millisecond
+/// deadline is rounded up, never claimable early); a release for another
+/// state or another owner changes nothing; `None` clears an earlier wait.
+#[tokio::test]
+async fn sqlite_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait() {
+    use rss_ai_news_storage::PublishState;
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_record(&pool, "deferred", "stored_local", 2, None).await;
+    let repo = PublishRecordRepo::new(pool.clone());
+    let first = now();
+    let claimed = repo
+        .claim_publish_by_ids(&claim_at(first, "d1"), PublishState::StoredLocal, &[id])
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(
+        state_counters_lease(&pool, id).await,
+        ("stored_local".to_string(), 3, 3, Some("d1".to_string()))
+    );
+
+    // Another state or another owner: nothing happens.
+    assert!(
+        !repo
+            .release_deferred_retry(id, "d1", PublishState::Rendered, "x", "x", None, first)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .release_deferred_retry(
+                id,
+                "other",
+                PublishState::StoredLocal,
+                "x",
+                "x",
+                None,
+                first
+            )
+            .await
+            .unwrap()
+    );
+
+    let not_before = first + Duration::seconds(30) + Duration::nanoseconds(400_000);
+    assert!(
+        repo.release_deferred_retry(
+            id,
+            "d1",
+            PublishState::StoredLocal,
+            "verification incomplete",
+            "remote_write_unverified",
+            Some(not_before),
+            first,
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        state_counters_lease(&pool, id).await,
+        ("stored_local".to_string(), 2, 2, None),
+        "state kept, lease cleared, claim refunded"
+    );
+    let early = not_before - Duration::nanoseconds(400_000);
+    assert!(
+        repo.claim_local_for_remote_publish(&claim_at(early, "d2"))
+            .await
+            .unwrap()
+            .is_empty(),
+        "the rounded-up wait is never claimable early"
+    );
+    let later = early + Duration::milliseconds(1);
+    let again = repo
+        .claim_publish_by_ids(&claim_at(later, "d3"), PublishState::StoredLocal, &[id])
+        .await
+        .unwrap();
+    assert_eq!(again.len(), 1);
+    assert!(
+        repo.release_deferred_retry(id, "d3", PublishState::StoredLocal, "x", "y", None, later)
+            .await
+            .unwrap()
+    );
+    let wait: Option<String> =
+        sqlx::query_scalar("SELECT next_attempt_at FROM publish_records WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(wait, None, "None clears the wait");
+}

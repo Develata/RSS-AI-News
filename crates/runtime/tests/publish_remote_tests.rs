@@ -1175,3 +1175,218 @@ async fn publish_remote_sends_the_other_record_after_the_keeper_failed() {
     assert_eq!(outcome.status, PublishRemoteStatus::PublishedRemote);
     assert_eq!(target.sent(), 1);
 }
+
+// === R3F-B2: a write whose verification did not complete keeps ownership ===
+
+/// A real GitHub target against `uri`, one attempt per stage.
+fn github_last_attempt_flow(pool: SqlitePool, uri: &str) -> PublishFlow {
+    let mut app = app_config(RetentionPolicy::Always, 1);
+    app.retry.publish_max_attempts = 1;
+    let target = rss_ai_news_publish::GitHubTarget::with_base_uri(
+        rss_ai_news_publish::GitHubTargetConfig {
+            token: rss_ai_news_domain::SecretString::from("unverified-test-token"),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            branch: "main".to_string(),
+            path_prefix: "reports".to_string(),
+            commit_message_prefix: "auto: publish".to_string(),
+        },
+        uri,
+    )
+    .unwrap();
+    PublishFlow::new(Arc::new(publish_deps(
+        pool,
+        Arc::new(app),
+        Arc::new(LocalFsTarget::new(std::env::temp_dir())),
+        Some(Arc::new(target)),
+    )))
+}
+
+async fn next_attempt_at(pool: &SqlitePool, id: i64) -> Option<OffsetDateTime> {
+    sqlx::query_scalar("SELECT next_attempt_at FROM publish_records WHERE id = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Last budget: the PUT outcome is unknown (502) and the read-only HEAD check
+/// fails (GET ref 503). The record must not fold to `failed` (which would
+/// release articles that may already be on GitHub): it stays `stored_local`
+/// with the attempt refunded, keeps its articles, and a later run publishes.
+#[tokio::test]
+async fn publish_remote_unverified_write_on_the_last_attempt_keeps_the_record_and_its_articles() {
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(serde_json::json!({"message": "Not Found"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(
+            ResponseTemplate::new(502).set_body_json(serde_json::json!({"message": "Bad gateway"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(
+            ResponseTemplate::new(503).set_body_json(serde_json::json!({"message": "unavailable"})),
+        )
+        .mount(&server)
+        .await;
+    let flow = github_last_attempt_flow(pool.clone(), &server.uri());
+
+    let outcome = flow.publish_remote_record(id, remote_opts()).await;
+
+    assert!(
+        matches!(&outcome.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "remote_write_unverified"),
+        "{:?}",
+        outcome.status
+    );
+    assert_record_state(&pool, id, "stored_local").await;
+    assert_last_error_kind(&pool, id, "remote_write_unverified").await;
+    assert_eq!(
+        record_counters(&pool, id).await,
+        (0, 0, None),
+        "refunded, lease cleared"
+    );
+    assert_eq!(next_attempt_at(&pool, id).await, None);
+    assert_referenced_articles_state(&pool, id, "ready_for_publish").await;
+    // Ownership is kept: the record is not failed, so its articles stay in
+    // its active snapshot (the maintenance sweep does not fail it either).
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT context_json FROM run_events WHERE event_kind = 'publish_failed'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        events[0].contains("\"budget_exhausted\":false"),
+        "{events:?}"
+    );
+
+    // A later run can claim it again and complete.
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(serde_json::json!({"message": "Not Found"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "content": { "sha": "file-sha" },
+            "commit": { "sha": "later-commit" }
+        })))
+        .mount(&server)
+        .await;
+    let later = flow.publish_remote_record(id, remote_opts()).await;
+    assert_eq!(later.status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(later.commit_sha.as_deref(), Some("later-commit"));
+    assert_record_state(&pool, id, "published_remote").await;
+}
+
+/// The HEAD check after an unknown write is itself rate limited: the
+/// deadline GitHub gave the check is persisted, so the next claim waits.
+#[tokio::test]
+async fn publish_remote_unverified_write_honours_the_verifications_rate_limit() {
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(serde_json::json!({"message": "Not Found"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(
+            ResponseTemplate::new(502).set_body_json(serde_json::json!({"message": "Bad gateway"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "600")
+                .set_body_json(serde_json::json!({"message": "API rate limit exceeded"})),
+        )
+        .mount(&server)
+        .await;
+    let before = OffsetDateTime::now_utc();
+    let flow = github_last_attempt_flow(pool.clone(), &server.uri());
+
+    flow.publish_remote_record(id, remote_opts()).await;
+
+    assert_record_state(&pool, id, "stored_local").await;
+    let wait = next_attempt_at(&pool, id)
+        .await
+        .expect("the check's deadline");
+    assert!(wait >= before + time::Duration::seconds(599), "{wait}");
+    assert_eq!(
+        flow.publish_remote_record(id, remote_opts()).await.status,
+        PublishRemoteStatus::NothingToClaim
+    );
+}
+
+/// The remote call is cut off by the deadline and the read-only check runs
+/// out of time too: the write may have landed, so the last attempt keeps the
+/// record (refunded) instead of folding it to `failed`.
+struct UnansweredAndUncheckableTarget;
+
+#[async_trait]
+impl PublishTarget for UnansweredAndUncheckableTarget {
+    async fn publish(&self, _report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        std::future::pending().await
+    }
+
+    async fn find_published(
+        &self,
+        _reports: &[RenderedReport],
+    ) -> Result<Option<PublishedBatchArtifact>, PublishError> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn publish_remote_timeout_with_an_unfinished_check_keeps_the_record_on_the_last_attempt() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+    let mut app = app_config(RetentionPolicy::Always, 1);
+    app.lease.publish_duration_seconds = 1;
+    app.retry.publish_max_attempts = 1;
+    let flow = PublishFlow::new(Arc::new(publish_deps(
+        pool.clone(),
+        Arc::new(app),
+        Arc::new(LocalFsTarget::new(std::env::temp_dir())),
+        Some(Arc::new(UnansweredAndUncheckableTarget)),
+    )));
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        flow.publish_remote_record(id, remote_opts()),
+    )
+    .await
+    .expect("the check is bounded inside the lease");
+
+    assert!(
+        matches!(&outcome.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "remote_write_unverified"),
+        "{:?}",
+        outcome.status
+    );
+    assert_record_state(&pool, id, "stored_local").await;
+    assert_eq!(record_counters(&pool, id).await, (0, 0, None));
+    assert_referenced_articles_state(&pool, id, "ready_for_publish").await;
+}

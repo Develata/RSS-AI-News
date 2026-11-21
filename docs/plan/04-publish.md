@@ -302,7 +302,9 @@ v0.3 引入：`publish_many(reports: &[RenderedReport])` 在一次 commit 内推
 
 **歧义写入的只读核对（2026-11-22，ADR 0012 §3）**：`PATCH ref`（批量）或 `PUT contents`（单报告）发出后遇到传输失败 /
 响应不可读 / 5xx，或 runtime 的远端 deadline 切断了调用时，释放前先 `GET ref` 取 HEAD commit、按该 commit 比对全部 blob；
-一致 → 以 HEAD commit 记成功；否则保留原错误按分类释放。4xx 与限流不核对。
+一致 → 以 HEAD commit 记成功；不一致 → 保留原错误按分类释放。4xx 与限流不核对。
+核对本身出错 / 被限流 / 用完时限 → `RemoteWriteUnverified`（R3F-B2）：保持 `stored_local`、退还本次 claim、不转 `failed`、
+文章归属保留；核对遇限流时其期限写入 `next_attempt_at`。
 
 ### 4.2.2 422 lost-update retry
 
@@ -376,8 +378,9 @@ Markdown **byte-equal**；跨渲染器版本（例如 YAML 引号规则调整）
 | GitHub 422 lost-update | `GitHubApiError { status: 422 }`（`is_branch_concurrently_updated`） | 同一次尝试内重新取 HEAD 再试 1 次；第二次 422 为永久错误 → `failed`（不保持 `stored_local`） |
 | 其它 GitHub 4xx（如 400 / 404 / 其它 422） | `GitHubApiError { status }` | `failed` |
 | GitHub 409 | `GitHubApiError { status: 409 }` | 保持 `stored_local` + 计预算 |
-| GitHub 5xx / 传输失败 / 响应读取失败 | `GitHubApiError { status: 5xx }`（传输类归为 503） | 写请求之后的歧义失败先只读核对 HEAD（已落地 → 成功，ADR 0012 §3）；否则保持 `stored_local` + 计预算，本地文件保留 |
-| 远端 deadline（lease 的 80%）超时 | `PublishError::RemoteTimeout` | 先只读核对 HEAD；否则保持 `stored_local` + 计预算 |
+| GitHub 5xx / 传输失败 / 响应读取失败 | `GitHubApiError { status: 5xx }`（传输类归为 503） | 写请求之后的歧义失败先只读核对 HEAD（已落地 → 成功，ADR 0012 §3）；确认未落地 → 保持 `stored_local` + 计预算，本地文件保留 |
+| 远端 deadline（lease 的 80%）超时 | `PublishError::RemoteTimeout` | 先只读核对 HEAD（已落地 → 成功）；确认未落地 → 保持 `stored_local` + 计预算 |
+| 歧义写入 / 远端超时之后的只读核对本身失败、被限流或超时 | `PublishError::RemoteWriteUnverified { write, verification }`（R3F-B2） | 保持 `stored_local`、**退还**本次 claim（不计预算，最后一次预算也不转 `failed`）、文章归属保留；`verification` 为限流时其期限（钳制 1 h）写入 `next_attempt_at`；下一次尝试的写前 HEAD 比对幂等 |
 | 2xx 但超过 16 MiB / 缺必需字段 | `ResponseTooLarge` / `GitHubApiError { status: 502 }` | 前者 `failed`；后者按 5xx 计预算 |
 | 目标漂移：record 的 `remote_target`（init 时写入的 `owner/repo:branch`）≠ 当前配置目标 | `PublishError::RemoteTargetMismatch`（`PublishRemoteStatus::TargetMismatch { stored, current }`） | 发请求前拦截，不重试，state='failed'，`last_error` 含两个目标；恢复配置或 `--force` 由运维决定 |
 

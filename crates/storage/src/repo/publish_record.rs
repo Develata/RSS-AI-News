@@ -223,6 +223,22 @@ pub trait PublishRecordRepository: Send + Sync {
         kind: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
+    /// Releases a remote attempt without charging the stage (R3F-B2 / S12):
+    /// lease cleared, claim refunded on both counters, `state` kept,
+    /// `last_error*` set and `next_attempt_at = retry_not_before` (`None`
+    /// clears a wait; SQLite stores it rounded up to the millisecond like
+    /// every deadline). Returns `false` when the lease was lost.
+    #[allow(clippy::too_many_arguments)]
+    async fn release_deferred_retry(
+        &self,
+        id: i64,
+        owner: &str,
+        state: PublishState,
+        error: &str,
+        kind: &str,
+        retry_not_before: Option<OffsetDateTime>,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
     async fn release_permanent_failure(
         &self,
         id: i64,

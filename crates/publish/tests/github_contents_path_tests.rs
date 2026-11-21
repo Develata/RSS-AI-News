@@ -502,6 +502,17 @@ async fn oversized_success_keeps_its_request_context() {
 #[tokio::test]
 async fn success_missing_a_required_field_keeps_its_request_context() {
     let server = MockServer::start().await;
+    // The 502 protocol error is an ambiguous write: the read-only HEAD check
+    // runs and finds the report absent, so the write error stands (a failing
+    // check would make it `RemoteWriteUnverified`, R3F-B2).
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path(
+            "/repos/owner/repo/git/ref/heads/main",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"object": {"sha": "head"}})))
+        .with_priority(1)
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
         .mount(&server)

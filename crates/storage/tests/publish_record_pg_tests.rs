@@ -815,6 +815,111 @@ async fn pg_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advance() 
     assert_eq!(wait, None);
 }
 
+/// R3F-B2 / S12 on PostgreSQL: a deferred retry keeps the state, clears the
+/// lease, refunds the claim on both counters and persists the wait; a release
+/// for another state changes nothing; `None` clears the wait.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "deferred").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .create_if_new(&new_record("idem-deferred", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE publish_records SET state = 'stored_local' WHERE id = $1")
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    let request = |owner: &str, now: OffsetDateTime| ClaimRequest {
+        owner: owner.to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+    let row = |id: i64| {
+        let pool = ctx.pg_pool().clone();
+        async move {
+            sqlx::query_as::<_, (String, i64, i64, Option<String>, Option<OffsetDateTime>)>(
+                "SELECT state, attempt_count, stage_attempt_count, lease_owner, next_attempt_at \
+                 FROM publish_records WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let first = OffsetDateTime::now_utc();
+    assert_eq!(
+        repo.claim_publish_by_ids(&request("d1", first), PublishState::StoredLocal, &[id])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        !repo
+            .release_deferred_retry(id, "d1", PublishState::Rendered, "x", "x", None, first)
+            .await
+            .unwrap()
+    );
+    let not_before = first + time::Duration::milliseconds(30_500);
+    assert!(
+        repo.release_deferred_retry(
+            id,
+            "d1",
+            PublishState::StoredLocal,
+            "verification incomplete",
+            "remote_write_unverified",
+            Some(not_before),
+            first,
+        )
+        .await
+        .unwrap()
+    );
+    let (state, attempts, stage_attempts, lease_owner, wait) = row(id).await;
+    assert_eq!(
+        (state.as_str(), attempts, stage_attempts, lease_owner),
+        ("stored_local", 0, 0, None)
+    );
+    assert!(wait.is_some());
+    assert!(
+        repo.claim_local_for_remote_publish(&request(
+            "d2",
+            not_before - time::Duration::milliseconds(1)
+        ))
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(
+        repo.claim_publish_by_ids(&request("d3", not_before), PublishState::StoredLocal, &[id])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        repo.release_deferred_retry(
+            id,
+            "d3",
+            PublishState::StoredLocal,
+            "x",
+            "y",
+            None,
+            not_before
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(row(id).await.4, None, "None clears the wait");
+}
+
 /// B2 (ADR 0012) on PostgreSQL under READ COMMITTED: a freeze locks its
 /// articles before the ownership re-check, so it waits for a concurrent
 /// freeze of the same article and then sees that snapshot's committed items

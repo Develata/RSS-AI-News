@@ -297,6 +297,81 @@ async fn ambiguous_contents_put_not_on_head_keeps_the_write_error() {
     );
 }
 
+/// R3F-B2: the PUT outcome is unknown (5xx) and the read-only HEAD check
+/// itself fails (GET ref 503). Neither "landed" nor "not landed" is known, so
+/// the target reports an unverified write — retryable, distinct from the
+/// write error — instead of the write error the stage would charge.
+#[tokio::test]
+async fn ambiguous_contents_put_with_a_failed_verification_is_unverified() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({ "message": "unavailable" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/repos/owner/repo/contents/reports/tech/2026-04-29.md",
+        ))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(504).set_body_json(json!({ "message": "timeout" })))
+        .mount(&server)
+        .await;
+
+    let error = target(&server).publish(&single_report()).await.unwrap_err();
+
+    use rss_ai_news_domain::error::ClassifiedError;
+    assert_eq!(error.error_kind(), "remote_write_unverified", "{error:?}");
+    assert!(error.is_retryable());
+    // The diagnostic names both the write and the failed check.
+    let message = error.to_string();
+    assert!(message.contains("PUT contents"), "{message}");
+    assert!(message.contains("GET ref"), "{message}");
+}
+
+/// R3F-B2 batch path: the PATCH outcome is unknown and the HEAD check is
+/// rate limited; the unverified error carries the check's deadline.
+#[tokio::test]
+async fn ambiguous_ref_update_with_a_rate_limited_verification_keeps_the_deadline() {
+    let server = MockServer::start().await;
+    mount_head(&server, "old-head", "old-tree", Some(1)).await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "600")
+                .set_body_json(json!({ "message": "API rate limit exceeded" })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/git/trees"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "sha": "batch-tree" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/git/commits"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "sha": "batch-commit" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/repos/owner/repo/git/refs/heads/main"))
+        .respond_with(ResponseTemplate::new(502).set_body_json(json!({ "message": "Bad gateway" })))
+        .mount(&server)
+        .await;
+    let before = time::OffsetDateTime::now_utc();
+
+    let error = target(&server).publish_many(&reports()).await.unwrap_err();
+
+    use rss_ai_news_domain::error::ClassifiedError;
+    assert_eq!(error.error_kind(), "remote_write_unverified", "{error:?}");
+    let reset = error.rate_limit_reset().expect("the check's deadline");
+    assert!(reset >= before + time::Duration::seconds(599), "{reset}");
+}
+
 /// R1-P-S2: a batch whose first receipt was recorded before an interruption
 /// is resumed with the one remaining report, which takes the single-report
 /// path. The branch already holds that exact blob, so the receipt names the

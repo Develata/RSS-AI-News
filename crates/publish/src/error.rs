@@ -87,6 +87,20 @@ pub enum PublishError {
         reset_at: time::OffsetDateTime,
         context: GitHubRequestContext,
     },
+    /// R3F-B2: a write whose outcome is unknown (`write`: a transport failure,
+    /// unreadable response or 5xx after the PUT / PATCH was sent, or the
+    /// remote deadline cutting the call off) whose read-only HEAD
+    /// verification did not complete (`verification`: the check failed, was
+    /// rate limited or ran out of time). The write may have landed, so the
+    /// stage must neither fail the record nor release its snapshot's articles:
+    /// the runtime refunds the attempt and keeps the state (the next attempt's
+    /// pre-write HEAD check is idempotent), waiting out a rate limit the
+    /// verification returned ([`Self::rate_limit_reset`]).
+    #[error("github write outcome unknown ({write}); HEAD verification incomplete: {verification}")]
+    RemoteWriteUnverified {
+        write: Box<PublishError>,
+        verification: Box<PublishError>,
+    },
     /// The record was initialised for a different remote destination than the
     /// one configured now. Never retried: the operator decides (restore the
     /// config, or `--force` a new render version for the new target).
@@ -109,6 +123,18 @@ impl PublishError {
             | Self::GitHubApiError { context, .. }
             | Self::ResponseTooLarge { context, .. }
             | Self::GitHubRateLimit { context, .. } => Some(context),
+            // Where the unknown write was sent.
+            Self::RemoteWriteUnverified { write, .. } => write.github_context(),
+            _ => None,
+        }
+    }
+
+    /// The instant GitHub asked to wait until: a rate limit's `reset_at`, or
+    /// the rate limit an unverified write's HEAD verification ran into.
+    pub fn rate_limit_reset(&self) -> Option<time::OffsetDateTime> {
+        match self {
+            Self::GitHubRateLimit { reset_at, .. } => Some(*reset_at),
+            Self::RemoteWriteUnverified { verification, .. } => verification.rate_limit_reset(),
             _ => None,
         }
     }
@@ -164,7 +190,9 @@ impl ClassifiedError for PublishError {
             | Self::ResponseTooLarge { .. }
             | Self::RemoteTargetMismatch { .. } => false,
             Self::GitHubApiError { status, .. } => *status == 409 || *status >= 500,
-            Self::GitHubRateLimit { .. } | Self::RemoteTimeout => true,
+            Self::GitHubRateLimit { .. }
+            | Self::RemoteTimeout
+            | Self::RemoteWriteUnverified { .. } => true,
         }
     }
 
@@ -176,6 +204,7 @@ impl ClassifiedError for PublishError {
             Self::GitHubApiError { .. } => "github_api_error",
             Self::GitHubRateLimit { .. } => "github_rate_limit",
             Self::RemoteTimeout => "remote_timeout",
+            Self::RemoteWriteUnverified { .. } => "remote_write_unverified",
             Self::ResponseTooLarge { .. } => "response_too_large",
             Self::RemoteTargetMismatch { .. } => "remote_target_mismatch",
         }

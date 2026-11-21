@@ -19,13 +19,13 @@ use super::{
     publish_record_sql::{
         ADVANCE_LOCAL_SQL, ADVANCE_REMOTE_SQL, ADVANCE_RENDERED_SQL, ADVANCE_SNAPSHOT_SQL,
         CREATE_IF_NEW_SQL, PROMOTE_ARTICLE_PUBLISHED_SQL, PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL,
-        RECLAIM_PUBLISH_LEASES_SQL, RECLAIM_PUBLISH_LEASES_SQLITE_SQL, RELEASE_EMPTY_SNAPSHOT_SQL,
-        RELEASE_FREEZE_CONFLICT_SQL, RELEASE_OWNERSHIP_CONFLICT_SQL, RELEASE_PERMANENT_FAILURE_SQL,
-        RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL, SELECT_PUBLISH_RECORD_BY_ID,
-        SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY, TERMINALIZE_EXHAUSTED_PUBLISH_SQL,
-        TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL, claim_pending_in_category_pg,
-        claim_pending_in_category_sqlite, claim_publish_pg, claim_publish_sqlite,
-        sqlite_lease_cutoff, sqlite_stored_deadline,
+        RECLAIM_PUBLISH_LEASES_SQL, RECLAIM_PUBLISH_LEASES_SQLITE_SQL, RELEASE_DEFERRED_RETRY_SQL,
+        RELEASE_EMPTY_SNAPSHOT_SQL, RELEASE_FREEZE_CONFLICT_SQL, RELEASE_OWNERSHIP_CONFLICT_SQL,
+        RELEASE_PERMANENT_FAILURE_SQL, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL,
+        SELECT_PUBLISH_RECORD_BY_ID, SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY,
+        TERMINALIZE_EXHAUSTED_PUBLISH_SQL, TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL,
+        claim_pending_in_category_pg, claim_pending_in_category_sqlite, claim_publish_pg,
+        claim_publish_sqlite, sqlite_lease_cutoff, sqlite_stored_deadline,
     },
 };
 
@@ -275,6 +275,46 @@ impl PublishRecordRepository for PublishRecordRepo {
                 .bind(id)
                 .bind(owner)
                 .bind(state.as_str())
+                .execute(p)
+                .await
+                .map_err(StorageError::from)?
+                .rows_affected(),
+        };
+        Ok(affected == 1)
+    }
+
+    async fn release_deferred_retry(
+        &self,
+        id: i64,
+        owner: &str,
+        state: PublishState,
+        error: &str,
+        kind: &str,
+        retry_not_before: Option<OffsetDateTime>,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let affected = match self.storage_pool() {
+            StoragePool::Sqlite(p) => sqlx::query(RELEASE_DEFERRED_RETRY_SQL)
+                .bind(error)
+                .bind(kind)
+                .bind(now)
+                .bind(id)
+                .bind(owner)
+                .bind(state.as_str())
+                // Rounded up like every SQLite deadline: never claimable early.
+                .bind(retry_not_before.map(sqlite_stored_deadline))
+                .execute(p)
+                .await
+                .map_err(StorageError::from)?
+                .rows_affected(),
+            StoragePool::Postgres(p) => sqlx::query(RELEASE_DEFERRED_RETRY_SQL)
+                .bind(error)
+                .bind(kind)
+                .bind(now)
+                .bind(id)
+                .bind(owner)
+                .bind(state.as_str())
+                .bind(retry_not_before)
                 .execute(p)
                 .await
                 .map_err(StorageError::from)?

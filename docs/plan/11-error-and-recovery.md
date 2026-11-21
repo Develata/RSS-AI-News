@@ -78,7 +78,7 @@ trait ClassifiedError {
 | 正文提取 | `feed_entries.last_error*` | 同上；fallback 命中时转 `FallbackPersisted`；article 写入 / 摘要回读的存储错误按 `StorageError::is_retryable()` 同样分流（不再一律 `Failed`） |
 | AI 调用 | `article_ai_results.last_error*` | `Running → Pending`（retry）/ `PermanentFailed`（exhausted） |
 | 本地落盘 | `publish_records.last_error*` | retryable 回原态重试 / 耗尽或永久 → `Failed` |
-| GitHub 推送 | `publish_records.last_error*` | 按 `PublishError::is_retryable()`：限流、409、5xx / 传输失败、远端超时 → 保持 `StoredLocal` 并计本阶段预算（耗尽 → `Failed`；歧义写入先只读核对 HEAD，限流写 `next_attempt_at`）；422 non-fast-forward 在同一次尝试内重试一次，第二次 422 及其它 4xx、认证失败、目标漂移、超大成功响应 → 直接 `Failed`。完整表见 [plan/04 §7](./04-publish.md) |
+| GitHub 推送 | `publish_records.last_error*` | 按 `PublishError::is_retryable()`：限流、409、5xx / 传输失败、远端超时 → 保持 `StoredLocal` 并计本阶段预算（耗尽 → `Failed`；歧义写入先只读核对 HEAD，核对未完成 → `RemoteWriteUnverified`：保态、退还 claim、不转 `Failed`；限流写 `next_attempt_at`）；422 non-fast-forward 在同一次尝试内重试一次，第二次 422 及其它 4xx、认证失败、目标漂移、超大成功响应 → 直接 `Failed`。完整表见 [plan/04 §7](./04-publish.md) |
 | Reindex 批次 | `reindex_jobs.last_error*` | `Running → Pending`（retry）/ `Failed`（exhausted） |
 
 `articles` 表**不**承载 `last_error*` 列。错误归属规则见 [./08-state-machines.md §4.2](./08-state-machines.md)。
