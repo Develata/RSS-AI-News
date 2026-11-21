@@ -25,6 +25,7 @@
 - **--force**：每次调用新建唯一的 `pending` render trace 行与新记录；force 行永不成为 active
 - **path 防穿越**：含 `..` / 反斜杠 / 无日期 token 的模板在 validate 阶段就报错（详见 [./06-config-loading.md](./06-config-loading.md)）
 - 远端 publish 成功后 article → `Published`；批次成功后 record → `PublishedRemote`
+- **lease 按时刻判定**：SQLite 上 publish_records 的 claim / reclaim / sweep 用 `julianday()` 比较（lease 写入向上、now 向下取整到毫秒），lease 绝不提前过期；PG 用 `timestamptz`
 - **record 隔离**：`publish` 与 `publish-all` 的每个阶段（freeze / render / store-local / publish-remote）都只 claim init 得到的 `publish_record_id`；
   单分类 `publish` 不得领取或推进其他分类残留的记录。例外：每阶段 claim 前的全局 maintenance
   （lease 过期 reclaim + 预算耗尽 sweep → `failed`）按设计作用于全表，不区分分类
@@ -98,6 +99,9 @@
 | `publish_all_refuses_categories_whose_paths_collide_on_the_report_date` | `crates/cli/tests/publish_cmd_tests.rs` | 真实日期路径碰撞在写入前拦截 |
 | `month_day_and_day_month_templates_collide_on_eleven_eleven` | `crates/runtime/src/flows/publish/paths.rs` | 11-11 碰撞 / 其它日期不碰撞 |
 | `publish_category_never_claims_another_categorys_pending_record` | `crates/cli/tests/publish_cmd_tests.rs` | 命令层跨分类 record 隔离 |
+| `sqlite_lease_predicates_compare_instants_not_rfc3339_text` | `crates/storage/tests/publish_stage_recovery_tests.rs` | SQLite lease 谓词按时刻（.5Z vs 整秒 now） |
+| `sqlite_claim_lease_is_not_expired_before_its_instant` | 同上 | claim 写入的 lease 不提前过期 |
+| `pg_lease_predicates_treat_subsecond_lease_as_live` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 同语义 |
 | `pg_claim_by_ids_skips_row_locked_by_another_transaction` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 按 ID claim `SKIP LOCKED` 不阻塞 |
 | `publish_store_local_failure_is_reported_as_failure` | 同上 | 本地写失败 → exit 1 |
 

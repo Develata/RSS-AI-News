@@ -19,10 +19,11 @@ use super::{
     publish_record_sql::{
         ADVANCE_LOCAL_SQL, ADVANCE_REMOTE_SQL, ADVANCE_RENDERED_SQL, ADVANCE_SNAPSHOT_SQL,
         CREATE_IF_NEW_SQL, PROMOTE_ARTICLE_PUBLISHED_SQL, PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL,
-        RECLAIM_PUBLISH_LEASES_SQL, RELEASE_EMPTY_SNAPSHOT_SQL, RELEASE_PERMANENT_FAILURE_SQL,
-        RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL, SELECT_PUBLISH_RECORD_BY_ID,
-        SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY, TERMINALIZE_EXHAUSTED_PUBLISH_SQL,
-        claim_publish_pg, claim_publish_sqlite,
+        RECLAIM_PUBLISH_LEASES_SQL, RECLAIM_PUBLISH_LEASES_SQLITE_SQL, RELEASE_EMPTY_SNAPSHOT_SQL,
+        RELEASE_PERMANENT_FAILURE_SQL, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL,
+        SELECT_PUBLISH_RECORD_BY_ID, SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY,
+        TERMINALIZE_EXHAUSTED_PUBLISH_SQL, TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL,
+        claim_publish_pg, claim_publish_sqlite, sqlite_lease_cutoff, sqlite_stored_deadline,
     },
 };
 
@@ -387,9 +388,9 @@ async fn sqlite_reclaim_expired_leases(
     pool: &SqlitePool,
     now: OffsetDateTime,
 ) -> Result<u64, StorageError> {
-    let result = sqlx::query(RECLAIM_PUBLISH_LEASES_SQL)
+    let result = sqlx::query(RECLAIM_PUBLISH_LEASES_SQLITE_SQL)
         .bind(now)
-        .bind(now)
+        .bind(sqlite_lease_cutoff(now))
         .execute(pool)
         .await
         .map_err(StorageError::from)?;
@@ -401,10 +402,10 @@ async fn sqlite_terminalize_exhausted(
     max_attempts: u32,
     now: OffsetDateTime,
 ) -> Result<u64, StorageError> {
-    let result = sqlx::query(TERMINALIZE_EXHAUSTED_PUBLISH_SQL)
+    let result = sqlx::query(TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL)
         .bind(now)
         .bind(i64::from(max_attempts))
-        .bind(now)
+        .bind(sqlite_lease_cutoff(now))
         .execute(pool)
         .await
         .map_err(StorageError::from)?;
@@ -418,10 +419,11 @@ async fn sqlite_claim_by_ids(
     ids: &[i64],
 ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
     let mut builder = QueryBuilder::<Sqlite>::new("UPDATE publish_records SET lease_owner = ");
+    let cutoff = sqlite_lease_cutoff(request.now);
     builder
         .push_bind(&request.owner)
         .push(", lease_expires_at = ")
-        .push_bind(request.lease_expires_at)
+        .push_bind(sqlite_stored_deadline(request.lease_expires_at))
         .push(", attempt_count = attempt_count + 1, updated_at = ")
         .push_bind(request.now)
         .push(" WHERE state = ")
@@ -433,10 +435,13 @@ async fn sqlite_claim_by_ids(
             separated.push_bind(id);
         }
     }
+    // Instant-correct lease expiry (see publish_record_sql.rs).
     builder
-        .push(") AND (lease_expires_at IS NULL OR lease_expires_at < ")
-        .push_bind(request.now)
-        .push(") AND attempt_count < ")
+        .push(") AND (lease_expires_at IS NULL OR COALESCE(julianday(lease_expires_at) < julianday(")
+        .push_bind(cutoff)
+        .push("), lease_expires_at < ")
+        .push_bind(cutoff)
+        .push(")) AND attempt_count < ")
         .push_bind(i64::from(request.max_attempts))
         .push(" RETURNING id, idempotency_key, category_key, report_date, target_timezone, ")
         .push("render_version, selection_policy_version, state, remote_target, attempt_count, rendered_at");
