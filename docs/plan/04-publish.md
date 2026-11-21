@@ -288,7 +288,8 @@ HTTP 状态、GitHub message 的**固定词表摘要**与 `x-github-request-id`�
 `validation failed`、`bad request` 等，大小写不敏感），持久化的只是对应的固定措辞，多个以 `; ` 连接；一个都不认识时写
 `unrecognized GitHub message omitted (<N> bytes)`；无法解码的正文前缀 `unreadable error body: `。重试分类依赖的信号
 （`not a fast-forward`、`rate limit`）属于该词表，且在任何截断之前从完整文本中提取。`x-github-request-id` 只有整值符合
-GitHub 形状（2–8 组、每组 1–16 位十六进制、以 `:` 分隔，实测形如 `828A:4A44E:40DA1B1:CEE6757:6B01CE59`）且不含 token
+GitHub 形状（恰好 5 组、每组 1–16 位十六进制、以 `:` 分隔——GitHub 文档示例与实测均为此形，如
+`828A:4A44E:40DA1B1:CEE6757:6B01CE59`；2026-11-22 R3F-B6 由此前无依据的"2–8 组"收紧，`12:34` 之类不再保留）且不含 token
 时才保留，否则整值丢弃（不再"过滤成合法字符"）。客户端侧的传输错误文本（无服务端内容）最多 512 字节。
 
 结构化请求上下文（2026-11-22，R1-P-S1）：`GitHubAuthFailed` / `GitHubApiError` / `GitHubRateLimit` / `ResponseTooLarge`

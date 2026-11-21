@@ -684,16 +684,19 @@ fn encode_repo_path(path: &str) -> String {
 }
 
 /// `x-github-request-id`, kept only when the whole value has GitHub's shape
-/// and never when it contains the token (R1-P-B6). Observed ids are five
-/// colon-separated groups of upper-case hex digits, e.g.
-/// `828A:4A44E:40DA1B1:CEE6757:6B01CE59`; 2–8 groups of 1–16 hex digits are
-/// accepted. Anything else (an intermediary's own id, injected text, a
-/// token-shaped value) is dropped rather than filtered into shape.
+/// and never when it contains the token (R1-P-B6). GitHub's documented
+/// example and every observed id are exactly five colon-separated groups of
+/// hex digits, e.g. `828A:4A44E:40DA1B1:CEE6757:6B01CE59`; only that shape
+/// (five groups of 1–16 hex digits) is accepted (R3F-B6) — no published
+/// grammar supports a wider one. Anything else (an intermediary's own id, a
+/// short value such as `12:34`, injected text, a token-shaped value) is
+/// dropped rather than filtered into shape.
 fn github_request_id(headers: &http::HeaderMap, token: &str) -> Option<String> {
+    const GROUPS: usize = 5;
     let value = headers.get("x-github-request-id")?.to_str().ok()?.trim();
     let groups = value.split(':').collect::<Vec<_>>();
     let well_formed = value.len() <= 128
-        && (2..=8).contains(&groups.len())
+        && groups.len() == GROUPS
         && groups.iter().all(|group| {
             (1..=16).contains(&group.len()) && group.bytes().all(|byte| byte.is_ascii_hexdigit())
         });
@@ -1107,11 +1110,17 @@ mod tests {
             "828A",
             "828A::CEE6757",
             "0123456789ABCDEF0:1",
+            // R3F-B6: only GitHub's documented / observed five-group shape.
+            "12:34",
+            "C0DE:1234:ABCD",
+            "828A:4A44E:40DA1B1:CEE6757",
+            "828A:4A44E:40DA1B1:CEE6757:6B01CE59:1",
+            "828A:4A44E::CEE6757:6B01CE59",
         ] {
             assert_eq!(id(rejected, "ghp_x"), None, "{rejected}");
         }
         // A hex token embedded in an otherwise well-formed id is dropped.
-        assert_eq!(id("ABCD:1234DEADBEEF", "1234DEADBEEF"), None);
+        assert_eq!(id("ABCD:1234DEADBEEF:1:2:3", "1234DEADBEEF"), None);
     }
 
     #[test]
