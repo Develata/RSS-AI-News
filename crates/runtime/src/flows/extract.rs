@@ -823,9 +823,11 @@ pub fn extract_lease_budget_seconds(
 ///
 /// `ingest` shrinks an over-budget batch instead of refusing to start, so a
 /// config that ran before the budget existed (e.g. the old 300 s lease with
-/// the default batch of 50) keeps running and no batch outlives its lease.
-/// `None` when not even one wave fits (R2-S9): any claim could then outlive
-/// its lease, so the caller skips extract for the run and reports it.
+/// the default batch of 50) keeps running and the batch's *estimated* budget
+/// fits its lease (R3E-S9: parsing or storage slower than the per-wave margin
+/// can still make a real batch outlive it; the guarantee is the estimate's).
+/// `None` when not even one wave fits (R2-S9): even one wave's estimate
+/// exceeds the lease, so the caller skips extract for the run and reports it.
 ///
 /// Postcondition: `Some(n)` ⇒ `1 <= n <= max(requested, 1)` and
 /// `extract_lease_budget_seconds(n, …) <= lease_seconds`.

@@ -182,7 +182,9 @@ lease 预算（2026-11-21）：一批 claim 共用一个 `lease.fetch_duration_s
 的整波数（`fit_extract_batch_to_lease`）并写 WARN。连一波都放不下时（`timeout + 5 > lease`）本次**不领取**
 extract（任何一批都可能在处理中途被另一 run 回收），ingest 照常运行，命令报 `extract_lease_too_short` 运行错误
 并退出 1（R2-S9，旧做法仍按一波领取）。这样升级前能运行的配置（如 lease 300 s + 默认批 50 → 本次按 40）继续运行，
-且一批不会超出自己的 lease。`+5` 秒是解析 / 写库耗时的估算余量，不是数据库与解析时间的硬上界。
+且一批的**估算预算**（上式）不超过自己的 lease（R3E-S9：这是对估算值的保证，不是对实际耗时的保证——
+`+5` 秒是解析 / 写库耗时的估算余量，不是数据库与解析时间的硬上界；解析或写库比估算慢时，实际批次仍可能超过 lease、
+被另一 run 回收并重复抓取）。
 示例配置的 lease 改为 600 s，默认批大小不再被缩小。
 
 滚动 JoinSet 将存活任务数限制在 `http.concurrent_fetches.max(1)`，不为整个 claim 批次预建等待任务。
