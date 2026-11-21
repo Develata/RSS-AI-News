@@ -299,7 +299,7 @@ impl PublishFlow {
                     &owner,
                     article_id,
                     &message,
-                    "article_owned_by_active_snapshot",
+                    super::OWNERSHIP_CONFLICT_KIND,
                     &emitter,
                 )
                 .await

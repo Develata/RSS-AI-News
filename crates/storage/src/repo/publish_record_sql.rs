@@ -162,6 +162,11 @@ pub(super) const RELEASE_EMPTY_SNAPSHOT_SQL: &str = "UPDATE publish_records SET 
 /// race is not a publish attempt, so it must not exhaust the stage budget.
 /// The next run re-selects without the contested article.
 pub(super) const RELEASE_FREEZE_CONFLICT_SQL: &str = "UPDATE publish_records SET lease_owner = NULL, lease_expires_at = NULL, attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, stage_attempt_count = CASE WHEN stage_attempt_count > 0 THEN stage_attempt_count - 1 ELSE 0 END, last_error = $1, last_error_kind = $2, updated_at = $3 WHERE id = $4 AND lease_owner = $5 AND state = 'pending'";
+/// A claimed record whose snapshot shares an article with a winning snapshot
+/// (P-B1): release the lease in the current stage, refund the claim on both
+/// counters (no write happened, so it is not an attempt) and record why. The
+/// state is kept so the record can continue if the winner later fails.
+pub(super) const RELEASE_OWNERSHIP_CONFLICT_SQL: &str = "UPDATE publish_records SET lease_owner = NULL, lease_expires_at = NULL, attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, stage_attempt_count = CASE WHEN stage_attempt_count > 0 THEN stage_attempt_count - 1 ELSE 0 END, last_error = $1, last_error_kind = $2, updated_at = $3 WHERE id = $4 AND lease_owner = $5 AND state = $6";
 pub(super) const RECLAIM_PUBLISH_LEASES_SQL: &str = r#"
 UPDATE publish_records
 SET lease_owner = NULL, lease_expires_at = NULL, updated_at = $1

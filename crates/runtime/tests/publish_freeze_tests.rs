@@ -519,6 +519,15 @@ impl PublishItemRepository for FlakyCandidateRepo {
     ) -> Result<Vec<rss_ai_news_domain::model::PublishItem>, StorageError> {
         self.inner.list_by_publish_record(publish_record_id).await
     }
+
+    async fn find_snapshot_ownership_conflict(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Option<rss_ai_news_storage::SnapshotOwnershipConflict>, StorageError> {
+        self.inner
+            .find_snapshot_ownership_conflict(publish_record_id)
+            .await
+    }
 }
 
 fn flaky_flow(pool: SqlitePool, err: fn() -> StorageError) -> PublishFlow {
@@ -691,6 +700,15 @@ impl PublishItemRepository for RacingFreezeRepo {
         publish_record_id: i64,
     ) -> Result<Vec<rss_ai_news_domain::model::PublishItem>, StorageError> {
         self.inner.list_by_publish_record(publish_record_id).await
+    }
+
+    async fn find_snapshot_ownership_conflict(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Option<rss_ai_news_storage::SnapshotOwnershipConflict>, StorageError> {
+        self.inner
+            .find_snapshot_ownership_conflict(publish_record_id)
+            .await
     }
 }
 

@@ -187,6 +187,18 @@ pub trait PublishRecordRepository: Send + Sync {
         kind: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
+    /// Releases a record claimed in `state` whose snapshot shares an article
+    /// with a winning snapshot (P-B1): lease cleared, claim refunded, state
+    /// kept, `last_error*` set. Returns `false` when the lease was lost.
+    async fn release_ownership_conflict(
+        &self,
+        id: i64,
+        owner: &str,
+        state: PublishState,
+        error: &str,
+        kind: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
     async fn release_permanent_failure(
         &self,
         id: i64,

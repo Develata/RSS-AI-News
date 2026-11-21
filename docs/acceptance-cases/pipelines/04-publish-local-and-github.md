@@ -46,6 +46,8 @@
 - 远端 422 重试达上限 → 仍报错，record 保持 `StoredLocal`
 - 多报告批次重试：HEAD 已逐字节包含整批内容（上次 ref 更新落地、响应丢失）→ 不新建 commit，回执指向该 HEAD
 - promote target article 已被其它流转推进 → `ArticleConflict`
+- 存量重复归属（0008 前两份未失败快照共享文章）：store_local / remote 写前拦截，已发布者或低 id 者胜出；败方不写外部产物、
+  释放 lease、退还 claim、保持阶段态 → `ArticleConflict`（`article_owned_by_active_snapshot`）
 - 目标漂移：`stored_local` 记录的 `remote_target`（`owner/repo:branch`）与当前配置的远端目标不同 →
   不发任何请求，`TargetMismatch { stored, current }`，record → `failed`（`last_error_kind=remote_target_mismatch`）；
   批量发布中只跳过该记录，其余照常提交
@@ -75,6 +77,12 @@
 | `freeze_losing_an_article_releases_lease_without_charging_budget_and_retries_without_it` | `crates/runtime/tests/publish_freeze_tests.rs` | 冲突立即释放 lease、不耗预算、下轮排除 |
 | `pg_concurrent_freeze_of_the_same_article_serialises_on_the_article_lock` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 并发 freeze 由文章行锁串行化 |
 | `pg_ai_off_selection_excludes_article_owned_by_active_snapshot` | 同上 | PG AI-off 选稿排除 |
+| `pg_snapshot_ownership_conflict_prefers_published_then_lowest_id` | 同上 | PG 存量重复归属：已发布者优先、否则低 id 胜出；败方释放退还、保态 |
+| `publish_remote_stops_the_higher_record_sharing_an_article_before_sending` | `crates/runtime/tests/publish_remote_tests.rs` | 存量重复归属：败方不发请求、保态、退还 claim |
+| `publish_remote_stops_a_lower_record_whose_article_a_published_record_holds` | 同上 | 已发布的持有者无论 id 都胜出 |
+| `publish_remote_batch_drops_only_the_record_losing_a_shared_article` | 同上 | 批量只剔除败方 |
+| `publish_remote_sends_the_other_record_after_the_keeper_failed` | 同上 | 胜方 failed 后归属释放 |
+| `store_local_stops_the_higher_record_sharing_an_article_before_writing` | `crates/runtime/tests/publish_store_local_tests.rs` | 败方不落盘 |
 | `freeze_transient_candidate_load_error_keeps_record_pending_and_next_run_freezes` | 同上 | 瞬时存储错误保态、下轮继续 |
 | `freeze_permanent_candidate_load_error_fails_record` | 同上 | 不可重试存储错误 → failed |
 | `render_advances_snapshot_frozen_to_rendered_when_items_exist` | `crates/runtime/tests/publish_render_tests.rs` | render happy |

@@ -225,6 +225,69 @@ async fn store_local_retryable_failure_keeps_rendered_state_and_reclaim_succeeds
     assert_referenced_articles_state(&pool, record_id, "published").await;
 }
 
+// === P-B1: legacy duplicate ownership is stopped before the local write ===
+
+#[tokio::test]
+async fn store_local_stops_the_higher_record_sharing_an_article_before_writing() {
+    let (_dir, pool) = make_test_pool().await;
+    let rendered_at = fixed_time();
+    let keeper = seed_rendered_publish_record(&pool, None, rendered_at).await;
+    let loser = seed_rendered_publish_record(&pool, None, rendered_at).await;
+    let shared: i64 =
+        sqlx::query_scalar("SELECT article_id FROM publish_items WHERE publish_record_id = ?")
+            .bind(keeper)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    // A pre-0008 database can hold two snapshots sharing one article.
+    sqlx::query(
+        "INSERT INTO publish_items (publish_record_id, position, article_id, frozen_title, \
+         frozen_summary, frozen_tags_json, frozen_canonical_link, frozen_source_display_name) \
+         VALUES (?, 2, ?, 'Shared', 's', '[]', 'https://example.com/shared', 'Source')",
+    )
+    .bind(loser)
+    .bind(shared)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let output_dir = tempfile::tempdir().unwrap();
+    let flow = flow(
+        pool.clone(),
+        Arc::new(LocalFsTarget::new(output_dir.path().to_path_buf())),
+    );
+
+    let outcome = flow
+        .store_local_record(loser, store_opts(rendered_at))
+        .await;
+
+    assert_eq!(
+        outcome.status,
+        PublishStoreLocalStatus::ArticleConflict { article_id: shared }
+    );
+    assert!(outcome.local_path.is_none());
+    assert!(
+        std::fs::read_dir(output_dir.path())
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true),
+        "no file may be written for the losing record"
+    );
+    assert_record_state(&pool, loser, "rendered").await;
+    let (attempts, stage_attempts, kind): (i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT attempt_count, stage_attempt_count, last_error_kind FROM publish_records WHERE id = ?",
+    )
+    .bind(loser)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((attempts, stage_attempts), (0, 0), "claim refunded");
+    assert_eq!(kind.as_deref(), Some("article_owned_by_active_snapshot"));
+
+    let kept = flow
+        .store_local_record(keeper, store_opts(rendered_at))
+        .await;
+    assert_eq!(kept.status, PublishStoreLocalStatus::PublishedLocal);
+}
+
 fn flow(pool: SqlitePool, target: Arc<dyn rss_ai_news_publish::PublishTarget>) -> PublishFlow {
     let app = Arc::new(app_config(RetentionPolicy::Always, 1));
     let ctx = Arc::new(publish_deps(pool, app, target, None));

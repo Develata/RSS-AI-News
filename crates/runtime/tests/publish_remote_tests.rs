@@ -656,3 +656,162 @@ async fn publish_remote_batch_skips_only_the_mismatched_record() {
     assert_record_state(&pool, drifted, "failed").await;
     assert_record_state(&pool, matching, "published_remote").await;
 }
+
+// === P-B1: legacy duplicate ownership is stopped before any external write ===
+
+/// Puts `from`'s first article into `into`'s snapshot too, the state a
+/// pre-0008 database can hold (two dates' snapshots sharing one article).
+async fn share_first_article(pool: &SqlitePool, from: i64, into: i64) -> i64 {
+    let article_id: i64 = sqlx::query_scalar(
+        "SELECT article_id FROM publish_items WHERE publish_record_id = ? ORDER BY position LIMIT 1",
+    )
+    .bind(from)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO publish_items (publish_record_id, position, article_id, frozen_title, \
+         frozen_summary, frozen_tags_json, frozen_canonical_link, frozen_source_display_name) \
+         VALUES (?, 2, ?, 'Shared', 's', '[]', 'https://example.com/shared', 'Source')",
+    )
+    .bind(into)
+    .bind(article_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    article_id
+}
+
+async fn record_counters(pool: &SqlitePool, id: i64) -> (i64, i64, Option<String>) {
+    sqlx::query_as(
+        "SELECT attempt_count, stage_attempt_count, lease_owner FROM publish_records WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn publish_remote_stops_the_higher_record_sharing_an_article_before_sending() {
+    let (_dir, pool) = make_test_pool().await;
+    let keeper = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let loser = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let shared = share_first_article(&pool, keeper, loser).await;
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow.publish_remote_record(loser, remote_opts()).await;
+
+    assert_eq!(
+        outcome.status,
+        PublishRemoteStatus::ArticleConflict { article_id: shared }
+    );
+    assert_eq!(target.sent(), 0, "the losing record must not be sent");
+    assert_record_state(&pool, loser, "stored_local").await;
+    assert_last_error_kind(&pool, loser, "article_owned_by_active_snapshot").await;
+    let last_error: String =
+        sqlx::query_scalar("SELECT last_error FROM publish_records WHERE id = ?")
+            .bind(loser)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        last_error.contains(&format!("publish record {keeper}")),
+        "{last_error}"
+    );
+    assert_eq!(
+        record_counters(&pool, loser).await,
+        (0, 0, None),
+        "lease released and claim refunded"
+    );
+
+    // The lower record keeps the article and publishes normally.
+    let kept = flow.publish_remote_record(keeper, remote_opts()).await;
+    assert_eq!(kept.status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(target.sent(), 1);
+}
+
+/// A published owner wins even with the higher id: its articles are already
+/// `published`, so the lower record could only write and then fail.
+#[tokio::test]
+async fn publish_remote_stops_a_lower_record_whose_article_a_published_record_holds() {
+    let (_dir, pool) = make_test_pool().await;
+    let lower = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let published = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let shared = share_first_article(&pool, published, lower).await;
+    sqlx::query("UPDATE publish_records SET state = 'published_remote' WHERE id = ?")
+        .bind(published)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow.publish_remote_record(lower, remote_opts()).await;
+
+    assert_eq!(
+        outcome.status,
+        PublishRemoteStatus::ArticleConflict { article_id: shared }
+    );
+    assert_eq!(target.sent(), 0);
+    assert_record_state(&pool, lower, "stored_local").await;
+}
+
+#[tokio::test]
+async fn publish_remote_batch_drops_only_the_record_losing_a_shared_article() {
+    let (_dir, pool) = make_test_pool().await;
+    let keeper = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let loser = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    share_first_article(&pool, keeper, loser).await;
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow
+        .publish_remote_batch(PublishRemoteBatchOptions {
+            items: vec![
+                batch_item(keeper, "AI", "Daily AI"),
+                batch_item(loser, "ML", "Daily ML"),
+            ],
+        })
+        .await;
+
+    let status_of = |id: i64| {
+        outcome
+            .items
+            .iter()
+            .find(|item| item.publish_record_id == id)
+            .map(|item| item.status.clone())
+            .unwrap()
+    };
+    assert_eq!(status_of(keeper), PublishRemoteStatus::PublishedRemote);
+    assert!(matches!(
+        status_of(loser),
+        PublishRemoteStatus::ArticleConflict { .. }
+    ));
+    assert_eq!(target.sent(), 1, "only the keeper's report is sent");
+    assert_record_state(&pool, keeper, "published_remote").await;
+    assert_record_state(&pool, loser, "stored_local").await;
+}
+
+/// Once the keeper fails, its ownership is released and the other record may
+/// publish.
+#[tokio::test]
+async fn publish_remote_sends_the_other_record_after_the_keeper_failed() {
+    let (_dir, pool) = make_test_pool().await;
+    let keeper = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let other = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    share_first_article(&pool, keeper, other).await;
+    sqlx::query("UPDATE publish_records SET state = 'failed' WHERE id = ?")
+        .bind(keeper)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow.publish_remote_record(other, remote_opts()).await;
+
+    assert_eq!(outcome.status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(target.sent(), 1);
+}

@@ -838,3 +838,131 @@ async fn pg_ai_off_selection_excludes_article_owned_by_active_snapshot() {
         assert_eq!(select().await.unwrap().len(), expected, "owner {state}");
     }
 }
+
+async fn pg_insert_item(ctx: &PgTestContext, record: i64, position: i64, article: i64) {
+    sqlx::query(
+        "INSERT INTO publish_items (publish_record_id, position, article_id, frozen_title, \
+         frozen_summary, frozen_tags_json, frozen_canonical_link, frozen_source_display_name) \
+         VALUES ($1, $2, $3, 't', 's', '[]', 'https://example.com', 'src')",
+    )
+    .bind(record)
+    .bind(position)
+    .bind(article)
+    .execute(ctx.pg_pool())
+    .await
+    .unwrap();
+}
+
+/// P-B1 on PostgreSQL: of two (legacy) snapshots sharing an article the
+/// lower id keeps it unless the other is already published; a failed owner
+/// keeps nothing. The release refunds the claim and keeps the stage.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_snapshot_ownership_conflict_prefers_published_then_lowest_id() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "own-guard").await;
+    let records = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let lower = records
+        .create_if_new(&new_record("idem-guard-lower", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let higher = records
+        .create_if_new(&new_record("idem-guard-higher", "ml", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    let shared = seed_article(&ctx, "hash-guard", "uid-guard", "ready_for_publish").await;
+    pg_insert_item(&ctx, lower, 1, shared).await;
+    pg_insert_item(&ctx, higher, 1, shared).await;
+    let set_state = |id: i64, state: &'static str| {
+        let pool = ctx.pg_pool().clone();
+        async move {
+            sqlx::query("UPDATE publish_records SET state = $1 WHERE id = $2")
+                .bind(state)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    set_state(lower, "stored_local").await;
+    set_state(higher, "stored_local").await;
+    let items = PublishItemRepo::new_with_storage(ctx.storage_pool().clone());
+
+    assert_eq!(
+        items.find_snapshot_ownership_conflict(lower).await.unwrap(),
+        None
+    );
+    let conflict = items
+        .find_snapshot_ownership_conflict(higher)
+        .await
+        .unwrap()
+        .expect("the higher record loses");
+    assert_eq!(
+        (conflict.article_id, conflict.owner_record_id),
+        (shared, lower)
+    );
+
+    set_state(higher, "published_remote").await;
+    let conflict = items
+        .find_snapshot_ownership_conflict(lower)
+        .await
+        .unwrap()
+        .expect("a published owner wins regardless of id");
+    assert_eq!(conflict.owner_record_id, higher);
+
+    set_state(higher, "failed").await;
+    assert_eq!(
+        items.find_snapshot_ownership_conflict(lower).await.unwrap(),
+        None
+    );
+
+    let now = OffsetDateTime::now_utc();
+    let claimed = records
+        .claim_publish_by_ids(
+            &ClaimRequest {
+                owner: "guard-owner".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 1,
+                max_attempts: 5,
+            },
+            PublishState::StoredLocal,
+            &[lower],
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert!(
+        records
+            .release_ownership_conflict(
+                lower,
+                "guard-owner",
+                PublishState::StoredLocal,
+                "shared",
+                "article_owned_by_active_snapshot",
+                now,
+            )
+            .await
+            .unwrap()
+    );
+    let row: (String, i64, i64, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT state, attempt_count, stage_attempt_count, lease_owner, last_error_kind \
+         FROM publish_records WHERE id = $1",
+    )
+    .bind(lower)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        (
+            "stored_local".to_string(),
+            0,
+            0,
+            None,
+            Some("article_owned_by_active_snapshot".to_string())
+        )
+    );
+}

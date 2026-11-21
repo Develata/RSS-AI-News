@@ -51,6 +51,16 @@ pub enum FreezeSnapshotStatus {
     },
 }
 
+/// An article of a record's snapshot that another, winning snapshot also
+/// holds (ADR 0012 §2, P-B1). Only data written before migration 0008 can
+/// contain such a pair: every later freeze re-checks ownership inside its
+/// transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotOwnershipConflict {
+    pub article_id: i64,
+    pub owner_record_id: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct FreezeSnapshotOutcome {
     pub status: FreezeSnapshotStatus,
@@ -89,6 +99,17 @@ pub trait PublishItemRepository: Send + Sync {
         &self,
         publish_record_id: i64,
     ) -> Result<Vec<PublishItem>, StorageError>;
+
+    /// First article of `publish_record_id`'s snapshot that another
+    /// not-`failed` record also holds and keeps: an owner already
+    /// `published_*` (its articles are `published`) always wins, otherwise the
+    /// lower record id wins. store_local and remote call this before writing
+    /// externally, so of two legacy snapshots sharing an article only the
+    /// winner reaches a file or GitHub.
+    async fn find_snapshot_ownership_conflict(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Option<SnapshotOwnershipConflict>, StorageError>;
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +298,23 @@ SET state = 'snapshot_frozen',
 WHERE id = $3 AND lease_owner = $4 AND state = 'pending'
 "#;
 
+/// Same text on both dialects: a published owner wins regardless of id;
+/// among the others the lowest record id wins.
+const SELECT_SNAPSHOT_OWNERSHIP_CONFLICT_SQL: &str = r#"
+SELECT mine.article_id AS article_id, owner_record.id AS owner_record_id
+FROM publish_items mine
+JOIN publish_items theirs
+  ON theirs.article_id = mine.article_id
+ AND theirs.publish_record_id <> mine.publish_record_id
+JOIN publish_records owner_record ON owner_record.id = theirs.publish_record_id
+WHERE mine.publish_record_id = $1
+  AND owner_record.state <> 'failed'
+  AND (owner_record.state IN ('published_local', 'published_remote')
+       OR owner_record.id < $1)
+ORDER BY mine.position ASC, mine.article_id ASC, owner_record.id ASC
+LIMIT 1
+"#;
+
 const LIST_PUBLISH_ITEMS_BY_RECORD_SQL: &str = r#"
 SELECT id, publish_record_id, position, article_id, article_ai_result_id,
        frozen_title, frozen_summary, frozen_tags_json, frozen_score,
@@ -397,6 +435,33 @@ impl PublishItemRepository for PublishItemRepo {
             StoragePool::Sqlite(p) => sqlite_list_by_publish_record(p, publish_record_id).await,
             StoragePool::Postgres(p) => pg_list_by_publish_record(p, publish_record_id).await,
         }
+    }
+
+    async fn find_snapshot_ownership_conflict(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Option<SnapshotOwnershipConflict>, StorageError> {
+        let row = match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlx::query_as::<_, (i64, i64)>(SELECT_SNAPSHOT_OWNERSHIP_CONFLICT_SQL)
+                    .bind(publish_record_id)
+                    .fetch_optional(p)
+                    .await
+            }
+            StoragePool::Postgres(p) => {
+                sqlx::query_as::<_, (i64, i64)>(SELECT_SNAPSHOT_OWNERSHIP_CONFLICT_SQL)
+                    .bind(publish_record_id)
+                    .fetch_optional(p)
+                    .await
+            }
+        }
+        .map_err(StorageError::from)?;
+        Ok(
+            row.map(|(article_id, owner_record_id)| SnapshotOwnershipConflict {
+                article_id,
+                owner_record_id,
+            }),
+        )
     }
 }
 

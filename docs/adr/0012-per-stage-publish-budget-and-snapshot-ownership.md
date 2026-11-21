@@ -54,6 +54,14 @@
 - 冲突时 runtime 立即释放 lease（`release_freeze_conflict`：记录回 `pending`、退还本次 claim、写 `last_error_kind`），
   不发生外部写入；下一次运行重新选稿时自然排除该文章。输掉竞争不是一次发布尝试，因此不消耗阶段预算——
   否则 `publish_max_attempts = 1` 时一次竞争就会让记录 `failed`。
+- **存量重复归属的写前拦截（2026-11-22，R1-P-B1）**：0008 之前的库里可能已有两份未失败快照持有同一文章（迁移只建索引，
+  不改数据；之后的 freeze 都会事务内复查，不会再产生新的重复）。因此 store_local 与 remote（单条与批量）在 claim 之后、
+  任何外部写入（本地文件 / GitHub）之前，查询本记录快照中是否有文章同时属于另一份**胜出**的未失败记录：
+  已 `published_*` 的记录无论 id 大小都胜出（其文章已是 `published`），其余情况 id 较小者胜出。
+  败方不写任何外部产物：立即释放 lease、两个计数都退还、**保持当前阶段态**、`last_error_kind =
+  article_owned_by_active_snapshot`、`last_error` 列出文章与胜方记录 id，阶段结果为 `ArticleConflict`（exit 1）；
+  批量发布中只剔除败方，其余照常提交。胜方转 `failed` 后归属释放，败方下次运行即可继续；胜方已发布时败方无法完成，
+  由运维把败方置为 `failed`（冻结快照保留）。
 
 ### 3. 多报告重试幂等
 

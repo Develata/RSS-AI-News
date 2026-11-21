@@ -79,6 +79,10 @@ SQLite 由此持有写锁、串行化并发 freeze）；② PG 按 id 顺序 `SE
 = `article_owned_by_active_snapshot` / `article_state_conflict`），不发生任何外部写入；本次 freeze 阶段结果为
 `ArticleConflict`（exit 1），下一次运行重新选稿时不再包含该文章。
 
+存量数据（0008 之前已有两份未失败快照持有同一文章）由写前拦截处理：store_local 与 remote（单条 / 批量）在任何外部写入前
+查询本快照是否与**胜出**的未失败记录（已 `published_*` 者优先，否则 id 较小者）共享文章；败方不写、释放 lease、退还 claim、
+保持阶段态，`ArticleConflict`（`last_error_kind = article_owned_by_active_snapshot`），批量中只剔除败方。见 ADR 0012 §2。
+
 **冻结契约**：`publish_items.frozen_*` 列**只读不改**。即使 article 后续被 backfill 改了 AI 结果，
 已冻结的 PublishItem 仍引用旧值。
 

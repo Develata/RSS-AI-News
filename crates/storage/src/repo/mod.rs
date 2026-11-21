@@ -92,7 +92,7 @@ pub use feed_source::{
 };
 pub use publish_item::{
     FreezeSnapshotItem, FreezeSnapshotOutcome, FreezeSnapshotStatus, PublishCandidateRow,
-    PublishItemRepo, PublishItemRepository,
+    PublishItemRepo, PublishItemRepository, SnapshotOwnershipConflict,
 };
 pub use publish_record::{
     ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord, PublishRecordRepo,

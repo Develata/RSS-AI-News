@@ -19,11 +19,11 @@ use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use tokio::time::Instant;
 
-use super::PublishFlow;
 use super::dto::{
     PublishRemoteBatchOptions, PublishRemoteBatchOutcome, PublishRemoteOptions,
     PublishRemoteOutcome, PublishRemoteStatus,
 };
+use super::{OwnershipGuard, PublishFlow};
 use super::{render_templates_from_ctx, rendered_timestamp};
 use crate::events::RunEventEmitter;
 
@@ -243,6 +243,19 @@ impl PublishFlow {
             return PublishRemoteOutcome {
                 publish_record_id: claimed.id,
                 status: mismatch_status(&error),
+                commit_sha: None,
+                remote_target: None,
+                item_count: 0,
+            };
+        }
+
+        if let Some(status) = self
+            .remote_ownership_status(claimed.id, &owner, "publish_remote", &emitter)
+            .await
+        {
+            return PublishRemoteOutcome {
+                publish_record_id: claimed.id,
+                status,
                 commit_sha: None,
                 remote_target: None,
                 item_count: 0,
@@ -519,6 +532,21 @@ impl PublishFlow {
                 continue;
             }
 
+            // Only the losing record leaves the batch; the rest still commit.
+            if let Some(status) = self
+                .remote_ownership_status(claimed.id, &owner, "publish_remote_batch", &emitter)
+                .await
+            {
+                outcomes.push(PublishRemoteOutcome {
+                    publish_record_id: claimed.id,
+                    status,
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count: 0,
+                });
+                continue;
+            }
+
             let render_config = RenderConfig {
                 category_display_name: item.category_display_name,
                 report_title: item.report_title,
@@ -689,6 +717,35 @@ impl PublishFlow {
         PublishRemoteBatchOutcome {
             items: outcomes,
             commit_sha: batch.commit_sha,
+        }
+    }
+
+    /// Pre-write ownership guard for a claimed `stored_local` record (P-B1);
+    /// `None` = clear to send.
+    async fn remote_ownership_status(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        phase: &'static str,
+        emitter: &RunEventEmitter<'_>,
+    ) -> Option<PublishRemoteStatus> {
+        match self
+            .guard_snapshot_ownership(
+                publish_record_id,
+                owner,
+                PublishState::StoredLocal,
+                phase,
+                emitter,
+            )
+            .await
+        {
+            OwnershipGuard::Clear => None,
+            OwnershipGuard::Conflict { article_id } => {
+                Some(PublishRemoteStatus::ArticleConflict { article_id })
+            }
+            OwnershipGuard::Failed { error_kind } => {
+                Some(PublishRemoteStatus::Failed { error_kind })
+            }
         }
     }
 
@@ -883,6 +940,12 @@ mod deadline_tests {
                 std::thread::sleep(self.0.saturating_duration_since(Instant::now()));
             }
             Ok(vec![])
+        }
+        async fn find_snapshot_ownership_conflict(
+            &self,
+            _: i64,
+        ) -> Result<Option<SnapshotOwnershipConflict>, StorageError> {
+            unreachable!()
         }
     }
     struct NoopEvents;
