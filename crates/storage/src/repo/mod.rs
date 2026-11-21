@@ -68,9 +68,10 @@ pub(crate) fn sqlite_instant_cutoff(now: time::OffsetDateTime) -> time::OffsetDa
 }
 
 /// SQLite bounds of a C9 window (R2-S1/S2): `julianday()` resolves source
-/// times to whole milliseconds, so both bounds are rounded **inward** — the
-/// start up, the end down (UTC) — and an instant before `since` is never
-/// admitted because it shares `since`'s millisecond.
+/// times to the *nearest* millisecond, so both bounds are rounded **inward**
+/// — the start up, the end down (UTC). Membership is exact at millisecond
+/// granularity; a sub-millisecond source time within 0.5 ms of a bound can
+/// still be classified by its rounded value (e.g. `.0006` vs a `.0008` start).
 pub(crate) fn sqlite_window_bounds(
     window: FreshWindow,
 ) -> (time::OffsetDateTime, time::OffsetDateTime) {
