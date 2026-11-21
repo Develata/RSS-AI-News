@@ -46,7 +46,10 @@ User-Agent 由 fetcher 构造器设置。
 fetcher 把响应 `Content-Type` 原样放进 `RawHtmlFetch.content_type`。extract flow 在策略链前调用
 `rss_ai_news_extractor::decode_html(bytes, content_type)`，按 WHATWG 编码嗅探顺序（简化）选候选：
 BOM → `Content-Type` 的 `charset` 参数 → 前 1024 字节内的 `<meta charset>` /
-`<meta http-equiv="Content-Type" content="…charset=…">`（跳过注释；meta 声明的 UTF-16 视为 UTF-8）→ UTF-8。
+`<meta http-equiv="Content-Type" content="…charset=…">`（按 WHATWG 预扫描逐个消费标签与属性：其它标签属性值里的
+`<meta …>` 文本、引号内的 `>` 都不会被误读；跳过注释与 `<!…>` / `</…>` / `<?…>`；声明到第 1024 字节仍未结束则作废；
+meta 声明的 UTF-16 视为 UTF-8、`x-user-defined` 视为 windows-1252；响应头参数按带引号字符串解析，其它参数引号内的
+`charset=` 不算，R2-S8）→ UTF-8。
 每个候选**严格**解码（`encoding_rs`，不插 U+FFFD），失败则试下一个；全部失败为
 `ParseFailed`（走 fallback / `failed`）。与浏览器不同，不按 locale 猜 windows-1252：未声明且非
 UTF-8 的字节维持旧行为失败，避免发布乱码。策略收到的是 UTF-8；`raw_artifacts` 保留原始字节。
