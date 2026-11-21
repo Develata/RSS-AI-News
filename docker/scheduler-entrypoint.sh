@@ -40,9 +40,12 @@ set -eu
 
 RSS_CRONTAB_FILE="${RSS_CRONTAB_FILE:-/app/crontab}"
 
-if [ -e "$RSS_CRONTAB_FILE" ] && [ ! -f "$RSS_CRONTAB_FILE" ]; then
-    # 典型原因：bind-mount 的宿主文件不存在，Docker 在容器里建了同名目录。
-    echo "[scheduler] $RSS_CRONTAB_FILE exists but is not a regular file (a bind mount of a missing host file?); refusing to start" >&2
+# `-L` as well as `-e`: a dangling symlink fails both `-e` and `-f` and would
+# otherwise fall through to the image's default env schedule (R3-16). A
+# symlink to a regular file passes `-f` and is used as is.
+if { [ -e "$RSS_CRONTAB_FILE" ] || [ -L "$RSS_CRONTAB_FILE" ]; } && [ ! -f "$RSS_CRONTAB_FILE" ]; then
+    # 典型原因：bind-mount 的宿主文件不存在，Docker 在容器里建了同名目录；或悬空符号链接。
+    echo "[scheduler] $RSS_CRONTAB_FILE exists but is not a regular file (a bind mount of a missing host file, or a dangling symlink?); refusing to start" >&2
     exit 1
 fi
 

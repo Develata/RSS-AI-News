@@ -61,6 +61,15 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         &[],
         0,
     );
+    // Crontab selection and input rejection of the scheduler entrypoint, with
+    // a stub supercronic (no scheduler is started).
+    executor.command(
+        "scheduler-entrypoint",
+        "sh",
+        &strings(["docker/scheduler-entrypoint-test.sh"]),
+        &[],
+        0,
+    );
     executor.check(
         "toolchain-pins",
         "workflow and Dockerfile toolchain pins equal rust-toolchain.toml's channel",
