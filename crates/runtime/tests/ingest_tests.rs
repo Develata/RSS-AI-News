@@ -220,6 +220,112 @@ async fn source_state_write_failure_after_200_is_a_storage_failure() {
     assert_eq!(summary.sources_storage_failed, 1);
 }
 
+/// A6: a source write-back that matches zero rows (`Ok(false)`) did not record
+/// the source state; it must not be reported as a success.
+#[tokio::test]
+async fn source_success_writeback_matching_no_row_is_a_storage_failure() {
+    for response in [not_modified as fn(i64) -> MockResponse, |id| {
+        ok_payload(id, RSS_BODY)
+    }] {
+        let (_dir, pool) = make_test_pool().await;
+        let config_id = insert_config_rule(&pool).await;
+        let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
+        // RAISE(IGNORE) skips the row silently: the UPDATE reports 0 rows.
+        sqlx::query(
+            "CREATE TRIGGER skip_success_writeback BEFORE UPDATE ON feed_sources \
+             WHEN NEW.last_success_at IS NOT NULL \
+             BEGIN SELECT RAISE(IGNORE); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let flow = flow(
+            pool.clone(),
+            RetentionPolicy::Always,
+            2,
+            category_with_sources(&["s1"]),
+            responses([(source_id, response(source_id))]),
+        );
+
+        let summary = flow.run(IngestOptions::default()).await;
+
+        assert_eq!(summary.sources_succeeded + summary.sources_not_modified, 0);
+        assert_eq!(summary.sources_failed, 1);
+        assert_eq!(summary.sources_storage_failed, 1);
+        assert_eq!(
+            summary.failure_samples[0].error_kind.as_deref(),
+            Some("integrity")
+        );
+    }
+}
+
+#[tokio::test]
+async fn source_failure_writeback_matching_no_row_is_a_storage_failure() {
+    let (_dir, pool) = make_test_pool().await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
+    sqlx::query(
+        "CREATE TRIGGER skip_failure_writeback BEFORE UPDATE ON feed_sources \
+         WHEN NEW.consecutive_failures > OLD.consecutive_failures \
+         BEGIN SELECT RAISE(IGNORE); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let flow = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&["s1"]),
+        responses([(
+            source_id,
+            MockResponse {
+                delay: Duration::ZERO,
+                result: Err(FeedError::HttpStatus { code: 503 }),
+            },
+        )]),
+    );
+
+    let summary = flow.run(IngestOptions::default()).await;
+
+    assert_eq!(summary.sources_failed, 1);
+    assert_eq!(summary.sources_storage_failed, 1);
+}
+
+/// A6: a source row that cannot be read back after its upsert is a storage
+/// integrity failure of that source, not a panic of the whole ingest.
+#[tokio::test]
+async fn unreadable_upserted_source_fails_that_source_without_panicking() {
+    let (_dir, pool) = make_test_pool().await;
+    insert_config_rule(&pool).await;
+    // RETURNING reports the inserted id; the AFTER trigger then removes the row.
+    sqlx::query(
+        "CREATE TRIGGER vanish_after_insert AFTER INSERT ON feed_sources \
+         WHEN NEW.source_key = 'ghost' \
+         BEGIN DELETE FROM feed_sources WHERE id = NEW.id; END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let flow = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&["ghost"]),
+        responses([]),
+    );
+
+    let summary = flow.run(IngestOptions::default()).await;
+
+    assert_eq!(summary.sources_attempted, 1);
+    assert_eq!(summary.sources_failed, 1);
+    assert_eq!(summary.sources_storage_failed, 1);
+    assert_eq!(
+        summary.failure_samples[0].error_kind.as_deref(),
+        Some("integrity")
+    );
+}
+
 #[tokio::test]
 async fn existing_source_is_synced_from_current_config_before_fetch() {
     let (_dir, pool) = make_test_pool().await;

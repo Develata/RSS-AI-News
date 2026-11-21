@@ -278,11 +278,7 @@ impl IngestFlow {
                     updated.last_error_kind = None;
                 }
                 let id = self.ctx.feed_source_repo.upsert(&updated).await?;
-                self.ctx
-                    .feed_source_repo
-                    .find_by_id(id)
-                    .await?
-                    .expect("upserted feed source should be readable")
+                self.read_back_source(id).await?
             } else {
                 existing
             }
@@ -314,11 +310,7 @@ impl IngestFlow {
                 updated_at: now,
             };
             let id = self.ctx.feed_source_repo.upsert(&new_source).await?;
-            self.ctx
-                .feed_source_repo
-                .find_by_id(id)
-                .await?
-                .expect("upserted feed source should be readable")
+            self.read_back_source(id).await?
         };
 
         Ok(SourceTask {
@@ -334,6 +326,17 @@ impl IngestFlow {
                 .rsshub_access_key(&category.category.key, &source.key)
                 .cloned(),
         })
+    }
+
+    /// Reads the row an upsert just wrote. A missing row is an integrity
+    /// failure of this source (handled by the caller's per-source error
+    /// branch), not a reason to abort the whole ingest.
+    async fn read_back_source(&self, id: i64) -> Result<FeedSource, StorageError> {
+        self.ctx
+            .feed_source_repo
+            .find_by_id(id)
+            .await?
+            .ok_or_else(|| source_row_missing(id))
     }
 
     async fn process_source(ctx: Arc<IngestDeps>, task: SourceTask) -> IngestSourceOutcome {
@@ -382,11 +385,17 @@ impl IngestFlow {
                         Some(json!({ "error_kind": error.error_kind() })),
                     )
                     .await;
-                if let Err(storage_error) = ctx
-                    .feed_source_repo
-                    .update_after_fetch_failure(task.source_id, now, &message, error.error_kind())
-                    .await
-                {
+                if let Err(storage_error) = require_row(
+                    ctx.feed_source_repo
+                        .update_after_fetch_failure(
+                            task.source_id,
+                            now,
+                            &message,
+                            error.error_kind(),
+                        )
+                        .await,
+                    task.source_id,
+                ) {
                     tracing::warn!(
                         source_id = task.source_id,
                         "failed to update source failure: {storage_error}"
@@ -399,17 +408,18 @@ impl IngestFlow {
         };
 
         if raw.not_modified {
-            if let Err(error) = ctx
-                .feed_source_repo
-                .update_after_fetch_success(
-                    task.source_id,
-                    raw.etag.as_deref(),
-                    raw.last_modified.as_deref(),
-                    now,
-                    now,
-                )
-                .await
-            {
+            if let Err(error) = require_row(
+                ctx.feed_source_repo
+                    .update_after_fetch_success(
+                        task.source_id,
+                        raw.etag.as_deref(),
+                        raw.last_modified.as_deref(),
+                        now,
+                        now,
+                    )
+                    .await,
+                task.source_id,
+            ) {
                 // The source state was not recorded: not a success.
                 tracing::warn!(
                     source_id = task.source_id,
@@ -435,11 +445,12 @@ impl IngestFlow {
                     Some(json!({ "error_kind": "missing_payload" })),
                 )
                 .await;
-            if let Err(error) = ctx
-                .feed_source_repo
-                .update_after_fetch_failure(task.source_id, now, message, "missing_payload")
-                .await
-            {
+            if let Err(error) = require_row(
+                ctx.feed_source_repo
+                    .update_after_fetch_failure(task.source_id, now, message, "missing_payload")
+                    .await,
+                task.source_id,
+            ) {
                 tracing::warn!(
                     source_id = task.source_id,
                     "failed to update source failure: {error}"
@@ -477,11 +488,17 @@ impl IngestFlow {
                         Some(json!({ "error_kind": error.error_kind() })),
                     )
                     .await;
-                if let Err(storage_error) = ctx
-                    .feed_source_repo
-                    .update_after_fetch_failure(task.source_id, now, &message, error.error_kind())
-                    .await
-                {
+                if let Err(storage_error) = require_row(
+                    ctx.feed_source_repo
+                        .update_after_fetch_failure(
+                            task.source_id,
+                            now,
+                            &message,
+                            error.error_kind(),
+                        )
+                        .await,
+                    task.source_id,
+                ) {
                     tracing::warn!(
                         source_id = task.source_id,
                         "failed to update source failure: {storage_error}"
@@ -507,11 +524,12 @@ impl IngestFlow {
                     Some(json!({ "error_kind": error.error_kind() })),
                 )
                 .await;
-            if let Err(storage_error) = ctx
-                .feed_source_repo
-                .update_after_fetch_failure(task.source_id, now, &message, error.error_kind())
-                .await
-            {
+            if let Err(storage_error) = require_row(
+                ctx.feed_source_repo
+                    .update_after_fetch_failure(task.source_id, now, &message, error.error_kind())
+                    .await,
+                task.source_id,
+            ) {
                 tracing::warn!(
                     source_id = task.source_id,
                     "failed to update source persistence failure: {storage_error}"
@@ -522,17 +540,18 @@ impl IngestFlow {
             return outcome;
         }
 
-        if let Err(error) = ctx
-            .feed_source_repo
-            .update_after_fetch_success(
-                task.source_id,
-                raw.etag.as_deref(),
-                raw.last_modified.as_deref(),
-                now,
-                now,
-            )
-            .await
-        {
+        if let Err(error) = require_row(
+            ctx.feed_source_repo
+                .update_after_fetch_success(
+                    task.source_id,
+                    raw.etag.as_deref(),
+                    raw.last_modified.as_deref(),
+                    now,
+                    now,
+                )
+                .await,
+            task.source_id,
+        ) {
             // Entries are stored, but the source's fetch state (etag,
             // last_success_at) is not: report the source as a storage failure.
             tracing::warn!(
@@ -546,6 +565,24 @@ impl IngestFlow {
 
         outcome.status = IngestSourceStatus::Succeeded;
         outcome
+    }
+}
+
+/// The `feed_sources` row the write targeted does not exist (anymore).
+fn source_row_missing(source_id: i64) -> StorageError {
+    StorageError::Integrity {
+        table: "feed_sources".to_string(),
+        reference: format!("id={source_id}"),
+    }
+}
+
+/// Source write-backs return `Ok(false)` when they matched no row: nothing was
+/// recorded, which is a storage failure of that source, like an `Err`.
+fn require_row(result: Result<bool, StorageError>, source_id: i64) -> Result<(), StorageError> {
+    if result? {
+        Ok(())
+    } else {
+        Err(source_row_missing(source_id))
     }
 }
 

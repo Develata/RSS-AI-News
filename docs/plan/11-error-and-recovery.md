@@ -140,7 +140,8 @@ CLI 退出码由 [`crates/cli/src/exit_code.rs`](../../crates/cli/src/exit_code.
 - `doctor`：任一 check `Fail` 或 `--deep` 不变量违规 → exit 1。
 - `run`：子阶段的 `Err` 与子阶段 summary 的非零退出码都记入 `stage_failures`，取最严重者。启动时只做
   结构校验，环境 / 凭证检查归各阶段，因此单个分类缺凭证不会阻断其他阶段。
-- `ingest` 的 source 状态写回（成功、304、失败记录）失败同样计为存储失败，该 source 不再报告成功。
+- `ingest` 的 source 状态写回（成功、304、失败记录）失败同样计为存储失败，该 source 不再报告成功；写回命中 0 行
+  （`Ok(false)`）与 upsert 后回读不到行都按 `StorageError::Integrity`（`integrity`）计为该 source 的存储失败，不 panic。
 - `ingest` 的 extract 阶段：单篇条目路径上的自身存储失败（article 写入、摘要回读、release 本身报错）计入
   `extract_storage_failed` → exit 1（即使该行已按 retryable 冷却回队）。owner guard 落空（lease 已被并发 run
   reclaim）计入 `extract_lease_lost`，只报告不改变退出码；两者都不再报告为 `permanent_failed` / `retryable_failed`，
