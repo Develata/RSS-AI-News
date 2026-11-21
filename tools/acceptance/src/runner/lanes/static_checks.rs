@@ -52,8 +52,8 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         &[],
         0,
     );
-    // The release workflow's only locally testable decision: which moving
-    // image tags (latest / X.Y) a tag may promote.
+    // The release workflow's image policy (version-tag reuse and alias
+    // reconciliation), against a file-backed fake registry.
     executor.command(
         "release-promotion",
         "sh",

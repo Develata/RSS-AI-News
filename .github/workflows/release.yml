@@ -120,14 +120,20 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: ./.github/actions/cargo-audit
 
-  # Two stages so a failed or re-run release never leaves the moving tags
-  # unpaired or moves them backwards:
+  # Two stages; the policy lives in .github/scripts/release-promotion.sh
+  # (tested offline by the static lane against a fake registry):
   #   1. publish-image pushes only the immutable version tags (X.Y.Z and
-  #      X.Y.Z-scheduler) and records both digests.
-  #   2. promote-tags runs only after both pushes succeed. It points latest /
-  #      X.Y (and their -scheduler twins) at those digests, and only when the
-  #      tag is the highest stable tag overall / of its X.Y line
-  #      (.github/scripts/release-promotion.sh, tested by the static lane).
+  #      X.Y.Z-scheduler). A re-run reuses a version tag already built from
+  #      this commit instead of rebuilding it (a rebuild would get a new
+  #      digest: the `created` label changes), builds only a missing one, and
+  #      fails on one built from another commit (R3-7).
+  #   2. promote-tags reconciles latest / X.Y (and their -scheduler twins) to
+  #      the highest *released* stable version, whichever tag triggered it, so
+  #      a lower version's run still promotes the highest (R3-2, R3-3). It
+  #      never moves an alias below the version label it carries, writes
+  #      runtime before scheduler aliases with --prefer-index=false and reads
+  #      every alias back; a re-run completes an interrupted promotion (R3-4,
+  #      R3-22).
   # A prerelease tag never gets here (verify-release only accepts X.Y.Z), and
   # the script refuses anything but X.Y.Z as well.
   publish-image:
@@ -138,13 +144,20 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # One publisher per version: a re-run never races a running attempt.
+    concurrency:
+      group: release-publish-${{ github.repository }}-${{ github.ref_name }}
+      cancel-in-progress: false
     outputs:
-      runtime-digest: ${{ steps.push-runtime.outputs.digest }}
-      scheduler-digest: ${{ steps.push-scheduler.outputs.digest }}
+      runtime-digest: ${{ steps.existing.outputs.runtime-digest || steps.push-runtime.outputs.digest }}
+      scheduler-digest: ${{ steps.existing.outputs.scheduler-digest || steps.push-scheduler.outputs.digest }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
+      # Pinned Buildx CLI (not the runner's), so imagetools behaves as tested.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.38.2
 
       # 登录 GHCR：用 GITHUB_TOKEN，无需额外 secret。
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
@@ -152,6 +165,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Digests of version tags already built from this commit (empty = build).
+      - id: existing
+        name: reuse version tags built from this commit
+        run: |
+          set -euo pipefail
+          image="$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+          sh .github/scripts/release-promotion.sh existing "$image" "${GITHUB_REF_NAME#v}" "$GITHUB_SHA" \
+            | tee -a "$GITHUB_OUTPUT"
 
       # Version tag only (v0.1.0 -> 0.1.0); the moving tags are promote-tags'.
       # metadata-action lowercases the image name and supplies the OCI labels.
@@ -171,6 +193,7 @@ jobs:
       # release 重新编译整个 Rust workspace。
       - name: build + push runtime image
         id: push-runtime
+        if: steps.existing.outputs.runtime-digest == ''
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -198,6 +221,7 @@ jobs:
 
       - name: build + push scheduler image
         id: push-scheduler
+        if: steps.existing.outputs.scheduler-digest == ''
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -209,76 +233,51 @@ jobs:
           cache-from: type=gha,scope=runtime
 
   promote-tags:
-    name: promote latest / X.Y tags
+    name: reconcile latest / X.Y tags
     needs: [publish-image]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       packages: write
-    # Serialise promotions across tags: two releases never move the aliases
-    # at the same time. Not cancel-in-progress, so a running promotion
-    # finishes. (GitHub keeps at most one pending run per group; a pending
-    # promotion superseded by a newer tag's is outranked by it anyway.)
+    # One reconcile at a time across tags. `queue: max` keeps up to 100
+    # waiting runs instead of the default single pending slot, in which a
+    # later (possibly lower) tag's run would cancel a waiting one. Correctness
+    # does not depend on it: every run reconciles latest to the highest
+    # released version, and a cancelled or dropped run is completed by
+    # re-running any release's promote-tags job (docs/operations/ci-and-release.md).
+    # `queue` is in GitHub's workflow schema for job concurrency; actionlint
+    # 1.7.12 does not know it yet (.github/actionlint.yaml).
     concurrency:
       group: release-promote-${{ github.repository }}
       cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      # The checkout is shallow and holds only this tag, so list the remote's
-      # tags instead; the script fails if this version is not among them.
-      - id: decide
-        name: decide which aliases this tag may move
-        run: |
-          set -o pipefail
-          git ls-remote --tags origin 'refs/tags/v*' \
-            | sh .github/scripts/release-promotion.sh "${GITHUB_REF_NAME#v}" \
-            | tee -a "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.38.2
 
-      - if: steps.decide.outputs.latest == 'true' || steps.decide.outputs.minor == 'true'
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - if: steps.decide.outputs.latest == 'true' || steps.decide.outputs.minor == 'true'
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # imagetools create copies the pushed index under the new tags (no
-      # rebuild). The sources are the digests publish-image recorded, so a tag
-      # moved in between cannot be picked up instead.
-      - if: steps.decide.outputs.latest == 'true' || steps.decide.outputs.minor == 'true'
-        name: promote tags
-        env:
-          LATEST: ${{ steps.decide.outputs.latest }}
-          MINOR: ${{ steps.decide.outputs.minor }}
-          RUNTIME_DIGEST: ${{ needs.publish-image.outputs.runtime-digest }}
-          SCHEDULER_DIGEST: ${{ needs.publish-image.outputs.scheduler-digest }}
+      # The checkout is shallow and holds only this tag, so list the remote's
+      # tags (with the peeled commit of annotated tags). The registry, not the
+      # previous job's outputs, is the source of truth for every digest: the
+      # script reads each released version's tags and every alias.
+      - name: reconcile aliases to the highest released version
         run: |
-          set -eu
+          set -euo pipefail
           image="$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
-          version="${GITHUB_REF_NAME#v}"
-          minor_line="${version%.*}"
-          for digest in "$RUNTIME_DIGEST" "$SCHEDULER_DIGEST"; do
-            case "$digest" in
-              sha256:*) ;;
-              *) echo "::error::missing image digest '$digest'"; exit 1 ;;
-            esac
-          done
-          runtime_tags=()
-          scheduler_tags=()
-          if [ "$LATEST" = true ]; then
-            runtime_tags+=(-t "$image:latest")
-            scheduler_tags+=(-t "$image:latest-scheduler")
-          fi
-          if [ "$MINOR" = true ]; then
-            runtime_tags+=(-t "$image:$minor_line")
-            scheduler_tags+=(-t "$image:$minor_line-scheduler")
-          fi
-          docker buildx imagetools create "${runtime_tags[@]}" "$image@$RUNTIME_DIGEST"
-          docker buildx imagetools create "${scheduler_tags[@]}" "$image@$SCHEDULER_DIGEST"
-
-      - if: steps.decide.outputs.latest != 'true' && steps.decide.outputs.minor != 'true'
-        run: echo "v${GITHUB_REF_NAME#v} is not the highest stable tag overall or of its line; latest and X.Y stay where they are"
+          tags="$(mktemp)"
+          git ls-remote --tags origin 'refs/tags/v*' >"$tags"
+          {
+            echo '### Image aliases'
+            echo '```text'
+            sh .github/scripts/release-promotion.sh reconcile "$image" "${GITHUB_REF_NAME#v}" <"$tags" 2>&1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

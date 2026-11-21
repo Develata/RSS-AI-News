@@ -1,0 +1,11 @@
+# actionlint 1.7.12 (latest release as of 2026-11-22) does not know the
+# `concurrency.queue` key yet (rhysd/actionlint#654, #657). GitHub documents
+# it (docs.github.com, "Control the concurrency of workflows and jobs") and its
+# workflow schema allows it for jobs (actions/languageservices
+# workflow-v1.0.json: job-concurrency -> concurrency-mapping -> queue).
+# Only that one message, only in release.yml, is ignored; drop this entry once
+# actionlint supports the key.
+paths:
+  .github/workflows/release.yml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'

@@ -83,8 +83,7 @@ CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks �
 
 ```yaml
 permissions:
-  contents: read
-  packages: write   # 推 GHCR 需要
+  contents: read    # 顶层只读；只有 publish-image / promote-tags 两个 job 声明 packages: write
 env:
   RUST_TOOLCHAIN: "1.97.0"     # 与 ci.yml 保持一致
   IMAGE_NAME: ghcr.io/${{ github.repository }}   # 自动 lowercase
@@ -101,26 +100,46 @@ Jobs：
 - `verify-audit` —— 复用 composite action `.github/actions/cargo-audit`（依赖策略脚本 + `cargo audit`），在 tag 的依赖图上
   拦下自上次 `main` 运行以来新发布的 advisory；
 - `publish-image`（`needs: [verify-test, verify-release, verify-postgres, verify-audit]`）—— 构建并推送 runtime + scheduler
-  两套镜像，**只**打不可变的版本 tag（`X.Y.Z` / `X.Y.Z-scheduler`），并记录两者的 digest；任一 verify 失败则不推镜像。
-- `promote-tags`（`needs: [publish-image]`）—— 两个镜像都推送成功后才运行，用 `docker buildx imagetools create`
-  把 `latest` / `X.Y` 及其 `-scheduler` 对应 tag 指向上一步记录的 digest（不重新构建）。是否晋升由
-  [`.github/scripts/release-promotion.sh`](../../.github/scripts/release-promotion.sh) 根据 `git ls-remote --tags` 决定：
-  只有当该 tag 是仓库内最高的 stable tag 时才动 `latest`，是同一 `X.Y` 线内最高时才动 `X.Y`；
-  因此重跑旧 tag 不会让 `latest` 回退，scheduler 构建失败也不会留下只更新了一半的稳定 tag。该 job 有
-  `concurrency: release-promote-<repo>`（不取消进行中的运行），不同 tag 的晋升串行执行。脚本由 static lane 的
-  `release-promotion` 步骤测试。
-  注意：若存在更高的 tag 但其 release 失败、从未推出镜像，较低版本也不会晋升 `latest`（保守方向）。四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit
-  不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
+  两套镜像，**只**打版本 tag（`X.Y.Z` / `X.Y.Z-scheduler`）；任一 verify 失败则不推镜像。版本 tag 不可变（R3-7）：先用
+  `release-promotion.sh existing` 读 registry，已存在且 `org.opencontainers.image.revision` 等于本次 commit 的版本 tag 直接复用其
+  digest、不重建（重建会因 `org.opencontainers.image.created` 变化得到新 digest），只补建缺失的一侧；已存在但来自别的 commit
+  （或版本 label 不符）则失败、不覆盖。job 级 `concurrency: release-publish-<repo>-<tag>`，同一版本的重跑串行。
+- `promote-tags`（`needs: [publish-image]`）—— 用
+  [`.github/scripts/release-promotion.sh`](../../.github/scripts/release-promotion.sh) `reconcile` 把别名**对齐到最高的已发布
+  stable 版本**，与触发它的是哪个 tag 无关（R3-2 / R3-3 / R3-4 / R3-22）：
+  - 输入：`git ls-remote --tags`（annotated tag 取 `^{}` 行的 commit）。只认 `vX.Y.Z`，每段为 `0` 或无前导零的数字。
+  - "已发布"：`V` 与 `V-scheduler` 两个版本 tag 都在 registry 中，且版本 label = `V`、revision label = 该 tag 的 commit；只有一侧镜像
+    的版本（发布未完成或失败）跳过，取下一个更低的版本。digest 一律从 registry 按版本 tag 读，不信任上一 job 的输出。
+  - 目标：`latest[-scheduler]` → 全局最高已发布版本；`X.Y[-scheduler]` → 触发版本所在线与 `latest` 所在线各自的最高已发布版本。
+    因此较低版本的 run 也会把 `latest` / `2.0` 推到更高版本（排队中被挤掉的高版本 run 不再造成漏晋升）。
+  - 不回退：别名当前的 `org.opencontainers.image.version` label 高于目标时保持不动（例如更高的 tag 被删除后重跑旧 tag）。
+    存在但没有合法版本 label 的别名、任何非"tag 不存在"的读取错误都会使 job 失败且不再写入（fail closed）。
+  - 写入：每条线先写 runtime 别名再写 scheduler 别名，`docker buildx imagetools create --prefer-index=false`（单一来源按原样
+    复制，别名 digest = 版本 tag digest；不加该参数时普通 manifest 会被包成新 index、digest 改变），写后逐个读回比对 digest。
+    两次写之间被取消 / 超时 / 第二次写失败时，别名可能暂时一新一旧（registry 写入无法原子化）；**重跑该 promote-tags job**
+    （或之后任一 release 的 promote-tags）会幂等补齐。最后若 runtime 与 scheduler 别名停在不同版本，job 失败。
+  - 串行：job 级 `concurrency: release-promote-<repo>`、`cancel-in-progress: false`、`queue: max`（最多 100 个等待中的 run，按
+    FIFO；默认的单个 pending 名额会让后到的 run 取消正在等待的 run）。`queue` 属于 GitHub 的 job concurrency schema，actionlint
+    1.7.12 尚不认识，见 `.github/actionlint.yaml`。正确性不依赖排队：每次 reconcile 都对齐到最高已发布版本；排队溢出或被人工
+    取消时，重跑任一 release 的 promote-tags 即可。
+  - Buildx CLI 由 `setup-buildx-action` 固定为 `v0.38.2`（两个镜像 job 相同）。
+  - 测试：static lane 的 `release-promotion` 步骤用文件后端的假 registry（`release-registry-fake.sh`）离线覆盖上述规则，含低版本 run
+    晋升最高版本、删除更高 tag 不回退、别名 label 校验、读错误零写入、scheduler 写失败后重跑补齐、重跑复用版本 tag。真实适配器
+    `release-registry.sh`（imagetools + jq）已在本地 `registry:2` 上对带 provenance 的 index 与普通 manifest 验证；GHCR 上的行为
+    （尤其 tag 不存在时的报错文本）要到首个真实 tag 才能确认。
+  四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit 不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
 
 ## 镜像 tag 规则
 
 版本 tag 由 `docker/metadata-action` 计算，`latest` / `X.Y` 由 `promote-tags` 在两镜像推送后晋升：
 
-| 推送 tag | 生成镜像 tag |
+| 推送 tag | 生成 / 对齐的镜像 tag |
 |---|---|
-| `v0.7.0`（且为最高 stable tag） | `0.7.0`、`0.7`、`latest` |
-| `v0.6.3`（`v0.7.0` 已存在，`0.6` 线内最高） | `0.6.3`、`0.6`（**不**动 `latest`） |
-| 重跑 `v0.7.0`（`v0.7.1` 已存在） | `0.7.0`（**不**动 `0.7` / `latest`） |
+| `v0.7.0`（且为最高已发布 stable 版本） | `0.7.0`、`0.7`、`latest` |
+| `v0.6.3`（`v0.7.0` 已发布，`0.6` 线内最高） | `0.6.3`、`0.6`；`latest` / `0.7` 保持（已在 `0.7.0`） |
+| 重跑 `v0.7.0`（`v0.7.1` 已发布） | 复用 `0.7.0`（不重建）；`latest` / `0.7` 保持在 `0.7.1` |
+| `v1.4.1` 在 `v2.0.0` 镜像推完之后晋升 | `1.4` → `1.4.1`，`latest` / `2.0` → `2.0.0` |
+| 重跑 `v1.4.3`（`v1.4.4` 曾发布、其 git tag 已删除） | `latest` / `1.4` 保持在 `1.4.4`（label 更高，不回退） |
 | `v0.7.0-rc.1` | 不推镜像：verify gate 只接受 `X.Y.Z` |
 
 `develata` lowercase 后即 GHCR 命名空间（owner）。runtime 使用上述 tag；scheduler 位于**同一 package**，
