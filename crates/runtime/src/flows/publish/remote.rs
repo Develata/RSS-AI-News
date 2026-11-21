@@ -8,7 +8,7 @@ use std::time::Duration as StdDuration;
 
 use rss_ai_news_domain::dto::publish::RenderedReport;
 use rss_ai_news_domain::error::ClassifiedError;
-use rss_ai_news_publish::PublishError;
+use rss_ai_news_publish::{PublishError, PublishTarget};
 use rss_ai_news_report::{RenderConfig, ReportError, load_frozen_items, render_markdown};
 use rss_ai_news_storage::{
     ClaimRequest, ClaimedPublishRecord, PublishAdvanceExtras, PublishItemRepository, PublishState,
@@ -98,6 +98,40 @@ async fn prepare_remote_report(
         return Err(RemotePreparationError::Timeout);
     }
     Ok(prepared)
+}
+
+/// Target drift guard: a `stored_local` record carries the destination it was
+/// initialised for (`owner/repo:branch`). If the configured target now
+/// declares a different identity, sending would publish the frozen snapshot to
+/// a repository/branch nobody chose for it, so the stage refuses before any
+/// request. Targets without an identity are not compared.
+fn target_drift(
+    claimed: &ClaimedPublishRecord,
+    target: &dyn PublishTarget,
+) -> Option<PublishError> {
+    let current = target.target_identity()?;
+    if claimed.remote_target.as_deref() == Some(current.as_str()) {
+        None
+    } else {
+        Some(PublishError::RemoteTargetMismatch {
+            stored: claimed.remote_target.clone(),
+            current,
+        })
+    }
+}
+
+fn mismatch_status(error: &PublishError) -> PublishRemoteStatus {
+    match error {
+        PublishError::RemoteTargetMismatch { stored, current } => {
+            PublishRemoteStatus::TargetMismatch {
+                stored: stored.clone(),
+                current: current.clone(),
+            }
+        }
+        other => PublishRemoteStatus::Failed {
+            error_kind: other.error_kind().to_string(),
+        },
+    }
 }
 
 impl PublishFlow {
@@ -196,6 +230,24 @@ impl PublishFlow {
                 };
             }
         };
+
+        if let Some(error) = target_drift(&claimed, target.as_ref()) {
+            self.release_publish_error_for_record(
+                claimed.id,
+                &owner,
+                &error,
+                "publish_remote",
+                &emitter,
+            )
+            .await;
+            return PublishRemoteOutcome {
+                publish_record_id: claimed.id,
+                status: mismatch_status(&error),
+                commit_sha: None,
+                remote_target: None,
+                item_count: 0,
+            };
+        }
 
         let render_config = RenderConfig {
             category_display_name: opts.category_display_name,
@@ -447,6 +499,25 @@ impl PublishFlow {
                     continue;
                 }
             };
+
+            if let Some(error) = target_drift(claimed, target.as_ref()) {
+                self.release_publish_error_for_record(
+                    claimed.id,
+                    &owner,
+                    &error,
+                    "publish_remote_batch",
+                    &emitter,
+                )
+                .await;
+                outcomes.push(PublishRemoteOutcome {
+                    publish_record_id: claimed.id,
+                    status: mismatch_status(&error),
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count: 0,
+                });
+                continue;
+            }
 
             let render_config = RenderConfig {
                 category_display_name: item.category_display_name,

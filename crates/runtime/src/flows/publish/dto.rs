@@ -146,7 +146,17 @@ pub enum PublishRemoteStatus {
     PublishedRemote,
     NothingToClaim,
     Conflicted,
-    ArticleConflict { article_id: i64 },
+    ArticleConflict {
+        article_id: i64,
+    },
     MissingTarget,
-    Failed { error_kind: String },
+    /// The record was initialised for `stored`, but the configured remote
+    /// target is `current`; nothing was sent and the record is `failed`.
+    TargetMismatch {
+        stored: Option<String>,
+        current: String,
+    },
+    Failed {
+        error_kind: String,
+    },
 }

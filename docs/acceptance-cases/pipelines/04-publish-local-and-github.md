@@ -36,6 +36,9 @@
 - 远端 429 → `GithubRateLimit`，state 保持、article 不晋升
 - 远端 422 重试达上限 → 仍报错，record 保持 `StoredLocal`
 - promote target article 已被其它流转推进 → `ArticleConflict`
+- 目标漂移：`stored_local` 记录的 `remote_target`（`owner/repo:branch`）与当前配置的远端目标不同 →
+  不发任何请求，`TargetMismatch { stored, current }`，record → `failed`（`last_error_kind=remote_target_mismatch`）；
+  批量发布中只跳过该记录，其余照常提交
 
 ## 测试覆盖
 
@@ -66,6 +69,10 @@
 | `publish_remote_batch_succeeds_with_one_commit_for_multiple_records` | 同上 | 多 record 单 commit |
 | `publish_remote_rate_limit_keeps_state_and_articles` | 同上 | 429 |
 | `publish_remote_auth_failed_is_terminal_without_promoting_articles` | 同上 | 401 终态 |
+| `publish_remote_rejects_record_frozen_for_another_target_without_sending` | 同上 | 目标漂移拦截 |
+| `publish_remote_sends_record_whose_stored_target_matches` | 同上 | 目标一致照常发布 |
+| `publish_remote_batch_skips_only_the_mismatched_record` | 同上 | 批量中只跳过漂移记录 |
+| `target_identity_uses_the_publish_record_remote_target_format` | `crates/publish/src/github.rs` | 目标身份格式 |
 | `publish_many_creates_one_commit_for_multiple_reports` | `crates/publish/tests/github_target_tests.rs` | target 层 batch |
 | `publish_many_retries_once_after_non_fast_forward_then_succeeds` | 同上 | 422 重试 |
 | `publish_many_surfaces_422_after_max_retries` | 同上 | 422 超限 |

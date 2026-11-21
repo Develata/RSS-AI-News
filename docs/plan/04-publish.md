@@ -234,6 +234,7 @@ Markdown **byte-equal**；跨渲染器版本（例如 YAML 引号规则调整）
 | GitHub 422 lost-update | `is_branch_concurrently_updated` | retry 1 次，仍失败 → state='failed' |
 | GitHub 5xx | `PublishError::GitHubApiError {5xx}` | state='failed'，本地文件保留 |
 | GitHub timeout | `PublishError::GitHubApiError` | state='failed' |
+| 目标漂移：record 的 `remote_target`（init 时写入的 `owner/repo:branch`）≠ 当前配置目标 | `PublishError::RemoteTargetMismatch`（`PublishRemoteStatus::TargetMismatch { stored, current }`） | 发请求前拦截，不重试，state='failed'，`last_error` 含两个目标；恢复配置或 `--force` 由运维决定 |
 
 **本地落盘成功 + GitHub 失败**：record 转 `failed`，但本地文件保留。下次 publish 触发同
 `(category, date, version)` 走 idempotent 路径。

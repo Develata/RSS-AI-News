@@ -88,6 +88,12 @@ impl GitHubTarget {
         }
     }
 
+    /// `owner/repo:branch`, the form recorded in `publish_records.remote_target`
+    /// at init. The path prefix is not part of it (see plan/04 §4.2).
+    pub fn identity(&self) -> String {
+        format!("{}/{}:{}", self.cfg.owner, self.cfg.repo, self.cfg.branch)
+    }
+
     fn remote_target_url(&self, final_path: &str) -> String {
         format!(
             "github://{}/{}/{}/{}",
@@ -98,6 +104,10 @@ impl GitHubTarget {
 
 #[async_trait]
 impl PublishTarget for GitHubTarget {
+    fn target_identity(&self) -> Option<String> {
+        Some(self.identity())
+    }
+
     async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
         let final_path = self.join_path(&report.relative_path)?;
         let existing_sha = self.existing_sha(&final_path).await?;
@@ -649,6 +659,21 @@ mod tests {
             let error = classify::classify_github_status(422, message, None);
             assert_eq!(is_branch_concurrently_updated(&error), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn target_identity_uses_the_publish_record_remote_target_format() {
+        let target = GitHubTarget::new(GitHubTargetConfig {
+            token: SecretString::from("token"),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            branch: "main".to_string(),
+            path_prefix: "archive".to_string(),
+            commit_message_prefix: "rss-ai-news".to_string(),
+        })
+        .expect("target");
+        // Must equal what `publish` init stores in `publish_records.remote_target`.
+        assert_eq!(target.target_identity().as_deref(), Some("owner/repo:main"));
     }
 
     #[test]

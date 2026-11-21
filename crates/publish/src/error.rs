@@ -17,6 +17,17 @@ pub enum PublishError {
     RemoteTimeout,
     #[error("github rate limit until {reset_at}")]
     GitHubRateLimit { reset_at: time::OffsetDateTime },
+    /// The record was initialised for a different remote destination than the
+    /// one configured now. Never retried: the operator decides (restore the
+    /// config, or `--force` a new render version for the new target).
+    #[error(
+        "remote target mismatch: record was initialised for {}, configured target is {current}",
+        stored.as_deref().unwrap_or("<none>")
+    )]
+    RemoteTargetMismatch {
+        stored: Option<String>,
+        current: String,
+    },
 }
 
 impl ClassifiedError for PublishError {
@@ -28,9 +39,10 @@ impl ClassifiedError for PublishError {
                     | std::io::ErrorKind::WouldBlock
                     | std::io::ErrorKind::TimedOut
             ),
-            Self::InvalidPath(_) | Self::GitHubAuthFailed(_) | Self::ResponseTooLarge { .. } => {
-                false
-            }
+            Self::InvalidPath(_)
+            | Self::GitHubAuthFailed(_)
+            | Self::ResponseTooLarge { .. }
+            | Self::RemoteTargetMismatch { .. } => false,
             Self::GitHubApiError { status, .. } => *status == 409 || *status >= 500,
             Self::GitHubRateLimit { .. } | Self::RemoteTimeout => true,
         }
@@ -45,6 +57,7 @@ impl ClassifiedError for PublishError {
             Self::GitHubRateLimit { .. } => "github_rate_limit",
             Self::RemoteTimeout => "remote_timeout",
             Self::ResponseTooLarge { .. } => "response_too_large",
+            Self::RemoteTargetMismatch { .. } => "remote_target_mismatch",
         }
     }
 

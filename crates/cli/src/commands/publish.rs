@@ -96,6 +96,7 @@ impl StageVerdict {
             PublishRemoteStatus::NothingToClaim | PublishRemoteStatus::Conflicted => Self::Skipped,
             PublishRemoteStatus::ArticleConflict { .. }
             | PublishRemoteStatus::MissingTarget
+            | PublishRemoteStatus::TargetMismatch { .. }
             | PublishRemoteStatus::Failed { .. } => Self::Failed,
         }
     }
@@ -226,14 +227,13 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
             target_timezone: loaded.app.publish.target_timezone.clone(),
             render_version,
             selection_policy_version,
-            remote_target: (mode == "remote").then(|| {
-                format!(
-                    "{}/{}:{}",
-                    loaded.app.publish.github_owner,
-                    loaded.app.publish.github_repo,
-                    loaded.app.publish.github_branch
-                )
-            }),
+            // The target's own identity (`owner/repo:branch`) is what the
+            // remote stage compares against before sending (target drift guard).
+            remote_target: ctx
+                .publish_target_remote
+                .as_ref()
+                .filter(|_| mode == "remote")
+                .and_then(|target| target.target_identity()),
         })
         .await?;
 
