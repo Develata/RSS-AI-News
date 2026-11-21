@@ -14,6 +14,8 @@ use super::dto::{PublishStoreLocalOptions, PublishStoreLocalOutcome, PublishStor
 use super::render_templates_from_ctx;
 use crate::events::RunEventEmitter;
 
+const PHASE: &str = "store_local";
+
 impl PublishFlow {
     pub async fn store_local(&self, opts: PublishStoreLocalOptions) -> PublishStoreLocalOutcome {
         self.store_local_record_inner(None, opts).await
@@ -108,7 +110,7 @@ impl PublishFlow {
         {
             Ok(report) => report,
             Err(error) => {
-                self.fail_claimed(claimed.id, &owner, &error, now, &emitter)
+                self.fail_claimed(claimed.id, &owner, &error, PHASE, now, &emitter)
                     .await;
                 return PublishStoreLocalOutcome {
                     publish_record_id: claimed.id,
@@ -129,25 +131,15 @@ impl PublishFlow {
         {
             Ok(items) => items,
             Err(error) => {
-                if let Err(persist_err) = self
-                    .ctx
-                    .publish_record_repo
-                    .release_permanent_failure(
-                        claimed.id,
-                        &owner,
-                        &error.to_string(),
-                        error.error_kind(),
-                        now,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        publish_record_id = claimed.id,
-                        phase = "store_local.list_items",
-                        ?persist_err,
-                        "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
-                    );
-                }
+                self.release_classified_failure(
+                    claimed.id,
+                    &owner,
+                    &error,
+                    "store_local.list_items",
+                    now,
+                    &emitter,
+                )
+                .await;
                 return PublishStoreLocalOutcome {
                     publish_record_id: claimed.id,
                     status: PublishStoreLocalStatus::Failed {

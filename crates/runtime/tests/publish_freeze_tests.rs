@@ -2,14 +2,19 @@ mod common;
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_domain::Score0To100;
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishFreezeStatus, PublishInitOptions, PublishInitOutcome,
 };
-use rss_ai_news_storage::{PublishItemRepo, PublishItemRepository};
+use rss_ai_news_storage::{
+    FreezeSnapshotItem, FreezeSnapshotOutcome, PublishCandidateRow, PublishItemRepo,
+    PublishItemRepository, StorageError,
+};
 use sqlx::SqlitePool;
+use time::OffsetDateTime;
 
 use common::{
     app_config, insert_config_rule, make_test_pool, publish_deps, seed_ai_succeeded_article,
@@ -428,4 +433,162 @@ async fn assert_article_state(pool: &SqlitePool, id: i64, expected: &str) {
         .await
         .unwrap();
     assert_eq!(state, expected);
+}
+
+// === B3: candidate-load storage errors keep their classification ===
+
+/// Delegates to the real repo but fails the first AI-path candidate read with
+/// `err`, the way a pool timeout or a dropped connection would.
+struct FlakyCandidateRepo {
+    inner: PublishItemRepo,
+    failures_left: AtomicUsize,
+    err: fn() -> StorageError,
+}
+
+#[async_trait::async_trait]
+impl PublishItemRepository for FlakyCandidateRepo {
+    async fn select_ai_path_candidates(
+        &self,
+        category_key: &str,
+        min_importance_score: i32,
+        published_since: OffsetDateTime,
+        published_until: OffsetDateTime,
+        max_items: NonZeroU32,
+    ) -> Result<Vec<PublishCandidateRow>, StorageError> {
+        if self
+            .failures_left
+            .fetch_update(AtomicOrdering::SeqCst, AtomicOrdering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err((self.err)());
+        }
+        self.inner
+            .select_ai_path_candidates(
+                category_key,
+                min_importance_score,
+                published_since,
+                published_until,
+                max_items,
+            )
+            .await
+    }
+
+    async fn select_ai_off_passthrough_candidates(
+        &self,
+        category_key: &str,
+        published_since: OffsetDateTime,
+        published_until: OffsetDateTime,
+        max_items: NonZeroU32,
+    ) -> Result<Vec<PublishCandidateRow>, StorageError> {
+        self.inner
+            .select_ai_off_passthrough_candidates(
+                category_key,
+                published_since,
+                published_until,
+                max_items,
+            )
+            .await
+    }
+
+    async fn freeze_snapshot(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        items: Vec<FreezeSnapshotItem>,
+        ai_off_promote_article_ids: Vec<i64>,
+        now: OffsetDateTime,
+    ) -> Result<FreezeSnapshotOutcome, StorageError> {
+        self.inner
+            .freeze_snapshot(
+                publish_record_id,
+                owner,
+                items,
+                ai_off_promote_article_ids,
+                now,
+            )
+            .await
+    }
+
+    async fn list_by_publish_record(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Vec<rss_ai_news_domain::model::PublishItem>, StorageError> {
+        self.inner.list_by_publish_record(publish_record_id).await
+    }
+}
+
+fn flaky_flow(pool: SqlitePool, err: fn() -> StorageError) -> PublishFlow {
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let mut deps = publish_deps(
+        pool.clone(),
+        app,
+        Arc::new(rss_ai_news_publish::LocalFsTarget::new(std::env::temp_dir())),
+        None,
+    );
+    deps.publish_item_repo = Arc::new(FlakyCandidateRepo {
+        inner: PublishItemRepo::new(pool),
+        failures_left: AtomicUsize::new(1),
+        err,
+    });
+    PublishFlow::new(Arc::new(deps))
+}
+
+#[tokio::test]
+async fn freeze_transient_candidate_load_error_keeps_record_pending_and_next_run_freezes() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flaky_flow(pool.clone(), || StorageError::Timeout);
+    let publish_record_id = init_record(&flow, &pool).await;
+    seed_ai_succeeded_article(&pool, "ai", "flaky-ai", "Title", "body", "summary", 88, 1).await;
+
+    let first = flow.freeze(freeze_opts(true, false)).await;
+
+    assert_eq!(first.publish_record_id, publish_record_id);
+    assert!(
+        matches!(&first.status, PublishFreezeStatus::Failed { error_kind } if error_kind == "db_timeout"),
+        "{:?}",
+        first.status
+    );
+    // A transient DB failure is not a business verdict: the record stays
+    // claimable, the lease is released, and the attempt is charged to the
+    // retry budget.
+    let (state, kind, attempts, lease_owner): (String, Option<String>, i64, Option<String>) =
+        sqlx::query_as(
+            "SELECT state, last_error_kind, attempt_count, lease_owner \
+             FROM publish_records WHERE id = ?",
+        )
+        .bind(publish_record_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "pending");
+    assert_eq!(kind.as_deref(), Some("db_timeout"));
+    assert_eq!(attempts, 1);
+    assert_eq!(lease_owner, None);
+
+    let second = flow.freeze(freeze_opts(true, false)).await;
+
+    assert_eq!(second.status, PublishFreezeStatus::Frozen);
+    assert_eq!(second.publish_record_id, publish_record_id);
+    assert_record_state(&pool, publish_record_id, "snapshot_frozen").await;
+}
+
+#[tokio::test]
+async fn freeze_permanent_candidate_load_error_fails_record() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flaky_flow(pool.clone(), || {
+        StorageError::Corruption("bad row".to_string())
+    });
+    let publish_record_id = init_record(&flow, &pool).await;
+    seed_ai_succeeded_article(&pool, "ai", "corrupt-ai", "Title", "body", "summary", 88, 1).await;
+
+    let outcome = flow.freeze(freeze_opts(true, false)).await;
+
+    assert!(
+        matches!(&outcome.status, PublishFreezeStatus::Failed { error_kind } if error_kind == "corruption"),
+        "{:?}",
+        outcome.status
+    );
+    assert_record_state(&pool, publish_record_id, "failed").await;
 }

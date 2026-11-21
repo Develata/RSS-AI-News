@@ -121,31 +121,63 @@ impl PublishFlow {
         emit_maintenance_outcome(emitter, "publish_records", reclaimed, Some(swept)).await;
     }
 
-    async fn fail_claimed(
+    /// Releases a claimed record after a stage failure, by classification:
+    /// retryable errors (e.g. a transient [`rss_ai_news_storage::StorageError`]
+    /// wrapped in [`ReportError::Storage`]) keep the stage state and are charged
+    /// to the shared retry budget (W15 §3, folded to `failed` in SQL once
+    /// exhausted); everything else is a permanent `failed`. A transient DB blip
+    /// must never become the day's terminal verdict, because the idempotency
+    /// key would then return the failed record on every later run.
+    ///
+    /// `&dyn ClassifiedError` lets report, storage and publish errors share one
+    /// release path without a generic per call site.
+    async fn release_classified_failure(
         &self,
         publish_record_id: i64,
         owner: &str,
-        error: &ReportError,
+        error: &dyn ClassifiedError,
+        phase: &'static str,
         now: OffsetDateTime,
         emitter: &RunEventEmitter<'_>,
     ) {
-        if let Err(persist_err) = self
-            .ctx
-            .publish_record_repo
-            .release_permanent_failure(
-                publish_record_id,
-                owner,
-                &error.display_user(),
-                error.error_kind(),
-                now,
-            )
-            .await
-        {
+        let message = error.display_user();
+        let retryable = error.is_retryable();
+        let mut budget_exhausted = false;
+        let release_result = if retryable {
+            self.ctx
+                .publish_record_repo
+                .release_retryable_failure(
+                    publish_record_id,
+                    owner,
+                    &message,
+                    error.error_kind(),
+                    self.ctx.retry.publish_max_attempts,
+                    now,
+                )
+                .await
+                .map(|outcome| {
+                    budget_exhausted = outcome.exhausted;
+                    outcome.released
+                })
+        } else {
+            self.ctx
+                .publish_record_repo
+                .release_permanent_failure(
+                    publish_record_id,
+                    owner,
+                    &message,
+                    error.error_kind(),
+                    now,
+                )
+                .await
+        };
+        if let Err(persist_err) = release_result {
             tracing::warn!(
                 publish_record_id,
-                phase = "render",
+                phase,
+                retryable,
                 ?persist_err,
-                "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
+                "release_*_failure 持久化失败；lease 回收仍可兜底（F15-fix4）"
             );
         }
         emitter
@@ -154,9 +186,27 @@ impl PublishFlow {
                 "error",
                 Some("publish_record"),
                 Some(publish_record_id),
-                &error.display_user(),
-                Some(json!({ "phase": "freeze", "error_kind": error.error_kind() })),
+                &message,
+                Some(json!({
+                    "phase": phase,
+                    "error_kind": error.error_kind(),
+                    "retryable": retryable,
+                    "budget_exhausted": budget_exhausted,
+                })),
             )
+            .await;
+    }
+
+    async fn fail_claimed(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        error: &ReportError,
+        phase: &'static str,
+        now: OffsetDateTime,
+        emitter: &RunEventEmitter<'_>,
+    ) {
+        self.release_classified_failure(publish_record_id, owner, error, phase, now, emitter)
             .await;
     }
 }

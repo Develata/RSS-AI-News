@@ -28,6 +28,9 @@
 
 ### 失败条件（failure path）
 
+- 任一阶段读库（候选读取、快照读取、冻结写入）遇可重试存储错误（pool timeout、SQLite busy、PG 40001/40P01 等）
+  → 保持当前阶段态、释放 lease、计入重试预算（耗尽才转 `failed`），`last_error_kind` 为存储错误类别；
+  下一次运行可继续推进。不可重试的存储错误 → `failed`
 - store-local 目录不可写 → record → `Failed`，errors 表登记；命令 summary 该阶段 `verdict=failed`、`status=fail`、exit 1
 - 远端 401 → `GithubAuthFailed`（终态，不重试）
 - 远端 429 → `GithubRateLimit`，state 保持、article 不晋升
@@ -48,6 +51,8 @@
 | `freeze_after_empty_snapshot_publishes_articles_that_arrive_later` | 同上 | 空跑不耗预算、后到文章可发布 |
 | `freeze_returns_nothing_to_claim_when_no_pending_records` | 同上 | 空闲 |
 | `freeze_skips_articles_without_correct_category_key` | 同上 | category 隔离 |
+| `freeze_transient_candidate_load_error_keeps_record_pending_and_next_run_freezes` | 同上 | 瞬时存储错误保态、下轮继续 |
+| `freeze_permanent_candidate_load_error_fails_record` | 同上 | 不可重试存储错误 → failed |
 | `render_advances_snapshot_frozen_to_rendered_when_items_exist` | `crates/runtime/tests/publish_render_tests.rs` | render happy |
 | `render_returns_failed_when_publish_record_has_no_items` | 同上 | 空 items 失败 |
 | `store_local_with_no_remote_target_publishes_locally_and_promotes_articles` | `crates/runtime/tests/publish_store_local_tests.rs` | 本地 + promote |

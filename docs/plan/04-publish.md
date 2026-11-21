@@ -228,6 +228,7 @@ Markdown **byte-equal**；跨渲染器版本（例如 YAML 引号规则调整）
 | 失败点 | 错误变体 | 处理 |
 |---|---|---|
 | freeze 时 UNIQUE 冲突 | `PublishError::AlreadyExists` | 返 idempotent outcome，不视为失败 |
+| 阶段内读库 / 冻结写入失败 | `ReportError::Storage` / `StorageError`（保留类型） | 按 `is_retryable()`：可重试 → 维持阶段态 + 计预算（耗尽 → `failed`）；否则 `failed` |
 | 本地落盘失败 | `PublishError::LocalStoreFailed` | state='failed'，无 retry |
 | GitHub 401/403 | `PublishError::GitHubAuthFailed` | state='failed' |
 | GitHub 422 lost-update | `is_branch_concurrently_updated` | retry 1 次，仍失败 → state='failed' |

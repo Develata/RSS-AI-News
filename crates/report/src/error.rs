@@ -1,5 +1,6 @@
 use rss_ai_news_domain::dto::publish::AiBindingError;
 use rss_ai_news_domain::error::ClassifiedError;
+use rss_ai_news_storage::StorageError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -14,11 +15,19 @@ pub enum ReportError {
     InvalidTagsJson(String),
     #[error("render failed: {0}")]
     RenderFailed(String),
+    /// A repository read failed. Kept typed (not stringified) so callers can
+    /// tell a transient DB failure (pool timeout, busy, dropped connection)
+    /// from a business verdict and route it through the retryable release.
+    #[error(transparent)]
+    Storage(#[from] StorageError),
 }
 
 impl ClassifiedError for ReportError {
     fn is_retryable(&self) -> bool {
-        false
+        match self {
+            Self::Storage(error) => error.is_retryable(),
+            _ => false,
+        }
     }
 
     fn error_kind(&self) -> &str {
@@ -28,6 +37,7 @@ impl ClassifiedError for ReportError {
             Self::InvalidScore(_) => "score_invalid",
             Self::InvalidTagsJson(_) => "tags_json_invalid",
             Self::RenderFailed(_) => "render_failed",
+            Self::Storage(error) => error.error_kind(),
         }
     }
 

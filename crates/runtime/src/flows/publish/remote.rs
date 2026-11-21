@@ -736,38 +736,16 @@ impl PublishFlow {
         error: &ReportError,
         emitter: &RunEventEmitter<'_>,
     ) {
-        if let Err(persist_err) = self
-            .ctx
-            .publish_record_repo
-            .release_permanent_failure(
-                publish_record_id,
-                owner,
-                &error.display_user(),
-                error.error_kind(),
-                OffsetDateTime::now_utc(),
-            )
-            .await
-        {
-            tracing::warn!(
-                publish_record_id,
-                phase = "publish_remote.report_error",
-                ?persist_err,
-                "release_permanent_failure 持久化失败；保留上游 ReportError 向上抛（F15-fix4）"
-            );
-        }
-        emitter
-            .emit(
-                "publish_failed",
-                "error",
-                Some("publish_record"),
-                Some(publish_record_id),
-                &error.display_user(),
-                Some(json!({
-                    "phase": "publish_remote",
-                    "error_kind": error.error_kind()
-                })),
-            )
-            .await;
+        // A snapshot read that failed transiently stays `stored_local`.
+        self.release_classified_failure(
+            publish_record_id,
+            owner,
+            error,
+            "publish_remote",
+            OffsetDateTime::now_utc(),
+            emitter,
+        )
+        .await;
     }
 }
 

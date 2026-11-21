@@ -13,6 +13,8 @@ use super::dto::{PublishRenderOptions, PublishRenderOutcome, PublishRenderStatus
 use super::render_templates_from_ctx;
 use crate::events::RunEventEmitter;
 
+const PHASE: &str = "render";
+
 impl PublishFlow {
     pub async fn render(&self, opts: PublishRenderOptions) -> PublishRenderOutcome {
         self.render_record_inner(None, opts).await
@@ -102,7 +104,7 @@ impl PublishFlow {
         )
         .await
         {
-            self.fail_claimed(claimed.id, &owner, &error, now, &emitter)
+            self.fail_claimed(claimed.id, &owner, &error, PHASE, now, &emitter)
                 .await;
             return PublishRenderOutcome {
                 publish_record_id: claimed.id,
