@@ -6,6 +6,7 @@ use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishInitOptions, PublishInitOutcome,
     PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRenderOptions, RuntimeError,
+    flows::publish::{ReportPathSpec, check_report_path_collisions},
 };
 use rss_ai_news_storage::StoragePool;
 use serde::Serialize;
@@ -133,6 +134,35 @@ pub(crate) async fn run_loaded(
         .cloned()
         .collect::<Vec<CategoryConfig>>();
     let date = args.date.clone().unwrap_or_else(today_utc);
+    // validate-config checks path collisions on one sample date only; render
+    // the real paths for this run's date before any DB or file write.
+    let path_templates = categories
+        .iter()
+        .map(|category| {
+            loaded
+                .effective_for_category(&category.category.key)
+                .map(|effective| {
+                    (
+                        category.category.key.as_str(),
+                        effective.path_template.clone(),
+                    )
+                })
+                .ok_or_else(|| {
+                    CliError::Runtime(RuntimeError::Config(format!(
+                        "category {} not found in loaded config",
+                        category.category.key
+                    )))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let path_specs = path_templates
+        .iter()
+        .map(|(category_key, path_template)| ReportPathSpec {
+            category_key,
+            path_template,
+        })
+        .collect::<Vec<_>>();
+    check_report_path_collisions(&path_specs, &date)?;
     let ctx = build_publish_deps(loaded, pool, args.local_only)?;
     let rule_version_repo = rss_ai_news_storage::RuleVersionRepo::new_with_storage(pool.clone());
     let flow = PublishFlow::new(ctx.clone());

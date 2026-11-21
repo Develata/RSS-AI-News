@@ -156,6 +156,12 @@ path_template = "docs/zh-news/{category_key}/{report_date}.md"  # 覆盖全局
 
 碰撞 → `Diagnostic`，`validate-config` exit 78。
 
+validate 只用一个样例日期（`2026-01-03`，ADR 0008）渲染，无法发现只在部分日期碰撞的组合
+（如 `{YYYY}/{MM}/{DD}.md` 与 `{YYYY}/{DD}/{MM}.md` 在月 = 日时同路径）。因此 `publish-all`（含 `run` 的发布段）
+在任何写入（rule_version 登记、init、落盘）之前，用发布渲染器按**本次报告日期**渲染全部所选分类的真实路径，
+归一化（`\` → `/`、去掉空段与 `.` 段）后查重；有碰撞 → `RuntimeError::Config`（列出路径与分类），exit 1。
+实现：[`crates/runtime/src/flows/publish/paths.rs`](../../crates/runtime/src/flows/publish/paths.rs)。
+
 ### 4.2 GithubTarget
 
 走 GitHub Git Data API（Tree / Blob / Commit / Ref）：

@@ -151,6 +151,85 @@ async fn publish_all_records_a_category_conflict_and_keeps_other_categories() {
     assert_eq!(second.exit_code(), ExitCode::RuntimeError);
 }
 
+/// `{YYYY}/{MM}/{DD}.md` vs `{YYYY}/{DD}/{MM}.md` passes the sample-date
+/// validate check but collides whenever month == day. publish-all renders the
+/// real paths for the run's date and refuses before any DB or file write.
+#[tokio::test]
+async fn publish_all_refuses_categories_whose_paths_collide_on_the_report_date() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    let output_dir = temp.path().join("output");
+    write_config(temp.path(), &db_path, &output_dir);
+    for (key, template) in [
+        ("ai", "{YYYY}/{MM}/{DD}.md"),
+        ("math", "{YYYY}/{DD}/{MM}.md"),
+    ] {
+        rewrite(
+            &temp.path().join("categories").join(format!("{key}.toml")),
+            |text| {
+                text.replace(
+                    "\n[[sources]]",
+                    &format!(
+                        "\n[category.publish_override]\npath_template = \"{template}\"\n\n[[sources]]"
+                    ),
+                )
+            },
+        );
+    }
+    let pool = migrated_pool(&db_path).await;
+    seed_persisted_article(&pool, "ai").await;
+    pool.close().await;
+
+    let mut cli = cli_for(temp.path(), "ai");
+    cli.category = None;
+    cli.command = Command::PublishAll(PublishArgs {
+        date: Some("2026-11-11".to_string()),
+        local_only: true,
+        force: false,
+    });
+    let args = match &cli.command {
+        Command::PublishAll(args) => args,
+        _ => unreachable!(),
+    };
+
+    let error = publish_all::run(&cli, args)
+        .await
+        .expect_err("colliding report paths must abort publish-all");
+
+    let message = error.to_string();
+    assert!(message.contains("2026/11/11.md"), "{message}");
+    let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
+    let records: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM publish_records")
+        .fetch_one(&pool)
+        .await
+        .expect("count records");
+    assert_eq!(records, 0, "no publish record may be created");
+    let render_rules: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM rule_versions WHERE kind = 'render'")
+            .fetch_one(&pool)
+            .await
+            .expect("count rules");
+    assert_eq!(render_rules, 0, "no rule version may be seeded");
+    pool.close().await;
+    assert!(
+        !output_dir.join("2026").exists(),
+        "no report may be written"
+    );
+
+    // Same config on a date where the paths differ publishes normally.
+    cli.command = Command::PublishAll(PublishArgs {
+        date: Some("2026-11-12".to_string()),
+        local_only: true,
+        force: false,
+    });
+    let args = match &cli.command {
+        Command::PublishAll(args) => args,
+        _ => unreachable!(),
+    };
+    let summary = publish_all::run(&cli, args).await.expect("distinct paths");
+    assert_eq!(summary.exit_code(), ExitCode::Success, "{summary:?}");
+}
+
 #[tokio::test]
 async fn ai_run_without_category_runs_every_category_and_reports_each_failure() {
     let temp = TempDir::new().expect("temp dir");

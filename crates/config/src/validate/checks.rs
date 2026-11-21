@@ -463,6 +463,10 @@ fn collect_app_value_checks(report: &mut DiagnosticReport, app: &AppConfig) {
 /// 但前提是 **调用方保证不同分类不会渲染出同一路径**。本 pass 用样本日期
 /// 渲染每个分类的 effective path_template，对结果做 `\` → `/` 归一化后查
 /// 重，把"配置合法但运行时会互相覆盖"的情况在 validate 阶段拦下。
+///
+/// 样本日期只能拦下与日期无关的碰撞；只在部分日期碰撞的模板组合（如
+/// `{YYYY}/{MM}/{DD}.md` 与 `{YYYY}/{DD}/{MM}.md`）由 publish-all 在首次写入前
+/// 按真实报告日期复查（runtime `flows::publish::check_report_path_collisions`）。
 fn collect_cross_category_path_collisions(
     report: &mut DiagnosticReport,
     app: &AppConfig,

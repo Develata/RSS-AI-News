@@ -22,11 +22,13 @@ use crate::flows::maintenance::emit_maintenance_outcome;
 
 mod dto;
 mod freeze;
+mod paths;
 mod remote;
 mod render;
 mod store_local;
 
 pub use dto::*;
+pub use paths::{ReportPathSpec, check_report_path_collisions};
 
 pub struct PublishFlow {
     ctx: Arc<PublishDeps>,
