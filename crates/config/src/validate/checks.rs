@@ -149,11 +149,10 @@ pub(super) fn collect_source_env_checks(
         for (index, source) in category.sources.iter().enumerate() {
             if source.enabled
                 && rsshub::has_base_placeholder(&source.feed_url)
-                && Url::parse(&rsshub::expand_base_placeholders(
+                && !is_fetchable_feed_url(&rsshub::expand_base_placeholders(
                     &source.feed_url,
                     base_url,
                 ))
-                .is_err()
             {
                 report.push(Diagnostic::new(
                     source_file.clone(),
@@ -833,13 +832,16 @@ fn validate_template_placeholders(
     }
 }
 
-/// Structural feed URL check: a literal URL must parse; a URL with an RSSHub
-/// base placeholder is checked as a template, expanded with a fixed probe
-/// base instead of `RSSHUB_BASE_URL`. Whether the *environment's* base URL
-/// yields a valid URL is an ingest precondition (R3-5): it is checked by
-/// [`collect_source_env_checks`] before expansion and by
-/// [`collect_effective_feed_url_checks`] after it, so commands that never
-/// fetch feeds (and `run`'s later stages) are not blocked by it.
+/// Structural feed URL check: a feed URL must not be empty, and a literal URL
+/// must parse. A URL with an RSSHub base placeholder is not parsed here:
+/// whether `{RSSHUB}:x/feed.xml` is valid depends on the base (a port after a
+/// bare host, a path segment after `https://hub/prefix`), so any fixed probe
+/// base would reject configs that are valid with the real one (R3G-B5).
+/// Whether the *environment's* base URL yields a fetchable URL is an ingest
+/// precondition (R3-5): it is checked by [`collect_source_env_checks`] before
+/// expansion and by [`collect_effective_feed_url_checks`] after it, so
+/// commands that never fetch feeds (and `run`'s later stages) are not
+/// blocked by it.
 fn validate_feed_url(
     report: &mut DiagnosticReport,
     source_file: &str,
@@ -855,13 +857,7 @@ fn validate_feed_url(
         return;
     }
 
-    let candidate = if rsshub::has_base_placeholder(feed_url) {
-        rsshub::expand_base_placeholders(feed_url, RSSHUB_TEMPLATE_PROBE_BASE)
-    } else {
-        feed_url.to_string()
-    };
-
-    if Url::parse(&candidate).is_err() {
+    if !rsshub::has_base_placeholder(feed_url) && Url::parse(feed_url).is_err() {
         report.push(Diagnostic::new(
             source_file,
             format!("sources[{index}].feed_url"),
@@ -870,21 +866,30 @@ fn validate_feed_url(
     }
 }
 
-/// A well-formed base URL used only to check an RSSHub placeholder template's
-/// structure (`.invalid` is reserved by RFC 2606 and never resolves).
-const RSSHUB_TEMPLATE_PROBE_BASE: &str = "https://rsshub.invalid";
+/// An expanded RSSHub URL the HTTP feed fetcher can request: it parses, its
+/// scheme is `http` or `https`, and it has a host. `feeds.internal:1200/x`
+/// parses (custom scheme `feeds.internal`, no host) but cannot be fetched.
+fn is_fetchable_feed_url(value: &str) -> bool {
+    Url::parse(value).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https") && url.host_str().is_some_and(|h| !h.is_empty())
+    })
+}
 
 const INVALID_EXPANSION_MESSAGE: &str =
     "invalid URL after expanding the RSSHub base URL placeholder (check RSSHUB_BASE_URL)";
 
 /// Ingest preflight on a loaded config (placeholders already expanded with
 /// `RSSHUB_BASE_URL`, R3-5): every enabled source in the `--category` scope
-/// must have a URL that parses. Literal URLs already passed the structural
-/// check at load, so in practice this reports a base URL that is set but
-/// invalid (e.g. missing its scheme).
+/// must have a URL that parses, and a URL the loader expanded from a
+/// placeholder (recorded in `source_secrets`) must be a fetchable http(s)
+/// URL (R3G-B5). Literal URLs already passed the structural check at load
+/// and keep exactly that contract, so in practice this reports a base URL
+/// that is set but invalid (missing its scheme, or a `host:port` read as a
+/// custom scheme).
 pub(super) fn collect_effective_feed_url_checks(
     report: &mut DiagnosticReport,
     categories: &[CategoryConfig],
+    source_secrets: &crate::SourceSecrets,
     category_filter: Option<&str>,
 ) {
     for category in categories
@@ -895,10 +900,15 @@ pub(super) fn collect_effective_feed_url_checks(
         for (index, source) in category.sources.iter().enumerate() {
             // A placeholder left in place means RSSHUB_BASE_URL is unset,
             // which collect_source_env_checks reports once.
-            if source.enabled
-                && !rsshub::has_base_placeholder(&source.feed_url)
-                && Url::parse(&source.feed_url).is_err()
-            {
+            if !source.enabled || rsshub::has_base_placeholder(&source.feed_url) {
+                continue;
+            }
+            let valid = if source_secrets.is_rsshub_expanded(&category.category.key, &source.key) {
+                is_fetchable_feed_url(&source.feed_url)
+            } else {
+                Url::parse(&source.feed_url).is_ok()
+            };
+            if !valid {
                 report.push(Diagnostic::new(
                     source_file.clone(),
                     format!("sources[{index}].feed_url"),
