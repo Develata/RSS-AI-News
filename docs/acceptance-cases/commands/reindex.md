@@ -74,7 +74,7 @@
 | `link_hash_reindex_resumes_when_only_the_reserved_normalizer_version_changes` | `crates/cli/tests/reindex_cmd_tests.rs` | R3E-S17 只改保留字段 `link_normalizer_version` 仍续跑 |
 | `pg_content_hash_race_after_the_precheck_is_a_row_conflict` | `crates/storage/tests/reindex_job_pg_tests.rs` | R2-S16 预检后并发提交 → 行级 conflict |
 | `pg_content_hash_batch_propagates_a_non_target_unique_violation` | 同上 | R3E-S16 非目标约束的 23505 使整批失败 |
-| `reindex_content_hash_unchanged_when_hash_matches` | 同上 | 未变不写 |
+| `reindex_content_hash_unchanged_when_hash_matches` | `crates/runtime/tests/reindex_tests.rs` | 未变不写 |
 | `reindex_categories_inserts_new_sources` | 同上 | 增量插入 |
 | `reindex_categories_archives_obsolete_sources` | 同上 | 归档旧 source |
 | `reindex_categories_second_run_archives_nothing` | 同上 | 幂等 |

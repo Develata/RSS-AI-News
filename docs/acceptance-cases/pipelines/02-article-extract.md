@@ -53,7 +53,7 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `extract_fetch_5xx_with_summary_stays_retryable` | 同上 | W18 可重试不降级 |
 | `extract_fetch_429_with_summary_stays_retryable` | 同上 | 429 可重试、不降级（plan/17 §7） |
 | `cross_host_redirect_sends_no_referer` | `crates/extractor/tests/fetcher_tests.rs` | R2-S11 重定向不带 Referer |
-| `extract_429_cooldown_honours_retry_after` | 同上 | R2-S10 冷却 = max(释放 + 退避, retry_at) |
+| `extract_429_cooldown_honours_retry_after` | `crates/runtime/tests/extract_tests.rs` | R2-S10 冷却 = max(释放 + 退避, retry_at) |
 | `extract_429_deadline_does_not_move_with_a_delayed_release` | 同上 | R3E-S10 retry_at 收包时确定，延迟释放不平移 |
 | `retry_after_seconds_on_429_are_kept` / `retry_after_http_date_on_429_is_kept_as_that_instant` / `missing_or_invalid_retry_after_on_429_is_none` | `crates/extractor/tests/fetcher_tests.rs` | R2-S10 / R3E-S10 Retry-After 解析为绝对时刻 |
 | `retry_after_of_48_hours_is_capped_one_day_after_receipt` | 同上 | R3E-S10 上限 = 收包时刻 + 1 天 |
@@ -82,10 +82,10 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `own_article_from_an_earlier_attempt_counts_as_persisted_not_dedup` | 同上 | 自命中 |
 | `retry_with_a_changed_body_reuses_the_article_the_entry_owns` | `crates/storage/tests/article_entry_persist_tests.rs` | R2-S6 复用已拥有 article |
 | `recovery_takes_the_entry_state_from_the_stored_article` | 同上 | R2-S6 状态按已存 article |
-| `recovered_fallback_article_is_reported_as_fallback_persisted` / `recovered_full_article_is_reported_as_persisted` | `crates/runtime/tests/extract_tests.rs` | R3E-S6 运行摘要按实际落库状态计数（两个方向） |
 | `an_entry_owning_several_articles_is_reported_not_guessed` | 同上 | R2-S6 歧义显式报告 |
 | `another_entrys_article_is_a_dedup` | 同上 | 他人 article 仍去重 |
 | `fallback_flag_selects_fallback_persisted` | 同上 | fallback 终态 |
+| `recovered_fallback_article_is_reported_as_fallback_persisted` / `recovered_full_article_is_reported_as_persisted` | `crates/runtime/tests/extract_tests.rs` | R3E-S6 运行摘要按实际落库状态计数（两个方向） |
 | `pg_persist_for_entry_is_atomic_and_recognises_own_article` | `crates/storage/tests/article_pg_tests.rs` | 同上（PG，需 docker） |
 | `both_write_paths_stamp_the_assembled_extractor_version` | `crates/runtime/tests/extract_tests.rs` | 两条写入路径写装配的 extractor 版本 |
 | `extractor_version_resolves_to_an_extractor_kind_row` | `crates/cli/tests/context_factory_tests.rs` | 装配期解析 `kind='extractor'` 行，幂等 |
