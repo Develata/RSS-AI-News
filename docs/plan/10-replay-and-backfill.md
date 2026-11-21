@@ -97,12 +97,14 @@ rss-ai-news replay --kind feed   --id 678
 
 | kind | 解析路径 | 输出 |
 |---|---|---|
-| `feed` | `rss_ai_news_feed::parse_feed(bytes, FeedKind::Rss)` | `{ "entry_count": N, "samples": [...] }` |
+| `feed` | `rss_ai_news_feed::parse_feed(bytes, FeedKind::Rss)` | `parsed = { "entry_count": N, "entries": [{ "uid", "title", "link" }, …] }`（前 5 条，`REPLAY_FEED_SAMPLE_LIMIT`） |
 | `html` | 线上同一条策略链：`extractor.strategy_order` 启用的 HTML 策略（当前只有 Readability），由 `context_factory::configured_html_strategies` 为 extract 与 replay 共同构造；base URI 见下 | 抽取出的 title / word_count / content_quality / body_preview，以及所用 `base_uri` |
 | `ai` | `rss_ai_news_ai::parse_response(raw)` | 解析后的 `ParsedResponse`（含 schema 校验） |
 
-副作用：**无**。`replay` 不写任何业务表，仅查询 `raw_artifacts` 并在内存中重做，
-打印 `ReplayCommandSummary`（pretty 或 JSON）。
+副作用：**无**。`replay` 以只读连接打开数据库，不写任何表，在内存中重做，打印 `ReplayCommandSummary`（pretty 或 JSON，
+顶层字段 `kind` / `artifact_id` / `artifact_key` / `byte_size` / `parsed` / `diff`）。读取范围：`raw_artifacts`；`html`
+另经只读 projection（`ReplayProjectionRepository`）读该 artifact key 对应的 `feed_entries` 行（取 base URI 与 `title_raw`，
+**不带** `--diff` 也读）以及 `--diff` 时它指向的 `articles` 行。`feed` / `ai` 不读业务表（R3-19）。
 
 `--id` 直查 `raw_artifacts.id`，`--key` 走 `(kind, key)` 联合索引。两者必给其一，
 否则 CLI 报 `replay requires either --id or --key`。
@@ -222,14 +224,18 @@ rss-ai-news --category ai rebuild-report --date 2026-05-01
 
 ## 7. 失败语义
 
+exit code 只有 0 / 1 / 2 / 78（`crates/cli/src/exit_code.rs`），此前表里的 3 不存在（R3-19）。`rebuild-report` 不推 GitHub
+（见 §6），所以不存在 422 lost-update 行。
+
 | 场景 | exit code | 行为 |
 |---|---|---|
-| `replay` artifact 找不到 | 3 | `CliError::ReplayArtifactNotFound`，stderr 一行 |
-| `replay` 找到但 inline_body 为空 | 3 | "file-backed artifacts not supported in W9c" |
+| `replay` 既无 `--id` 也无 `--key` | 1 | `replay requires either --id or --key`，在打开数据库之前报出 |
+| `replay` artifact 找不到（含 `--id` 命中其他 kind） | 1 | `CliError::ReplayArtifactNotFound` |
+| `replay` 找到但 inline_body 为空（文件后端） | 1 | `"file-backed artifacts not supported in W9c replay"` |
+| `replay --kind html` 但 `strategy_order` 无 HTML 策略 | 1 | `REPLAY_HTML_NO_STRATEGY` |
 | `backfill --target ai` 范围内无候选 | 0 | `articles_scanned=0`，正常退出 |
-| `backfill` DB 写失败 | 3 | 透传 `RuntimeError::Storage` |
-| `rebuild-report` publish_record 不存在 | 3 | `CliError::PublishRecordNotFound` |
-| `rebuild-report` GitHub 推送 422 lost-update | 3（默认） / 0（带 retry） | 详见 [./04-publish.md](./04-publish.md) §422 |
+| `backfill` DB 写失败 | 1 | 透传 `RuntimeError::Storage` |
+| `rebuild-report` publish_record 不存在 | 1 | `CliError::PublishRecordNotFound` |
 
 exit code 详表见 [./11-error-and-recovery.md](./11-error-and-recovery.md)。
 
