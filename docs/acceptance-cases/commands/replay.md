@@ -25,7 +25,8 @@
 
 - artifact 找不到 → `CliError::ReplayArtifactNotFound`，exit 1
 - artifact 命中但 `inline_body` 为空（文件后端） → `"file-backed artifacts not supported in W9c replay"`，exit 1（已知限制）
-- 既无 `--id` 也无 `--key` → `"replay requires either --id or --key"`
+- 既无 `--id` 也无 `--key` → `"replay requires either --id or --key"`，exit 1；在加载配置 / 打开数据库**之前**报出，
+  数据库不可用时也不被 `storage` 错误掩盖（R3-17）
 - `--kind html` 且 `strategy_order` 只含 `summary_fallback`（无 HTML 策略）→ `REPLAY_HTML_NO_STRATEGY` 配置矛盾错误，exit 1，
   不读 artifact（线上该配置不解析 HTML，replay 不换用别的策略）
 
@@ -52,6 +53,7 @@
 | `html_replay_without_an_html_strategy_reports_the_contract_error` | `crates/runtime/src/flows/replay.rs` | 仅 summary_fallback → 契约错误，feed 不受影响 |
 | `html_replay_runs_the_configured_chain_in_order` | 同上 | 策略链顺序与失败回退 |
 | `html_replay_follows_the_configured_strategy_order` | `crates/cli/tests/replay_cmd_tests.rs` | 真实 CLI 装配，两种 strategy_order |
+| `missing_selector_is_reported_before_the_database_is_opened` | 同上 | 缺 selector 先于打开数据库报错 |
 | `sqlite_html_replay_source_reaches_entry_link_and_article` / `pg_…`（ignored） | `crates/storage/tests/replay_projection_tests.rs` | 双方言 projection |
 
 ## 当前状态

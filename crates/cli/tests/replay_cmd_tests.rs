@@ -48,6 +48,29 @@ async fn html_replay_follows_the_configured_strategy_order() {
     }
 }
 
+/// R3-17: without `--id` / `--key` the usage error is reported even when the
+/// database cannot be opened (it used to surface as `kind=storage`).
+#[tokio::test]
+async fn missing_selector_is_reported_before_the_database_is_opened() {
+    let temp = TempDir::new().expect("temp dir");
+    let blocker = temp.path().join("not-a-directory");
+    fs::write(&blocker, b"file").expect("blocker file");
+    write_config(
+        temp.path(),
+        &blocker.join("rss.sqlite"),
+        r#"["readability"]"#,
+    );
+    let cli = cli_for(temp.path());
+    let mut args = html_args(0);
+    args.id = None;
+    let error = replay::run(&cli, &args).await.expect_err("no selector");
+    assert_eq!(
+        error.display_user(),
+        "config: replay requires either --id or --key"
+    );
+    assert_eq!(error.error_kind(), "runtime");
+}
+
 fn html_args(id: i64) -> ReplayArgs {
     ReplayArgs {
         kind: ReplayKind::Html,

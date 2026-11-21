@@ -48,8 +48,21 @@ impl CommandSummary for ReplayCommandSummary {
 }
 
 pub async fn run(cli: &Cli, args: &ReplayArgs) -> Result<ReplayCommandSummary, CliError> {
+    // A missing selector is a usage error: report it before loading the config
+    // or opening the database, whose failures would otherwise mask it (R3-17).
+    selector(args)?;
     let deps = build_replay_deps(cli).await?;
     replay(deps, args).await
+}
+
+fn selector(args: &ReplayArgs) -> Result<ReplaySelector, CliError> {
+    match (args.id, args.key.as_deref()) {
+        (Some(id), _) => Ok(ReplaySelector::Id(id)),
+        (None, Some(key)) => Ok(ReplaySelector::Key(key.to_string())),
+        (None, None) => Err(CliError::Runtime(RuntimeError::Config(
+            "replay requires either --id or --key".to_string(),
+        ))),
+    }
 }
 
 /// Assembles the read-only [`ReplayFlow`] from the replay dependencies, runs
@@ -59,15 +72,7 @@ pub async fn run(cli: &Cli, args: &ReplayArgs) -> Result<ReplayCommandSummary, C
 /// flow reports as an error, acceptance AC-C-01).
 async fn replay(deps: ReplayDeps, args: &ReplayArgs) -> Result<ReplayCommandSummary, CliError> {
     let kind = runtime_kind(args.kind);
-    let selector = match (args.id, args.key.as_deref()) {
-        (Some(id), _) => ReplaySelector::Id(id),
-        (None, Some(key)) => ReplaySelector::Key(key.to_string()),
-        (None, None) => {
-            return Err(CliError::Runtime(RuntimeError::Config(
-                "replay requires either --id or --key".to_string(),
-            )));
-        }
-    };
+    let selector = selector(args)?;
     let flow = ReplayFlow::new(ReplayFlowDeps {
         artifact_repo: deps.artifact_repo,
         projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(deps.pool)),
