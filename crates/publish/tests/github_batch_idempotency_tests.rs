@@ -114,11 +114,10 @@ async fn retry_after_lost_ref_update_response_records_existing_head_without_new_
         .await
         .expect("the ambiguous ref update is verified against HEAD");
     assert_eq!(first.commit_sha.as_deref(), Some("batch-commit"));
-    // The HTTP client may itself resend the PATCH on a 5xx; all of that
-    // belongs to attempt 1.
+    // The client sends the PATCH once (R3F-B1): no transparent resend.
     let ref_updates_in_attempt_1 =
         count(&server, "PATCH", "/repos/owner/repo/git/refs/heads/main").await;
-    assert!(ref_updates_in_attempt_1 >= 1);
+    assert_eq!(ref_updates_in_attempt_1, 1);
     // A later run (e.g. the receipt was never persisted) is idempotent too.
     let second = target
         .publish_many(&reports())

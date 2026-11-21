@@ -7,6 +7,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Limited, combinators::BoxBody};
 use octocrab::Octocrab;
+use octocrab::service::middleware::retry::RetryConfig;
 use rss_ai_news_domain::{SecretString, dto::publish::RenderedReport};
 use serde_json::{Value, json};
 
@@ -29,6 +30,16 @@ pub struct GitHubTargetConfig {
     pub commit_message_prefix: String,
 }
 
+/// Both constructors build the client with Octocrab's transparent retries
+/// off (`RetryConfig::None`; the 0.54 default is `Simple(3)`, which resends
+/// any request immediately after a transport error, a 5xx or a 429). Every
+/// request is sent once (R3F-B1): a resend of a write that already landed
+/// would be refused (422 "sha wasn't supplied", a moved ref) and hide the
+/// landed write from the HEAD verification, and a resent 429 would spend
+/// GitHub's rate-limit window inside one claim. Retrying is the publish
+/// stage's job (stage budget, `next_attempt_at`, idempotent pre-write HEAD
+/// check). A client passed to [`GitHubTarget::with_client`] keeps whatever
+/// retry policy its builder chose.
 pub struct GitHubTarget {
     cfg: GitHubTargetConfig,
     client: Arc<Octocrab>,
@@ -37,6 +48,7 @@ pub struct GitHubTarget {
 impl GitHubTarget {
     pub fn new(cfg: GitHubTargetConfig) -> Result<Self, PublishError> {
         let client = Octocrab::builder()
+            .add_retry_config(RetryConfig::None)
             .set_connect_timeout(Some(Duration::from_secs(5)))
             .set_read_timeout(Some(Duration::from_secs(30)))
             .set_write_timeout(Some(Duration::from_secs(30)))
@@ -53,6 +65,7 @@ impl GitHubTarget {
 
     pub fn with_base_uri(cfg: GitHubTargetConfig, base_uri: &str) -> Result<Self, PublishError> {
         let client = Octocrab::builder()
+            .add_retry_config(RetryConfig::None)
             .set_connect_timeout(Some(Duration::from_secs(5)))
             .set_read_timeout(Some(Duration::from_secs(30)))
             .set_write_timeout(Some(Duration::from_secs(30)))

@@ -413,6 +413,10 @@ remote 使用 claim 返回的记录元信息，只加载一次 frozen items，�
 单条/批量调用远端前也各自检查 deadline，已超预算不发起远端调用。
 网络取消不能撤销服务端已经完成的提交，仍依靠既有幂等发布与重试恢复。
 Octocrab connect/read/write timeout 为5/30/30秒，所有 GitHub 响应最多16 MiB（含 base64 Contents 响应）。
+发布客户端关闭 Octocrab 的透明重试（`RetryConfig::None`；0.54 默认 `Simple(3)` 会在传输错误、5xx、429 后立即重发，
+R3F-B1）：每个请求只发一次。已落地写入的重发会被拒（文件已存在而 PUT 不带 `sha` → 422；ref 已移动），从而掩盖首次写入，
+使歧义写入核对（ADR 0012 §3）无从发生；429 的重发会在本次 claim 内消耗限流窗口。重试只由发布阶段负责（阶段预算、
+`next_attempt_at`、写前 HEAD 幂等比对）。代价：读请求的瞬时 5xx / 传输错误也直接计为本阶段的一次失败尝试。
 成功响应超限不可重试；429/5xx 错误页超限仍保留对应 retry 分类。
 GitHub错误消息先解析JSON，再只输出固定词表摘要（见 §4.2，R1-P-B6，取代此前"遮蔽 token + 8 KiB 截断"的做法），
 因此 JSON 转义、回显的报告片段与凭据都不会进入诊断；422 的 fast-forward 冲突分类信号来自完整文本。

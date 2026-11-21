@@ -122,8 +122,7 @@ async fn batch_ref_routes_encode_hash_percent_and_keep_slashes_in_the_branch() {
 /// R1-P-B2 transport path: the connection is closed after the PATCH request
 /// was read (no response at all — the ref update landed, the answer was
 /// lost). The batch then reads HEAD back and records the landed commit
-/// instead of failing. Responses are chosen by request line, so a client-side
-/// resend of the PATCH is answered the same way.
+/// instead of failing. The client sends the PATCH exactly once (R3F-B1).
 #[tokio::test]
 async fn transport_failure_after_the_ref_patch_is_verified_against_head() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -208,7 +207,7 @@ async fn transport_failure_after_the_ref_patch_is_verified_against_head() {
         .expect("the lost ref update is verified against HEAD");
 
     assert_eq!(batch.commit_sha.as_deref(), Some("new-commit"));
-    assert!(server.await.unwrap() >= 1, "the PATCH was sent");
+    assert_eq!(server.await.unwrap(), 1, "the PATCH was sent exactly once");
 }
 
 #[tokio::test]
