@@ -133,6 +133,23 @@ Jobs：
     （尤其 tag 不存在时的报错文本）要到首个真实 tag 才能确认。
   四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit 不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
 
+### 修复前 release run 的重跑边界（R3-1）
+
+GitHub 重跑一个 workflow run 时沿用**原始**的 commit、ref 与该 commit 上的 workflow 文件
+（[Re-running workflows and jobs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs)），
+不会采用 `main` 上的新 `release.yml`。`v0.10.4` 及更早 tag 的 release run 用的是旧 workflow：它们在两个 verify job 之后直接把
+`latest` / `X.Y`（及 `-scheduler`）推到本 tag，不经过 PostgreSQL lane、`cargo audit` 门槛，也不读别名当前的版本 label、不进
+新的晋升队列。只要本仓库的 workflow 仍对 GHCR package 有写权限，重跑这些旧 run 就可能覆盖较新的生产别名。约定：
+
+- **不要重跑** `v0.10.4` 及更早 tag 的 release run（包括其中单个 job），只重跑使用本文件现行 `release.yml` 的 run。
+- GHCR 的 Actions 写权限按**仓库**授予（package 设置 → Manage Actions access），无法收窄到单个 workflow 文件：保持只有本仓库
+  有 write 角色、不给其他仓库授权；`GITHUB_TOKEN` 的 `packages: write` 只在现行 `release.yml` 的两个镜像 job 上声明。
+- 想从技术上排除旧 run 被重跑，只能删除这些 run（`gh run delete <run-id>`）。这会同时删除其日志与发布证据链接，属于不可逆的
+  批量删除，需由维护者单独决定；本仓库目前**不**这样做，靠上面的约定。
+- 若旧 run 已被误重跑：重跑任一现行 release 的 `promote-tags` job。reconcile 只认别名的版本 label 与已发布版本，会把被旧 run
+  拉低的 `latest` / `X.Y` 重新对齐到最高已发布版本。旧 run 还会重建并覆盖它自己的 `X.Y.Z` / `X.Y.Z-scheduler`（digest 因重建
+  而改变，revision label 不变），这无法自动撤回，需在该版本的 release report 中记录新 digest。
+
 ## 镜像 tag 规则
 
 版本 tag 由 `docker/metadata-action` 计算，`latest` / `X.Y` 由 `promote-tags` 在两镜像推送后晋升：
