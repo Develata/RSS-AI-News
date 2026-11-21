@@ -53,6 +53,12 @@ LIMIT $9
 ON CONFLICT (article_id, policy_version, execution_key) DO NOTHING
 "#;
 
+/// SQLite: lease expiry compared by instant (`julianday()`), not by RFC3339
+/// text (variable-width fractions sort out of instant order within a
+/// second). `$2` is stored via `sqlite_stored_deadline` (UTC, ms rounded up),
+/// `$9` is `sqlite_instant_cutoff(now)` (ms rounded down); `COALESCE` falls
+/// back to the text comparison for text `julianday()` cannot parse. Same rule
+/// for every SQLite deadline predicate below (feed_entries pattern, plan/02 §5.3).
 pub(super) const CLAIM_SQLITE_SQL: &str = r#"
 UPDATE decision_results
 SET state = 'running',
@@ -65,7 +71,8 @@ WHERE id IN (
     SELECT id FROM decision_results
     WHERE category_key = $4 AND policy_version = $5 AND execution_key = $6
       AND state = 'pending'
-      AND (lease_expires_at IS NULL OR lease_expires_at < $3)
+      AND (lease_expires_at IS NULL
+           OR COALESCE(julianday(lease_expires_at) < julianday($9), lease_expires_at < $9))
       AND attempt_count < $7
     ORDER BY id ASC
     LIMIT $8
@@ -165,6 +172,15 @@ WHERE category_key = $2 AND policy_version = $3 AND execution_key = $4
   AND lease_expires_at < $1
 "#;
 
+/// SQLite variant; `$5` is `sqlite_instant_cutoff(now)`.
+pub(super) const RECLAIM_EXPIRED_SQLITE_SQL: &str = r#"
+UPDATE decision_results
+SET state = 'pending', lease_owner = NULL, lease_expires_at = NULL, updated_at = $1
+WHERE category_key = $2 AND policy_version = $3 AND execution_key = $4
+  AND state = 'running'
+  AND COALESCE(julianday(lease_expires_at) < julianday($5), lease_expires_at < $5)
+"#;
+
 pub(super) const TERMINALIZE_EXHAUSTED_SQL: &str = r#"
 UPDATE decision_results
 SET state = 'failed',
@@ -178,7 +194,25 @@ WHERE category_key = $2 AND policy_version = $3 AND execution_key = $4
   AND (lease_expires_at IS NULL OR lease_expires_at < $1)
 "#;
 
+/// SQLite variant; `$6` is `sqlite_instant_cutoff(now)`.
+pub(super) const TERMINALIZE_EXHAUSTED_SQLITE_SQL: &str = r#"
+UPDATE decision_results
+SET state = 'failed',
+    last_error_kind = 'retry_budget_exhausted',
+    last_error = COALESCE(last_error, 'retry budget exhausted'),
+    completed_at = $1,
+    updated_at = $1
+WHERE category_key = $2 AND policy_version = $3 AND execution_key = $4
+  AND state = 'pending'
+  AND attempt_count >= $5
+  AND (lease_expires_at IS NULL
+       OR COALESCE(julianday(lease_expires_at) < julianday($6), lease_expires_at < $6))
+"#;
+
 /// Both columns are cleared, so a purged row is never selected again.
+/// `$1` is `sqlite_instant_cutoff(now)`; the expiry is compared by instant.
+/// The ordering keeps the text column (index order); it only picks which
+/// expired rows go first.
 pub(super) const PURGE_EXPIRED_RAW_SQLITE_SQL: &str = r#"
 UPDATE decision_results
 SET raw_response = NULL, raw_response_expires_at = NULL
@@ -186,7 +220,8 @@ WHERE id IN (
     SELECT id FROM decision_results
     WHERE raw_response IS NOT NULL
       AND raw_response_expires_at IS NOT NULL
-      AND raw_response_expires_at < $1
+      AND COALESCE(julianday(raw_response_expires_at) < julianday($1),
+                   raw_response_expires_at < $1)
     ORDER BY raw_response_expires_at ASC
     LIMIT $2
 )

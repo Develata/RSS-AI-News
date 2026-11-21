@@ -176,9 +176,12 @@ SQLite 以小数位数可变的 RFC3339 TEXT 存时间，同一秒内字典序 �
 `julianday()` 比较 lease：比较侧 now 转 UTC 并向下取整到毫秒，claim 写入的
 `lease_expires_at` 转 UTC 并向上取整到毫秒；严格 `<` 加上 `julianday()` 的单调舍入，保证
 lease 绝不提前判过期（最多晚约 2 ms）。`julianday()` 解析不了的文本（例如 `+15:00` 偏移）
-回退到原先的文本比较，避免行被永久跳过。PG 直接比较 `TIMESTAMPTZ`。其余 lease 表
-（`article_ai_results` / `publish_records` / `reindex_jobs` / `decision_results`）与 doctor
-的同类谓词仍是字典序比较，待单独修复。
+回退到原先的文本比较，避免行被永久跳过。PG 直接比较 `TIMESTAMPTZ`。
+`article_ai_results`（claim / reclaim / `terminalize_exhausted`）与 `decision_results`（claim /
+reclaim / `terminalize_exhausted` / 原始响应 TTL 清理的 `raw_response_expires_at`）2026-11-21 起
+采用同一规则（`repo::sqlite_stored_deadline` 写入、`repo::sqlite_instant_cutoff` 比较，
+测试 `ai_decision_lease_instant_tests.rs`）。其余 lease 表（`publish_records` / `reindex_jobs`）
+与 doctor 的同类谓词仍是字典序比较，待单独修复。
 
 **`attempt_count` 不重置**，作为重试预算的硬约束。
 

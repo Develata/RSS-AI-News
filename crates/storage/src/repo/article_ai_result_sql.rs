@@ -13,6 +13,13 @@ ON CONFLICT(article_id, prompt_version, output_schema_version, model_id) DO NOTH
 RETURNING id
 "#;
 
+/// SQLite claim. SQLite stores times as RFC3339 TEXT with a variable-width
+/// fraction, so text order is not instant order within a second; the lease
+/// predicate compares `julianday()` instants. `$2` is written through
+/// `sqlite_stored_deadline` (UTC, rounded up to the ms) and `$5` is
+/// `sqlite_instant_cutoff(now)` (rounded down), so the comparison is exact
+/// and never early. Text unparseable by `julianday()` (NULL) falls back to the
+/// old text comparison via `COALESCE` (same rule as `feed_entries`).
 pub(super) const CLAIM_AI_PENDING_SQLITE_SQL: &str = r#"
 UPDATE article_ai_results
 SET state = 'running',
@@ -28,7 +35,9 @@ WHERE id IN (
     JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
     JOIN feed_sources fs ON fs.id = fe.source_id
     WHERE aar.state = 'pending'
-      AND (aar.lease_expires_at IS NULL OR aar.lease_expires_at < $5)
+      AND (aar.lease_expires_at IS NULL
+           OR COALESCE(julianday(aar.lease_expires_at) < julianday($5),
+                       aar.lease_expires_at < $5))
       AND aar.attempt_count < $6
       AND fs.category_key = $7
     ORDER BY aar.id ASC
@@ -105,6 +114,19 @@ WHERE lease_expires_at IS NOT NULL
   AND state = 'running'
 "#;
 
+/// SQLite variant: instant comparison (see [`CLAIM_AI_PENDING_SQLITE_SQL`]);
+/// `$2` is `sqlite_instant_cutoff(now)`.
+pub(super) const RECLAIM_AI_LEASES_SQLITE_SQL: &str = r#"
+UPDATE article_ai_results
+SET state = 'pending',
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = $1
+WHERE lease_expires_at IS NOT NULL
+  AND COALESCE(julianday(lease_expires_at) < julianday($2), lease_expires_at < $2)
+  AND state = 'running'
+"#;
+
 /// W15 §4 sweep：预算耗尽且 claim 永远不会再领取的 pending 行 → 终态。
 /// COALESCE 保留行上既有真实错误（retryable release 已写过），仅对从未留过
 /// 错误的行落兜底文案。
@@ -119,6 +141,22 @@ SET state = 'permanent_failed',
 WHERE state = 'pending'
   AND attempt_count >= $2
   AND (lease_expires_at IS NULL OR lease_expires_at < $3)
+"#;
+
+/// SQLite variant of [`TERMINALIZE_EXHAUSTED_AI_SQL`]: instant comparison;
+/// `$3` is `sqlite_instant_cutoff(now)`.
+pub(super) const TERMINALIZE_EXHAUSTED_AI_SQLITE_SQL: &str = r#"
+UPDATE article_ai_results
+SET state = 'permanent_failed',
+    last_error = COALESCE(last_error, 'retry budget exhausted'),
+    last_error_kind = COALESCE(last_error_kind, 'retry_budget_exhausted'),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = $1
+WHERE state = 'pending'
+  AND attempt_count >= $2
+  AND (lease_expires_at IS NULL
+       OR COALESCE(julianday(lease_expires_at) < julianday($3), lease_expires_at < $3))
 "#;
 
 pub(super) const ADVANCE_ARTICLE_TO_AI_PENDING_SQL: &str = r#"

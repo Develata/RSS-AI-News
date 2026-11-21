@@ -18,8 +18,10 @@ use super::decision_result_sql::{
     CLAIM_PG_SQL, CLAIM_SQLITE_SQL, COUNT_OTHER_IDENTITY_PENDING_SQL, GENERATE_PENDING_PG_SQL,
     GENERATE_PENDING_SQLITE_SQL, INSERT_RUN_EVENT_SQL, LOAD_ARTICLE_TEXT_SQL,
     PURGE_EXPIRED_RAW_PG_SQL, PURGE_EXPIRED_RAW_SQLITE_SQL, RECLAIM_EXPIRED_SQL,
-    RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL, TERMINALIZE_EXHAUSTED_SQL, UPSERT_POLICY_SQL,
+    RECLAIM_EXPIRED_SQLITE_SQL, RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL,
+    TERMINALIZE_EXHAUSTED_SQL, TERMINALIZE_EXHAUSTED_SQLITE_SQL, UPSERT_POLICY_SQL,
 };
+use super::{sqlite_instant_cutoff, sqlite_stored_deadline};
 
 /// A lock or statement timeout, wherever it was raised: PostgreSQL
 /// `query_canceled` (57014, `statement_timeout`) and `lock_not_available`
@@ -99,8 +101,9 @@ fn raw_columns(attempt: &DecisionAttemptRecord) -> RawColumns<'_> {
             withheld,
         }) => RawColumns {
             body: body.as_deref(),
-            // An expiry only means something for a stored body.
-            expires_at: body.as_ref().and(*expires_at),
+            // An expiry only means something for a stored body. Stored in
+            // UTC rounded up to the ms, so SQLite compares it by instant.
+            expires_at: body.as_ref().and(expires_at.map(sqlite_stored_deadline)),
             bytes: Some(*bytes),
             sha256: sha256.as_deref(),
             withheld: *withheld,
@@ -274,19 +277,17 @@ impl DecisionResultRepository for DecisionResultRepo {
         limit: u32,
         now: OffsetDateTime,
     ) -> Result<Vec<ClaimedDecision>, StorageError> {
-        let query = |sql| {
-            sqlx::query_as::<_, ClaimedDecision>(sql)
+        match &self.pool {
+            StoragePool::Sqlite(pool) => Ok(sqlx::query_as::<_, ClaimedDecision>(CLAIM_SQLITE_SQL)
                 .bind(owner)
-                .bind(lease_expires_at)
+                .bind(sqlite_stored_deadline(lease_expires_at))
                 .bind(now)
                 .bind(&identity.category_key)
                 .bind(&identity.policy_version)
                 .bind(&identity.execution_key)
                 .bind(i64::from(max_attempts))
                 .bind(i64::from(limit))
-        };
-        match &self.pool {
-            StoragePool::Sqlite(pool) => Ok(query(CLAIM_SQLITE_SQL)
+                .bind(sqlite_instant_cutoff(now))
                 .fetch_all(pool)
                 .await
                 .map_err(bounded)?),
@@ -383,8 +384,8 @@ impl DecisionResultRepository for DecisionResultRepo {
         now: OffsetDateTime,
     ) -> Result<u64, StorageError> {
         macro_rules! query {
-            () => {
-                sqlx::query(RECLAIM_EXPIRED_SQL)
+            ($sql:expr) => {
+                sqlx::query($sql)
                     .bind(now)
                     .bind(&identity.category_key)
                     .bind(&identity.policy_version)
@@ -392,14 +393,15 @@ impl DecisionResultRepository for DecisionResultRepo {
             };
         }
         match &self.pool {
-            StoragePool::Sqlite(pool) => Ok(query!()
+            StoragePool::Sqlite(pool) => Ok(query!(RECLAIM_EXPIRED_SQLITE_SQL)
+                .bind(sqlite_instant_cutoff(now))
                 .execute(pool)
                 .await
                 .map_err(bounded)?
                 .rows_affected()),
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
-                let count = query!()
+                let count = query!(RECLAIM_EXPIRED_SQL)
                     .execute(&mut *tx)
                     .await
                     .map_err(bounded)?
@@ -417,8 +419,8 @@ impl DecisionResultRepository for DecisionResultRepo {
         now: OffsetDateTime,
     ) -> Result<u64, StorageError> {
         macro_rules! query {
-            () => {
-                sqlx::query(TERMINALIZE_EXHAUSTED_SQL)
+            ($sql:expr) => {
+                sqlx::query($sql)
                     .bind(now)
                     .bind(&identity.category_key)
                     .bind(&identity.policy_version)
@@ -427,14 +429,15 @@ impl DecisionResultRepository for DecisionResultRepo {
             };
         }
         match &self.pool {
-            StoragePool::Sqlite(pool) => Ok(query!()
+            StoragePool::Sqlite(pool) => Ok(query!(TERMINALIZE_EXHAUSTED_SQLITE_SQL)
+                .bind(sqlite_instant_cutoff(now))
                 .execute(pool)
                 .await
                 .map_err(bounded)?
                 .rows_affected()),
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
-                let count = query!()
+                let count = query!(TERMINALIZE_EXHAUSTED_SQL)
                     .execute(&mut *tx)
                     .await
                     .map_err(bounded)?
@@ -452,7 +455,7 @@ impl DecisionResultRepository for DecisionResultRepo {
     ) -> Result<u64, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(pool) => Ok(sqlx::query(PURGE_EXPIRED_RAW_SQLITE_SQL)
-                .bind(now)
+                .bind(sqlite_instant_cutoff(now))
                 .bind(i64::from(limit))
                 .execute(pool)
                 .await

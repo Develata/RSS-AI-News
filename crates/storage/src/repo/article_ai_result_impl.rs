@@ -10,6 +10,8 @@ use time::OffsetDateTime;
 
 use crate::{ClaimRequest, ReleaseFailureOutcome, StorageError, StoragePool, classify_db_error};
 
+use super::{sqlite_instant_cutoff, sqlite_stored_deadline};
+
 use super::article_ai_result::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
     ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome,
@@ -18,9 +20,9 @@ use super::article_ai_result_sql::{
     ADVANCE_ARTICLE_FROM_AI_PHASE_SQL, ADVANCE_ARTICLE_TO_AI_PENDING_SQL,
     ADVANCE_PERSISTED_ARTICLE_SQL, CLAIM_AI_PENDING_PG_SQL, CLAIM_AI_PENDING_SQLITE_SQL,
     INSERT_AI_PENDING_SQL, OTHER_SUCCEEDED_AI_EXISTS_SQL, RECLAIM_AI_LEASES_SQL,
-    RELEASE_AI_FAILURE_SQL, RELEASE_AI_RETRYABLE_FAILURE_SQL, RELEASE_AI_SUCCESS_SQL,
-    SELECT_AI_IDENTITY_ROW_PG_SQL, SELECT_AI_IDENTITY_ROW_SQLITE_SQL, SELECT_ARTICLE_STATE_SQL,
-    TERMINALIZE_EXHAUSTED_AI_SQL,
+    RECLAIM_AI_LEASES_SQLITE_SQL, RELEASE_AI_FAILURE_SQL, RELEASE_AI_RETRYABLE_FAILURE_SQL,
+    RELEASE_AI_SUCCESS_SQL, SELECT_AI_IDENTITY_ROW_PG_SQL, SELECT_AI_IDENTITY_ROW_SQLITE_SQL,
+    SELECT_ARTICLE_STATE_SQL, TERMINALIZE_EXHAUSTED_AI_SQL, TERMINALIZE_EXHAUSTED_AI_SQLITE_SQL,
 };
 
 /// `(id, state, keep_decision, importance_score)` of an existing identity row.
@@ -268,10 +270,10 @@ async fn sqlite_claim_pending(
 ) -> Result<Vec<ClaimedAiResult>, StorageError> {
     sqlx::query_as::<_, ClaimedAiResult>(CLAIM_AI_PENDING_SQLITE_SQL)
         .bind(&request.owner)
-        .bind(request.lease_expires_at)
+        .bind(sqlite_stored_deadline(request.lease_expires_at))
         .bind(request.now)
         .bind(request.now)
-        .bind(request.now)
+        .bind(sqlite_instant_cutoff(request.now))
         .bind(i64::from(request.max_attempts))
         .bind(category_key)
         .bind(i64::from(request.batch_size))
@@ -367,9 +369,9 @@ async fn sqlite_reclaim_expired_leases(
     pool: &SqlitePool,
     now: OffsetDateTime,
 ) -> Result<u64, StorageError> {
-    let result = sqlx::query(RECLAIM_AI_LEASES_SQL)
+    let result = sqlx::query(RECLAIM_AI_LEASES_SQLITE_SQL)
         .bind(now)
-        .bind(now)
+        .bind(sqlite_instant_cutoff(now))
         .execute(pool)
         .await
         .map_err(StorageError::from)?;
@@ -381,10 +383,10 @@ async fn sqlite_terminalize_exhausted(
     max_attempts: u32,
     now: OffsetDateTime,
 ) -> Result<u64, StorageError> {
-    let result = sqlx::query(TERMINALIZE_EXHAUSTED_AI_SQL)
+    let result = sqlx::query(TERMINALIZE_EXHAUSTED_AI_SQLITE_SQL)
         .bind(now)
         .bind(i64::from(max_attempts))
-        .bind(now)
+        .bind(sqlite_instant_cutoff(now))
         .execute(pool)
         .await
         .map_err(StorageError::from)?;
