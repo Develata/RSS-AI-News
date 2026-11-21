@@ -1,7 +1,7 @@
 //! HTTP-only HTML fetcher.
 
 use async_trait::async_trait;
-use reqwest::header::{ACCEPT, USER_AGENT};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
 use reqwest::{Client, Url};
 use rss_ai_news_domain::dto::extract::ArticleFetchTask;
 
@@ -15,6 +15,10 @@ pub struct RawHtmlFetch {
     pub feed_entry_id: i64,
     pub final_url: String,
     pub http_status: u16,
+    /// Response `Content-Type` header, if present and visible ASCII; its
+    /// `charset` parameter feeds [`crate::decode_html`].
+    pub content_type: Option<String>,
+    /// Original response bytes (persisted as the html artifact unchanged).
     pub body_bytes: Vec<u8>,
 }
 
@@ -71,6 +75,11 @@ impl HtmlFetcher for ReqwestHtmlFetcher {
 
         let status = response.status();
         let final_url = response.url().to_string();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
         if !status.is_success() {
             return Err(ExtractorError::HttpStatus {
                 code: status.as_u16(),
@@ -83,6 +92,7 @@ impl HtmlFetcher for ReqwestHtmlFetcher {
             feed_entry_id: task.feed_entry_id,
             final_url,
             http_status: status.as_u16(),
+            content_type,
             body_bytes: body,
         })
     }

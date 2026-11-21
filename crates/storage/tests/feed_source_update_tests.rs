@@ -95,3 +95,66 @@ async fn update_after_unknown_id_returns_false() {
     assert!(!success);
     assert!(!failure);
 }
+
+/// A7: a 304 that omits the validators keeps the stored ones (acceptance
+/// 01-feed-ingest: "304 → last_etag / last_modified 不变"); validators the 304
+/// does send replace the stored ones. The 200 path keeps replace semantics.
+#[tokio::test]
+async fn not_modified_update_keeps_validators_the_304_omits() {
+    let (_dir, pool) = make_test_pool().await;
+    let source_id = seed_source(&pool).await;
+    let repo = FeedSourceRepo::new(pool.clone());
+    let now = OffsetDateTime::now_utc();
+    repo.update_after_fetch_success(source_id, Some("\"v1\""), Some("lm-1"), now, now)
+        .await
+        .unwrap();
+    repo.update_after_fetch_failure(source_id, now, "boom", "http_5xx")
+        .await
+        .unwrap();
+
+    let validators = |pool: sqlx::SqlitePool| async move {
+        sqlx::query_as::<_, (Option<String>, Option<String>, i64, Option<String>)>(
+            "SELECT etag, last_modified, consecutive_failures, last_error_kind \
+             FROM feed_sources WHERE id = ?",
+        )
+        .bind(source_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+
+    assert!(
+        repo.update_after_not_modified(source_id, None, None, now, now)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        validators(pool.clone()).await,
+        (
+            Some("\"v1\"".to_string()),
+            Some("lm-1".to_string()),
+            0,
+            None
+        )
+    );
+
+    repo.update_after_not_modified(source_id, Some("\"v2\""), None, now, now)
+        .await
+        .unwrap();
+    assert_eq!(validators(pool.clone()).await.0.as_deref(), Some("\"v2\""));
+
+    // 200 without validators: replace semantics (the new representation has none).
+    repo.update_after_fetch_success(source_id, None, None, now, now)
+        .await
+        .unwrap();
+    let (etag, last_modified, _, _) = validators(pool.clone()).await;
+    assert_eq!((etag, last_modified), (None, None));
+
+    assert!(
+        !repo
+            .update_after_not_modified(999, None, None, now, now)
+            .await
+            .unwrap(),
+        "missing row reports false"
+    );
+}

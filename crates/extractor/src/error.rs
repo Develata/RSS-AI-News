@@ -25,7 +25,9 @@ impl ClassifiedError for ExtractorError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::HttpTimeout => true,
-            Self::HttpStatus { code } => *code >= 500,
+            // 429 is rate limiting: retry after the cooldown instead of
+            // falling back to the summary. 403 / 404 stay permanent (W18).
+            Self::HttpStatus { code } => *code == 429 || *code >= 500,
             Self::ConnectionFailed => true,
             Self::TooLarge { .. } => false,
             Self::ParseFailed { .. } => false,
@@ -38,6 +40,7 @@ impl ClassifiedError for ExtractorError {
         match self {
             Self::HttpTimeout => "http_timeout",
             Self::HttpStatus { code } if *code >= 500 => "http_5xx",
+            Self::HttpStatus { code: 429 } => "http_429",
             Self::HttpStatus { .. } => "http_4xx",
             Self::ConnectionFailed => "connection_failed",
             Self::TooLarge { .. } => "too_large",
@@ -64,6 +67,24 @@ impl From<reqwest::Error> for ExtractorError {
             }
         } else {
             Self::ConnectionFailed
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_classification_retries_429_and_5xx_only() {
+        let status = |code| ExtractorError::HttpStatus { code };
+        assert!(status(429).is_retryable());
+        assert_eq!(status(429).error_kind(), "http_429");
+        assert!(status(500).is_retryable());
+        // 403 / 404 stay permanent so the W18 summary fallback applies.
+        for code in [400, 403, 404, 408, 410] {
+            assert!(!status(code).is_retryable(), "{code}");
+            assert_eq!(status(code).error_kind(), "http_4xx");
         }
     }
 }

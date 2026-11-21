@@ -31,7 +31,8 @@ impl ClassifiedError for FeedError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::HttpTimeout | Self::ConnectionFailed { .. } => true,
-            Self::HttpStatus { code } => (500..600).contains(code),
+            // 429 Too Many Requests is rate limiting: retry after the cooldown.
+            Self::HttpStatus { code } => *code == 429 || (500..600).contains(code),
             Self::ParseFailed { .. } | Self::TooLarge { .. } | Self::InvalidUrl { .. } => false,
         }
     }
@@ -40,6 +41,7 @@ impl ClassifiedError for FeedError {
         match self {
             Self::HttpTimeout => "http_timeout",
             Self::HttpStatus { code } if (500..600).contains(code) => "http_5xx",
+            Self::HttpStatus { code: 429 } => "http_429",
             Self::HttpStatus { .. } => "http_4xx",
             Self::ConnectionFailed { .. } => "connection_failed",
             Self::ParseFailed { .. } => "feed_parse",
@@ -74,6 +76,23 @@ impl From<reqwest::Error> for FeedError {
 
         Self::ConnectionFailed {
             source: error.without_url().to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_classification_retries_429_and_5xx_only() {
+        let status = |code| FeedError::HttpStatus { code };
+        assert!(status(429).is_retryable());
+        assert_eq!(status(429).error_kind(), "http_429");
+        assert!(status(503).is_retryable());
+        for code in [400, 401, 403, 404, 408, 410] {
+            assert!(!status(code).is_retryable(), "{code}");
+            assert_eq!(status(code).error_kind(), "http_4xx");
         }
     }
 }

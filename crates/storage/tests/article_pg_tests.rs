@@ -12,7 +12,9 @@
 mod common;
 
 use common::pg::{PgTestContext, make_pg_test_pool};
-use rss_ai_news_storage::{ArticleRepo, ArticleRepository, NewArticle, UpdateContentHashOutcome};
+use rss_ai_news_storage::{
+    ArticleRepo, ArticleRepository, EntryPersistOutcome, NewArticle, UpdateContentHashOutcome,
+};
 use time::OffsetDateTime;
 
 async fn seed_feed_source(ctx: &PgTestContext) -> (i64, i64) {
@@ -239,5 +241,91 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+async fn claim_entry(ctx: &PgTestContext, source_id: i64, uid: &str) -> i64 {
+    let id = seed_feed_entry(ctx, source_id, uid).await;
+    sqlx::query("UPDATE feed_entries SET state = 'fetching', lease_owner = 'w' WHERE id = $1")
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    id
+}
+
+async fn entry_state(ctx: &PgTestContext, id: i64) -> (String, Option<i64>) {
+    sqlx::query_as("SELECT state, article_id FROM feed_entries WHERE id = $1")
+        .bind(id)
+        .fetch_one(ctx.pg_pool())
+        .await
+        .unwrap()
+}
+
+/// A12 (PG): insert-or-get + owner-guarded entry advance in one transaction:
+/// a lost lease rolls back the insert, the entry's own article counts as
+/// persisted, another entry's article is a dedup.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_persist_for_entry_is_atomic_and_recognises_own_article() {
+    let ctx = make_pg_test_pool().await;
+    let (_, source_id) = seed_feed_source(&ctx).await;
+    let extractor_id = seed_extractor_rule(&ctx, "ext-persist").await;
+    let repo = ArticleRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+
+    let lost = claim_entry(&ctx, source_id, "persist-lost").await;
+    let outcome = repo
+        .persist_for_entry(
+            &new_article("h-lost", lost, extractor_id),
+            "other",
+            false,
+            now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, EntryPersistOutcome::LeaseLost);
+    let orphans: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM articles WHERE content_hash = 'h-lost'")
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+    assert_eq!(orphans, 0);
+
+    let own = claim_entry(&ctx, source_id, "persist-own").await;
+    let earlier = repo
+        .insert_or_get_by_content_hash(&new_article("h-own", own, extractor_id))
+        .await
+        .unwrap();
+    let outcome = repo
+        .persist_for_entry(&new_article("h-own", own, extractor_id), "w", true, now)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        EntryPersistOutcome::Persisted {
+            article_id: earlier.article_id,
+            newly_created: false
+        }
+    );
+    assert_eq!(
+        entry_state(&ctx, own).await,
+        ("fallback_persisted".to_string(), Some(earlier.article_id))
+    );
+
+    let dup = claim_entry(&ctx, source_id, "persist-dup").await;
+    let outcome = repo
+        .persist_for_entry(&new_article("h-own", dup, extractor_id), "w", false, now)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        EntryPersistOutcome::DedupSkipped {
+            article_id: earlier.article_id
+        }
+    );
+    assert_eq!(
+        entry_state(&ctx, dup).await,
+        ("dedup_skipped".to_string(), Some(earlier.article_id))
     );
 }

@@ -75,7 +75,7 @@ trait ClassifiedError {
 | 失败发生位置 | 持久化字段 | 状态变化 |
 |---|---|---|
 | feed 抓取 | `feed_entries.last_error*` | `Fetching → PendingFetch`（retry）/ `Failed`（exhausted） |
-| 正文提取 | `feed_entries.last_error*` | 同上；fallback 命中时转 `FallbackPersisted` |
+| 正文提取 | `feed_entries.last_error*` | 同上；fallback 命中时转 `FallbackPersisted`；article 写入 / 摘要回读的存储错误按 `StorageError::is_retryable()` 同样分流（不再一律 `Failed`） |
 | AI 调用 | `article_ai_results.last_error*` | `Running → Pending`（retry）/ `PermanentFailed`（exhausted） |
 | 本地落盘 | `publish_records.last_error*` | retryable 回原态重试 / 耗尽或永久 → `Failed` |
 | GitHub 推送 | `publish_records.last_error*` | 422 → 重试一次后 `Failed`；其它直接 `Failed` |
@@ -144,7 +144,12 @@ CLI 退出码由 [`crates/cli/src/exit_code.rs`](../../crates/cli/src/exit_code.
   ai-run 与 publish 仍在已入库的数据上执行（例如此前已 `stored_local` 的报告照常推进），退出码仍反映 ingest
   失败。只有阶段自身的前提不满足才跳过该阶段：数据库无法打开 / 迁移时（记在 `ingest` 阶段名下）所有阶段都跳过，
   `ai_run_skip_reason = "database unavailable"`。
-- `ingest` 的 source 状态写回（成功、304、失败记录）失败同样计为存储失败，该 source 不再报告成功。
+- `ingest` 的 source 状态写回（成功、304、失败记录）失败同样计为存储失败，该 source 不再报告成功；写回命中 0 行
+  （`Ok(false)`）与 upsert 后回读不到行都按 `StorageError::Integrity`（`integrity`）计为该 source 的存储失败，不 panic。
+- `ingest` 的 extract 阶段：单篇条目路径上的自身存储失败（article 写入、摘要回读、release 本身报错）计入
+  `extract_storage_failed` → exit 1（即使该行已按 retryable 冷却回队）。owner guard 落空（lease 已被并发 run
+  reclaim）计入 `extract_lease_lost`，只报告不改变退出码；两者都不再报告为 `permanent_failed` / `retryable_failed`，
+  也不写 `entry_permanent_failed` 事件——只有已落库的转移才被报告（2026-11-21）。
 
 特殊行为：
 - `migrate run` / `validate-config` / 任何 `ConfigError` → exit 78（CI / Docker scheduler 据此区分"配置问题"vs"业务问题"）

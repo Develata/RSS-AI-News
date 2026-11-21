@@ -85,6 +85,20 @@ pub trait FeedSourceRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError>;
 
+    /// A14：categories reindex 的配置同步。lease 语义同
+    /// [`Self::upsert_with_lease_guard`]，但已存在的行只写配置列
+    /// （display_name / feed_url / feed_kind / status / priority / config_version）；
+    /// etag / last_modified / consecutive_failures / last_error* 仅在 endpoint
+    /// （feed_url 或 feed_kind）变化时清空，与 ingest 的 needs_sync 规则一致；
+    /// last_fetched_at / last_success_at 始终保留。新行按 `src` 原样插入。
+    async fn upsert_config_with_lease_guard(
+        &self,
+        src: &FeedSource,
+        job_id: i64,
+        owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<LeaseGuardedWriteOutcome, StorageError>;
+
     /// F15-fix7：同上，封装 `mark_archived`。`status='archived'` 是终态，
     /// 已是 archived 的行返 `NoOp`（与原 `mark_archived` 返 `false` 等价），
     /// 让 runtime 把 `summary.archived` 仅在 `Applied` 时递增。
@@ -96,6 +110,16 @@ pub trait FeedSourceRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError>;
     async fn update_after_fetch_success(
+        &self,
+        id: i64,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        fetched_at: OffsetDateTime,
+        success_at: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+    /// 304 write-back: like [`Self::update_after_fetch_success`], but `None`
+    /// validators keep the stored values instead of clearing them.
+    async fn update_after_not_modified(
         &self,
         id: i64,
         etag: Option<&str>,

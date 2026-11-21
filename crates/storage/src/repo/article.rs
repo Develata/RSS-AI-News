@@ -6,6 +6,10 @@ use time::OffsetDateTime;
 
 use crate::{StorageError, StoragePool, classify_db_error};
 
+use super::feed_entry_sql::{
+    RELEASE_DEDUP_SKIPPED_SQL, RELEASE_FALLBACK_PERSISTED_SQL, RELEASE_SUCCESS_SQL,
+};
+
 #[derive(Debug, Clone)]
 pub struct NewArticle {
     pub content_hash: String,
@@ -24,6 +28,28 @@ pub struct NewArticle {
 pub struct ArticleInsertOutcome {
     pub article_id: i64,
     pub newly_created: bool,
+}
+
+/// Result of [`ArticleRepository::persist_for_entry`]. Every variant except
+/// `LeaseLost` means the article row and the feed entry's state committed
+/// together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryPersistOutcome {
+    /// The entry now points at its own article and is `persisted` /
+    /// `fallback_persisted`. `newly_created = false` is a self-hit: the
+    /// article with this content hash was created from this same entry by an
+    /// earlier attempt (e.g. a version that committed the article before the
+    /// entry release and then crashed); it counts as persisted, not as a dup.
+    Persisted {
+        article_id: i64,
+        newly_created: bool,
+    },
+    /// Another entry's article has this content hash; the entry is
+    /// `dedup_skipped` and points at that article.
+    DedupSkipped { article_id: i64 },
+    /// The owner-guarded entry update matched no row (lease reclaimed by
+    /// another run). The transaction was rolled back: no article was created.
+    LeaseLost,
 }
 
 /// Identifier-only projection: AI content is loaded after the task is claimed.
@@ -65,6 +91,22 @@ pub trait ArticleRepository: Send + Sync {
         &self,
         article: &NewArticle,
     ) -> Result<ArticleInsertOutcome, StorageError>;
+
+    /// One transaction for the extract invariant "an article exists ⇔ its
+    /// entry advanced": insert-or-get the article by content hash, then move
+    /// entry `article.origin_feed_entry_id` (guarded by `lease_owner = owner`)
+    /// to `persisted` / `fallback_persisted` (own article, `fallback` chooses)
+    /// or `dedup_skipped` (another entry's article, decision `hash_dup`).
+    /// If the guard matches no row everything is rolled back (`LeaseLost`).
+    ///
+    /// Precondition: the caller claimed the entry with `owner`.
+    async fn persist_for_entry(
+        &self,
+        article: &NewArticle,
+        owner: &str,
+        fallback: bool,
+        now: OffsetDateTime,
+    ) -> Result<EntryPersistOutcome, StorageError>;
 
     async fn find_by_id(&self, id: i64) -> Result<Option<Article>, StorageError>;
 
@@ -148,6 +190,9 @@ RETURNING id
 const SELECT_ARTICLE_ID_BY_CONTENT_HASH_SQL: &str =
     "SELECT id FROM articles WHERE content_hash = $1";
 
+const SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL: &str =
+    "SELECT id, origin_feed_entry_id FROM articles WHERE content_hash = $1";
+
 const SELECT_ARTICLE_BY_ID_SQL: &str = r#"
 SELECT id, content_hash, canonical_link, title, body_text,
        body_html_artifact_id, extractor_strategy, extractor_version,
@@ -230,6 +275,23 @@ impl ArticleRepository for ArticleRepo {
         match &self.pool {
             StoragePool::Sqlite(p) => sqlite_insert_or_get_by_content_hash(p, article).await,
             StoragePool::Postgres(p) => pg_insert_or_get_by_content_hash(p, article).await,
+        }
+    }
+
+    async fn persist_for_entry(
+        &self,
+        article: &NewArticle,
+        owner: &str,
+        fallback: bool,
+        now: OffsetDateTime,
+    ) -> Result<EntryPersistOutcome, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_persist_for_entry(p, article, owner, fallback, now).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_persist_for_entry(p, article, owner, fallback, now).await
+            }
         }
     }
 
@@ -380,6 +442,125 @@ async fn sqlite_insert_or_get_by_content_hash(
     })
 }
 
+/// How [`ArticleRepository::persist_for_entry`] advances the entry, decided
+/// from the insert-or-get result inside the transaction.
+enum EntryAdvance {
+    Own {
+        article_id: i64,
+        newly_created: bool,
+    },
+    Dedup {
+        article_id: i64,
+    },
+}
+
+impl EntryAdvance {
+    fn decide(
+        inserted_id: Option<i64>,
+        existing: Option<(i64, i64)>,
+        entry_id: i64,
+    ) -> Result<Self, StorageError> {
+        match (inserted_id, existing) {
+            (Some(article_id), _) => Ok(Self::Own {
+                article_id,
+                newly_created: true,
+            }),
+            (None, Some((article_id, origin))) if origin == entry_id => Ok(Self::Own {
+                article_id,
+                newly_created: false,
+            }),
+            (None, Some((article_id, _))) => Ok(Self::Dedup { article_id }),
+            // ON CONFLICT skipped the insert, so a row with this hash exists in
+            // this transaction's view; not finding it is a broken invariant.
+            (None, None) => Err(StorageError::Integrity {
+                table: "articles".to_string(),
+                reference: "content_hash conflict without a visible row".to_string(),
+            }),
+        }
+    }
+
+    fn outcome(&self) -> EntryPersistOutcome {
+        match *self {
+            Self::Own {
+                article_id,
+                newly_created,
+            } => EntryPersistOutcome::Persisted {
+                article_id,
+                newly_created,
+            },
+            Self::Dedup { article_id } => EntryPersistOutcome::DedupSkipped { article_id },
+        }
+    }
+}
+
+async fn sqlite_persist_for_entry(
+    pool: &SqlitePool,
+    article: &NewArticle,
+    owner: &str,
+    fallback: bool,
+    now: OffsetDateTime,
+) -> Result<EntryPersistOutcome, StorageError> {
+    let entry_id = article.origin_feed_entry_id;
+    // The INSERT is the first statement, so the deferred transaction takes the
+    // write lock immediately (no read-then-upgrade busy window).
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_ARTICLE_ON_CONFLICT_SQL)
+        .bind(&article.content_hash)
+        .bind(&article.canonical_link)
+        .bind(&article.title)
+        .bind(&article.body_text)
+        .bind(article.body_html_artifact_id)
+        .bind(&article.extractor_strategy)
+        .bind(article.extractor_version)
+        .bind(&article.content_quality)
+        .bind(article.word_count)
+        .bind(entry_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
+    let existing = match inserted_id {
+        Some(_) => None,
+        None => sqlx::query_as::<_, (i64, i64)>(SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL)
+            .bind(&article.content_hash)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from)?,
+    };
+    let advance = EntryAdvance::decide(inserted_id, existing, entry_id)?;
+    let updated = match advance {
+        EntryAdvance::Own { article_id, .. } => {
+            sqlx::query(if fallback {
+                RELEASE_FALLBACK_PERSISTED_SQL
+            } else {
+                RELEASE_SUCCESS_SQL
+            })
+            .bind(article_id)
+            .bind(now)
+            .bind(entry_id)
+            .bind(owner)
+            .execute(&mut *tx)
+            .await
+        }
+        EntryAdvance::Dedup { article_id } => {
+            sqlx::query(RELEASE_DEDUP_SKIPPED_SQL)
+                .bind("hash_dup")
+                .bind(article_id)
+                .bind(now)
+                .bind(entry_id)
+                .bind(owner)
+                .execute(&mut *tx)
+                .await
+        }
+    }
+    .map_err(StorageError::from)?;
+    if updated.rows_affected() != 1 {
+        tx.rollback().await.map_err(StorageError::from)?;
+        return Ok(EntryPersistOutcome::LeaseLost);
+    }
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(advance.outcome())
+}
+
 async fn sqlite_find_by_id(pool: &SqlitePool, id: i64) -> Result<Option<Article>, StorageError> {
     let row = sqlx::query_as::<_, ArticleRow>(SELECT_ARTICLE_BY_ID_SQL)
         .bind(id)
@@ -528,6 +709,75 @@ async fn pg_insert_or_get_by_content_hash(
         article_id,
         newly_created,
     })
+}
+
+async fn pg_persist_for_entry(
+    pool: &PgPool,
+    article: &NewArticle,
+    owner: &str,
+    fallback: bool,
+    now: OffsetDateTime,
+) -> Result<EntryPersistOutcome, StorageError> {
+    let entry_id = article.origin_feed_entry_id;
+    // READ COMMITTED: a concurrent insert of the same hash makes this INSERT
+    // wait for it; after its commit ON CONFLICT skips and the SELECT (a new
+    // statement snapshot) sees the committed row.
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_ARTICLE_ON_CONFLICT_SQL)
+        .bind(&article.content_hash)
+        .bind(&article.canonical_link)
+        .bind(&article.title)
+        .bind(&article.body_text)
+        .bind(article.body_html_artifact_id)
+        .bind(&article.extractor_strategy)
+        .bind(article.extractor_version)
+        .bind(&article.content_quality)
+        .bind(article.word_count)
+        .bind(entry_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
+    let existing = match inserted_id {
+        Some(_) => None,
+        None => sqlx::query_as::<_, (i64, i64)>(SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL)
+            .bind(&article.content_hash)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from)?,
+    };
+    let advance = EntryAdvance::decide(inserted_id, existing, entry_id)?;
+    let updated = match advance {
+        EntryAdvance::Own { article_id, .. } => {
+            sqlx::query(if fallback {
+                RELEASE_FALLBACK_PERSISTED_SQL
+            } else {
+                RELEASE_SUCCESS_SQL
+            })
+            .bind(article_id)
+            .bind(now)
+            .bind(entry_id)
+            .bind(owner)
+            .execute(&mut *tx)
+            .await
+        }
+        EntryAdvance::Dedup { article_id } => {
+            sqlx::query(RELEASE_DEDUP_SKIPPED_SQL)
+                .bind("hash_dup")
+                .bind(article_id)
+                .bind(now)
+                .bind(entry_id)
+                .bind(owner)
+                .execute(&mut *tx)
+                .await
+        }
+    }
+    .map_err(StorageError::from)?;
+    if updated.rows_affected() != 1 {
+        tx.rollback().await.map_err(StorageError::from)?;
+        return Ok(EntryPersistOutcome::LeaseLost);
+    }
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(advance.outcome())
 }
 
 async fn pg_find_by_id(pool: &PgPool, id: i64) -> Result<Option<Article>, StorageError> {

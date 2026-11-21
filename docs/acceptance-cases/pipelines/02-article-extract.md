@@ -13,7 +13,10 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 ### 命中条件（success path）
 
 - 抓取成功 + Readability 抽出正文 → 写 `articles`，state=`Persisted`
-- 同 content_hash 已存在 → 跳过插入，FeedEntry → `DedupSkipped`（第三层去重）
+- 非 UTF-8 页面（BOM / `Content-Type` charset / `<meta>` 声明）先解码再提取；未声明且非 UTF-8 → `ParseFailed`
+- 同 content_hash 已存在 → 跳过插入，FeedEntry → `DedupSkipped`（第三层去重）；若该 article 源自本条目
+  （上次尝试在 release 前中断），FeedEntry → `Persisted`，不算去重
+- article 写入与 entry 推进同一事务提交；lease 落空时回滚，不留孤儿 article
 - Readability 失败但 summary 非空 → SummaryFallback 兜底写入，state=`FallbackPersisted`
 - 抓取**永久失败**（4xx/too_large/invalid_url）但 summary 非空 → SummaryFallback
   兜底写入（无 html artifact），state=`FallbackPersisted`（W18，[../../plan/17-extract-fetch-fallback.md](../../plan/17-extract-fetch-fallback.md)）
@@ -22,7 +25,7 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 
 ### 失败条件（failure path）
 
-- 5xx / 超时且重试预算未尽 → 状态保持 `PendingFetch`，lease 释放、写入 `next_attempt_at`
+- 5xx / 429 / 超时且重试预算未尽 → 状态保持 `PendingFetch`，lease 释放、写入 `next_attempt_at`
   冷却；冷却截止前不被 claim，之后的 run 可重试（**即使 summary 可用也不提前降级**，W18）
 - 5xx / 超时发生在预算内最后一次尝试（`attempt_count == max_attempts`）→ 直接转 `Failed`
 - retryable 失败不终止本 run：同 run 内继续领取其他可领取行，直到队列为空或达到
@@ -30,6 +33,8 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
   release 落空的情形），而 run 期间才到期、本 run 未尝试过的行可以被领取
 - 只剩冷却中的行 → claim 为空，run 立即结束（不空转）
 - 4xx 且 summary 为空 → state=`Failed`，不计入下一轮 claim
+- article 写入或摘要回读遇到可重试存储错误 → 走 retryable 冷却 release（预算内回 `PendingFetch`，
+  最后一次尝试折叠 `Failed`），`last_error_kind` 为真实存储错误；不可重试存储错误 → `Failed`
 - 策略链 + fallback 都失败 → state=`Failed`，artifact 仍保留（按 policy）
 - content_hash 在 articles 表已存在但 link 不同 → repo 层报 `ArticleConflict`（用 `dedup_tests::articles_content_hash_duplicate_is_conflict` 兜底）
 
@@ -46,6 +51,32 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `extract_fetch_403_with_summary_persists_fallback` | 同上 | W18 抓取失败兜底 |
 | `extract_fetch_403_without_summary_fails_permanent` | 同上 | W18 无摘要仍 Failed |
 | `extract_fetch_5xx_with_summary_stays_retryable` | 同上 | W18 可重试不降级 |
+| `extract_fetch_429_with_summary_stays_retryable` | 同上 | 429 可重试、不降级（plan/17 §7） |
+| `status_classification_retries_429_and_5xx_only` | `crates/extractor/src/error.rs`、`crates/feed/src/error.rs`（单元测试） | 仅 429 / 5xx 可重试；403/404/408 不变 |
+| `transient_article_insert_failure_is_retried_with_cooldown` | `crates/runtime/tests/extract_storage_failure_tests.rs` | 瞬时写入失败回队 + 冷却 |
+| `transient_article_insert_failure_on_last_attempt_folds_to_failed` | 同上 | 最后一次尝试折叠 failed |
+| `non_retryable_article_insert_failure_is_permanent` | 同上 | 不可重试存储错误终态 |
+| `transient_summary_read_failure_after_403_is_not_terminal` | 同上 | 摘要回读瞬时失败不终态（抓取 403） |
+| `transient_summary_read_failure_after_parse_failure_is_not_terminal` | 同上 | 摘要回读瞬时失败不终态（解析失败） |
+| `permanent_release_that_misses_reports_lease_lost_without_event` | `crates/runtime/tests/extract_tests.rs` | 永久 release 落空报 LeaseLost、无事件 |
+| `success_release_that_misses_reports_lease_lost` | 同上 | 成功 release 落空不报 Persisted |
+| `failed_permanent_release_reports_release_failed` | `crates/runtime/tests/extract_storage_failure_tests.rs` | release 报错为 ReleaseFailed + storage_failed |
+| `extract_storage_failures_fail_the_run_but_lost_leases_do_not` | `crates/cli/src/commands/ingest.rs`（单元测试） | extract 存储失败进入退出码 |
+| `category_scoped_extract_leaves_other_category_backlog_untouched` | `crates/runtime/tests/extract_tests.rs` | `ingest -C` 不碰其他分类积压 |
+| `claim_is_scoped_to_category_and_active_sources` | `crates/storage/tests/feed_entry_claim_scope_tests.rs` | 分类 + active 源过滤（SQLite） |
+| `unscoped_claim_method_keeps_its_contract` | 同上 | 无分类 claim 仍排除归档源 |
+| `pg_claim_is_scoped_to_category_and_active_sources` | `crates/storage/tests/feed_entry_pg_tests.rs` | 同上（PG，需 docker） |
+| `extract_lease_budget_over_the_lease_fails_fast` | `crates/cli/tests/ingest_cmd_tests.rs` | 批次可能超出 lease → 启动即配置错误；`--skip-fetch` 不校验 |
+| `lease_budget_counts_waves_times_timeout_plus_margin` | `crates/runtime/src/flows/extract.rs`（单元测试） | 预算公式 |
+| `retry_that_finds_its_own_article_is_persisted_not_dedup` | `crates/runtime/tests/extract_tests.rs` | 自命中记 persisted |
+| `new_article_and_entry_advance_commit_together` | `crates/storage/tests/article_entry_persist_tests.rs` | 同事务提交（SQLite） |
+| `lost_lease_rolls_back_the_article_insert` | 同上 | lease 落空回滚 article |
+| `own_article_from_an_earlier_attempt_counts_as_persisted_not_dedup` | 同上 | 自命中 |
+| `another_entrys_article_is_a_dedup` | 同上 | 他人 article 仍去重 |
+| `fallback_flag_selects_fallback_persisted` | 同上 | fallback 终态 |
+| `pg_persist_for_entry_is_atomic_and_recognises_own_article` | `crates/storage/tests/article_pg_tests.rs` | 同上（PG，需 docker） |
+| `both_write_paths_stamp_the_assembled_extractor_version` | `crates/runtime/tests/extract_tests.rs` | 两条写入路径写装配的 extractor 版本 |
+| `extractor_version_resolves_to_an_extractor_kind_row` | `crates/cli/tests/context_factory_tests.rs` | 装配期解析 `kind='extractor'` 行，幂等 |
 | `extract_writes_html_artifact_before_strategy` | 同上 | artifact 顺序 |
 | `max_batches_caps_loop_and_reports_reached_flag` | 同上 | 限批生效 |
 | `max_batches_zero_means_unlimited_until_queue_drained` | 同上 | 0 = 不限 |
@@ -65,6 +96,18 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `readability_extracts_simple_article` | `crates/extractor/tests/strategy_tests.rs` | 策略层 happy |
 | `readability_returns_content_too_short_for_short_article` | 同上 | 太短拒收 |
 | `readability_returns_parse_failed_for_no_content` | 同上 | 无正文 |
+| `gbk_page_declared_by_header_is_decoded_before_readability` | `crates/runtime/tests/extract_tests.rs` | 先解码再提取，artifact 保留原始字节 |
+| `gbk_page_declared_only_by_the_content_type_header_decodes` | `crates/extractor/tests/charset_tests.rs` | 仅响应头声明 GBK |
+| `gbk_page_declared_only_by_meta_decodes` | 同上 | 仅 `<meta>` 声明 |
+| `http_equiv_big5_and_shift_jis_pages_decode` | 同上 | Big5 / Shift_JIS |
+| `undeclared_invalid_utf8_still_fails_without_guessing` | 同上 | 未声明的非 UTF-8 仍 `ParseFailed` |
+| `declared_charset_with_malformed_bytes_is_rejected_not_replaced` | 同上 | 严格解码，不插替换字符 |
+| `readability_grades_a_2340_char_chinese_article_high` | 同上 | 中文长文按 CJK 计词为 High |
+| `content_too_short_reports_characters_not_bytes` | 同上 | `ContentTooShort.chars` 为字符数 |
+| `summary_fallback_counts_cjk_words` | 同上 | fallback 字数同一规则 |
+| `cjk_boundaries_around_medium_and_high` | `crates/extractor/src/strategy.rs`（单元测试） | 199/200、599/600 汉字边界 |
+| `mixed_text_counts_latin_runs_and_halves_cjk` | 同上 | 中英混排、假名、谚文 |
+| `non_cjk_text_counts_like_split_whitespace` | 同上 | 非 CJK 文本计数不变 |
 | `summary_fallback_uses_summary_raw_when_present` | 同上 | fallback 策略 |
 | `summary_fallback_returns_none_when_summary_empty_or_only_html_tags` | 同上 | fallback 边界 |
 | `articles_content_hash_duplicate_is_conflict` | `crates/storage/tests/dedup_tests.rs` | repo 层冲突 |

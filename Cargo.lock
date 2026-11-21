@@ -2929,6 +2929,7 @@ name = "rss-ai-news-extractor"
 version = "0.10.4"
 dependencies = [
  "async-trait",
+ "encoding_rs",
  "hex",
  "readability-rust",
  "reqwest 0.12.28",

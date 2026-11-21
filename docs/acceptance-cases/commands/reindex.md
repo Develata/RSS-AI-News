@@ -24,6 +24,9 @@
 - `content_hash`：扫描所有 article 重算；命中 unique conflict 时计入 conflict 计数（不写入）
 - `categories`：扫描 sources 增量插入新行、归档已不在 config 的旧行；幂等（第二次执行归档=0）
 - categories reindex 把 active `config` kind rule_version_id 写入新插入 feed_sources 的 `config_rule_version_id`
+- categories reindex 对已存在的 source 只写配置列（display_name / feed_url / feed_kind / status / priority /
+  config_version）；etag / last_modified / consecutive_failures / last_error* 仅在 feed_url 或 feed_kind 变化时清空
+  （与 ingest 配置同步规则一致），last_fetched_at / last_success_at 始终保留（2026-11-21）
 - 无并发写入的静态数据库中，`--dry-run` 与 real run 计数一致；dry-run 的 **reindex 流程自身**不写任何业务表。
   2026-09-10 起 CLI 启动也严格只读：不创建数据库、不迁移、不轮换 config、不写 run_events。
   全局或子命令 --dry-run 均生效，abort 与 dry-run 的组合在访问配置/数据库前拒绝。
@@ -69,6 +72,10 @@
 | `reindex_categories_second_run_archives_nothing` | 同上 | 幂等 |
 | `reindex_categories_writes_config_kind_id_into_feed_sources_config_version` | 同上 | config rule_version 绑定 |
 | `reindex_link_hash_finalizes_reindex_jobs_row` | 同上 | jobs 终态 |
+| `reindex_categories_keeps_fetch_runtime_state_of_unchanged_sources` | `crates/runtime/tests/reindex_tests.rs` | 不覆盖抓取运行态 |
+| `config_upsert_keeps_runtime_state_unless_the_endpoint_changes` | `crates/storage/tests/feed_source_lease_guard_tests.rs` | 仅配置列；endpoint 变化才清运行态（SQLite） |
+| `config_upsert_without_lease_writes_nothing` | 同上 | lease 失去不写 |
+| `pg_config_upsert_keeps_runtime_state_unless_the_endpoint_changes` | `crates/storage/tests/feed_source_pg_tests.rs` | 同上（PG，需 docker） |
 | `reindex_categories_finalizes_reindex_jobs_row_without_checkpoint` | 同上 | 无 checkpoint 终态 |
 | `reindex_promotes_rule_version_to_active_on_completion` | 同上 | active 切换 |
 | `reindex_demotes_previous_active_rule_version_on_second_run` | 同上 | 旧 active 降级 |

@@ -719,7 +719,7 @@ max_body_bytes = 1048576
 min_body_chars = 1
 
 [lease]
-fetch_duration_seconds = 30
+fetch_duration_seconds = 600
 ai_duration_seconds = 30
 publish_duration_seconds = 30
 reclaim_interval_seconds = 30

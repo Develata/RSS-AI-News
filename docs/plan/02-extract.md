@@ -8,7 +8,7 @@ pending_fetch (claim+lease)
     → 抓取永久失败（4xx/too_large/invalid_url）→ summary fallback
       → 摘要可用 → fallback_persisted（W18，见 ./17-extract-fetch-fallback.md）
       → 无摘要   → failed
-    → 抓取可重试失败（超时/5xx）→ 回 pending_fetch + next_attempt_at 冷却（W15 预算路径，§5.3）
+    → 抓取可重试失败（超时/5xx/429）→ 回 pending_fetch + next_attempt_at 冷却（W15 预算路径，§5.3）
   → extracting (策略链提取)
     → 第三层 content_hash 去重
     → 成功 → INSERT articles + feed_entries.state='persisted'
@@ -41,6 +41,18 @@ payload 上限来自 `extractor.max_body_bytes`；先检查 Content-Length，再
 不单独发 HEAD，也不强制 Content-Type 白名单；非 HTML 内容由策略解析失败路径处理。
 User-Agent 由 fetcher 构造器设置。
 
+### 2.2 字符集解码（2026-11-21）
+
+fetcher 把响应 `Content-Type` 原样放进 `RawHtmlFetch.content_type`。extract flow 在策略链前调用
+`rss_ai_news_extractor::decode_html(bytes, content_type)`，按 WHATWG 编码嗅探顺序（简化）选候选：
+BOM → `Content-Type` 的 `charset` 参数 → 前 1024 字节内的 `<meta charset>` /
+`<meta http-equiv="Content-Type" content="…charset=…">`（跳过注释；meta 声明的 UTF-16 视为 UTF-8）→ UTF-8。
+每个候选**严格**解码（`encoding_rs`，不插 U+FFFD），失败则试下一个；全部失败为
+`ParseFailed`（走 fallback / `failed`）。与浏览器不同，不按 locale 猜 windows-1252：未声明且非
+UTF-8 的字节维持旧行为失败，避免发布乱码。策略收到的是 UTF-8；`raw_artifacts` 保留原始字节。
+`ReadabilityStrategy` 收到非 UTF-8 字节时（如 replay 传入原始 artifact）按 BOM / `<meta>` 自行解码；
+只由响应头声明字符集的页面，其 artifact 不含 Content-Type，replay 无法还原该声明。
+
 ## 3. 策略链
 
 `ContentStrategy` trait 在 [`crates/extractor/src/strategy.rs`](../../crates/extractor/src/strategy.rs) 定义。
@@ -69,17 +81,41 @@ Readability 本身也会拒绝空正文；不满足配置最小字数时继续�
 
 quality 由 strategy 自己决定。AI 阶段会跳过 `Fallback` 行（避免分析 summary），见 [./03-ai.md](./03-ai.md)。
 
+字数（`word_count`，Readability 分级与 `articles.word_count` 共用，`strategy::word_count`）：
+`High` 需 ≥ 300 词且有标题，`Medium` 需 ≥ 100 词，不足为 `ContentTooShort`（其 `chars`
+字段报告字符数而非字节数）。不含 CJK 字符的空白分隔 token 记 1 词（与旧
+`split_whitespace` 计数完全一致）；含 CJK 的 token 内，每段含字母或数字的非 CJK 连续片段记
+1 词，CJK 字符（汉字、平假名、片假名、谚文）合计 `⌊n / 2⌋` 词。中英平行文本约 1.6 个汉字对应
+1 个英文词，取 2 偏保守、并向下取整，故 200 个汉字起为 `Medium`、600 个起为 `High`
+（2026-11-21，修复中文长文被判过短）。韩文本身以空格分词，此规则对韩文约高估 1.5 倍。
+存量 article 的 `word_count` 不回写；`replay --diff` 对旧 CJK 文章会显示字数差异。
+
 ## 4. 第三层去重：content_hash
 
 正文提取使用 SHA-256 计算 content_hash，storage::insert_or_get_by_content_hash
 依靠数据库唯一约束原子插入或返回已有 article，禁止 SELECT-exists 再 INSERT。
 命中后 feed_entry 进入 dedup_skipped 并关联已有 article；schema/claim 状态由 storage 负责。
 
+原子性（2026-11-21）：extract 调 `ArticleRepository::persist_for_entry`，在**一个事务**内完成
+insert-or-get article 与 owner-guarded 的 entry 推进（persisted / fallback_persisted / dedup_skipped）；
+owner guard 落空则整体回滚（不留孤儿 article），报 `LeaseLost`。命中的已有 article 若
+`origin_feed_entry_id` 就是本条目（旧版本在 article 提交后、release 前崩溃留下的），记为本条目的
+`persisted`（`newly_created = false`），不再误判为 `dedup_skipped` 指向自己。
+
 命中时已有 article 的字段保持不变（先写者为准，`ON CONFLICT DO NOTHING`）：这次提取新写入的 html artifact
 **不会**补到已有 article 的 `body_html_artifact_id`。已有 article 可能本来就没有 artifact（`on_failure` 下提取成功、
 `off`、采样未命中、写入失败，或被 TTL 清理后置 NULL），即便如此也不补挂。新 artifact 以 feed entry id 为 key，
 写入成功且未被清理时，`replay --kind html --key <feed_entry_id>` 仍可回放，`--diff` 经 `feed_entries.article_id`
 找到对应 article（R3 审查遗留，2026-11-16 定为既定语义）。
+
+### 4.0 extractor_version（2026-11-21）
+
+`articles.extractor_version` 引用 `rule_versions` 中 `kind='extractor'` 的行：CLI 装配 extract 时
+（`context_factory::resolve_extractor_version`）经 `active_rule_or_register("extractor", EXTRACTOR_RULE_TAG, …)`
+取 active 行，首次使用时登记（tag 见 `rss_ai_news_extractor::EXTRACTOR_RULE_TAG`）。此前两条写入路径写字面量
+`1`，在新库上指向 `kind='config'` 行。历史 article 行**不回写**，其 `extractor_version` 仍为旧值，审计时需按
+`rule_versions.kind` 区分。改变提取规则时提升 tag；同 kind 的 active 轮换未实现（与 config 的 sha 轮换不同），
+已有 active extractor 行时新 tag 不会自动生效。
 
 ### 4.1 与一/二层的区别
 
@@ -98,6 +134,8 @@ loop:
      WHERE state='pending_fetch' AND (lease_expires_at IS NULL OR lease_expires_at < now)
        AND (next_attempt_at IS NULL OR next_attempt_at <= now)
        AND id NOT IN excluded
+       AND source_id IN (SELECT id FROM feed_sources
+                         WHERE status='active' AND (:category IS NULL OR category_key=:category))
      ORDER BY discovered_at ASC LIMIT N RETURNING *
   2. 对每行：
      a. HTTP GET → raw HTML（超时/大小边界）
@@ -105,13 +143,17 @@ loop:
      c. `always` / `sampled`：写入 raw_artifact
      d. 执行配置的提取策略；`on_failure` 且无策略成功时才写 raw_artifact
      e. 策略链尝试 → ExtractedArticle 或 fallback
-     f. 计算 content_hash，原子 insert-or-get
-     g. 命中 → feed_entries='dedup_skipped'，关联 article_id
+     f. 计算 content_hash；同一事务内 insert-or-get + owner-guarded entry 推进（§4）
+     g. 命中他人 article → feed_entries='dedup_skipped'，关联 article_id；命中自己的 → 'persisted'
      h. 未命中 → INSERT articles，feed_entries='persisted'
      i. fallback 命中 → INSERT articles (quality='fallback')，feed_entries='fallback_persisted'
   3. claim 为空 → break；达到 max_batches → break；否则继续
      （retryable 失败**不**终止循环，见 §5.3）
 ```
+
+claim 只领取 `status='active'` 源的条目；`ingest --category X` 时只领取分类 X 的条目（2026-11-21，此前
+extract 不看分类与源状态，会抓取并改写其他分类及暂停源的积压）。暂停 / 归档源的待抓条目保持
+`pending_fetch`，源恢复 active 后照常领取。
 
 ### 5.1 batch_size 与 max_batches
 
@@ -120,6 +162,13 @@ loop:
 - 触达 max_batches → INFO 日志 + exit 0（**不**视为失败）
 
 ### 5.2 并发与 lease
+
+lease 预算（2026-11-21）：一批 claim 共用一个 `lease.fetch_duration_seconds`，按
+`http.concurrent_fetches` 分 `ceil(batch / concurrent)` 波处理，每波最多 `http.timeout_seconds`
+加 `EXTRACT_WAVE_MARGIN_SECONDS = 5` 秒解析 / 写库余量。`ingest`（及 `run` 的 ingest 段）在任何 flow
+执行前校验 `ceil(batch / concurrent) × (timeout + 5) ≤ lease.fetch_duration_seconds`，超出即以配置错误失败
+（与 ai-run 的 `ai_lease_budget_seconds` 同构；`--skip-fetch` 不校验）。默认 50 / 5 / 30 s 需 350 s，
+示例配置因此从 300 改为 600；仍为 300 的既有配置在默认批大小下会被拒绝，需调大 lease 或减小 `--batch-size`。
 
 滚动 JoinSet 将存活任务数限制在 `http.concurrent_fetches.max(1)`，不为整个 claim 批次预建等待任务。
 claim 行集合仍占 O(batch size) 内存；CLI 批大小范围见 [09-cli-and-runtime](./09-cli-and-runtime.md)。
@@ -137,7 +186,8 @@ lease 字段约束见 [./08-state-machines.md](./08-state-machines.md) §2.3 + [
 - 每次 claim 按该次 claim 的时刻判断是否到期：冷却行在 `LIMIT` 前被过滤、不占批次名额；
   run 期间到期的行（包括上一 run 留下的冷却）在同一 run 内即可被领取。
 - 本 run 尝试过的行不会被本 run 再次领取：claim 排除本 run 已领取、且未确认终态成功
-  （persisted / fallback_persisted / dedup_skipped 的 release 已落库）的 id。失败行即使在
+  （persisted / fallback_persisted / dedup_skipped 的 release 已落库）的 id。release 落空报 `LeaseLost`、
+  release 报错报 `ReleaseFailed`（计入 `storage_failed`），二者都不冒充已落库的转移。失败行即使在
   run 结束前冷却到期、或 release 落空（lease 过期被并发 run reclaim，owner guard 拦下
   release，行回到 `pending_fetch` 且无冷却）、或被并发 backfill reset，也留给之后的 run。
   排除集合只随本 run 的失败数增长。跨 run 的过期 lease 恢复不变。
@@ -198,11 +248,13 @@ rss-ai-news replay --kind html --key <feed_entry_id> --diff
 | 失败点 | 错误变体 | retryable | 处理 |
 |---|---|---|---|
 | HTML fetch 超时 | `ExtractorError::HttpTimeout` | true | 回 `pending_fetch` + 冷却（§5.3） |
-| HTML 4xx | `ExtractorError::HttpStatus { 4xx }` | false | 尝试 fallback（W18）；无摘要则 `failed` |
+| HTML 429 | `ExtractorError::HttpStatus { 429 }`（`http_429`） | true | 回 `pending_fetch` + 冷却（§5.3），不消费摘要 |
+| HTML 其余 4xx | `ExtractorError::HttpStatus { 4xx }` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | HTML 5xx | `ExtractorError::HttpStatus { 5xx }` | true | 回 `pending_fetch` + 冷却（§5.3） |
 | payload 过大 | `ExtractorError::TooLarge` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | 提取失败 | `ExtractorError::ParseFailed` | false | 尝试 fallback；失败则 `failed` |
 | 内容太短 | `ExtractorError::ContentTooShort` | false | 尝试 fallback；失败则 `failed` |
+| article 写入 / 摘要回读的存储错误 | `StorageError`（`is_retryable()`） | 按分类 | 可重试（池超时、PG 40001/40P01、SQLite busy）→ 回 `pending_fetch` + 冷却，耗尽折叠 `failed`，`last_error_kind` 为真实存储错误；不可重试 → `failed`。摘要回读失败不再当作"无摘要" |
 | content_hash 命中 | 非错误 | — | 转 `dedup_skipped` |
 | fallback 成功 | 非错误 | — | 转 `fallback_persisted` |
 

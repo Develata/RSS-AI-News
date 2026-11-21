@@ -2,7 +2,7 @@
 //! and opening write storage does not require AI clients or credentials.
 //! LoadedConfig is constructed directly to avoid process-environment pollution.
 
-use rss_ai_news_cli::context_factory::open_write_storage;
+use rss_ai_news_cli::context_factory::{open_write_storage, resolve_extractor_version};
 use rss_ai_news_config::{
     AppConfig, CategoryConfig, CliOverrides, EnvConfig, LoadedConfig, SourceSecrets,
 };
@@ -258,4 +258,40 @@ api_key_env = "DEEPSEEK_API_KEY"
         cli_overrides: CliOverrides::default(),
         decision: Default::default(),
     }
+}
+
+/// A13: articles are stamped with a `kind='extractor'` rule version resolved
+/// at assembly, not the literal `1` (on a fresh database that is the
+/// `kind='config'` row). Resolution is idempotent.
+#[tokio::test]
+async fn extractor_version_resolves_to_an_extractor_kind_row() {
+    let temp = TempDir::new().expect("temp dir");
+    let loaded = loaded_config(&temp);
+    let pool = open_write_storage(&loaded).await.expect("open storage");
+
+    let first = resolve_extractor_version(&pool).await.expect("resolve");
+    let second = resolve_extractor_version(&pool)
+        .await
+        .expect("resolve again");
+    assert_eq!(first, second, "resolution reuses the active row");
+
+    let verify = verify_pool(&temp).await;
+    let (kind, tag, status): (String, String, String) =
+        sqlx::query_as("SELECT kind, version_tag, status FROM rule_versions WHERE id = ?")
+            .bind(first)
+            .fetch_one(&verify)
+            .await
+            .expect("rule row");
+    assert_eq!(kind, "extractor");
+    assert_eq!(tag, rss_ai_news_extractor::EXTRACTOR_RULE_TAG);
+    assert_eq!(status, "active");
+    let config_kind: String = sqlx::query_scalar("SELECT kind FROM rule_versions WHERE id = 1")
+        .fetch_one(&verify)
+        .await
+        .expect("row 1");
+    assert_eq!(
+        config_kind, "config",
+        "row 1 is the config row the old literal hit"
+    );
+    assert_ne!(first, 1);
 }

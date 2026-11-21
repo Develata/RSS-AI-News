@@ -221,6 +221,9 @@ pub fn extract_deps(
         retry: app.retry.clone(),
         artifact: app.artifact.clone(),
         min_body_chars: app.extractor.min_body_chars,
+        // Callers seed `seed_extractor_rule_version` first, so it is row 1;
+        // tests that need another id overwrite the field.
+        extractor_version: 1,
         html_fetcher,
         strategies,
         feed_entry_repo: Arc::new(rss_ai_news_storage::FeedEntryRepo::new(pool.clone())),
