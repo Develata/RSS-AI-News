@@ -106,9 +106,10 @@ Reindex 无预算（claim 不过滤 attempt_count，失败 `mark_failed` 直转�
 - 失败时**不**改值（已在 claim 时递增）
 - reclaim（lease 过期）时**不**改值
 - 这样保证：worker 崩溃 / lease 过期不会刷预算，预算严格反映尝试次数
-- **唯一例外**：Publish freeze 选不到候选（`SnapshotEmpty`）时退还本次 claim 计入的 1 次
-  （`release_empty_snapshot`，记录回 `pending`；两个计数都退）。空快照不是一次发布尝试，否则同日反复空跑会耗尽预算、
-  被 sweep 转 `failed`（见 [./08-state-machines.md](./08-state-machines.md) §6.1）
+- **例外（仅 Publish，均不是一次发布尝试，两个计数都退）**：freeze 选不到候选（`SnapshotEmpty`，`release_empty_snapshot`，
+  记录回 `pending`）——否则同日反复空跑会耗尽预算、被 sweep 转 `failed`；freeze 输掉文章归属竞争（`release_freeze_conflict`）；
+  按 ID freeze 遇分类不符（`category_mismatch`，同一释放，R1-P-S15）；store_local / remote 写前发现存量重复归属的败方
+  （`release_ownership_conflict`，保持阶段态，R1-P-B1）。见 [./08-state-machines.md](./08-state-machines.md) §6.1
 
 **Publish 按阶段计预算（2026-11-21，migration 0008，[ADR 0012](../adr/0012-per-stage-publish-budget-and-snapshot-ownership.md)）**：
 publish_records 有两个计数。`attempt_count` 仍按上述契约累计（审计用，成功不清零）；
