@@ -6,7 +6,7 @@
 ready_for_publish (articles)
   → freeze:  INSERT publish_records (pending → snapshot_frozen) + 拷贝候选到 publish_items
   → render:  Markdown + frontmatter（无持久副作用）
-  → store:   写 docs/news/<category>/<date>.md（本地 target）
+  → store:   写 <local_output_dir>/<path_template 渲染结果>（本地 target）
   → push:    GitHub Git Data API（atomic batch + 422 retry）
   → published_local / published_remote
 ```
@@ -77,27 +77,34 @@ render_version / 新记录，且**不会**成为 active——新库上首次 for
 
 ## 3. Markdown 渲染
 
-`crates/report/src/` 实现。**无持久副作用**，纯函数式：
+`crates/report/src/render.rs` 的 `render_markdown(publish_record_id, category_key, report_date, frozen_items,
+&RenderConfig)` 实现：**无持久副作用**的纯函数，只读冻结快照与 `[publish.template]` 四个模板
+（`path_template` / `frontmatter_template` / `report_template` / `item_template`），按 `{name}` 占位符替换。
+各模板允许的占位符由 `validate-config` 白名单校验（`crates/config/src/validate/checks.rs`），未知占位符 → 配置错误：
 
-```rust
-fn render_markdown(record: &PublishRecord, items: &[PublishItem]) -> String;
-```
+| 模板 | 允许的占位符 |
+|---|---|
+| `path_template` | `{category_key}` `{CATEGORY_KEY}` `{date}` `{YYYY}` `{MM}` `{DD}` `{YYYYMMDD}` |
+| `frontmatter_template` | `{title}` `{title_yaml}` `{date}` `{YYYY}` `{MM}` `{DD}` `{YYYYMMDD}` `{excerpt}` `{excerpt_yaml}` |
+| `report_template` | `{frontmatter}` `{title}` `{title_md}` `{date}` `{YYYY}` `{MM}` `{DD}` `{YYYYMMDD}` `{category_key}` `{CATEGORY_KEY}` `{category_display_name}` `{category_display_name_md}` `{excerpt}` `{excerpt_yaml}` `{excerpt_block}` `{items}` `{generated_at}` |
+| `item_template` | `{item_title}` `{item_title_md}` `{score}` `{score_badge}` `{tags}` `{tags_block}` `{source}` `{source_md}` `{source_code}` `{url}` `{url_md}` `{summary}` `{summary_inline}` `{summary_blockquote}` |
+
+`{date}` 是报告日期 `YYYY-MM-DD`；`{CATEGORY_KEY}` 为分类 key 的大写。`report_template` 必须含 `{items}`；
+`item_template` 必须含 `{item_title_md}` 或 `{item_title}`，以及一个摘要占位符。
 
 ### 3.1 frontmatter
 
-YAML 头：
+frontmatter 由 `frontmatter_template` 渲染后填入 `report_template` 的 `{frontmatter}`。默认模板：
 
 ```yaml
 ---
-title: AI 日报 2026-06-04
-date: 2026-06-04
-category: ai
-render_version: v1
-item_count: 12
-generated_at: 2026-06-04T12:34:56Z
+title: {date}
+date: {date}
+excerpt: {excerpt_yaml}
 ---
 ```
 
+`{generated_at}` 只在 `report_template` 中可用（ISO 8601，例如 `2026-06-04T12:34:56.123456000Z`）。
 `generated_at` 来自 `publish_records.rendered_at`：render 阶段取**一个**时刻（UTC，截断到整微秒——PostgreSQL
 `timestamptz` 与 SQLite 都能原样往返的精度），既渲染进报告、又写入 `rendered_at`；store_local、remote 重试
 （单条与批量）与 rebuild-report 一律从记录读回该值重渲染（调用方传入的 `generated_at` 只在记录尚无
@@ -105,16 +112,18 @@ generated_at: 2026-06-04T12:34:56Z
 
 ### 3.2 正文格式
 
-每个 PublishItem 渲染为：
+每个冻结的 PublishItem 用 `item_template` 渲染后按顺序拼入 `{items}`。默认模板：
 
 ```markdown
-## [{frozen_title}]({frozen_link})
+## {item_title_md}{score_badge}
 
-**评分**: {frozen_score} | **标签**: {frozen_tags_json.join(", ")}
+{tags_block}- **Source:** `{source_code}` | [阅读原文]({url_md})
 
-{frozen_summary}
+> [摘要]
+{summary_blockquote}
 
-> 原文：[{frozen_link}]({frozen_link})
+---
+
 ```
 
 ## 4. PublishTarget
@@ -131,25 +140,27 @@ CLI `publish` 子命令同时调用两者（本地必发，GitHub 可选）。
 
 ### 4.1 LocalFsTarget
 
-路径模板由配置决定：
+路径模板由配置决定（相对 `[publish].local_output_dir`；GitHub target 另加 `github_path_prefix`）：
 
 ```toml
-[publish]
-path_template = "docs/news/{category_key}/{report_date}.md"  # 全局
+# app.toml
+[publish.template]
+path_template = "{CATEGORY_KEY}/{YYYY}/{YYYYMMDD}.md"  # 全局默认，必须含 {category_key} 或 {CATEGORY_KEY}
 ```
 
 v0.3 引入**分类级覆盖**：
 
 ```toml
 # categories/ai.toml
-[publish]
-path_template = "docs/zh-news/{category_key}/{report_date}.md"  # 覆盖全局
+[category.publish_override]
+path_template = "zh-news/{category_key}/{YYYY}/{YYYYMMDD}.md"  # 覆盖全局；可省略分类占位符
 ```
 
 `EffectiveConfig.path_template` 合并：category override > global fallback。
 详见 [./06-config.md](./06-config.md) + [../adr/0008-per-category-path-template.md](../adr/0008-per-category-path-template.md)。
 
-支持的占位符：`{category_key}` / `{CATEGORY_KEY}` / `{report_date}` / `{render_version}`。
+支持的占位符：`{category_key}` / `{CATEGORY_KEY}` / `{date}` / `{YYYY}` / `{MM}` / `{DD}` / `{YYYYMMDD}`；
+必须含日期占位符（`{date}`、`{YYYYMMDD}`，或 `{YYYY}` + `{MM}` + `{DD}`），不得含 `..` / `\` / 绝对路径。
 
 写入语义（2026-11-21）：先在目标目录内写隐藏临时文件并 fsync，再 `rename` 覆盖目标（Unix 上随后 fsync 目录），
 中断不会留下截断或半份报告。路径逐级在输出根（canonical）之下解析：既有符号链接仅在其 canonical 目标仍位于
@@ -158,7 +169,7 @@ path_template = "docs/zh-news/{category_key}/{report_date}.md"  # 覆盖全局
 ### 4.1.1 跨分类碰撞检测
 
 `validate-config` 校验：所有分类的 effective path_template 渲染后**不**应碰撞。
-碰撞示例：`docs/news/{report_date}.md`（缺 category 占位符）让 ai 和 ml 分类的产物互相覆盖。
+碰撞示例：两个分类的 override 都写 `docs/news/{date}.md`（缺 category 占位符），产物互相覆盖。
 
 碰撞 → `Diagnostic`，`validate-config` exit 78。
 
