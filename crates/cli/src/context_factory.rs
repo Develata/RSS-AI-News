@@ -303,19 +303,15 @@ pub async fn build_recent_entries_flow(
     ))
 }
 
+/// What `replay` needs: one read-only repository on a read-only pool, and the
+/// configured HTML strategies (R3-20: no writer repository is built).
 pub struct ReplayDeps {
-    /// W11-P4-C2：StoragePool 替代 SqlitePool；replay.rs 内部按 backend match。
-    pub pool: StoragePool,
-    pub artifact_repo: Arc<dyn rss_ai_news_storage::RawArtifactRepository>,
-    pub article_repo: Arc<dyn rss_ai_news_storage::ArticleRepository>,
-    pub feed_entry_repo: Arc<dyn rss_ai_news_storage::FeedEntryRepository>,
+    pub projection_repo: Arc<dyn rss_ai_news_storage::ReplayProjectionRepository>,
     /// [`configured_html_strategies`] of the loaded config.
     pub html_strategies: Vec<Arc<dyn ContentStrategy>>,
 }
 
 pub async fn build_replay_deps(cli: &crate::args::Cli) -> Result<ReplayDeps, CliError> {
-    // W11-P4-C2：原 require_sqlite_driver 拦截已移除。replay 的 artifact /
-    // article / feed_entry repo 在 P3-C/E 全部双轨化；html_diff SQL 已升 $1。
     let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
     let app = &loaded.app;
     let url = resolve_storage_url(&loaded)?;
@@ -324,10 +320,9 @@ pub async fn build_replay_deps(cli: &crate::args::Cli) -> Result<ReplayDeps, Cli
     ensure_migration_state_exact(&pool).await?;
 
     Ok(ReplayDeps {
-        pool: pool.clone(),
-        artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
-        article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
-        feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool)),
+        projection_repo: Arc::new(rss_ai_news_storage::ReplayProjectionRepo::new_with_storage(
+            pool,
+        )),
         html_strategies: configured_html_strategies(&app.extractor),
     })
 }

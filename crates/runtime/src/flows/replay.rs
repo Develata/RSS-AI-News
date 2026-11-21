@@ -19,7 +19,7 @@ use rss_ai_news_domain::{
 };
 use rss_ai_news_extractor::ContentStrategy;
 use rss_ai_news_feed::parse_feed;
-use rss_ai_news_storage::{HtmlReplaySource, RawArtifactRepository, ReplayProjectionRepository};
+use rss_ai_news_storage::{HtmlReplaySource, ReplayProjectionRepository};
 
 use crate::error::RuntimeError;
 
@@ -143,7 +143,8 @@ pub struct ReplayOutcome {
 }
 
 pub struct ReplayFlowDeps {
-    pub artifact_repo: Arc<dyn RawArtifactRepository>,
+    /// The flow's only storage access: read-only artifact lookups and the
+    /// HTML projection (no writer repository, R3-20).
     pub projection_repo: Arc<dyn ReplayProjectionRepository>,
     /// The HTML strategies live extraction runs, in `extractor.strategy_order`
     /// (the CLI builds both from one function). An HTML replay uses the first
@@ -171,11 +172,11 @@ impl ReplayFlow {
             return Err(RuntimeError::Config(REPLAY_HTML_NO_STRATEGY.to_string()));
         }
         let artifact = match &options.selector {
-            ReplaySelector::Id(id) => self.deps.artifact_repo.find_by_id(*id).await?,
+            ReplaySelector::Id(id) => self.deps.projection_repo.artifact_by_id(*id).await?,
             ReplaySelector::Key(key) => {
                 self.deps
-                    .artifact_repo
-                    .find_by_key(options.kind.storage_kind(), key)
+                    .projection_repo
+                    .artifact_by_key(options.kind.storage_kind(), key)
                     .await?
             }
         };
@@ -518,7 +519,6 @@ mod tests {
 
         fn flow(&self, strategy: Arc<RecordingStrategy>) -> ReplayFlow {
             ReplayFlow::new(ReplayFlowDeps {
-                artifact_repo: self.artifacts.clone(),
                 projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(
                     self.pool.clone(),
                 )),
@@ -713,7 +713,6 @@ mod tests {
             .html_artifact(&entry.to_string(), relative_link_html())
             .await;
         let flow = ReplayFlow::new(ReplayFlowDeps {
-            artifact_repo: fixture.artifacts.clone(),
             projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(fixture.pool.clone())),
             html_strategies: Vec::new(),
         });
@@ -764,7 +763,6 @@ mod tests {
             .await;
         let flow = |html_strategies| {
             ReplayFlow::new(ReplayFlowDeps {
-                artifact_repo: fixture.artifacts.clone(),
                 projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(
                     fixture.pool.clone(),
                 )),

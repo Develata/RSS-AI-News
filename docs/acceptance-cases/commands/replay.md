@@ -16,7 +16,8 @@
 - `replay --kind feed --id <N>` → 调用 `parse_feed(bytes, FeedKind::Rss)`，输出 entry_count + samples
 - `replay --kind html --id <N>` → 按 `extractor.strategy_order` 走线上同一条 HTML 策略链（Readability），输出 title / body 长度；base URI 为 artifact key 对应 feed entry 的 `normalized_link`，无此 entry 时为占位符 `about:blank`，并在 `parsed.base_uri` 回显
 - `replay --kind html --diff` → 经 feed entry 找到其文章（含 dedup entry），对比 content hash 与字数；无文章时 `{"found": false}`
-- 只读分层：CLI → `ReplayFlow` → repository（`ReplayProjectionRepository`），CLI 不直接发 SQL
+- 只读分层：CLI → `ReplayFlow` → 唯一的只读 repository（`ReplayProjectionRepository`，含 artifact 查询），CLI 不直接发 SQL，
+  flow 的依赖类型中没有写接口
 - `replay --kind ai --id <N>` → 调用 `parse_response`，输出 ParsedResponse + schema 校验结果
 - `--id` 与 `--key` 二选一；都缺时 CLI 报错
 - summary 既支持 pretty 输出也支持 JSON 输出

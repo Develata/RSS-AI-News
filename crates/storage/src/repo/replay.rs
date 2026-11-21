@@ -10,9 +10,10 @@
 //! entry points at an earlier article.
 
 use async_trait::async_trait;
+use rss_ai_news_domain::model::RawArtifact;
 use sqlx::FromRow;
 
-use crate::{StorageError, StoragePool};
+use crate::{RawArtifactRepo, RawArtifactRepository, StorageError, StoragePool};
 
 /// The article an HTML replay is diffed against.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,11 +35,22 @@ pub struct HtmlReplaySource {
     pub article: Option<ReplayArticleDigest>,
 }
 
-/// Read-only: no method of this trait writes. Kept apart from the writer
-/// repositories so the replay flow's side-effect boundary is visible in its
-/// dependency types (as with `RecentFeedEntryRepository`).
+/// Read-only: no method of this trait writes. It is the replay flow's only
+/// storage dependency, so its side-effect boundary is visible in its
+/// dependency types (as with `RecentFeedEntryRepository`); the artifact reads
+/// are offered here instead of the writer `RawArtifactRepository` (R3-20).
 #[async_trait]
 pub trait ReplayProjectionRepository: Send + Sync {
+    /// `raw_artifacts` row by id, of any kind.
+    async fn artifact_by_id(&self, id: i64) -> Result<Option<RawArtifact>, StorageError>;
+
+    /// `raw_artifacts` row by `(kind, artifact_key)`.
+    async fn artifact_by_key(
+        &self,
+        kind: &str,
+        artifact_key: &str,
+    ) -> Result<Option<RawArtifact>, StorageError>;
+
     async fn html_replay_source(
         &self,
         feed_entry_id: i64,
@@ -113,6 +125,24 @@ impl From<HtmlReplaySourceRow> for HtmlReplaySource {
 
 #[async_trait]
 impl ReplayProjectionRepository for ReplayProjectionRepo {
+    // The artifact reads reuse the artifact repository's queries (one SQL
+    // source of truth); only its read methods are reachable through here.
+    async fn artifact_by_id(&self, id: i64) -> Result<Option<RawArtifact>, StorageError> {
+        RawArtifactRepo::new_with_storage(self.pool.clone())
+            .find_by_id(id)
+            .await
+    }
+
+    async fn artifact_by_key(
+        &self,
+        kind: &str,
+        artifact_key: &str,
+    ) -> Result<Option<RawArtifact>, StorageError> {
+        RawArtifactRepo::new_with_storage(self.pool.clone())
+            .find_by_key(kind, artifact_key)
+            .await
+    }
+
     async fn html_replay_source(
         &self,
         feed_entry_id: i64,

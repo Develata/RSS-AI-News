@@ -84,8 +84,10 @@
 
 入口：[`crates/cli/src/commands/replay.rs`](../../crates/cli/src/commands/replay.rs)（参数、装配与渲染）→
 `ReplayFlow`（[`crates/runtime/src/flows/replay.rs`](../../crates/runtime/src/flows/replay.rs)，只读）→
-`RawArtifactRepository` + `ReplayProjectionRepository`
-（[`crates/storage/src/repo/replay.rs`](../../crates/storage/src/repo/replay.rs)）。CLI 不直接发 SQL。
+`ReplayProjectionRepository`（[`crates/storage/src/repo/replay.rs`](../../crates/storage/src/repo/replay.rs)）。
+CLI 不直接发 SQL。flow 唯一的存储依赖是这个只读 trait：artifact 查询（`artifact_by_id` / `artifact_by_key`，内部复用
+`RawArtifactRepo` 的 SQL）与 HTML projection 都在其上，不再拿到带 `upsert_inline` / `purge_expired` 的写接口；
+工厂在只读连接上装配它，不再构造 replay 不用的 article / feed-entry repo（R3-20）。
 
 ```bash
 rss-ai-news replay --kind ai     --id 12345

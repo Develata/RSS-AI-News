@@ -1,14 +1,10 @@
-use std::{
-    io::{self, Write},
-    sync::Arc,
-};
+use std::io::{self, Write};
 
 use rss_ai_news_ai::ParsedResponse;
 use rss_ai_news_runtime::{
     ReplayDiff, ReplayFlow, ReplayFlowDeps, ReplayKind as RuntimeReplayKind, ReplayOptions,
     ReplayOutcome, ReplayParsed, ReplaySelector, RuntimeError,
 };
-use rss_ai_news_storage::ReplayProjectionRepo;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -74,8 +70,7 @@ async fn replay(deps: ReplayDeps, args: &ReplayArgs) -> Result<ReplayCommandSumm
     let kind = runtime_kind(args.kind);
     let selector = selector(args)?;
     let flow = ReplayFlow::new(ReplayFlowDeps {
-        artifact_repo: deps.artifact_repo,
-        projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(deps.pool)),
+        projection_repo: deps.projection_repo,
         html_strategies: deps.html_strategies,
     });
     let outcome = flow
@@ -185,8 +180,8 @@ mod tests {
 
     use rss_ai_news_runtime::RuntimeError;
     use rss_ai_news_storage::{
-        ArticleRepo, FeedEntryRepo, NewRawArtifact, RawArtifactRepo, StorageError, StoragePool,
-        build_sqlite_pool, run_migrations,
+        NewRawArtifact, RawArtifactRepo, RawArtifactRepository, ReplayProjectionRepo, StorageError,
+        StoragePool, build_sqlite_pool, run_migrations,
     };
     use sqlx::SqlitePool;
 
@@ -197,20 +192,19 @@ mod tests {
         error::CliError,
     };
 
-    async fn deps(dir: &tempfile::TempDir) -> (SqlitePool, ReplayDeps) {
+    /// The pool (for fixtures), a writer artifact repo (fixtures only: the
+    /// replay deps themselves hold no writer) and the replay deps.
+    async fn deps(dir: &tempfile::TempDir) -> (SqlitePool, RawArtifactRepo, ReplayDeps) {
         let sqlite = build_sqlite_pool(&dir.path().join("replay.sqlite"), 2, 5_000)
             .await
             .expect("pool");
         let pool = StoragePool::Sqlite(sqlite.clone());
         run_migrations(&pool).await.expect("migrations");
         let deps = ReplayDeps {
-            pool: pool.clone(),
-            artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
-            article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
-            feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool)),
+            projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(pool.clone())),
             html_strategies: vec![Arc::new(rss_ai_news_extractor::ReadabilityStrategy)],
         };
-        (sqlite, deps)
+        (sqlite, RawArtifactRepo::new_with_storage(pool), deps)
     }
 
     async fn feed_entry(sqlite: &SqlitePool, link: &str) -> i64 {
@@ -257,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn html_replay_renders_with_the_feed_entry_link_as_base_uri() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let (sqlite, deps) = deps(&dir).await;
+        let (sqlite, artifacts, deps) = deps(&dir).await;
         let link = "https://example.com/posts/relative/";
         let entry = feed_entry(&sqlite, link).await;
         let paragraph =
@@ -268,8 +262,7 @@ mod tests {
              <p>{paragraph} <a href=\"../next.html\">next</a></p></article></body></html>"
         )
         .into_bytes();
-        let id = deps
-            .artifact_repo
+        let id = artifacts
             .upsert_inline(&NewRawArtifact {
                 kind: "html_payload".to_string(),
                 artifact_key: entry.to_string(),
@@ -302,7 +295,7 @@ mod tests {
     #[tokio::test]
     async fn replay_failures_keep_their_error_kinds() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let (_sqlite, replay_deps) = deps(&dir).await;
+        let (_sqlite, _artifacts, replay_deps) = deps(&dir).await;
         let error = replay(
             replay_deps,
             &args(ReplayKind::Feed, None, Some("missing"), false),
@@ -315,7 +308,7 @@ mod tests {
             "{error:?}"
         );
 
-        let (_sqlite, replay_deps) = deps(&dir).await;
+        let (_sqlite, _artifacts, replay_deps) = deps(&dir).await;
         let error = replay(replay_deps, &args(ReplayKind::Ai, None, None, false))
             .await
             .expect_err("no selector");
