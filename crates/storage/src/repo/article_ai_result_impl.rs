@@ -19,14 +19,15 @@ use super::article_ai_result::{
 };
 use super::article_ai_result_sql::{
     ADVANCE_ARTICLE_FROM_AI_PHASE_SQL, ADVANCE_ARTICLE_TO_AI_PENDING_SQL,
-    ADVANCE_PERSISTED_ARTICLE_SQL, CLAIM_AI_PENDING_BACKLOG_PG_SQL,
-    CLAIM_AI_PENDING_BACKLOG_SQLITE_SQL, CLAIM_AI_PENDING_FRESH_PG_SQL,
-    CLAIM_AI_PENDING_FRESH_SQLITE_SQL, CLAIM_AI_PENDING_PG_SQL, CLAIM_AI_PENDING_SQLITE_SQL,
-    INSERT_AI_PENDING_SQL, OTHER_SUCCEEDED_AI_EXISTS_SQL, RECLAIM_AI_LEASES_SQL,
-    RECLAIM_AI_LEASES_SQLITE_SQL, RELEASE_AI_FAILURE_SQL, RELEASE_AI_RETRYABLE_FAILURE_SQL,
-    RELEASE_AI_SUCCESS_SQL, SELECT_AI_IDENTITY_ROW_PG_SQL, SELECT_AI_IDENTITY_ROW_SQLITE_SQL,
-    SELECT_ARTICLE_STATE_SQL, SELECT_SHARE_SIDE_SQL, TERMINALIZE_EXHAUSTED_AI_SQL,
-    TERMINALIZE_EXHAUSTED_AI_SQLITE_SQL, UPSERT_SHARE_SIDE_SQL,
+    ADVANCE_PERSISTED_ARTICLE_SQL, CLAIM_AI_BY_ID_SQL, CLAIM_AI_PENDING_PG_SQL,
+    CLAIM_AI_PENDING_SQLITE_SQL, INSERT_AI_PENDING_SQL, OTHER_SUCCEEDED_AI_EXISTS_SQL,
+    RECLAIM_AI_LEASES_SQL, RECLAIM_AI_LEASES_SQLITE_SQL, RELEASE_AI_FAILURE_SQL,
+    RELEASE_AI_RETRYABLE_FAILURE_SQL, RELEASE_AI_SUCCESS_SQL, SELECT_AI_IDENTITY_ROW_PG_SQL,
+    SELECT_AI_IDENTITY_ROW_SQLITE_SQL, SELECT_ARTICLE_STATE_SQL,
+    SELECT_BACKLOG_CLAIM_CANDIDATES_PG_SQL, SELECT_BACKLOG_CLAIM_CANDIDATES_SQLITE_SQL,
+    SELECT_FRESH_CLAIM_CANDIDATES_PG_SQL, SELECT_FRESH_CLAIM_CANDIDATES_SQLITE_SQL,
+    SELECT_SHARE_SIDE_SQL, TERMINALIZE_EXHAUSTED_AI_SQL, TERMINALIZE_EXHAUSTED_AI_SQLITE_SQL,
+    UPSERT_SHARE_SIDE_SQL,
 };
 
 /// `(id, state, keep_decision, importance_score)` of an existing identity row.
@@ -479,15 +480,11 @@ async fn sqlite_claim_pending_shared(
     let mut served = None;
     while let Some((fresh, limit)) = plan.next_query() {
         let sql = if fresh {
-            CLAIM_AI_PENDING_FRESH_SQLITE_SQL
+            SELECT_FRESH_CLAIM_CANDIDATES_SQLITE_SQL
         } else {
-            CLAIM_AI_PENDING_BACKLOG_SQLITE_SQL
+            SELECT_BACKLOG_CLAIM_CANDIDATES_SQLITE_SQL
         };
-        let rows = sqlx::query_as::<_, ClaimedAiResult>(sql)
-            .bind(&request.owner)
-            .bind(sqlite_stored_deadline(request.lease_expires_at))
-            .bind(request.now)
-            .bind(request.now)
+        let candidates = sqlx::query_scalar::<_, i64>(sql)
             .bind(sqlite_instant_cutoff(request.now))
             .bind(i64::from(request.max_attempts))
             .bind(category_key)
@@ -497,6 +494,19 @@ async fn sqlite_claim_pending_shared(
             .fetch_all(&mut *tx)
             .await
             .map_err(StorageError::from)?;
+        // Claimed one by one so the rows keep the candidate order (R2-S2).
+        let mut rows = Vec::with_capacity(candidates.len());
+        for id in candidates {
+            let row = sqlx::query_as::<_, ClaimedAiResult>(CLAIM_AI_BY_ID_SQL)
+                .bind(&request.owner)
+                .bind(sqlite_stored_deadline(request.lease_expires_at))
+                .bind(request.now)
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StorageError::from)?;
+            rows.extend(row);
+        }
         plan.record(rows.len());
         if !rows.is_empty() {
             served = Some(side_of(fresh));
@@ -973,15 +983,11 @@ async fn pg_claim_pending_shared(
     let mut served = None;
     while let Some((fresh, limit)) = plan.next_query() {
         let sql = if fresh {
-            CLAIM_AI_PENDING_FRESH_PG_SQL
+            SELECT_FRESH_CLAIM_CANDIDATES_PG_SQL
         } else {
-            CLAIM_AI_PENDING_BACKLOG_PG_SQL
+            SELECT_BACKLOG_CLAIM_CANDIDATES_PG_SQL
         };
-        let rows = sqlx::query_as::<_, ClaimedAiResult>(sql)
-            .bind(&request.owner)
-            .bind(request.lease_expires_at)
-            .bind(request.now)
-            .bind(request.now)
+        let candidates = sqlx::query_scalar::<_, i64>(sql)
             .bind(request.now)
             .bind(i64::from(request.max_attempts))
             .bind(category_key)
@@ -991,6 +997,19 @@ async fn pg_claim_pending_shared(
             .fetch_all(&mut *tx)
             .await
             .map_err(StorageError::from)?;
+        // Claimed one by one so the rows keep the candidate order (R2-S2).
+        let mut rows = Vec::with_capacity(candidates.len());
+        for id in candidates {
+            let row = sqlx::query_as::<_, ClaimedAiResult>(CLAIM_AI_BY_ID_SQL)
+                .bind(&request.owner)
+                .bind(request.lease_expires_at)
+                .bind(request.now)
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StorageError::from)?;
+            rows.extend(row);
+        }
         plan.record(rows.len());
         if !rows.is_empty() {
             served = Some(side_of(fresh));

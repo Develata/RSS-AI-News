@@ -783,3 +783,57 @@ async fn pg_release_success_and_advance_filtered_publish_skipped() {
 
     ctx.cleanup().await;
 }
+/// R2-S2 on PG: fresh claims order by source time, ties by **article** id
+/// (not task id), and the batch comes back in that order.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_fresh_claim_orders_by_source_time_then_article_id() {
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "order").await;
+    let ai = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let mut ids = Vec::new();
+    for (tag, hours) in [("o-a", 1), ("o-b", 2), ("o-c", 2)] {
+        let id = seed_article(&ctx, tag, "ai_pending").await;
+        sqlx::query(
+            "UPDATE feed_entries SET published_at = $1 \
+             WHERE id = (SELECT origin_feed_entry_id FROM articles WHERE id = $2)",
+        )
+        .bind(now - time::Duration::hours(hours))
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    // Tasks created in reverse: article C owns the lowest task id.
+    for id in ids.iter().rev() {
+        ai.insert_pending(&NewAiResult {
+            article_id: *id,
+            prompt_version: prompt_id,
+            output_schema_version: schema_id,
+            model_id: "gpt-4".to_string(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    }
+    let request = ClaimRequest {
+        owner: "w".to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 3,
+        max_attempts: 3,
+    };
+
+    let claimed = ai
+        .claim_pending_shared(&request, "ai", now - time::Duration::hours(48))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        claimed.iter().map(|c| c.article_id).collect::<Vec<_>>(),
+        [ids[1], ids[2], ids[0]]
+    );
+    ctx.cleanup().await;
+}

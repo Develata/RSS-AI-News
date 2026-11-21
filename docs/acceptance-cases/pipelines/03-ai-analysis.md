@@ -61,6 +61,11 @@ AI-off 直通模式跳过整段。
 | `batch_size_one_claim_retries_count_as_served_turns` | 同上 | R2-B1 重试也算一轮 |
 | `future_dated_articles_are_not_fresh_for_task_gen` | `crates/runtime/tests/ai_run_tests.rs` | R2-S1 窗口上界 = now（task_gen） |
 | `future_dated_tasks_are_not_fresh_for_the_claim` | 同上 | R2-S1 窗口上界 = now（claim） |
+| `equal_instants_in_different_offsets_tie_by_article_id` | `crates/storage/tests/ai_fresh_order_tests.rs` | R2-S2 按时刻排序、article id 打平 |
+| `fresh_claim_ties_by_article_id_not_task_id` | 同上 | R2-S2 claim 按 article id 打平 |
+| `claimed_rows_come_back_in_candidate_order` | 同上 | R2-S2 领取保序 |
+| `a_sub_millisecond_instant_before_the_window_start_is_not_fresh` | 同上 | R2-S1 毫秒边界向内取整 |
+| `pg_fresh_claim_orders_by_source_time_then_article_id` | `crates/storage/tests/article_ai_result_pg_tests.rs` | R2-S2 PG 排序与保序 |
 | `a_failed_second_claim_side_leaves_the_first_side_unclaimed` | `crates/runtime/tests/ai_run_tests.rs` | R2-B2 整批同事务回滚 |
 | `pg_fresh_share_lists_claims_and_signals_by_source_time` | `crates/storage/tests/article_ai_result_pg_tests.rs` | C9 PG SQL |
 | `real_sqlite_extended_lock_error_returns_task_to_pending_with_budget_left` | `crates/runtime/tests/ai_run_tests.rs` | R2-B3 真实驱动扩展码 517 可重试 |

@@ -279,7 +279,9 @@ LIMIT $7
 "#;
 
 /// C9 fresh task_gen list, SQLite: the source time is compared and ordered
-/// by `julianday()` instant with a text fallback; `$2` / `$7` are the window
+/// by `julianday()` instant, ties by article id (R2-S2: the raw text never
+/// orders — `10:00+02:00` and `08:00Z` are one instant); a text fallback
+/// decides membership of values `julianday()` cannot parse; `$2` / `$7` are the window
 /// bounds rounded inward to whole milliseconds (`sqlite_window_bounds`).
 const LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL: &str = r#"
 SELECT a.id AS article_id, 1 AS in_window
@@ -297,9 +299,7 @@ WHERE a.state = 'persisted'
       WHERE r.article_id = a.id AND r.prompt_version = $3
         AND r.output_schema_version = $4 AND r.model_id = $5
   )
-ORDER BY julianday(COALESCE(fe.published_at, fe.discovered_at)) ASC,
-         COALESCE(fe.published_at, fe.discovered_at) ASC,
-         a.id ASC
+ORDER BY julianday(COALESCE(fe.published_at, fe.discovered_at)) ASC, a.id ASC
 LIMIT $6
 "#;
 
