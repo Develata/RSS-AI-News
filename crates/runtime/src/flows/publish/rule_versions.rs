@@ -44,21 +44,39 @@ pub async fn bootstrap_publish_rule_versions(
             repo.insert_pending_rule("render", &tag, "force render trace", "v1")
                 .await?
         }
-        None => {
-            repo.active_rule_or_register("render", "default", "default render", "v1")
-                .await?
-        }
+        None => active_rule_id(repo, "render", "default render").await?,
     };
-    let selection_policy_version = repo
-        .active_rule_or_register(
-            "selection_policy",
-            "default",
-            "default selection policy",
-            "v1",
-        )
-        .await?;
+    let selection_policy_version =
+        active_rule_id(repo, "selection_policy", "default selection policy").await?;
     Ok(PublishRuleVersions {
         render_version,
         selection_policy_version,
     })
+}
+
+/// The active `kind` rule, seeding `default` when the kind has no row at all.
+/// `active_rule_or_register` reads an existing `default` row back by tag on a
+/// conflict, whatever its status; when that row was superseded and nothing is
+/// active, it would hand out a superseded id (R1-P-S6). The returned id is
+/// therefore checked against the active row and refused otherwise, before any
+/// record is created with it.
+async fn active_rule_id(
+    repo: &dyn RuleVersionRepository,
+    kind: &str,
+    description: &str,
+) -> Result<i64, RuntimeError> {
+    let id = repo
+        .active_rule_or_register(kind, "default", description, "v1")
+        .await?;
+    match repo.active_rule(kind).await? {
+        Some(active) if active.id == id => Ok(id),
+        Some(active) => Err(RuntimeError::Config(format!(
+            "{kind} rule version {id} is not the active one (active is {}); retry the publish",
+            active.id
+        ))),
+        None => Err(RuntimeError::Config(format!(
+            "no active {kind} rule version: the registered 'default' row {id} is not active; \
+             activate a {kind} rule before publishing"
+        ))),
+    }
 }

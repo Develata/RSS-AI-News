@@ -157,6 +157,9 @@
 | `local_fs_target_follows_symlinks_that_stay_inside_the_root` | 同上 | 根内链接照常 |
 | `interrupted_write_before_commit_leaves_old_report_intact` | `crates/publish/src/local.rs` | 中断写保留旧报告 |
 | `publish_force_creates_unique_non_active_render_versions_on_a_fresh_db` | `crates/cli/tests/publish_cmd_tests.rs` | --force 每次唯一且非 active |
+| `bootstrap_refuses_a_superseded_default_rule_when_none_is_active` | `crates/runtime/tests/publish_rule_bootstrap_tests.rs` | 无 active render 规则（default 已 superseded）→ 建记录前报错 |
+| `bootstrap_refuses_a_superseded_default_selection_policy` | 同上 | selection_policy 同规则 |
+| `bootstrap_returns_the_active_rules_and_seeds_them_on_a_fresh_db` | 同上 | 新库登记 active；已有非 default active 行照用 |
 | `publish_all_refuses_categories_whose_paths_collide_on_the_report_date` | `crates/cli/tests/publish_cmd_tests.rs` | 真实日期路径碰撞在写入前拦截 |
 | `month_day_and_day_month_templates_collide_on_eleven_eleven` | `crates/runtime/src/flows/publish/paths.rs` | 11-11 碰撞 / 其它日期不碰撞 |
 | `paths_differing_only_in_case_collide` | 同上 | 仅大小写不同的路径碰撞 |

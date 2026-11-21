@@ -102,6 +102,10 @@ SQLite 由此持有写锁、串行化并发 freeze）；② PG 按 id 顺序 `SE
 同一秒内重复 force 也互不复用），状态恒为 `pending`（ADR 0004 的 partial unique 之外），因此产生新的
 render_version / 新记录，且**不会**成为 active——新库上首次 force 之后，普通发布仍使用 `default` render 规则。
 
+非 force 时，publish / publish-all 用的 render 与 selection_policy 版本必须是该 kind 当前 **active** 的行（无任何行时登记
+`default` 为 active）。若 `default` 行已 `superseded` 且没有 active 行，引导在建任何记录之前报错（`RuntimeError::Config`），
+不再按 tag 回读并盖上一个已 superseded 的版本（R1-P-S6；否则按日期 rebuild-report 随后会失败）。
+
 ## 3. Markdown 渲染
 
 `crates/report/src/render.rs` 的 `render_markdown(publish_record_id, category_key, report_date, frozen_items,
