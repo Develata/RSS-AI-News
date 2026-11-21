@@ -41,6 +41,18 @@ payload 上限来自 `extractor.max_body_bytes`；先检查 Content-Length，再
 不单独发 HEAD，也不强制 Content-Type 白名单；非 HTML 内容由策略解析失败路径处理。
 User-Agent 由 fetcher 构造器设置。
 
+### 2.2 字符集解码（2026-11-21）
+
+fetcher 把响应 `Content-Type` 原样放进 `RawHtmlFetch.content_type`。extract flow 在策略链前调用
+`rss_ai_news_extractor::decode_html(bytes, content_type)`，按 WHATWG 编码嗅探顺序（简化）选候选：
+BOM → `Content-Type` 的 `charset` 参数 → 前 1024 字节内的 `<meta charset>` /
+`<meta http-equiv="Content-Type" content="…charset=…">`（跳过注释；meta 声明的 UTF-16 视为 UTF-8）→ UTF-8。
+每个候选**严格**解码（`encoding_rs`，不插 U+FFFD），失败则试下一个；全部失败为
+`ParseFailed`（走 fallback / `failed`）。与浏览器不同，不按 locale 猜 windows-1252：未声明且非
+UTF-8 的字节维持旧行为失败，避免发布乱码。策略收到的是 UTF-8；`raw_artifacts` 保留原始字节。
+`ReadabilityStrategy` 收到非 UTF-8 字节时（如 replay 传入原始 artifact）按 BOM / `<meta>` 自行解码；
+只由响应头声明字符集的页面，其 artifact 不含 Content-Type，replay 无法还原该声明。
+
 ## 3. 策略链
 
 `ContentStrategy` trait 在 [`crates/extractor/src/strategy.rs`](../../crates/extractor/src/strategy.rs) 定义。

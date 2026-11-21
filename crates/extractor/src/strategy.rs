@@ -35,9 +35,16 @@ impl ContentStrategy for ReadabilityStrategy {
         html_bytes: &[u8],
         final_url: &str,
     ) -> Result<ExtractedArticle, ExtractorError> {
-        let html = std::str::from_utf8(html_bytes).map_err(|err| ExtractorError::ParseFailed {
-            reason: format!("HTML is not valid UTF-8: {err}"),
-        })?;
+        // Runtime passes bytes already decoded to UTF-8 by `decode_html` (with
+        // the response's Content-Type). Valid UTF-8 is used as is: re-applying
+        // the page's `<meta charset>` to decoded text would corrupt it. Other
+        // callers (e.g. replay of a stored artifact) may pass the original
+        // bytes; only then is the BOM / `<meta>` declaration consulted.
+        let decoded = match std::str::from_utf8(html_bytes) {
+            Ok(text) => std::borrow::Cow::Borrowed(text),
+            Err(_) => crate::charset::decode_html(html_bytes, None)?,
+        };
+        let html: &str = &decoded;
 
         let mut parser = Readability::new_with_base_uri(
             html,

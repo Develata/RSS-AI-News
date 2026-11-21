@@ -5,7 +5,7 @@ use std::time::Duration as StdDuration;
 use rss_ai_news_domain::dto::extract::{ArticleFetchTask, ExtractedArticle, FallbackArticle};
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_domain::state::{ContentQuality, ExtractorStrategy};
-use rss_ai_news_extractor::{ExtractorError, RawHtmlFetch, summary_fallback};
+use rss_ai_news_extractor::{ExtractorError, RawHtmlFetch, decode_html, summary_fallback};
 use rss_ai_news_storage::{
     ArticleInsertOutcome, ClaimRequest, ClaimedFeedEntry, NewArticle, build_owner_id,
     lease_expires_at,
@@ -399,9 +399,16 @@ fn run_strategy_chain(
     task: &ArticleFetchTask,
     raw: &RawHtmlFetch,
 ) -> ChainResult {
+    // Strategies receive UTF-8: the charset comes from the BOM, the response
+    // Content-Type or the page's <meta> (plan/02 §2.2). The html artifact keeps
+    // the original bytes. An undecodable page is a permanent parse failure.
+    let html = match decode_html(&raw.body_bytes, raw.content_type.as_deref()) {
+        Ok(html) => html,
+        Err(error) => return ChainResult::Failed(vec![error]),
+    };
     let mut errors = Vec::new();
     for strategy in &ctx.strategies {
-        match strategy.extract(task, &raw.body_bytes, &raw.final_url) {
+        match strategy.extract(task, html.as_bytes(), &raw.final_url) {
             Ok(article) if article.body_text.chars().count() >= ctx.min_body_chars as usize => {
                 return ChainResult::Extracted(article);
             }

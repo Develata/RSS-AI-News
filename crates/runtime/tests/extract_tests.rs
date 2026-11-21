@@ -667,6 +667,50 @@ async fn always_retention_keeps_html_even_when_a_strategy_panics() {
     assert_eq!(artifact_count, 1);
 }
 
+/// A2：GBK 页面仅由 Content-Type 声明字符集 → flow 先解码再交给 Readability；
+/// html artifact 保留原始字节。
+#[tokio::test]
+async fn gbk_page_declared_by_header_is_decoded_before_readability() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry_id = seed_pending_fetch_entry(&pool, source_id, "uid-gbk", "hash-gbk", None).await;
+    // "中文" in GBK is D6 D0 CE C4; 300 repetitions = 600 Han characters.
+    let mut body = b"<html><head><title>GBK</title></head><body><article><p>".to_vec();
+    for _ in 0..300 {
+        body.extend_from_slice(&[0xD6, 0xD0, 0xCE, 0xC4]);
+    }
+    body.extend_from_slice(b"</p></article></body></html>");
+    let mut fetched = raw(entry_id, &body);
+    fetched.content_type = Some("text/html; charset=gbk".to_string());
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Ok(fetched))]),
+        vec![Arc::new(rss_ai_news_extractor::ReadabilityStrategy)],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+    let (state, text): (String, String) = sqlx::query_as(
+        "SELECT fe.state, a.body_text FROM feed_entries fe \
+         JOIN articles a ON a.id = fe.article_id WHERE fe.id = ?",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .expect("entry should be persisted with an article");
+    let artifact: Vec<u8> = sqlx::query_scalar(
+        "SELECT inline_body FROM raw_artifacts WHERE kind = 'html_payload' AND artifact_key = ?",
+    )
+    .bind(entry_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("artifact should be readable");
+
+    assert_eq!(summary.persisted, 1, "{summary:?}");
+    assert_eq!(state, "persisted");
+    assert!(text.starts_with("中文中文"), "decoded text: {text}");
+    assert_eq!(artifact, body, "artifact keeps the original bytes");
+}
+
 async fn setup_base(pool: &SqlitePool) -> (i64, i64) {
     let extractor_rule_id = seed_extractor_rule_version(pool).await;
     let config_id = insert_config_rule(pool).await;
@@ -717,6 +761,7 @@ fn raw(feed_entry_id: i64, body: &[u8]) -> RawHtmlFetch {
         feed_entry_id,
         final_url: format!("https://example.com/final/{feed_entry_id}"),
         http_status: 200,
+        content_type: None,
         body_bytes: body.to_vec(),
     }
 }

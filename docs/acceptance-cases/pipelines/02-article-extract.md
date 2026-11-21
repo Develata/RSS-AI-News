@@ -13,6 +13,7 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 ### 命中条件（success path）
 
 - 抓取成功 + Readability 抽出正文 → 写 `articles`，state=`Persisted`
+- 非 UTF-8 页面（BOM / `Content-Type` charset / `<meta>` 声明）先解码再提取；未声明且非 UTF-8 → `ParseFailed`
 - 同 content_hash 已存在 → 跳过插入，FeedEntry → `DedupSkipped`（第三层去重）
 - Readability 失败但 summary 非空 → SummaryFallback 兜底写入，state=`FallbackPersisted`
 - 抓取**永久失败**（4xx/too_large/invalid_url）但 summary 非空 → SummaryFallback
@@ -65,6 +66,12 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `readability_extracts_simple_article` | `crates/extractor/tests/strategy_tests.rs` | 策略层 happy |
 | `readability_returns_content_too_short_for_short_article` | 同上 | 太短拒收 |
 | `readability_returns_parse_failed_for_no_content` | 同上 | 无正文 |
+| `gbk_page_declared_by_header_is_decoded_before_readability` | `crates/runtime/tests/extract_tests.rs` | 先解码再提取，artifact 保留原始字节 |
+| `gbk_page_declared_only_by_the_content_type_header_decodes` | `crates/extractor/tests/charset_tests.rs` | 仅响应头声明 GBK |
+| `gbk_page_declared_only_by_meta_decodes` | 同上 | 仅 `<meta>` 声明 |
+| `http_equiv_big5_and_shift_jis_pages_decode` | 同上 | Big5 / Shift_JIS |
+| `undeclared_invalid_utf8_still_fails_without_guessing` | 同上 | 未声明的非 UTF-8 仍 `ParseFailed` |
+| `declared_charset_with_malformed_bytes_is_rejected_not_replaced` | 同上 | 严格解码，不插替换字符 |
 | `readability_grades_a_2340_char_chinese_article_high` | 同上 | 中文长文按 CJK 计词为 High |
 | `content_too_short_reports_characters_not_bytes` | 同上 | `ContentTooShort.chars` 为字符数 |
 | `summary_fallback_counts_cjk_words` | 同上 | fallback 字数同一规则 |

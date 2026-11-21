@@ -12,6 +12,7 @@ sha2.workspace = true
 async-trait = "0.1"
 hex.workspace = true
 readability-rust = "0.1"
+encoding_rs = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
