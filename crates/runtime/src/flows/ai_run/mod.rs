@@ -297,6 +297,8 @@ impl AiRunFlow {
                     "filtered": summary.filtered,
                     "retryable_failed": summary.retryable_failed,
                     "permanent_failed": summary.permanent_failed,
+                    "lease_lost": summary.lease_lost,
+                    "release_failed": summary.release_failed,
                     "tasks_panicked": summary.tasks_panicked,
                     "batches_executed": summary.batches_executed,
                     "max_batches_reached": summary.max_batches_reached,
@@ -324,10 +326,12 @@ impl AiProcessSummary {
             AiTaskStatus::Filtered => self.filtered += 1,
             AiTaskStatus::RetryableFailed => self.retryable_failed += 1,
             AiTaskStatus::PermanentFailed => self.permanent_failed += 1,
+            AiTaskStatus::LeaseLost => self.lease_lost += 1,
+            AiTaskStatus::ReleaseFailed => self.release_failed += 1,
         }
-        if matches!(
+        if !matches!(
             outcome.status,
-            AiTaskStatus::RetryableFailed | AiTaskStatus::PermanentFailed
+            AiTaskStatus::Succeeded | AiTaskStatus::Filtered
         ) && self.failure_samples.len() < 32
         {
             self.failure_samples.push(outcome);

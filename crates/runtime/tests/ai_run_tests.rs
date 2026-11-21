@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use rss_ai_news_ai::{AiClient, AiError, AiResponse, AiTask, TokenUsage};
 use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_domain::Score0To100;
-use rss_ai_news_runtime::{AiRunFlow, AiRunOptions};
+use rss_ai_news_runtime::{AiRunFlow, AiRunOptions, AiTaskStatus};
 use rss_ai_news_storage::StorageError;
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
@@ -889,4 +889,141 @@ async fn ai_run_uses_the_injected_clock() {
             .expect("AI result should be readable");
     assert_eq!(started, fixed);
     assert_eq!(completed, fixed);
+}
+
+// === C2: release outcomes are reported only when the transition landed ===
+
+/// Returns `raw_response`, after optionally moving the row's lease to another
+/// owner (as a concurrent reclaim + re-claim would).
+struct LeaseStealingClient {
+    pool: SqlitePool,
+    raw_response: String,
+    steal: bool,
+}
+
+#[async_trait]
+impl AiClient for LeaseStealingClient {
+    async fn invoke(&self, task: &AiTask) -> Result<AiResponse, AiError> {
+        if self.steal {
+            sqlx::query("UPDATE article_ai_results SET lease_owner = 'thief' WHERE id = ?")
+                .bind(task.article_ai_result_id)
+                .execute(&self.pool)
+                .await
+                .expect("lease should move");
+        }
+        Ok(AiResponse {
+            article_ai_result_id: task.article_ai_result_id,
+            raw_response: self.raw_response.clone(),
+            usage: None,
+            latency_ms: 1,
+        })
+    }
+}
+
+async fn run_with_client(
+    pool: &SqlitePool,
+    content_hash: &str,
+    client: Arc<dyn AiClient>,
+    max_attempts: u32,
+) -> (i64, rss_ai_news_runtime::AiProcessSummary) {
+    let article_id = seed_persisted_article(pool, content_hash, "title", "body").await;
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let flow = AiRunFlow::new(Arc::new(common::ai_deps(pool.clone(), app, client)));
+    let mut opts = opts();
+    opts.max_attempts = max_attempts;
+    flow.task_gen(&opts).await;
+    let ai_result_id = ai_result_id_by_article(pool, article_id).await;
+    (ai_result_id, flow.process_ai_tasks(&opts).await)
+}
+
+/// Makes every UPDATE of an AI row into `state` fail inside the database.
+async fn fail_updates_to_state(pool: &SqlitePool, state: &str) {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER fail_release BEFORE UPDATE ON article_ai_results \
+         WHEN NEW.state = '{state}' AND OLD.state = 'running' \
+         BEGIN SELECT RAISE(ABORT, 'injected release failure'); END;"
+    )))
+    .execute(pool)
+    .await
+    .expect("trigger should install");
+}
+
+async fn ai_failed_events(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM run_events WHERE event_kind = 'ai_failed'")
+        .fetch_one(pool)
+        .await
+        .expect("events should be countable")
+}
+
+#[tokio::test]
+async fn permanent_release_that_lost_the_lease_is_not_reported_as_permanent() {
+    let (_dir, pool) = make_test_pool().await;
+    let client = Arc::new(LeaseStealingClient {
+        pool: pool.clone(),
+        raw_response: "not json".to_string(),
+        steal: true,
+    });
+    let (ai_result_id, summary) = run_with_client(&pool, "ai-perm-lost", client, 3).await;
+
+    assert_eq!(summary.permanent_failed, 0);
+    assert_eq!(summary.lease_lost, 1);
+    assert_eq!(summary.release_failed, 0);
+    assert_eq!(ai_failed_events(&pool).await, 0);
+    assert_eq!(ai_result_state(&pool, ai_result_id).await, "running");
+}
+
+#[tokio::test]
+async fn permanent_release_storage_error_is_reported_as_release_failure() {
+    let (_dir, pool) = make_test_pool().await;
+    fail_updates_to_state(&pool, "permanent_failed").await;
+    let client = Arc::new(LeaseStealingClient {
+        pool: pool.clone(),
+        raw_response: "not json".to_string(),
+        steal: false,
+    });
+    let (ai_result_id, summary) = run_with_client(&pool, "ai-perm-err", client, 3).await;
+
+    assert_eq!(summary.permanent_failed, 0);
+    assert_eq!(summary.release_failed, 1);
+    assert_eq!(ai_failed_events(&pool).await, 0);
+    assert_eq!(ai_result_state(&pool, ai_result_id).await, "running");
+    let sample = &summary.failure_samples[0];
+    assert_eq!(sample.status, AiTaskStatus::ReleaseFailed);
+}
+
+#[tokio::test]
+async fn retryable_release_storage_error_is_reported_as_release_failure() {
+    let (_dir, pool) = make_test_pool().await;
+    fail_updates_to_state(&pool, "pending").await;
+    let client = Arc::new(MockAiClient::default());
+    // No queued response: the mock fails with a retryable connection error.
+    let (ai_result_id, summary) = run_with_client(&pool, "ai-retry-err", client, 3).await;
+
+    assert_eq!(summary.retryable_failed, 0);
+    assert_eq!(summary.release_failed, 1);
+    assert_eq!(ai_failed_events(&pool).await, 0);
+    assert_eq!(ai_result_state(&pool, ai_result_id).await, "running");
+}
+
+#[tokio::test]
+async fn success_release_that_lost_the_lease_is_not_reported_as_permanent() {
+    let (_dir, pool) = make_test_pool().await;
+    let client = Arc::new(LeaseStealingClient {
+        pool: pool.clone(),
+        raw_response: output_json(80),
+        steal: true,
+    });
+    let (ai_result_id, summary) = run_with_client(&pool, "ai-success-lost", client, 3).await;
+
+    assert_eq!(summary.succeeded, 0);
+    assert_eq!(summary.permanent_failed, 0);
+    assert_eq!(summary.lease_lost, 1);
+    assert_eq!(ai_result_state(&pool, ai_result_id).await, "running");
+    let events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM run_events WHERE event_kind = 'ai_release_not_applied'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("events should be countable");
+    assert_eq!(events, 1);
 }

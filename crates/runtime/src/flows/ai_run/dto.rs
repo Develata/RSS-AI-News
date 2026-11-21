@@ -68,6 +68,12 @@ pub struct AiProcessSummary {
     pub filtered: u32,
     pub retryable_failed: u32,
     pub permanent_failed: u32,
+    /// Releases that matched no row: the lease had moved to another owner
+    /// (reclaim + re-claim), so this run claims no transition for the task.
+    pub lease_lost: u32,
+    /// Releases that failed with a storage error; the row stays leased and is
+    /// recovered by lease reclaim. Infrastructure errors of the run.
+    pub release_failed: u32,
     /// Tasks that panicked or were cancelled; leases recover on expiry.
     pub tasks_panicked: u32,
     /// 实际执行的批次数（F6-3）。命中 `max_batches` 时等于上限；否则小于上限。
@@ -101,4 +107,8 @@ pub enum AiTaskStatus {
     Filtered,
     RetryableFailed,
     PermanentFailed,
+    /// The release matched no row (lease lost); no transition landed.
+    LeaseLost,
+    /// The release failed with a storage error; no transition landed.
+    ReleaseFailed,
 }
