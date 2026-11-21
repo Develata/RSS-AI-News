@@ -335,9 +335,11 @@ async fn pg_persist_for_entry_is_atomic_and_recognises_own_article() {
             newly_created: false
         }
     );
+    // R2-S6: the entry state follows the stored (readability) article, not
+    // this call's fallback flag.
     assert_eq!(
         entry_state(&ctx, own).await,
-        ("fallback_persisted".to_string(), Some(earlier.article_id))
+        ("persisted".to_string(), Some(earlier.article_id))
     );
 
     let dup = claim_entry(&ctx, source_id, "persist-dup").await;

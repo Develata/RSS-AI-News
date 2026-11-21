@@ -13,3 +13,8 @@ CREATE TABLE ai_fresh_share_state (
     CHECK (stage IN ('task_gen', 'claim')),
     CHECK (last_side IN ('fresh', 'backlog'))
 );
+
+-- R2-S6: `persist_for_entry` first looks up the article a feed entry already
+-- owns (recovery of a pre-transaction partial commit); without this index
+-- that lookup scans every article on each persist.
+CREATE INDEX idx_articles_origin_feed_entry ON articles (origin_feed_entry_id);

@@ -82,12 +82,12 @@ const PINNED_UP_MIGRATIONS: &[(&str, &str)] = &[
         "9d13b40ab1753066ba251ca5e45979f4b3e0d342644c3a40ee0b0b5dc759b90b",
     ),
     (
-        "migrations/sqlite/0009_ai_fresh_share_state.up.sql",
-        "7d668b8f7ab8366445ea6c2d7ac8d59a093001aeab2d48a131241cc6ba5d2e05",
+        "migrations/sqlite/0009_ai_share_state_and_article_origin_index.up.sql",
+        "4f2f16c7736090abdc967578a9dcb259bdecb75978224d4e3fc6b9b10dc550c1",
     ),
     (
-        "migrations/postgres/0009_ai_fresh_share_state.up.sql",
-        "c05ca6bcaf312913da16f2fe37427955925011ec942ac7ed1a01e97b7f29ed54",
+        "migrations/postgres/0009_ai_share_state_and_article_origin_index.up.sql",
+        "0016bedd1799839984d22584afe2b6d5ad667b1464302f4e6dca100d30d77605",
     ),
 ];
 

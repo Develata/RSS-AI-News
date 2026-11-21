@@ -213,6 +213,17 @@ RETURNING id
 const SELECT_ARTICLE_ID_BY_CONTENT_HASH_SQL: &str =
     "SELECT id FROM articles WHERE content_hash = $1";
 
+/// R2-S6: the articles a feed entry already owns (at most one is expected;
+/// two are enough to report ambiguity).
+const SELECT_ARTICLES_OWNED_BY_ENTRY_SQL: &str = "SELECT id, extractor_strategy FROM articles WHERE origin_feed_entry_id = $1 ORDER BY id LIMIT 2";
+
+fn ambiguous_entry_ownership(entry_id: i64) -> StorageError {
+    StorageError::Integrity {
+        table: "articles".to_string(),
+        reference: format!("feed entry {entry_id} owns more than one article"),
+    }
+}
+
 const SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL: &str =
     "SELECT id, origin_feed_entry_id FROM articles WHERE content_hash = $1";
 
@@ -672,32 +683,62 @@ async fn sqlite_persist_for_entry(
     now: OffsetDateTime,
 ) -> Result<EntryPersistOutcome, StorageError> {
     let entry_id = article.origin_feed_entry_id;
-    // The INSERT is the first statement, so the deferred transaction takes the
-    // write lock immediately (no read-then-upgrade busy window).
-    let mut tx = pool.begin().await.map_err(StorageError::from)?;
-    let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_ARTICLE_ON_CONFLICT_SQL)
-        .bind(&article.content_hash)
-        .bind(&article.canonical_link)
-        .bind(&article.title)
-        .bind(&article.body_text)
-        .bind(article.body_html_artifact_id)
-        .bind(&article.extractor_strategy)
-        .bind(article.extractor_version)
-        .bind(&article.content_quality)
-        .bind(article.word_count)
-        .bind(entry_id)
-        .fetch_optional(&mut *tx)
+    // The ownership read comes first, so the write lock is taken up front
+    // (`BEGIN IMMEDIATE`): no read-then-upgrade busy window.
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
         .await
-        .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
-    let existing = match inserted_id {
-        Some(_) => None,
-        None => sqlx::query_as::<_, (i64, i64)>(SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL)
-            .bind(&article.content_hash)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(StorageError::from)?,
+        .map_err(StorageError::from)?;
+    // R2-S6: an earlier attempt (before persist became one transaction) may
+    // have committed an article for this entry and crashed before the
+    // release. Recovery reuses that article and its stored path, whatever
+    // body / path this attempt produced; several owned articles cannot be
+    // resolved here and are reported.
+    let owned = sqlx::query_as::<_, (i64, String)>(SELECT_ARTICLES_OWNED_BY_ENTRY_SQL)
+        .bind(entry_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    let (advance, fallback) = match owned.as_slice() {
+        [] => {
+            let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_ARTICLE_ON_CONFLICT_SQL)
+                .bind(&article.content_hash)
+                .bind(&article.canonical_link)
+                .bind(&article.title)
+                .bind(&article.body_text)
+                .bind(article.body_html_artifact_id)
+                .bind(&article.extractor_strategy)
+                .bind(article.extractor_version)
+                .bind(&article.content_quality)
+                .bind(article.word_count)
+                .bind(entry_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
+            let existing = match inserted_id {
+                Some(_) => None,
+                None => sqlx::query_as::<_, (i64, i64)>(
+                    SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL,
+                )
+                .bind(&article.content_hash)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StorageError::from)?,
+            };
+            (
+                EntryAdvance::decide(inserted_id, existing, entry_id)?,
+                fallback,
+            )
+        }
+        [(article_id, strategy)] => (
+            EntryAdvance::Own {
+                article_id: *article_id,
+                newly_created: false,
+            },
+            strategy == "summary_fallback",
+        ),
+        _ => return Err(ambiguous_entry_ownership(entry_id)),
     };
-    let advance = EntryAdvance::decide(inserted_id, existing, entry_id)?;
     let updated = match advance {
         EntryAdvance::Own { article_id, .. } => {
             sqlx::query(if fallback {
@@ -879,29 +920,56 @@ async fn pg_persist_for_entry(
     // wait for it; after its commit ON CONFLICT skips and the SELECT (a new
     // statement snapshot) sees the committed row.
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
-    let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_ARTICLE_ON_CONFLICT_SQL)
-        .bind(&article.content_hash)
-        .bind(&article.canonical_link)
-        .bind(&article.title)
-        .bind(&article.body_text)
-        .bind(article.body_html_artifact_id)
-        .bind(&article.extractor_strategy)
-        .bind(article.extractor_version)
-        .bind(&article.content_quality)
-        .bind(article.word_count)
+    // R2-S6: an earlier attempt (before persist became one transaction) may
+    // have committed an article for this entry and crashed before the
+    // release. Recovery reuses that article and its stored path, whatever
+    // body / path this attempt produced; several owned articles cannot be
+    // resolved here and are reported.
+    let owned = sqlx::query_as::<_, (i64, String)>(SELECT_ARTICLES_OWNED_BY_ENTRY_SQL)
         .bind(entry_id)
-        .fetch_optional(&mut *tx)
+        .fetch_all(&mut *tx)
         .await
-        .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
-    let existing = match inserted_id {
-        Some(_) => None,
-        None => sqlx::query_as::<_, (i64, i64)>(SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL)
-            .bind(&article.content_hash)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(StorageError::from)?,
+        .map_err(StorageError::from)?;
+    let (advance, fallback) = match owned.as_slice() {
+        [] => {
+            let inserted_id = sqlx::query_scalar::<_, i64>(INSERT_ARTICLE_ON_CONFLICT_SQL)
+                .bind(&article.content_hash)
+                .bind(&article.canonical_link)
+                .bind(&article.title)
+                .bind(&article.body_text)
+                .bind(article.body_html_artifact_id)
+                .bind(&article.extractor_strategy)
+                .bind(article.extractor_version)
+                .bind(&article.content_quality)
+                .bind(article.word_count)
+                .bind(entry_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| classify_db_error(error, "articles", &article.content_hash))?;
+            let existing = match inserted_id {
+                Some(_) => None,
+                None => sqlx::query_as::<_, (i64, i64)>(
+                    SELECT_ARTICLE_ID_AND_ORIGIN_BY_CONTENT_HASH_SQL,
+                )
+                .bind(&article.content_hash)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StorageError::from)?,
+            };
+            (
+                EntryAdvance::decide(inserted_id, existing, entry_id)?,
+                fallback,
+            )
+        }
+        [(article_id, strategy)] => (
+            EntryAdvance::Own {
+                article_id: *article_id,
+                newly_created: false,
+            },
+            strategy == "summary_fallback",
+        ),
+        _ => return Err(ambiguous_entry_ownership(entry_id)),
     };
-    let advance = EntryAdvance::decide(inserted_id, existing, entry_id)?;
     let updated = match advance {
         EntryAdvance::Own { article_id, .. } => {
             sqlx::query(if fallback {

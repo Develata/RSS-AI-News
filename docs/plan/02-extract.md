@@ -102,6 +102,12 @@ insert-or-get article 与 owner-guarded 的 entry 推进（persisted / fallback_
 owner guard 落空则整体回滚（不留孤儿 article），报 `LeaseLost`。命中的已有 article 若
 `origin_feed_entry_id` 就是本条目（旧版本在 article 提交后、release 前崩溃留下的），记为本条目的
 `persisted`（`newly_created = false`），不再误判为 `dedup_skipped` 指向自己。
+恢复优先（R2-S6）：同一事务内**先**按 `origin_feed_entry_id` 查本条目已拥有的 article（`idx_articles_origin_feed_entry`，
+migration 0009）。恰有一篇时直接复用它，**不**插入本次提取的正文（重试可能得到不同正文哈希 H2，旧做法会再建一篇，
+使同一 entry 拥有两篇 article、task_gen 两篇都处理），entry 状态按已存 article 推导（`extractor_strategy =
+summary_fallback` → `fallback_persisted`，否则 `persisted`），与本次是否走摘要路径无关。拥有多篇时无法判定，
+返回 `StorageError::Integrity`（不可重试，事务回滚，entry 不动），由 extract 按存储故障如实上报。SQLite 该事务改用
+`BEGIN IMMEDIATE`（先读后写，避免升级写锁时 busy）。
 
 命中时已有 article 的字段保持不变（先写者为准，`ON CONFLICT DO NOTHING`）：这次提取新写入的 html artifact
 **不会**补到已有 article 的 `body_html_artifact_id`。已有 article 可能本来就没有 artifact（`on_failure` 下提取成功、
