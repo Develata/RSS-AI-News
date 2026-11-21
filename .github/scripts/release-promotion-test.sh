@@ -423,6 +423,48 @@ reconcile 01.4.99 <"$work/tags"
 expect_rc 2
 done_case
 
+# 2^53 + 1 and 2^53 are equal as doubles: components must compare exactly,
+# with no digit cap (R3G-S8, same rule as the Rust acceptance validator).
+start "components beyond 2^53 and 9 digits compare exactly"
+case_failures=$failures
+big_hi=9007199254740993.0.0
+big_lo=9007199254740992.0.0
+publish "$big_hi" chi
+publish "$big_lo" clo
+publish 1000000000.0.0 cg
+{ tag "$big_lo" clo; tag "$big_hi" chi; tag 1000000000.0.0 cg; } >"$work/tags"
+reconcile "$big_lo" <"$work/tags"
+expect_rc 0
+alias_at latest "$big_hi"
+alias_at 9007199254740992.0 "$big_lo"
+alias_at 9007199254740993.0 "$big_hi"
+done_case
+
+start "an alias beyond 2^53 is not moved down to a version it rounds to"
+case_failures=$failures
+publish "$big_hi" chi
+publish "$big_lo" clo
+point latest "$big_hi"
+point 9007199254740992.0 "$big_lo"
+tag "$big_lo" clo >"$work/tags"
+reconcile "$big_lo" <"$work/tags"
+expect_rc 0
+alias_at latest "$big_hi"
+no_writes
+done_case
+
+start "same-length components compare digit by digit"
+case_failures=$failures
+publish 1.19.0 c119
+publish 1.20.0 c120
+publish 1.9.0 c19
+{ tag 1.9.0 c19; tag 1.19.0 c119; tag 1.20.0 c120; } >"$work/tags"
+reconcile 1.9.0 <"$work/tags"
+expect_rc 0
+alias_at latest 1.20.0
+alias_at 1.9 1.9.0
+done_case
+
 start "version missing from the listing fails"
 case_failures=$failures
 publish 0.10.5 c5

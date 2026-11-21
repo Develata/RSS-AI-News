@@ -115,7 +115,8 @@ Jobs：
 - `promote-tags`（`needs: [publish-image]`）—— 用
   [`.github/scripts/release-promotion.sh`](../../.github/scripts/release-promotion.sh) `reconcile` 把别名**对齐到最高的已发布
   stable 版本**，与触发它的是哪个 tag 无关（R3-2 / R3-3 / R3-4 / R3-22）：
-  - 输入：`git ls-remote --tags`（annotated tag 取 `^{}` 行的 commit）。只认 `vX.Y.Z`，每段为 `0` 或无前导零的数字。
+  - 输入：`git ls-remote --tags`（annotated tag 取 `^{}` 行的 commit）。只认 `vX.Y.Z`，每段为 `0` 或无前导零的数字，位数不限（与 Rust 验收的
+    `validate_version` 同一规则）；比较时逐段先比位数、再按数字串比较，不经浮点数，超过 2^53 也精确（R3G-S8）。
   - "已发布"：`V` 与 `V-scheduler` 两个版本 tag 都在 registry 中，版本 label 分别**恰为** `V` 与 `V-scheduler`（metadata-action
     生成的值，不再剥掉 `-scheduler` 后比较，因此两个 tag 互相指错的镜像不算发布，`existing` 也不会复用，R3G-B2），revision label 都
     = 该 tag 的 commit；只有一侧镜像

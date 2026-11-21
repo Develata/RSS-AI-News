@@ -58,13 +58,16 @@
 #       for the case where the higher tag is deleted in between).
 #
 # Versions: stable `X.Y.Z` only, each component `0` or `[1-9][0-9]*` (SemVer
-# 2.0.0 §2; at most 9 digits so awk compares them exactly).
+# 2.0.0 §2), of any length, like the Rust acceptance validator
+# (`validate_version`). Without leading zeros a longer component is larger
+# and equal-length components compare digit by digit, so versions are
+# compared as strings, never as (floating-point) numbers (R3G-S8).
 
 set -eu
 
 script_dir="$(dirname "$0")"
 registry="${RELEASE_REGISTRY:-$script_dir/release-registry.sh}"
-VERSION_ERE='^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$'
+VERSION_ERE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 
 die() {
     echo "release-promotion: $*" >&2
@@ -75,13 +78,18 @@ is_version() {
     printf '%s\n' "$1" | grep -Eq "$VERSION_ERE"
 }
 
-# version_cmp A B -> prints -1, 0 or 1.
+# version_cmp A B -> prints -1, 0 or 1. Pre: A and B are versions.
 version_cmp() {
-    awk -v a="$1" -v b="$2" 'BEGIN {
+    # `split` yields numeric strings, which awk would compare as doubles;
+    # concatenating "" forces a string comparison (by length first).
+    LC_ALL=C awk -v a="$1" -v b="$2" 'BEGIN {
         split(a, x, "."); split(b, y, ".")
         for (i = 1; i <= 3; i++) {
-            if (x[i] + 0 < y[i] + 0) { print -1; exit }
-            if (x[i] + 0 > y[i] + 0) { print 1; exit }
+            p = x[i] ""; q = y[i] ""
+            if (length(p) < length(q)) { print -1; exit }
+            if (length(p) > length(q)) { print 1; exit }
+            if (p < q) { print -1; exit }
+            if (p > q) { print 1; exit }
         }
         print 0
     }'
@@ -135,7 +143,11 @@ stable_tags() {
                 printf '%s %s\n' "$name" "$commit"
             fi
         done |
-        sort -t . -k1,1nr -k2,2nr -k3,3nr
+        # Sort keys: each component's length, then its digits as a string
+        # (exact for any length; `sort -n` may go through floating point).
+        awk '{ split($1, v, "."); print length(v[1]), v[1], length(v[2]), v[2], length(v[3]), v[3], $0 }' |
+        LC_ALL=C sort -k1,1nr -k2,2r -k3,3nr -k4,4r -k5,5nr -k6,6r |
+        cut -d ' ' -f 7-
 }
 
 # role_tag ROLE NAME -> NAME for runtime, NAME-scheduler for scheduler: both
