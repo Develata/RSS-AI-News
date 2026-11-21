@@ -460,7 +460,7 @@ mod tests {
         // A config change that alters the rewritten rows changes it.
         let moved = category("a", "https://example.com/moved.xml");
         assert_ne!(
-            reindex_rule_fingerprint(Categories, "1", &[a.clone()]),
+            reindex_rule_fingerprint(Categories, "1", std::slice::from_ref(&a)),
             reindex_rule_fingerprint(Categories, "1", &[moved])
         );
         assert_ne!(
@@ -469,7 +469,7 @@ mod tests {
         );
         // Unrelated inputs do not.
         assert_eq!(
-            reindex_rule_fingerprint(ContentHash, "1", &[a.clone()]),
+            reindex_rule_fingerprint(ContentHash, "1", std::slice::from_ref(&a)),
             reindex_rule_fingerprint(ContentHash, "2", &[])
         );
         // Targets never share an identity, and none is the old bare-name hash.
