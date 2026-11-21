@@ -595,7 +595,7 @@ fn path_segment_key(segment: &str) -> String {
 /// Cross-category collisions among `(category_key, rendered relative path)`
 /// pairs, shared by validate-config (sample date) and publish-all (real report
 /// date). Paths are compared by segment after normalization and a caseless,
-/// normalization-insensitive key ([`path_segment_key`]), so `News/x.md` and
+/// normalization-insensitive key (`path_segment_key`), so `News/x.md` and
 /// `news/x.md`, `ſ` and `s`, or composed and decomposed `é` collide (one file
 /// on a case-insensitive volume), and a path that is a whole-segment prefix of
 /// another (`a/x` vs `a/x/y.md`) collides because one category needs a
