@@ -1,6 +1,6 @@
 mod common;
 
-use rss_ai_news_storage::{ArticleRepo, ArticleRepository, NewAiResult};
+use rss_ai_news_storage::{ArticleRepo, ArticleRepository, FreshWindow, NewAiResult};
 use time::{Duration, OffsetDateTime};
 
 use common::{insert_article, insert_feed_entry, insert_rule, make_test_pool, seed_source};
@@ -14,9 +14,13 @@ fn identity() -> NewAiResult {
     }
 }
 
-/// A window start after every seeded article: all of them are backlog.
-fn after_everything() -> OffsetDateTime {
-    OffsetDateTime::now_utc() + Duration::days(365)
+/// A window after every seeded article: all of them are backlog.
+fn after_everything() -> FreshWindow {
+    let since = OffsetDateTime::now_utc() + Duration::days(365);
+    FreshWindow {
+        since,
+        until: since + Duration::days(1),
+    }
 }
 
 #[tokio::test]

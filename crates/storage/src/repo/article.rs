@@ -122,13 +122,13 @@ pub trait ArticleRepository: Send + Sync {
         &self,
         category_key: &str,
         identity: &crate::NewAiResult,
-        published_since: OffsetDateTime,
+        window: crate::FreshWindow,
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
     /// C9 task_gen fresh share: `persisted` articles of the category inside
-    /// the publish window (`COALESCE(fe.published_at, fe.discovered_at) >=
-    /// published_since`) that have no AI row of `identity` yet, oldest source
+    /// the publish window (`window.since <= COALESCE(fe.published_at,
+    /// fe.discovered_at) <= window.until`, R2-S1) that have no AI row of `identity` yet, oldest source
     /// time first (they leave the window first), ties by id. The anti-join
     /// keeps rows whose task already exists (and may stay `persisted`, e.g.
     /// `permanent_failed`) out of this list; the id-ordered list
@@ -137,7 +137,7 @@ pub trait ArticleRepository: Send + Sync {
         &self,
         category_key: &str,
         identity: &crate::NewAiResult,
-        published_since: OffsetDateTime,
+        window: crate::FreshWindow,
         batch_size: u32,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
     async fn list_in_window_for_backfill(
@@ -228,14 +228,16 @@ WHERE id = $1
 /// C9 backlog task_gen list, SQLite (R2-B1): the complement of
 /// [`LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL`] within `persisted` — outside the
 /// window, or inside it with an identity row already (reconciled here).
-/// Window membership as in the fresh list; `$3` is
-/// `sqlite_instant_cutoff(published_since)`.
+/// Window membership as in the fresh list (`$3` / `$8` the SQLite window
+/// bounds).
 const LIST_BACKLOG_FOR_AI_TASK_GEN_SQLITE_SQL: &str = r#"
 SELECT article_id, in_window
 FROM (
     SELECT a.id AS article_id,
-           COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($3),
-                    COALESCE(fe.published_at, fe.discovered_at) >= $3) AS in_window,
+           (COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($3),
+                     COALESCE(fe.published_at, fe.discovered_at) >= $3)
+            AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) <= julianday($8),
+                         COALESCE(fe.published_at, fe.discovered_at) <= $8)) AS in_window,
            EXISTS (
                SELECT 1 FROM article_ai_results r
                WHERE r.article_id = a.id AND r.prompt_version = $4
@@ -257,7 +259,8 @@ const LIST_BACKLOG_FOR_AI_TASK_GEN_PG_SQL: &str = r#"
 SELECT article_id, in_window
 FROM (
     SELECT a.id AS article_id,
-           COALESCE(fe.published_at, fe.discovered_at) >= $3 AS in_window,
+           (COALESCE(fe.published_at, fe.discovered_at) >= $3
+            AND COALESCE(fe.published_at, fe.discovered_at) <= $8) AS in_window,
            EXISTS (
                SELECT 1 FROM article_ai_results r
                WHERE r.article_id = a.id AND r.prompt_version = $4
@@ -276,8 +279,8 @@ LIMIT $7
 "#;
 
 /// C9 fresh task_gen list, SQLite: the source time is compared and ordered
-/// by `julianday()` instant with a text fallback; `$2` is
-/// `sqlite_instant_cutoff(published_since)`.
+/// by `julianday()` instant with a text fallback; `$2` / `$7` are the window
+/// bounds rounded inward to whole milliseconds (`sqlite_window_bounds`).
 const LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL: &str = r#"
 SELECT a.id AS article_id, 1 AS in_window
 FROM articles a
@@ -287,6 +290,8 @@ WHERE a.state = 'persisted'
   AND fs.category_key = $1
   AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($2),
                COALESCE(fe.published_at, fe.discovered_at) >= $2)
+  AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) <= julianday($7),
+               COALESCE(fe.published_at, fe.discovered_at) <= $7)
   AND NOT EXISTS (
       SELECT 1 FROM article_ai_results r
       WHERE r.article_id = a.id AND r.prompt_version = $3
@@ -306,6 +311,7 @@ JOIN feed_sources fs ON fs.id = fe.source_id
 WHERE a.state = 'persisted'
   AND fs.category_key = $1
   AND COALESCE(fe.published_at, fe.discovered_at) >= $2
+  AND COALESCE(fe.published_at, fe.discovered_at) <= $7
   AND NOT EXISTS (
       SELECT 1 FROM article_ai_results r
       WHERE r.article_id = a.id AND r.prompt_version = $3
@@ -408,20 +414,22 @@ impl ArticleRepository for ArticleRepo {
         &self,
         category_key: &str,
         identity: &crate::NewAiResult,
-        published_since: OffsetDateTime,
+        window: crate::FreshWindow,
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
+                let (since, until) = super::sqlite_window_bounds(window);
                 sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_BACKLOG_FOR_AI_TASK_GEN_SQLITE_SQL)
                     .bind(after_id)
                     .bind(category_key)
-                    .bind(super::sqlite_instant_cutoff(published_since))
+                    .bind(since)
                     .bind(identity.prompt_version)
                     .bind(identity.output_schema_version)
                     .bind(&identity.model_id)
                     .bind(i64::from(batch_size))
+                    .bind(until)
                     .fetch_all(p)
                     .await
                     .map_err(StorageError::from)
@@ -430,11 +438,12 @@ impl ArticleRepository for ArticleRepo {
                 sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_BACKLOG_FOR_AI_TASK_GEN_PG_SQL)
                     .bind(after_id)
                     .bind(category_key)
-                    .bind(published_since)
+                    .bind(window.since)
                     .bind(identity.prompt_version)
                     .bind(identity.output_schema_version)
                     .bind(&identity.model_id)
                     .bind(i64::from(batch_size))
+                    .bind(window.until)
                     .fetch_all(p)
                     .await
                     .map_err(StorageError::from)
@@ -446,18 +455,20 @@ impl ArticleRepository for ArticleRepo {
         &self,
         category_key: &str,
         identity: &crate::NewAiResult,
-        published_since: OffsetDateTime,
+        window: crate::FreshWindow,
         batch_size: u32,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
+                let (since, until) = super::sqlite_window_bounds(window);
                 sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL)
                     .bind(category_key)
-                    .bind(super::sqlite_instant_cutoff(published_since))
+                    .bind(since)
                     .bind(identity.prompt_version)
                     .bind(identity.output_schema_version)
                     .bind(&identity.model_id)
                     .bind(i64::from(batch_size))
+                    .bind(until)
                     .fetch_all(p)
                     .await
                     .map_err(StorageError::from)
@@ -465,11 +476,12 @@ impl ArticleRepository for ArticleRepo {
             StoragePool::Postgres(p) => {
                 sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_FRESH_FOR_AI_TASK_GEN_PG_SQL)
                     .bind(category_key)
-                    .bind(published_since)
+                    .bind(window.since)
                     .bind(identity.prompt_version)
                     .bind(identity.output_schema_version)
                     .bind(&identity.model_id)
                     .bind(i64::from(batch_size))
+                    .bind(window.until)
                     .fetch_all(p)
                     .await
                     .map_err(StorageError::from)

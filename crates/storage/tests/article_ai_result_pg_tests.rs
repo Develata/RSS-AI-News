@@ -438,12 +438,15 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
     let articles = ArticleRepo::new_with_storage(ctx.storage_pool().clone());
     let now = OffsetDateTime::now_utc();
     let since = now - time::Duration::hours(48);
+    let window = rss_ai_news_storage::FreshWindow { since, until: now };
     let mut ids = Vec::new();
-    // (tag, source time): old backlog, late fresh, early fresh.
+    // (tag, source time): old backlog, late fresh, early fresh, future (R2-S1:
+    // after the window's end, so backlog).
     for (tag, at) in [
         ("f-old", now - time::Duration::days(10)),
         ("f-late", now - time::Duration::hours(1)),
         ("f-early", now - time::Duration::hours(40)),
+        ("f-future", now + time::Duration::hours(2)),
     ] {
         let id = seed_article(&ctx, tag, "persisted").await;
         sqlx::query(
@@ -464,7 +467,7 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
         model_id: "gpt-4".to_string(),
     };
     let listed = articles
-        .list_fresh_for_ai_task_gen("ai", &identity, since, 10)
+        .list_fresh_for_ai_task_gen("ai", &identity, window, 10)
         .await
         .expect("pg fresh list");
     assert_eq!(
@@ -472,9 +475,9 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
         [ids[2], ids[1]],
         "in-window only, earliest source time first"
     );
-    // R2-B1: the backlog list is the complement (here: the old article only).
+    // R2-B1: the backlog list is the complement (old and future articles).
     let backlog = articles
-        .list_backlog_for_ai_task_gen("ai", &identity, since, 10, 0)
+        .list_backlog_for_ai_task_gen("ai", &identity, window, 10, 0)
         .await
         .expect("pg backlog list");
     assert_eq!(
@@ -482,7 +485,7 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
             .iter()
             .map(|c| (c.article_id, c.in_window))
             .collect::<Vec<_>>(),
-        [(ids[0], false)]
+        [(ids[0], false), (ids[3], false)]
     );
     assert_eq!(
         ai.last_served_side("ai", ShareStage::Claim).await.unwrap(),
@@ -505,13 +508,13 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
     // the backlog list then reconciles them (in-window rows flagged).
     assert!(
         articles
-            .list_fresh_for_ai_task_gen("ai", &identity, since, 10)
+            .list_fresh_for_ai_task_gen("ai", &identity, window, 10)
             .await
             .unwrap()
             .is_empty()
     );
     let backlog = articles
-        .list_backlog_for_ai_task_gen("ai", &identity, since, 10, 0)
+        .list_backlog_for_ai_task_gen("ai", &identity, window, 10, 0)
         .await
         .unwrap();
     assert_eq!(
@@ -519,7 +522,12 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
             .iter()
             .map(|c| (c.article_id, c.in_window))
             .collect::<Vec<_>>(),
-        [(ids[0], false), (ids[1], true), (ids[2], true)]
+        [
+            (ids[0], false),
+            (ids[1], true),
+            (ids[2], true),
+            (ids[3], false)
+        ]
     );
 
     let request = ClaimRequest {
@@ -549,12 +557,17 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
         ai.last_served_side("ai", ShareStage::Claim).await.unwrap(),
         Some(ShareSide::Backlog)
     );
-    // Backlog exhausted: its slot passes to the remaining fresh task.
-    let rest = ai
+    let fresh = ai
         .claim_pending_shared(&request, "ai", since)
         .await
         .unwrap();
-    assert_eq!(rest.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[1]]);
+    assert_eq!(fresh.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[1]]);
+    // The future-dated task is backlog, not fresh (R2-S1).
+    let future = ai
+        .claim_pending_shared(&request, "ai", since)
+        .await
+        .unwrap();
+    assert_eq!(future.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[3]]);
     ctx.cleanup().await;
 }
 

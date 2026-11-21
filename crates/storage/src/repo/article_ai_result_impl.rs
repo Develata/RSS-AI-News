@@ -10,12 +10,12 @@ use time::OffsetDateTime;
 
 use crate::{ClaimRequest, ReleaseFailureOutcome, StorageError, StoragePool, classify_db_error};
 
-use super::{sqlite_instant_cutoff, sqlite_stored_deadline};
+use super::{sqlite_instant_cutoff, sqlite_stored_deadline, sqlite_window_bounds};
 
 use super::article_ai_result::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
-    ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome, ShareMark,
-    ShareSide, ShareStage,
+    ClaimedAiResult, FreshWindow, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome,
+    ShareMark, ShareSide, ShareStage,
 };
 use super::article_ai_result_sql::{
     ADVANCE_ARTICLE_FROM_AI_PHASE_SQL, ADVANCE_ARTICLE_TO_AI_PENDING_SQL,
@@ -458,7 +458,11 @@ async fn sqlite_claim_pending_shared(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(StorageError::from)?;
-    let since = sqlite_instant_cutoff(published_since);
+    // One window per batch, ending at the claim's own `now` (R2-S1).
+    let (since, until) = sqlite_window_bounds(FreshWindow {
+        since: published_since,
+        until: request.now,
+    });
     let fresh_first = if n == 1 {
         let last = sqlx::query_scalar::<_, String>(SELECT_SHARE_SIDE_SQL)
             .bind(category_key)
@@ -489,6 +493,7 @@ async fn sqlite_claim_pending_shared(
             .bind(category_key)
             .bind(i64::from(limit))
             .bind(since)
+            .bind(until)
             .fetch_all(&mut *tx)
             .await
             .map_err(StorageError::from)?;
@@ -982,6 +987,7 @@ async fn pg_claim_pending_shared(
             .bind(category_key)
             .bind(i64::from(limit))
             .bind(published_since)
+            .bind(request.now)
             .fetch_all(&mut *tx)
             .await
             .map_err(StorageError::from)?;

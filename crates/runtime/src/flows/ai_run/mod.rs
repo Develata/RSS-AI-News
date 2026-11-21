@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_storage::{
-    ClaimRequest, ClaimedAiResult, NewAiResult, ShareMark, ShareSide, ShareStage, build_owner_id,
-    lease_expires_at,
+    ClaimRequest, ClaimedAiResult, FreshWindow, NewAiResult, ShareMark, ShareSide, ShareStage,
+    build_owner_id, lease_expires_at,
 };
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
@@ -63,11 +63,16 @@ impl AiRunFlow {
             .await;
 
         let page_size = opts.task_gen_batch_size.max(1);
-        let since = ai_fresh_since((self.ctx.clock)(), opts.candidate_window_hours);
+        // One window for the whole pass, ending at its own `now` (R2-S1).
+        let now = (self.ctx.clock)();
+        let window = FreshWindow {
+            since: ai_fresh_since(now, opts.candidate_window_hours),
+            until: now,
+        };
         let mut summary = TaskGenSummary::default();
         let mut pass = TaskGenPass {
             page_size,
-            since,
+            window,
             backlog_cursor: 0,
             stopped: false,
         };
@@ -165,7 +170,7 @@ impl AiRunFlow {
                         .list_fresh_for_ai_task_gen(
                             &opts.category_key,
                             &identity,
-                            pass.since,
+                            pass.window,
                             pass.page_size,
                         )
                         .await
@@ -176,7 +181,7 @@ impl AiRunFlow {
                         .list_backlog_for_ai_task_gen(
                             &opts.category_key,
                             &identity,
-                            pass.since,
+                            pass.window,
                             pass.page_size,
                             pass.backlog_cursor,
                         )
@@ -486,7 +491,7 @@ enum TaskGenSide {
 /// State shared by the sides of one task_gen pass.
 struct TaskGenPass {
     page_size: u32,
-    since: OffsetDateTime,
+    window: FreshWindow,
     /// C3 keyset cursor of the backlog (id-ordered) list.
     backlog_cursor: i64,
     /// A storage error ended the pass.

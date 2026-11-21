@@ -732,29 +732,23 @@ impl rss_ai_news_storage::ArticleRepository for FlakyArticleRepo {
         &self,
         category_key: &str,
         identity: &rss_ai_news_storage::NewAiResult,
-        published_since: OffsetDateTime,
+        window: rss_ai_news_storage::FreshWindow,
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<rss_ai_news_storage::ArticleAiTaskCandidate>, StorageError> {
         self.inner
-            .list_backlog_for_ai_task_gen(
-                category_key,
-                identity,
-                published_since,
-                batch_size,
-                after_id,
-            )
+            .list_backlog_for_ai_task_gen(category_key, identity, window, batch_size, after_id)
             .await
     }
     async fn list_fresh_for_ai_task_gen(
         &self,
         category_key: &str,
         identity: &rss_ai_news_storage::NewAiResult,
-        published_since: OffsetDateTime,
+        window: rss_ai_news_storage::FreshWindow,
         batch_size: u32,
     ) -> Result<Vec<rss_ai_news_storage::ArticleAiTaskCandidate>, StorageError> {
         self.inner
-            .list_fresh_for_ai_task_gen(category_key, identity, published_since, batch_size)
+            .list_fresh_for_ai_task_gen(category_key, identity, window, batch_size)
             .await
     }
     async fn list_in_window_for_backfill(
@@ -1271,10 +1265,11 @@ async fn fresh_share_prefers_articles_that_leave_the_window_first() {
     flow.task_gen(&opts).await;
 
     // Fresh share: the article closest to leaving the window. The backlog
-    // share then takes the lowest id among the rest.
+    // share takes the future-dated article: it is outside the window that
+    // ends now (R2-S1), so it is backlog, not fresh.
     assert_eq!(article_state(&pool, early[0]).await, "ai_pending");
-    assert_eq!(article_state(&pool, late[0]).await, "ai_pending");
-    assert_eq!(article_state(&pool, future[0]).await, "persisted");
+    assert_eq!(article_state(&pool, future[0]).await, "ai_pending");
+    assert_eq!(article_state(&pool, late[0]).await, "persisted");
 }
 
 #[tokio::test]
@@ -1671,5 +1666,57 @@ async fn real_sqlite_extended_lock_error_returns_task_to_pending_with_budget_lef
     assert_eq!(
         ai_result_state_and_attempts(&pool, ai_result_id).await,
         ("pending".to_string(), 1)
+    );
+}
+// === R2-S1: the fresh window ends at `now` (the freeze's upper bound) ===
+
+async fn share_state(pool: &SqlitePool, stage: &str) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT last_side FROM ai_fresh_share_state WHERE category_key = 'ai' AND stage = ?",
+    )
+    .bind(stage)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn future_dated_articles_are_not_fresh_for_task_gen() {
+    let (_dir, pool) = make_test_pool().await;
+    // Today's freeze (`published_until = now`) cannot select it.
+    let future = seed_aged(&pool, "s1-future", 1, hours_ago(-2)).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 1;
+
+    let summary = flow.task_gen(&opts).await;
+
+    // Served by the backlog side, not as a fresh article.
+    assert_eq!(summary.fresh_advanced, 0);
+    assert_eq!(article_state(&pool, future[0]).await, "ai_pending");
+    assert_eq!(
+        share_state(&pool, "task_gen").await.as_deref(),
+        Some("backlog")
+    );
+}
+
+#[tokio::test]
+async fn future_dated_tasks_are_not_fresh_for_the_claim() {
+    let (_dir, pool) = make_test_pool().await;
+    let future = seed_aged(&pool, "s1-c-future", 1, hours_ago(-2)).await;
+    let task = pending_tasks(&pool, &future).await[0];
+    let client = Arc::new(MockAiClient::default());
+    client.insert_success(task, output_json(80)).await;
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.process_batch_size = 1;
+    opts.max_batches = 1;
+
+    let summary = flow.process_ai_tasks(&opts).await;
+
+    assert_eq!(summary.claimed, 1);
+    assert_eq!(
+        share_state(&pool, "claim").await.as_deref(),
+        Some("backlog")
     );
 }

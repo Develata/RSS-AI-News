@@ -77,12 +77,13 @@ RETURNING id, article_id, prompt_version, output_schema_version, model_id
 
 // ── C9: publish-window ("fresh") share ────────────────────────────────
 // "Fresh" = the article would be eligible if publish froze now:
-// `COALESCE(fe.published_at, fe.discovered_at) >= published_since` (the
-// freeze rule, `flows/publish/freeze.rs::published_since`; no upper bound, so
-// future-dated articles count as fresh). SQLite compares and orders that
-// source time by `julianday()` instant with a text fallback; `$9` is
-// `sqlite_instant_cutoff(published_since)`. The backlog claim is the exact
-// complement (R2-B1), so the two sides never compete for the same task.
+// `published_since <= COALESCE(fe.published_at, fe.discovered_at) <= now`
+// (the freeze's bounds, `flows/publish/freeze.rs`; R2-S1: a future-dated
+// article is not fresh, today's freeze cannot select it). SQLite compares and
+// orders that source time by `julianday()` instant with a text fallback; `$9`
+// / `$10` are `sqlite_window_bounds` (rounded inward to whole ms). The
+// backlog claim is the exact complement (R2-B1), so the two sides never
+// compete for the same task.
 
 /// SQLite fresh claim: pending tasks of in-window articles, oldest source
 /// time first (they leave the window first), ties by task id. Lease,
@@ -109,6 +110,8 @@ WHERE id IN (
       AND fs.category_key = $7
       AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($9),
                    COALESCE(fe.published_at, fe.discovered_at) >= $9)
+      AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) <= julianday($10),
+                   COALESCE(fe.published_at, fe.discovered_at) <= $10)
     ORDER BY julianday(COALESCE(fe.published_at, fe.discovered_at)) ASC,
              COALESCE(fe.published_at, fe.discovered_at) ASC,
              aar.id ASC
@@ -137,6 +140,7 @@ WHERE id IN (
       AND aar.attempt_count < $6
       AND fs.category_key = $7
       AND COALESCE(fe.published_at, fe.discovered_at) >= $9
+      AND COALESCE(fe.published_at, fe.discovered_at) <= $10
     ORDER BY COALESCE(fe.published_at, fe.discovered_at) ASC, aar.id ASC
     LIMIT $8
     FOR UPDATE OF aar SKIP LOCKED
@@ -167,8 +171,10 @@ WHERE id IN (
                        aar.lease_expires_at < $5))
       AND aar.attempt_count < $6
       AND fs.category_key = $7
-      AND NOT COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($9),
-                       COALESCE(fe.published_at, fe.discovered_at) >= $9)
+      AND NOT (COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($9),
+                        COALESCE(fe.published_at, fe.discovered_at) >= $9)
+               AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) <= julianday($10),
+                            COALESCE(fe.published_at, fe.discovered_at) <= $10))
     ORDER BY aar.id ASC
     LIMIT $8
 )
@@ -194,7 +200,8 @@ WHERE id IN (
       AND (aar.lease_expires_at IS NULL OR aar.lease_expires_at < $5)
       AND aar.attempt_count < $6
       AND fs.category_key = $7
-      AND NOT (COALESCE(fe.published_at, fe.discovered_at) >= $9)
+      AND NOT (COALESCE(fe.published_at, fe.discovered_at) >= $9
+               AND COALESCE(fe.published_at, fe.discovered_at) <= $10)
     ORDER BY aar.id ASC
     LIMIT $8
     FOR UPDATE OF aar SKIP LOCKED

@@ -202,6 +202,16 @@ pub trait ArticleAiResultRepository: Send + Sync {
     ) -> Result<ReleaseSuccessOutcome, StorageError>;
 }
 
+/// C9 publish window of one selection: an article is fresh when
+/// `since <= COALESCE(fe.published_at, fe.discovered_at) <= until` — the
+/// freeze's own bounds (`published_since(now, window)`, `published_until =
+/// now`, R2-S1). One pass / claim uses one window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreshWindow {
+    pub since: OffsetDateTime,
+    pub until: OffsetDateTime,
+}
+
 /// C9 share side: `Fresh` = inside the publish window, `Backlog` = the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShareSide {

@@ -67,11 +67,25 @@ pub(crate) fn sqlite_instant_cutoff(now: time::OffsetDateTime) -> time::OffsetDa
     now - time::Duration::nanoseconds(i64::from(now.nanosecond() % 1_000_000))
 }
 
+/// SQLite bounds of a C9 window (R2-S1/S2): `julianday()` resolves source
+/// times to whole milliseconds, so both bounds are rounded **inward** — the
+/// start up, the end down (UTC) — and an instant before `since` is never
+/// admitted because it shares `since`'s millisecond.
+pub(crate) fn sqlite_window_bounds(
+    window: FreshWindow,
+) -> (time::OffsetDateTime, time::OffsetDateTime) {
+    (
+        sqlite_stored_deadline(window.since),
+        sqlite_instant_cutoff(window.until),
+    )
+}
+
 pub use article::{
     ArticleAiTaskCandidate, ArticleContentHash, ArticleInsertOutcome, ArticleRepo,
     ArticleRepository, BackfillArticleCandidate, ContentHashReindexCandidate, NewArticle,
     UpdateContentHashOutcome,
 };
+pub use article_ai_result::FreshWindow;
 pub use article_ai_result::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
     ClaimedAiResult, InsertPendingOutcome, NewAiResult, ReleaseSuccessOutcome, ShareMark,

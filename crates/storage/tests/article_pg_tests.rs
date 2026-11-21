@@ -229,7 +229,10 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
         .list_backlog_for_ai_task_gen(
             "ai",
             &backlog_identity(),
-            OffsetDateTime::now_utc() + time::Duration::days(365),
+            rss_ai_news_storage::FreshWindow {
+                since: OffsetDateTime::now_utc() + time::Duration::days(365),
+                until: OffsetDateTime::now_utc() + time::Duration::days(366),
+            },
             2,
             0,
         )
@@ -244,7 +247,10 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
         .list_backlog_for_ai_task_gen(
             "ai",
             &backlog_identity(),
-            OffsetDateTime::now_utc() + time::Duration::days(365),
+            rss_ai_news_storage::FreshWindow {
+                since: OffsetDateTime::now_utc() + time::Duration::days(365),
+                until: OffsetDateTime::now_utc() + time::Duration::days(366),
+            },
             2,
             ids[1],
         )
