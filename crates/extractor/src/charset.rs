@@ -59,8 +59,9 @@ pub fn decode_html<'a>(
         }
     }
 
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        return Ok(Cow::Borrowed(text));
+    // Implicit UTF-8 last; its failure is reported as ParseFailed below.
+    if let Some(text) = decode_strict(UTF_8, bytes) {
+        return Ok(text);
     }
 
     let declared_names = tried
