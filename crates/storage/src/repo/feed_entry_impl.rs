@@ -40,31 +40,12 @@ struct RetryableRelease<'a> {
     now: OffsetDateTime,
 }
 
-/// Retry deadline as stored: UTC, rounded up to a whole millisecond.
-///
-/// UTC keeps every value parseable by SQLite's date functions (`julianday()`
-/// returns NULL for some valid RFC3339 offsets such as `+15:00`). Rounding up,
-/// together with [`cooldown_cutoff`] rounding down, makes the claim's cooldown
-/// comparison exact on both backends: a row is never claimed before
-/// `retry_at`, and at most ~2 ms after it.
-///
-/// The SQLite claim stores `lease_expires_at` the same way, so the lease-expiry
-/// comparisons (strict `<`, against [`cooldown_cutoff`]) are exact too: a
-/// lease is never treated as expired before its instant.
-fn stored_deadline(at: OffsetDateTime) -> OffsetDateTime {
-    let at = at.to_offset(UtcOffset::UTC);
-    match at.nanosecond() % 1_000_000 {
-        0 => at,
-        sub_ms => at + Duration::nanoseconds(i64::from(1_000_000 - sub_ms)),
-    }
-}
-
-/// Claim-time cooldown cutoff: UTC, rounded down to a whole millisecond.
-/// Also the `now` that SQLite lease-expiry predicates compare against.
-fn cooldown_cutoff(now: OffsetDateTime) -> OffsetDateTime {
-    let now = now.to_offset(UtcOffset::UTC);
-    now - Duration::nanoseconds(i64::from(now.nanosecond() % 1_000_000))
-}
+// Deadlines as stored (UTC, rounded up to a whole millisecond) and the `now`
+// they are compared with (UTC, rounded down): the shared SQLite instant rule
+// in `repo::sqlite_stored_deadline` / `repo::sqlite_instant_cutoff`
+// (plan/02 §5.3). UTC keeps every value parseable by `julianday()`; the
+// rounding makes cooldown and lease comparisons exact on both backends.
+use super::{sqlite_instant_cutoff as cooldown_cutoff, sqlite_stored_deadline as stored_deadline};
 
 /// `[1,2,3]` for SQLite `json_each`; ids are integers, so no escaping is needed.
 fn json_id_array(ids: &[i64]) -> String {

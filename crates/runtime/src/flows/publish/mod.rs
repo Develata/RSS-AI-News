@@ -22,6 +22,7 @@ use crate::flows::maintenance::emit_maintenance_outcome;
 
 mod dto;
 mod freeze;
+pub(crate) use freeze::published_since;
 mod paths;
 mod remote;
 mod render;

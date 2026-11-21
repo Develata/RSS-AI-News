@@ -292,7 +292,10 @@ impl PublishFlow {
     }
 }
 
-fn published_since(now: OffsetDateTime, window_hours: u32) -> OffsetDateTime {
+/// Start of the publish candidate window: `now - candidate_window_hours`, and
+/// `0` = no window (everything is eligible). Shared with ai-run's fresh share
+/// (`flows/ai_run`, plan/03 §5.1) so both stages use one eligibility clock.
+pub(crate) fn published_since(now: OffsetDateTime, window_hours: u32) -> OffsetDateTime {
     if window_hours == 0 {
         OffsetDateTime::UNIX_EPOCH
     } else {

@@ -5,7 +5,6 @@
 //! `FOR UPDATE SKIP LOCKED`（§6.4 契约），故按 backend 分裂。
 
 use sqlx::{PgPool, SqlitePool};
-use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::{ClaimRequest, StorageError};
 
@@ -22,26 +21,8 @@ use crate::{ClaimRequest, StorageError};
 // parse (e.g. some valid offsets such as `+15:00`), so each predicate falls
 // back to the previous text comparison via `COALESCE`.
 //
-// These two helpers duplicate the private ones in feed_entry_impl.rs
-// (`stored_deadline` / `cooldown_cutoff`); kept local to avoid cross-module
-// coupling — consolidate when those modules are next touched.
 // PostgreSQL compares `timestamptz` by instant and needs no change.
-
-/// Lease deadline as SQLite stores it: UTC, rounded up to a whole millisecond.
-pub(super) fn sqlite_stored_deadline(at: OffsetDateTime) -> OffsetDateTime {
-    let at = at.to_offset(UtcOffset::UTC);
-    match at.nanosecond() % 1_000_000 {
-        0 => at,
-        sub_ms => at + Duration::nanoseconds(i64::from(1_000_000 - sub_ms)),
-    }
-}
-
-/// The `now` SQLite lease predicates compare against: UTC, rounded down to a
-/// whole millisecond.
-pub(super) fn sqlite_lease_cutoff(now: OffsetDateTime) -> OffsetDateTime {
-    let now = now.to_offset(UtcOffset::UTC);
-    now - Duration::nanoseconds(i64::from(now.nanosecond() % 1_000_000))
-}
+pub(super) use super::{sqlite_instant_cutoff as sqlite_lease_cutoff, sqlite_stored_deadline};
 
 use super::publish_record::ClaimedPublishRecord;
 

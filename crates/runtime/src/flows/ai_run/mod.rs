@@ -510,16 +510,11 @@ struct SideOutcome {
     exhausted: bool,
 }
 
-/// Start of the publish window, as the freeze computes it
-/// (`flows/publish/freeze.rs::published_since`, duplicated there): `now −
-/// candidate_window_hours`, and `0` = no window (everything is fresh). An
-/// article counts as fresh when it would be eligible if publish froze now.
+/// Start of the publish window, from the freeze's own rule
+/// ([`crate::flows::publish::published_since`]): an article counts as fresh
+/// when it would be eligible if publish froze now.
 fn ai_fresh_since(now: OffsetDateTime, candidate_window_hours: u32) -> OffsetDateTime {
-    if candidate_window_hours == 0 {
-        OffsetDateTime::UNIX_EPOCH
-    } else {
-        now - Duration::hours(i64::from(candidate_window_hours))
-    }
+    crate::flows::publish::published_since(now, candidate_window_hours)
 }
 
 impl AiProcessSummary {
