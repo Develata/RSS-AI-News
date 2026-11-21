@@ -1,6 +1,8 @@
 mod checks;
 mod warnings;
 
+pub use checks::{PathCollision, report_path_collisions};
+
 pub use warnings::{
     ConfigWarning, config_warnings, inert_config_warnings, prompt_template_warnings,
 };

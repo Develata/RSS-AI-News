@@ -205,6 +205,12 @@ validate 只用一个样例日期（`2026-01-03`，ADR 0008）渲染，无法发
 归一化（`\` → `/`、去掉空段与 `.` 段）后查重；有碰撞 → `RuntimeError::Config`（列出路径与分类），exit 1。
 实现：[`crates/runtime/src/flows/publish/paths.rs`](../../crates/runtime/src/flows/publish/paths.rs)。
 
+碰撞规则（2026-11-22，R1-P-B5；validate 与 publish-all 共用 `config::validate::report_path_collisions`）：
+按段比较，且**忽略大小写**（Unicode 小写折叠）——`News/{date}.md` 与 `news/{date}.md` 在 macOS / Windows 默认的
+大小写不敏感卷上是同一文件；一个路径是另一个路径的**整段前缀**（`news/2026-01-03` 与 `news/2026-01-03/ml.md`）也算碰撞，
+一个分类要写文件的位置另一个分类需要目录。Git tree 路径本身区分大小写，但每份报告都先落本地，因此统一用更严格的规则。
+根内目录符号链接造成的别名不在此检查之列。
+
 ### 4.2 GithubTarget
 
 走 GitHub Git Data API（Tree / Blob / Commit / Ref）：

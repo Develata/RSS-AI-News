@@ -22,7 +22,8 @@
   - 分类 `path_template` override 生效
 - **publish-remote**：批量提交一个 commit 覆盖多 publish_records；422 lost-update 自动重试一次；429 保持状态可重试
 - **本地原子写**：临时文件 fsync 后 rename 覆盖；越出输出根的符号链接（父目录或目标）被拒绝
-- **跨分类路径碰撞（运行时）**：`publish-all` 在首次写入前按本次报告日期渲染全部分类真实路径并查重；碰撞 → 报错退出，不建 record、不登记规则版本、不落盘
+- **跨分类路径碰撞（运行时）**：`publish-all` 在首次写入前按本次报告日期渲染全部分类真实路径并查重；碰撞 → 报错退出，不建 record、不登记规则版本、不落盘。
+  比较忽略大小写，且一个路径是另一路径的整段父目录也算碰撞（validate 同规则）
 - **--force**：每次调用新建唯一的 `pending` render trace 行与新记录；force 行永不成为 active
 - **path 防穿越**：含 `..` / 反斜杠 / 无日期 token 的模板在 validate 阶段就报错（详见 [./06-config-loading.md](./06-config-loading.md)）
 - 远端 publish 成功后 article → `Published`；批次成功后 record → `PublishedRemote`
@@ -145,6 +146,9 @@
 | `publish_force_creates_unique_non_active_render_versions_on_a_fresh_db` | `crates/cli/tests/publish_cmd_tests.rs` | --force 每次唯一且非 active |
 | `publish_all_refuses_categories_whose_paths_collide_on_the_report_date` | `crates/cli/tests/publish_cmd_tests.rs` | 真实日期路径碰撞在写入前拦截 |
 | `month_day_and_day_month_templates_collide_on_eleven_eleven` | `crates/runtime/src/flows/publish/paths.rs` | 11-11 碰撞 / 其它日期不碰撞 |
+| `paths_differing_only_in_case_collide` | 同上 | 仅大小写不同的路径碰撞 |
+| `a_report_path_that_is_another_reports_directory_collides` | 同上 | 文件路径是另一路径的父目录 → 碰撞 |
+| `paths_differing_only_in_letter_case_collide` | `crates/config/src/validate/checks.rs` | 共享碰撞规则：大小写折叠（含非 ASCII）、整段父子、整段前缀才算 |
 | `publish_default_date_uses_the_effective_timezone_and_rejects_unknown_zones` | `crates/cli/tests/publish_cmd_tests.rs` | 默认日期按目标时区；未知时区写库前报错 |
 | `shanghai_after_midnight_is_the_local_date_not_the_utc_date` | `crates/runtime/src/flows/publish/report_date.rs` | 2026-11-21T00:30+08:00 → 2026-11-21（另含负偏移、夏令时、未知时区用例） |
 | `real_iana_zones_are_accepted_and_made_up_ones_rejected` | `crates/config/src/validate/checks.rs` | validate 按 IANA 库校验 |

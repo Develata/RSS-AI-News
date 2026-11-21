@@ -7,8 +7,7 @@
 //! paths for the run's report date are rendered with the publish renderer and
 //! compared after normalization.
 
-use std::collections::BTreeMap;
-
+use rss_ai_news_config::validate::report_path_collisions;
 use rss_ai_news_report::render_relative_path;
 
 use crate::error::RuntimeError;
@@ -20,29 +19,26 @@ pub struct ReportPathSpec<'a> {
     pub path_template: &'a str,
 }
 
-/// Fails when two categories would write the same report path for
-/// `report_date`. Paths are compared after `\` → `/` and dropping empty and
-/// `.` segments (`a//./b.md` ≡ `a/b.md`); case is significant, as on the
-/// publish targets' own path checks.
+/// Fails when two categories' report paths for `report_date` cannot both be
+/// written, by the rule validate-config uses
+/// ([`rss_ai_news_config::validate::report_path_collisions`]): equal after
+/// `\` → `/`, dropping empty and `.` segments and folding letter case (one
+/// file on a case-insensitive volume), or one path a whole-segment parent of
+/// another (file vs directory).
 pub fn check_report_path_collisions(
     specs: &[ReportPathSpec<'_>],
     report_date: &str,
 ) -> Result<(), RuntimeError> {
-    let mut by_path: BTreeMap<String, Vec<&str>> = BTreeMap::new();
-    for spec in specs {
-        let rendered = render_relative_path(spec.path_template, spec.category_key, report_date)?;
-        by_path
-            .entry(normalize(&rendered))
-            .or_default()
-            .push(spec.category_key);
-    }
-    let collisions = by_path
-        .into_iter()
-        .filter(|(_, keys)| keys.len() > 1)
-        .map(|(path, mut keys)| {
-            keys.sort_unstable();
-            format!("{path:?} <- {keys:?}")
+    let rendered = specs
+        .iter()
+        .map(|spec| {
+            render_relative_path(spec.path_template, spec.category_key, report_date)
+                .map(|path| (spec.category_key.to_string(), path))
         })
+        .collect::<Result<Vec<_>, _>>()?;
+    let collisions = report_path_collisions(&rendered)
+        .iter()
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
     if collisions.is_empty() {
         Ok(())
@@ -50,17 +46,9 @@ pub fn check_report_path_collisions(
         Err(RuntimeError::Config(format!(
             "report paths collide for {report_date}: {}; give each category a distinct \
              path_template (e.g. include {{category_key}})",
-            collisions.join(", ")
+            collisions.join("; ")
         )))
     }
-}
-
-fn normalize(path: &str) -> String {
-    path.replace('\\', "/")
-        .split('/')
-        .filter(|segment| !segment.is_empty() && *segment != ".")
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 #[cfg(test)]
@@ -106,6 +94,41 @@ mod tests {
             },
         ];
         assert!(check_report_path_collisions(&specs, "2026-01-03").is_err());
+    }
+
+    /// R1-P-B5: on a case-insensitive volume (macOS / Windows defaults) these
+    /// are one file, so two "successful" reports would leave one behind.
+    #[test]
+    fn paths_differing_only_in_case_collide() {
+        let specs = [
+            ReportPathSpec {
+                category_key: "ai",
+                path_template: "News/{date}.md",
+            },
+            ReportPathSpec {
+                category_key: "math",
+                path_template: "news/{date}.md",
+            },
+        ];
+        let error = check_report_path_collisions(&specs, "2026-01-03").expect_err("same file");
+        assert!(error.to_string().contains("ai"), "{error}");
+    }
+
+    #[test]
+    fn a_report_path_that_is_another_reports_directory_collides() {
+        let specs = [
+            ReportPathSpec {
+                category_key: "ai",
+                path_template: "news/{date}",
+            },
+            ReportPathSpec {
+                category_key: "math",
+                path_template: "news/{date}/{category_key}.md",
+            },
+        ];
+        let error =
+            check_report_path_collisions(&specs, "2026-01-03").expect_err("file vs directory");
+        assert!(error.to_string().contains("parent directory"), "{error}");
     }
 
     #[test]

@@ -473,35 +473,133 @@ fn collect_cross_category_path_collisions(
     categories: &[CategoryConfig],
 ) {
     let global = app.publish.template.path_template.as_str();
-    // BTreeMap 让 Diagnostic 顺序与 category_key 字典序一致，便于回归测试。
-    let mut bucket: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for category in categories {
-        let template = category
-            .publish_override
-            .as_ref()
-            .and_then(|override_| override_.path_template.as_deref())
-            .filter(|template| !template.trim().is_empty())
-            .unwrap_or(global);
-        let rendered = render_path_template_sample(template, &category.category.key);
-        bucket
-            .entry(rendered)
-            .or_default()
-            .push(category.category.key.clone());
+    let rendered = categories
+        .iter()
+        .map(|category| {
+            let template = category
+                .publish_override
+                .as_ref()
+                .and_then(|override_| override_.path_template.as_deref())
+                .filter(|template| !template.trim().is_empty())
+                .unwrap_or(global);
+            (
+                category.category.key.clone(),
+                render_path_template_sample(template, &category.category.key),
+            )
+        })
+        .collect::<Vec<_>>();
+    for collision in report_path_collisions(&rendered) {
+        report.push(Diagnostic::new(
+            "categories/*.toml",
+            "category.publish_override.path_template",
+            format!(
+                "{collision}: include {{category_key}} or {{CATEGORY_KEY}} in path_template, \
+                 or give each affected category a distinct prefix"
+            ),
+        ));
     }
-    for (path, mut keys) in bucket {
-        if keys.len() > 1 {
-            keys.sort();
-            report.push(Diagnostic::new(
-                "categories/*.toml",
-                "category.publish_override.path_template",
-                format!(
-                    "rendered path {path:?} collides across categories {keys:?}: \
-                    include {{category_key}} or {{CATEGORY_KEY}} in path_template, \
-                    or give each affected category a distinct prefix"
-                ),
-            ));
+}
+
+/// Two categories' report paths that cannot both be written (R1-P-B5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathCollision {
+    /// Same path once `\` → `/`, empty / `.` segments dropped and letter case
+    /// folded: one report overwrites the other on a case-insensitive volume
+    /// (macOS / Windows defaults) or is the very same file.
+    Same { path: String, keys: Vec<String> },
+    /// `parent` is a whole-segment prefix of `child` (case-folded): one
+    /// category needs a file where the other needs a directory.
+    Nested {
+        parent: String,
+        parent_key: String,
+        child: String,
+        child_key: String,
+    },
+}
+
+impl std::fmt::Display for PathCollision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Same { path, keys } => write!(
+                f,
+                "rendered path {path:?} collides across categories {keys:?} \
+                 (compared case-insensitively)"
+            ),
+            Self::Nested {
+                parent,
+                parent_key,
+                child,
+                child_key,
+            } => write!(
+                f,
+                "rendered path {parent:?} of category {parent_key:?} is a parent directory of \
+                 {child:?} of category {child_key:?}"
+            ),
         }
     }
+}
+
+/// Segments of a rendered relative report path: `\` → `/`, empty and `.`
+/// segments dropped (`a//./b.md` ≡ `a/b.md`).
+fn path_segments(path: &str) -> Vec<String> {
+    path.replace('\\', "/")
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Cross-category collisions among `(category_key, rendered relative path)`
+/// pairs, shared by validate-config (sample date) and publish-all (real report
+/// date). Paths are compared by segment after normalization and Unicode case
+/// folding, so `News/x.md` and `news/x.md` collide (one file on a
+/// case-insensitive volume), and a path that is a whole-segment prefix of
+/// another (`a/x` vs `a/x/y.md`) collides because one category needs a
+/// directory where the other writes a file. Git tree paths are case-sensitive,
+/// but every report is also written locally, so the stricter rule applies.
+/// Output order is deterministic (sorted by the normalized path).
+pub fn report_path_collisions(rendered: &[(String, String)]) -> Vec<PathCollision> {
+    // (folded segments, display path, key); BTreeMap keeps diagnostics sorted.
+    let mut by_folded: BTreeMap<Vec<String>, (String, Vec<String>)> = BTreeMap::new();
+    for (key, path) in rendered {
+        let segments = path_segments(path);
+        let folded = segments
+            .iter()
+            .map(|segment| segment.to_lowercase())
+            .collect::<Vec<_>>();
+        let entry = by_folded
+            .entry(folded)
+            .or_insert_with(|| (segments.join("/"), Vec::new()));
+        entry.1.push(key.clone());
+    }
+    let mut collisions = Vec::new();
+    for (path, keys) in by_folded.values() {
+        if keys.len() > 1 {
+            let mut keys = keys.clone();
+            keys.sort();
+            collisions.push(PathCollision::Same {
+                path: path.clone(),
+                keys,
+            });
+        }
+    }
+    for (parent_segments, (parent, parent_keys)) in &by_folded {
+        for (child_segments, (child, child_keys)) in &by_folded {
+            if child_segments.len() > parent_segments.len()
+                && child_segments.starts_with(parent_segments)
+            {
+                // Every bucket holds at least one key; report the smallest.
+                let first = |keys: &[String]| keys.iter().min().cloned().unwrap_or_default();
+                collisions.push(PathCollision::Nested {
+                    parent: parent.clone(),
+                    parent_key: first(parent_keys),
+                    child: child.clone(),
+                    child_key: first(child_keys),
+                });
+            }
+        }
+    }
+    collisions
 }
 
 /// 用样本日期与真实 category_key 渲染 path_template，复用与 `validate_path_template`
@@ -802,5 +900,76 @@ mod timezone_tests {
         for zone in ["Mars/Olympus_Mons", "Asia/Shang hai", "", "+08:00"] {
             assert!(!is_supported_timezone(zone), "{zone:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod path_collision_tests {
+    use super::{PathCollision, report_path_collisions};
+
+    fn paths(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(key, path)| (key.to_string(), path.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn paths_differing_only_in_letter_case_collide() {
+        let collisions = report_path_collisions(&paths(&[
+            ("ai", "News/2026-01-03.md"),
+            ("ml", "news/2026-01-03.md"),
+        ]));
+        assert_eq!(collisions.len(), 1, "{collisions:?}");
+        assert!(
+            matches!(&collisions[0], PathCollision::Same { keys, .. } if keys == &["ai", "ml"]),
+            "{collisions:?}"
+        );
+        assert!(collisions[0].to_string().contains("case-insensitively"));
+    }
+
+    #[test]
+    fn non_ascii_case_folding_also_collides() {
+        let collisions =
+            report_path_collisions(&paths(&[("ai", "Ärzte/2026.md"), ("ml", "ärzte/2026.md")]));
+        assert_eq!(collisions.len(), 1, "{collisions:?}");
+    }
+
+    #[test]
+    fn a_file_path_that_is_another_paths_directory_collides() {
+        let collisions = report_path_collisions(&paths(&[
+            ("ai", "news/2026-01-03"),
+            ("ml", "NEWS/2026-01-03/ml.md"),
+        ]));
+        assert_eq!(
+            collisions,
+            vec![PathCollision::Nested {
+                parent: "news/2026-01-03".to_string(),
+                parent_key: "ai".to_string(),
+                child: "NEWS/2026-01-03/ml.md".to_string(),
+                child_key: "ml".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_shared_name_prefix_that_is_not_a_whole_segment_does_not_collide() {
+        assert!(
+            report_path_collisions(&paths(&[
+                ("ai", "news/2026-01-03.md"),
+                ("ml", "news/2026-01-03.md.bak/ml.md"),
+                ("tech", "news-tech/2026-01-03.md"),
+            ]))
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn equal_paths_collide_after_separator_and_dot_normalization() {
+        let collisions = report_path_collisions(&paths(&[
+            ("ai", "news//./2026.md"),
+            ("ml", "news\\2026.md"),
+        ]));
+        assert_eq!(collisions.len(), 1, "{collisions:?}");
     }
 }
