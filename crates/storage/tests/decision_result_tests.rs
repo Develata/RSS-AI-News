@@ -157,9 +157,8 @@ async fn generation_pages_by_keyset_cursor_and_reports_the_last_scanned_id() {
     let current = identity(POLICY, "laya:multilingual:2048");
     let execution = laya();
     let since = long_ago();
-    let page = |after_id, limit| {
-        repo.generate_pending(&current, &execution, since, after_id, limit, now)
-    };
+    let page =
+        |after_id, limit| repo.generate_pending(&current, &execution, since, after_id, limit, now);
 
     let first = page(0, 2).await.unwrap();
     assert_eq!(first.inserted, 2);
