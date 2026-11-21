@@ -469,7 +469,7 @@ pub(super) async fn pg_apply_content_hash_batch(
                     // UPDATE runs in a savepoint so its unique violation only
                     // rolls back this row (a failed statement would abort the
                     // whole transaction, checkpoint included).
-                    let mut savepoint = (&mut *tx).begin().await.map_err(StorageError::from)?;
+                    let mut savepoint = tx.begin().await.map_err(StorageError::from)?;
                     let updated = sqlx::query(UPDATE_ARTICLE_CONTENT_HASH_SQL)
                         .bind(new_content_hash)
                         .bind(checkpoint.now)
