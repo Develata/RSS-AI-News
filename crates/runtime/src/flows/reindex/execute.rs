@@ -193,7 +193,13 @@ impl ReindexFlow {
                 match self
                     .ctx
                     .feed_source_repo
-                    .upsert_config_with_lease_guard(&feed_source, job_id, owner, now)
+                    .upsert_config_with_lease_guard(
+                        &feed_source,
+                        job_id,
+                        owner,
+                        now,
+                        self.lease_deadline(now),
+                    )
                     .await?
                 {
                     LeaseGuardedWriteOutcome::Applied => {
@@ -222,7 +228,13 @@ impl ReindexFlow {
                 match self
                     .ctx
                     .feed_source_repo
-                    .mark_archived_with_lease_guard(source.id, job_id, owner, now)
+                    .mark_archived_with_lease_guard(
+                        source.id,
+                        job_id,
+                        owner,
+                        now,
+                        self.lease_deadline(now),
+                    )
                     .await?
                 {
                     LeaseGuardedWriteOutcome::Applied => summary.archived += 1,

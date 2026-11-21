@@ -173,7 +173,13 @@ async fn pg_upsert_with_lease_guard_without_lease_returns_lease_lost() {
 
     let src = sample_feed_source("ai", "no-lease", rule_id);
     let outcome = repo
-        .upsert_with_lease_guard(&src, 9999, "owner-x", OffsetDateTime::now_utc())
+        .upsert_with_lease_guard(
+            &src,
+            9999,
+            "owner-x",
+            OffsetDateTime::now_utc(),
+            OffsetDateTime::now_utc() + time::Duration::hours(1),
+        )
         .await
         .expect("pg upsert_with_lease_guard");
     assert_eq!(outcome, LeaseGuardedWriteOutcome::LeaseLost);
@@ -197,7 +203,13 @@ async fn pg_upsert_with_lease_guard_applied_writes_row_in_same_tx() {
 
     let src = sample_feed_source("ai", "lease-ok", rule_id);
     let outcome = repo
-        .upsert_with_lease_guard(&src, job_id, owner, OffsetDateTime::now_utc())
+        .upsert_with_lease_guard(
+            &src,
+            job_id,
+            owner,
+            OffsetDateTime::now_utc(),
+            OffsetDateTime::now_utc() + time::Duration::hours(1),
+        )
         .await
         .expect("pg upsert_with_lease_guard");
     assert_eq!(outcome, LeaseGuardedWriteOutcome::Applied);
@@ -249,7 +261,7 @@ async fn pg_upsert_with_lease_guard_rolls_back_after_concurrent_abort() {
     // → 整段事务回滚 → feed_sources 行不被写入。
     let src = sample_feed_source("ai", "cross-tx-rollback", rule_id);
     let outcome = fs_repo
-        .upsert_with_lease_guard(&src, job_id, owner, now)
+        .upsert_with_lease_guard(&src, job_id, owner, now, now + time::Duration::hours(1))
         .await
         .expect("pg upsert_with_lease_guard");
     assert_eq!(
@@ -275,7 +287,7 @@ async fn pg_upsert_with_lease_guard_rolls_back_after_concurrent_abort() {
     let active = sample_feed_source("ai", "guard-mark", rule_id);
     let id = fs_repo.upsert(&active).await.unwrap();
     let outcome2 = fs_repo
-        .mark_archived_with_lease_guard(id, job_id, owner, now)
+        .mark_archived_with_lease_guard(id, job_id, owner, now, now + time::Duration::hours(1))
         .await
         .expect("pg mark_archived_with_lease_guard");
     assert_eq!(outcome2, LeaseGuardedWriteOutcome::LeaseLost);
@@ -301,13 +313,13 @@ async fn pg_mark_archived_with_lease_guard_second_call_is_noop() {
 
     let now = OffsetDateTime::now_utc();
     let first = repo
-        .mark_archived_with_lease_guard(id, job_id, owner, now)
+        .mark_archived_with_lease_guard(id, job_id, owner, now, now + time::Duration::hours(1))
         .await
         .expect("first lease-guarded archive");
     assert_eq!(first, LeaseGuardedWriteOutcome::Applied);
 
     let second = repo
-        .mark_archived_with_lease_guard(id, job_id, owner, now)
+        .mark_archived_with_lease_guard(id, job_id, owner, now, now + time::Duration::hours(1))
         .await
         .expect("second lease-guarded archive (target already archived)");
     assert_eq!(
@@ -362,7 +374,7 @@ async fn pg_config_upsert_keeps_runtime_state_unless_the_endpoint_changes() {
     let repo = FeedSourceRepo::new_with_storage(ctx.storage_pool().clone());
     let now = OffsetDateTime::now_utc();
     let src = sample_feed_source("ai", "a14", rule_id);
-    repo.upsert_config_with_lease_guard(&src, job_id, owner, now)
+    repo.upsert_config_with_lease_guard(&src, job_id, owner, now, now + time::Duration::hours(1))
         .await
         .unwrap();
     let id = repo.find_by_keys("ai", "a14").await.unwrap().unwrap().id;
@@ -376,9 +388,15 @@ async fn pg_config_upsert_keeps_runtime_state_unless_the_endpoint_changes() {
     let mut renamed = src.clone();
     renamed.display_name = "Renamed".to_string();
     assert_eq!(
-        repo.upsert_config_with_lease_guard(&renamed, job_id, owner, now)
-            .await
-            .unwrap(),
+        repo.upsert_config_with_lease_guard(
+            &renamed,
+            job_id,
+            owner,
+            now,
+            now + time::Duration::hours(1)
+        )
+        .await
+        .unwrap(),
         LeaseGuardedWriteOutcome::Applied
     );
     let row = repo.find_by_id(id).await.unwrap().unwrap();
@@ -389,7 +407,7 @@ async fn pg_config_upsert_keeps_runtime_state_unless_the_endpoint_changes() {
 
     let mut moved = renamed.clone();
     moved.feed_url = "https://example.com/moved.xml".to_string();
-    repo.upsert_config_with_lease_guard(&moved, job_id, owner, now)
+    repo.upsert_config_with_lease_guard(&moved, job_id, owner, now, now + time::Duration::hours(1))
         .await
         .unwrap();
     let row = repo.find_by_id(id).await.unwrap().unwrap();

@@ -300,7 +300,9 @@ prompt：`prompt_version` 语义见 [./03-ai.md](./03-ai.md) §3.2，历史文�
 - `content_hash` — 重算所有 articles.content_hash（升级正文规范化算法时）。PG 上预检与 UPDATE 之间另一事务提交同一 hash
   （READ COMMITTED）时，该行的 UPDATE 在 savepoint 内执行，唯一约束冲突只回滚这一行并记 `conflict_skipped`，
   批次与 checkpoint 照常提交（R2-S16）
-- `categories` — 重算 article→category 关联（升级分类规则时）
+- `categories` — 重算 article→category 关联（升级分类规则时）。每次 owner-guarded 的配置写入（upsert / archive）
+  在同一事务内把 job 的 `lease_expires_at` 续到 `now + lease`（R2-S18），与 hash target 的 checkpoint 续租一致；
+  此前只刷新 `updated_at`，而 reclaim 只看 `lease_expires_at`，同步总时长超过初始租期即可被另一 worker 接手
 
 active rule resolver 保证 reindex 中途 `active_rule(kind)` 仍返回旧 active 行，不污染读路径。
 详见 [../adr/0004-active-rule-resolver-partial-unique.md](../adr/0004-active-rule-resolver-partial-unique.md)。

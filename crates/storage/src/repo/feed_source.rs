@@ -13,7 +13,8 @@ use crate::{StorageError, StoragePool};
 
 /// F15-fix7：reindex `categories` target 写 `feed_sources` 时的 lease-guarded
 /// 写入结果。`upsert_with_lease_guard` / `mark_archived_with_lease_guard`
-/// 把"check reindex_jobs lease"与"写 feed_sources"放进同一事务，彻底关闭
+/// 把"check reindex_jobs lease + 续租到 `lease_expires_at`（R2-S18）"与"写 feed_sources"
+/// 放进同一事务，彻底关闭
 /// fix2 残留的 guard→write TOCTOU 窗口（assert_lease_held 通过后到 upsert
 /// 之间仍有可被 reclaim/abort 的间隙）。
 ///
@@ -83,6 +84,7 @@ pub trait FeedSourceRepository: Send + Sync {
         job_id: i64,
         owner: &str,
         now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError>;
 
     /// A14：categories reindex 的配置同步。lease 语义同
@@ -97,6 +99,7 @@ pub trait FeedSourceRepository: Send + Sync {
         job_id: i64,
         owner: &str,
         now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError>;
 
     /// F15-fix7：同上，封装 `mark_archived`。`status='archived'` 是终态，
@@ -108,6 +111,7 @@ pub trait FeedSourceRepository: Send + Sync {
         job_id: i64,
         owner: &str,
         now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError>;
     /// Fetch write-backs (200 / 304 / failure) match only while the row still
     /// has `endpoint` (R2-S12): `Ok(false)` = the row is gone or config moved

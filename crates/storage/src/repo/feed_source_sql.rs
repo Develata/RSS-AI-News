@@ -159,10 +159,12 @@ WHERE id = $2 AND status <> 'archived'
 "#;
 
 /// lease guard 用——把 reindex_jobs 行的 updated_at 顺手刷成 `now`
-/// （fix9 heartbeat 语义）。`rows_affected == 1` ↔ lease 仍在手。
+/// （fix9 heartbeat 语义），并把 lease 续到 `$4`（R2-S18：reclaim 只看
+/// `lease_expires_at`，categories 同步只刷 updated_at 时总时长一过初始租期
+/// 就会被另一 worker 接手）。`rows_affected == 1` ↔ lease 仍在手。
 pub(super) const LEASE_GUARD_UPDATE_REINDEX_JOBS_SQL: &str = r#"
 UPDATE reindex_jobs
-SET updated_at = $1
+SET updated_at = $1, lease_expires_at = $4
 WHERE id = $2 AND state = 'running' AND lease_owner = $3
 "#;
 

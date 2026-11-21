@@ -15,6 +15,8 @@ use time::OffsetDateTime;
 
 use crate::{StorageError, StoragePool, classify_db_error};
 
+use super::sqlite_stored_deadline;
+
 use super::feed_source::{
     FeedEndpoint, FeedSourceRepo, FeedSourceRepository, LeaseGuardedWriteOutcome,
     RecentFeedSourceHealth, RecentFeedSourceHealthRepository,
@@ -84,14 +86,32 @@ impl FeedSourceRepository for FeedSourceRepo {
         job_id: i64,
         owner: &str,
         now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlite_upsert_with_lease_guard(p, UPSERT_FEED_SOURCE_SQL, src, job_id, owner, now)
-                    .await
+                sqlite_upsert_with_lease_guard(
+                    p,
+                    UPSERT_FEED_SOURCE_SQL,
+                    src,
+                    job_id,
+                    owner,
+                    now,
+                    lease_expires_at,
+                )
+                .await
             }
             StoragePool::Postgres(p) => {
-                pg_upsert_with_lease_guard(p, UPSERT_FEED_SOURCE_SQL, src, job_id, owner, now).await
+                pg_upsert_with_lease_guard(
+                    p,
+                    UPSERT_FEED_SOURCE_SQL,
+                    src,
+                    job_id,
+                    owner,
+                    now,
+                    lease_expires_at,
+                )
+                .await
             }
         }
     }
@@ -102,6 +122,7 @@ impl FeedSourceRepository for FeedSourceRepo {
         job_id: i64,
         owner: &str,
         now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
@@ -112,6 +133,7 @@ impl FeedSourceRepository for FeedSourceRepo {
                     job_id,
                     owner,
                     now,
+                    lease_expires_at,
                 )
                 .await
             }
@@ -123,6 +145,7 @@ impl FeedSourceRepository for FeedSourceRepo {
                     job_id,
                     owner,
                     now,
+                    lease_expires_at,
                 )
                 .await
             }
@@ -135,13 +158,15 @@ impl FeedSourceRepository for FeedSourceRepo {
         job_id: i64,
         owner: &str,
         now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
     ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
-                sqlite_mark_archived_with_lease_guard(p, id, job_id, owner, now).await
+                sqlite_mark_archived_with_lease_guard(p, id, job_id, owner, now, lease_expires_at)
+                    .await
             }
             StoragePool::Postgres(p) => {
-                pg_mark_archived_with_lease_guard(p, id, job_id, owner, now).await
+                pg_mark_archived_with_lease_guard(p, id, job_id, owner, now, lease_expires_at).await
             }
         }
     }
@@ -377,6 +402,7 @@ async fn sqlite_upsert_with_lease_guard(
     job_id: i64,
     owner: &str,
     now: OffsetDateTime,
+    lease_expires_at: OffsetDateTime,
 ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
 
@@ -384,6 +410,7 @@ async fn sqlite_upsert_with_lease_guard(
         .bind(now)
         .bind(job_id)
         .bind(owner)
+        .bind(sqlite_stored_deadline(lease_expires_at))
         .execute(&mut *tx)
         .await
         .map_err(StorageError::from)?;
@@ -424,6 +451,7 @@ async fn sqlite_mark_archived_with_lease_guard(
     job_id: i64,
     owner: &str,
     now: OffsetDateTime,
+    lease_expires_at: OffsetDateTime,
 ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
 
@@ -431,6 +459,7 @@ async fn sqlite_mark_archived_with_lease_guard(
         .bind(now)
         .bind(job_id)
         .bind(owner)
+        .bind(sqlite_stored_deadline(lease_expires_at))
         .execute(&mut *tx)
         .await
         .map_err(StorageError::from)?;
@@ -591,6 +620,7 @@ async fn pg_upsert_with_lease_guard(
     job_id: i64,
     owner: &str,
     now: OffsetDateTime,
+    lease_expires_at: OffsetDateTime,
 ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
 
@@ -598,6 +628,7 @@ async fn pg_upsert_with_lease_guard(
         .bind(now)
         .bind(job_id)
         .bind(owner)
+        .bind(lease_expires_at)
         .execute(&mut *tx)
         .await
         .map_err(StorageError::from)?;
@@ -638,6 +669,7 @@ async fn pg_mark_archived_with_lease_guard(
     job_id: i64,
     owner: &str,
     now: OffsetDateTime,
+    lease_expires_at: OffsetDateTime,
 ) -> Result<LeaseGuardedWriteOutcome, StorageError> {
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
 
@@ -645,6 +677,7 @@ async fn pg_mark_archived_with_lease_guard(
         .bind(now)
         .bind(job_id)
         .bind(owner)
+        .bind(lease_expires_at)
         .execute(&mut *tx)
         .await
         .map_err(StorageError::from)?;
