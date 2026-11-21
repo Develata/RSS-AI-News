@@ -439,6 +439,7 @@ fn ai_summary() -> AiRunCommandSummary {
         process_tasks_panicked: 0,
         process_lease_lost: 0,
         process_release_failed: 0,
+        process_storage_failed: 0,
         task_gen_insert_failed: 0,
         task_gen_error: None,
         process_claim_error: None,
