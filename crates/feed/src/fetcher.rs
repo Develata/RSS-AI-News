@@ -65,6 +65,10 @@ impl ReqwestFeedFetcher {
     pub fn new(max_body_bytes: u64) -> Result<Self, FeedError> {
         let client = Client::builder()
             .user_agent(USER_AGENT_VALUE)
+            // reqwest sends the previous URL as `Referer` on redirects by
+            // default; for RSSHub that URL carries `?key=<access key>`, which
+            // would leak to whatever host the redirect points at.
+            .referer(false)
             .build()
             .map_err(FeedError::from)?;
 
@@ -74,6 +78,8 @@ impl ReqwestFeedFetcher {
         })
     }
 
+    /// Uses a caller-built client as is. Build it with `.referer(false)` when
+    /// fetching RSSHub sources (see [`Self::new`]).
     pub fn with_client(client: Client, max_body_bytes: u64) -> Self {
         Self {
             client,

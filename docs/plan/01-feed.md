@@ -46,6 +46,8 @@ enabled = true
 占位符约束：
 - 配置 schema **不**接受裸 URL 中的密钥（避免持久化泄露）
 - 占位符展开仅在运行时进行，**不**写回 `feed_sources.feed_url`
+- feed HTTP client 关闭 `Referer`（`reqwest` 默认在重定向时把带 `?key=` 的上一跳 URL 作为 Referer 发给新主机）；
+  测试 `cross_host_redirect_does_not_leak_rsshub_key_via_referer`（2026-11-21）
 - 详见 [../adr/0007-rsshub-secret-runtime-expansion.md](../adr/0007-rsshub-secret-runtime-expansion.md)
 
 ## 3. HTTP 抓取
