@@ -11,6 +11,9 @@ base64 = "0.22"
 bytes = "1"
 http = "1"
 http-body-util = "0.1"
+# Retry-After HTTP-dates in all three RFC 9110 forms (R3F-S11); same version
+# already in the lockfile (hyper, extractor).
+httpdate = "1"
 octocrab.workspace = true
 # octocrab 0.54 `personal_token` accepts `impl Into<secrecy::SecretString>`;
 # we materialise its argument at the boundary from our own SecretString so

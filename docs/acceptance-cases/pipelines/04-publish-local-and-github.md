@@ -179,6 +179,7 @@
 | `status_403_naming_a_rate_limit_maps_to_rate_limit` | `crates/publish/tests/github_classify_tests.rs` | message 含 (secondary) rate limit |
 | `status_403_without_rate_limit_signal_maps_to_auth_failed` | 同上 | 普通 403 |
 | `forbidden_with_an_http_date_retry_after_is_a_rate_limit_until_that_date` | 同上 | HTTP 日期形式 `retry-after` |
+| `obsolete_http_date_forms_of_retry_after_give_the_real_deadline` | 同上 | RFC 850 与 asctime 形式的 `retry-after` 得到真实期限，而非 60 s 回退（R3F-S11） |
 | `unparsable_retry_after_still_marks_a_403_as_rate_limited` | 同上 | 头存在即限流信号 |
 | `oversized_retry_after_seconds_are_capped_without_overflow` | 同上 | 超大秒数封顶、无溢出 |
 | `past_http_date_retry_after_means_now` | 同上 | 过去日期 = now |

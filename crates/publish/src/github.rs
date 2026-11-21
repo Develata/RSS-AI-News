@@ -934,17 +934,16 @@ pub mod classify {
         }
     }
 
-    /// IMF-fixdate, the HTTP-date form senders must generate
-    /// (`Sun, 06 Nov 1994 08:49:37 GMT`).
+    /// An HTTP-date in any of the three forms RFC 9110 §5.6.7 requires
+    /// recipients to accept (R3F-S11): IMF-fixdate
+    /// (`Sun, 06 Nov 1994 08:49:37 GMT`), the obsolete RFC 850 form
+    /// (`Sunday, 06-Nov-94 08:49:37 GMT`) and asctime
+    /// (`Sun Nov  6 08:49:37 1994`). Parsed by `httpdate` (the parser hyper
+    /// itself uses; already in the lockfile).
     fn parse_http_date(value: &str) -> Option<OffsetDateTime> {
-        // Runtime-parsed description: the workspace `time` has no `macros`.
-        let format = time::format_description::parse_borrowed::<2>(
-            "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT",
-        )
-        .ok()?;
-        time::PrimitiveDateTime::parse(value, &format)
+        httpdate::parse_http_date(value)
             .ok()
-            .map(time::PrimitiveDateTime::assume_utc)
+            .map(OffsetDateTime::from)
     }
 
     impl RateLimitHints {

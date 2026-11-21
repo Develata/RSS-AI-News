@@ -118,6 +118,19 @@ fn forbidden_with_an_http_date_retry_after_is_a_rate_limit_until_that_date() {
     assert!(error.is_retryable());
 }
 
+/// R3F-S11: RFC 9110 §5.6.7 recipients also accept the obsolete RFC 850
+/// and asctime forms; each yields the real deadline, not the 60 s fallback.
+#[test]
+fn obsolete_http_date_forms_of_retry_after_give_the_real_deadline() {
+    let expected = OffsetDateTime::from_unix_timestamp(1_795_336_200).unwrap();
+    for value in ["Sunday, 22-Nov-26 08:30:00 GMT", "Sun Nov 22 08:30:00 2026"] {
+        let hints = hints_with_retry_after(value);
+        assert_eq!(hints.retry_after, Some(RetryAfter::At(expected)), "{value}");
+        let now = expected - time::Duration::hours(2);
+        assert_eq!(hints.reset_at_from(now), expected, "{value}");
+    }
+}
+
 #[test]
 fn unparsable_retry_after_still_marks_a_403_as_rate_limited() {
     let hints = hints_with_retry_after("soon");
