@@ -101,6 +101,9 @@
 - 依次执行 ingest → ai-run（全部分类；`ai.enabled=false` 时跳过）→ publish-all；整次运行只加载一次配置、
   只打开一次数据库连接池，各阶段看到同一份配置。启动时只做结构校验；环境 / 凭证检查归各阶段：某分类缺
   AI 凭证只记为 ai-run 阶段失败（exit 78），ingest 与 publish 照常执行
+- ingest 失败（preflight 失败，如缺 `RSSHUB_BASE_URL`，或 ingest 返回错误）不阻断后续阶段：ai-run 与 publish
+  仍处理库中已有的数据，`stage_failures` 记录 ingest 失败，退出码取最严重者（缺环境变量为 78）
+- 数据库无法打开 / 迁移时所有阶段跳过（失败记在 `ingest` 阶段名下，`ai_run_skip_reason` 为 `database unavailable`）
 - `--ingest-batch-size <N>` / `--ai-batch-size <N>`
 - `--publish-date <YYYY-MM-DD>`
 - `--max-batches <N>`
