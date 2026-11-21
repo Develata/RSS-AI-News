@@ -23,7 +23,15 @@ expect() {
     output="$(env -i PATH="$PATH" "$@" sh "$work/entrypoint.sh" 2>&1)"
     code=$?
     set -e
-    if [ "$code" -eq "$want_code" ] && printf '%s' "$output" | grep -Fq -- "$want_text"; then
+    # `nonzero`: the shell picks the code (`${VAR:?}` exits 1 in bash, 2 in dash).
+    if [ "$want_code" = nonzero ] && [ "$code" -ne 0 ]; then
+        code_ok=true
+    elif [ "$code" = "$want_code" ]; then
+        code_ok=true
+    else
+        code_ok=false
+    fi
+    if [ "$code_ok" = true ] && printf '%s' "$output" | grep -Fq -- "$want_text"; then
         echo "ok   - $description"
     else
         echo "FAIL - $description: exit $code (want $want_code), output: $output"
@@ -52,7 +60,7 @@ expect "a mounted crontab wins over the env schedule" 0 "using mounted crontab" 
 : >"$work/empty"
 expect "an empty crontab falls back to the env schedule" 0 "starting generated schedule" \
     "RSS_CRONTAB_FILE=$work/empty" "$env_schedule" "$env_command"
-expect "no crontab and no env schedule fails" 1 "RSS_CRON_SCHEDULE must be set" \
+expect "no crontab and no env schedule fails" nonzero "RSS_CRON_SCHEDULE must be set" \
     "RSS_CRONTAB_FILE=$work/absent"
 expect "a newline in the command is refused" 1 "single lines" \
     "RSS_CRONTAB_FILE=$work/absent" "$env_schedule" "RSS_CRON_COMMAND=run
