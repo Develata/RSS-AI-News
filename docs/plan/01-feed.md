@@ -72,8 +72,11 @@ enabled = true
 - TCP keep-alive：开
 - 失败分类：见 [./11-error-and-recovery.md](./11-error-and-recovery.md) `FeedError`
 
-retryable 错误：超时、5xx、连接失败 → 状态保持，下轮重试
-非 retryable：4xx（除 408 / 429）、过大、解析失败 → 直接转 `Failed`
+retryable 错误：超时、5xx、429（限流，`error_kind = http_429`）、连接失败 → 状态保持，下轮重试
+非 retryable：其余 4xx（含 408）、过大、解析失败 → 本次跳过（见 §8；source 不转 paused）
+
+（2026-11-21：此前本节写"除 408 / 429"而 §8 与代码把全部 4xx 判为不可重试，二者矛盾；现统一为
+仅 429 可重试，408 维持不可重试。）
 
 ### 3.3 代理与 TLS
 
@@ -182,7 +185,8 @@ INSERT 直接写入 `feed_entries`：数据库以 `(source_id, feed_entry_uid)` 
 | 失败点 | 错误变体 | retryable | 处理 |
 |---|---|---|---|
 | HTTP 超时 | `FeedError::HttpTimeout` | true | source 跳过，下次再试 |
-| 4xx | `FeedError::HttpStatus { 4xx }` | false | source 仍 active，但本次跳过 |
+| 429 | `FeedError::HttpStatus { 429 }`（`http_429`） | true | 同超时 |
+| 其余 4xx | `FeedError::HttpStatus { 4xx }` | false | source 仍 active，但本次跳过 |
 | 5xx | `FeedError::HttpStatus { 5xx }` | true | 同超时 |
 | 过大 (`> max_payload_bytes`) | `FeedError::TooLarge` | false | source 跳过 |
 | 解析失败 | `FeedError::ParseFailed` | false | source 跳过 |

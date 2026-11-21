@@ -315,6 +315,41 @@ async fn extract_fetch_403_without_summary_fails_permanent() {
 
 /// W18：可重试错误（5xx）即使摘要可用也不提前降级——重试仍有机会拿全文，
 /// W15 预算路径不变。
+/// A8：429 是限流，可重试：带冷却回队，不消费摘要（与 5xx 同构）。
+#[tokio::test]
+async fn extract_fetch_429_with_summary_stays_retryable() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry_id = seed_pending_fetch_entry(
+        &pool,
+        source_id,
+        "uid-429-summary",
+        "hash-429-summary",
+        Some("<p>summary exists but must not be consumed yet</p>"),
+    )
+    .await;
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Err(ExtractorError::HttpStatus { code: 429 }))]),
+        vec![success_strategy("unused")],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+    let row: (String, Option<String>, Option<time::OffsetDateTime>) = sqlx::query_as(
+        "SELECT state, last_error_kind, next_attempt_at FROM feed_entries WHERE id = ?",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .expect("entry should be readable");
+
+    assert_eq!(summary.retryable_failed, 1);
+    assert_eq!(summary.fallback_persisted, 0);
+    assert_eq!(row.0, "pending_fetch");
+    assert_eq!(row.1.as_deref(), Some("http_429"));
+    assert!(row.2.is_some(), "cooldown honoured");
+}
+
 #[tokio::test]
 async fn extract_fetch_5xx_with_summary_stays_retryable() {
     let (_dir, pool) = make_test_pool().await;

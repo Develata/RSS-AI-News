@@ -8,7 +8,7 @@ pending_fetch (claim+lease)
     → 抓取永久失败（4xx/too_large/invalid_url）→ summary fallback
       → 摘要可用 → fallback_persisted（W18，见 ./17-extract-fetch-fallback.md）
       → 无摘要   → failed
-    → 抓取可重试失败（超时/5xx）→ 回 pending_fetch + next_attempt_at 冷却（W15 预算路径，§5.3）
+    → 抓取可重试失败（超时/5xx/429）→ 回 pending_fetch + next_attempt_at 冷却（W15 预算路径，§5.3）
   → extracting (策略链提取)
     → 第三层 content_hash 去重
     → 成功 → INSERT articles + feed_entries.state='persisted'
@@ -220,7 +220,8 @@ rss-ai-news replay --kind html --key <feed_entry_id> --diff
 | 失败点 | 错误变体 | retryable | 处理 |
 |---|---|---|---|
 | HTML fetch 超时 | `ExtractorError::HttpTimeout` | true | 回 `pending_fetch` + 冷却（§5.3） |
-| HTML 4xx | `ExtractorError::HttpStatus { 4xx }` | false | 尝试 fallback（W18）；无摘要则 `failed` |
+| HTML 429 | `ExtractorError::HttpStatus { 429 }`（`http_429`） | true | 回 `pending_fetch` + 冷却（§5.3），不消费摘要 |
+| HTML 其余 4xx | `ExtractorError::HttpStatus { 4xx }` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | HTML 5xx | `ExtractorError::HttpStatus { 5xx }` | true | 回 `pending_fetch` + 冷却（§5.3） |
 | payload 过大 | `ExtractorError::TooLarge` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | 提取失败 | `ExtractorError::ParseFailed` | false | 尝试 fallback；失败则 `failed` |

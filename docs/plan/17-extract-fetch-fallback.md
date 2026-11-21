@@ -24,10 +24,10 @@ nyt-world 553、ft-world 484、economist-international 304…），且持续产�
 
 `runtime/src/flows/extract.rs::process_entry` 抓取错误分支加一个对称判定：
 
-- `error.is_retryable()`（http_timeout / http_5xx / connection_failed）→
+- `error.is_retryable()`（http_timeout / http_5xx / http_429 / connection_failed）→
   **维持现状**：`release_extract_error` 走 W15 重试预算路径，不消费摘要
   （下次重试可能抓到全文，提前降级是损失）。
-- 永久性错误（http_4xx / too_large / invalid_url）→ 先试
+- 永久性错误（http_4xx（429 除外）/ too_large / invalid_url）→ 先试
   `summary_fallback(&fetch_task)`：
   - `Some(fallback)` → `persist_fallback(..., html_artifact_id=None, ...)`，
     条目转 `fallback_persisted`，与解析链失败分支完全同构；
@@ -87,3 +87,9 @@ nyt-world 553、ft-world 484、economist-international 304…），且持续产�
 - [./02-extract.md](./02-extract.md) §策略链 / 兜底——落地后同步。
 - [./15-retry-exhaustion-and-reclaim.md](./15-retry-exhaustion-and-reclaim.md)
   ——重试预算语义的权威定义，本设计不触碰。
+
+## 7. 429 例外（2026-11-21）
+
+429 Too Many Requests 是限流而非内容不可得：自此判为 retryable（`error_kind = http_429`），走 W15
+冷却 + 预算路径，**不**消费摘要（与 5xx 同构）；403 / 404 等其余 4xx 行为不变，仍先试摘要兜底。
+测试：`extract_fetch_429_with_summary_stays_retryable`（`crates/runtime/tests/extract_tests.rs`）。

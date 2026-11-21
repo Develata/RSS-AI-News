@@ -23,7 +23,7 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 
 ### 失败条件（failure path）
 
-- 5xx / 超时且重试预算未尽 → 状态保持 `PendingFetch`，lease 释放、写入 `next_attempt_at`
+- 5xx / 429 / 超时且重试预算未尽 → 状态保持 `PendingFetch`，lease 释放、写入 `next_attempt_at`
   冷却；冷却截止前不被 claim，之后的 run 可重试（**即使 summary 可用也不提前降级**，W18）
 - 5xx / 超时发生在预算内最后一次尝试（`attempt_count == max_attempts`）→ 直接转 `Failed`
 - retryable 失败不终止本 run：同 run 内继续领取其他可领取行，直到队列为空或达到
@@ -49,6 +49,8 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `extract_fetch_403_with_summary_persists_fallback` | 同上 | W18 抓取失败兜底 |
 | `extract_fetch_403_without_summary_fails_permanent` | 同上 | W18 无摘要仍 Failed |
 | `extract_fetch_5xx_with_summary_stays_retryable` | 同上 | W18 可重试不降级 |
+| `extract_fetch_429_with_summary_stays_retryable` | 同上 | 429 可重试、不降级（plan/17 §7） |
+| `status_classification_retries_429_and_5xx_only` | `crates/extractor/src/error.rs`、`crates/feed/src/error.rs`（单元测试） | 仅 429 / 5xx 可重试；403/404/408 不变 |
 | `transient_article_insert_failure_is_retried_with_cooldown` | `crates/runtime/tests/extract_storage_failure_tests.rs` | 瞬时写入失败回队 + 冷却 |
 | `transient_article_insert_failure_on_last_attempt_folds_to_failed` | 同上 | 最后一次尝试折叠 failed |
 | `non_retryable_article_insert_failure_is_permanent` | 同上 | 不可重试存储错误终态 |
