@@ -14,7 +14,9 @@
 ### 命中条件（success path）
 
 - `replay --kind feed --id <N>` → 调用 `parse_feed(bytes, FeedKind::Rss)`，输出 entry_count + samples
-- `replay --kind html --id <N>` → 调用 Readability 策略，输出 title / body 长度
+- `replay --kind html --id <N>` → 调用 Readability 策略，输出 title / body 长度；base URI 为 artifact key 对应 feed entry 的 `normalized_link`，无此 entry 时为占位符 `about:blank`，并在 `parsed.base_uri` 回显
+- `replay --kind html --diff` → 经 feed entry 找到其文章（含 dedup entry），对比 content hash 与字数；无文章时 `{"found": false}`
+- 只读分层：CLI → `ReplayFlow` → repository（`ReplayProjectionRepository`），CLI 不直接发 SQL
 - `replay --kind ai --id <N>` → 调用 `parse_response`，输出 ParsedResponse + schema 校验结果
 - `--id` 与 `--key` 二选一；都缺时 CLI 报错
 - summary 既支持 pretty 输出也支持 JSON 输出
@@ -38,6 +40,14 @@
 | `raw_artifact_find_by_id_missing` | 同上 | repo find_by_id 缺失 |
 | `find_by_key_returns_inserted_row` | `crates/storage/tests/raw_artifact_tests.rs` | repo find_by_key |
 | `find_by_key_returns_none_when_missing` | 同上 | repo find_by_key 缺失 |
+| `html_replay_uses_the_feed_entry_link_as_base_uri` | `crates/runtime/src/flows/replay.rs` | base URI = entry link（相对链接 artifact） |
+| `html_replay_without_a_feed_entry_uses_the_placeholder_base_uri` | 同上 | 占位符 base URI |
+| `html_diff_finds_the_article_through_the_feed_entry` | 同上 | diff 经 entry（含 dedup）找文章 |
+| `replay_reports_missing_and_file_backed_artifacts` | 同上 | 找不到 / 文件后端拒绝 |
+| `an_artifact_of_another_kind_is_not_replayed` | 同上 | `--id` 命中他类 artifact 视为找不到 |
+| `html_replay_renders_with_the_feed_entry_link_as_base_uri` | `crates/cli/src/commands/replay.rs` | 完整命令路径（装配 + Readability + JSON） |
+| `replay_failures_keep_their_error_kinds` | 同上 | not-found / 缺 selector / storage 错误分类 |
+| `sqlite_html_replay_source_reaches_entry_link_and_article` / `pg_…`（ignored） | `crates/storage/tests/replay_projection_tests.rs` | 双方言 projection |
 
 ## 当前状态
 

@@ -60,7 +60,7 @@ busy_timeout_ms = 5000
 ```bash
 cargo run -- migrate run                    # 本地
 docker run --rm --env-file .env \           # 容器
-  ghcr.io/develata/rss-ai-news:0.4.0 \
+  ghcr.io/develata/rss-ai-news:0.10.4 \
   --config-dir /app/configs migrate run
 ```
 

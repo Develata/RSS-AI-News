@@ -1,5 +1,5 @@
 use super::super::{
-    checks::{check_acceptance_documents, check_tooling_dependency_boundary},
+    checks::{check_acceptance_documents, check_toolchain_pins, check_tooling_dependency_boundary},
     executor::LaneExecutor,
     util::strings,
 };
@@ -51,6 +51,20 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         &strings([".ci/check_dependency_security_policy.sh"]),
         &[],
         0,
+    );
+    // The release workflow's only locally testable decision: which moving
+    // image tags (latest / X.Y) a tag may promote.
+    executor.command(
+        "release-promotion",
+        "sh",
+        &strings([".github/scripts/release-promotion-test.sh"]),
+        &[],
+        0,
+    );
+    executor.check(
+        "toolchain-pins",
+        "workflow and Dockerfile toolchain pins equal rust-toolchain.toml's channel",
+        check_toolchain_pins(executor.repo_root()),
     );
     executor.check(
         "tooling-boundary",

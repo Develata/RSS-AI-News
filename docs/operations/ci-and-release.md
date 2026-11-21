@@ -17,7 +17,7 @@ CI 与本地 pre-tag 矩阵执行同一份检查（见 [./acceptance-matrix.md](
 | Job | 命令 / 验证项 | 本地复现 |
 |---|---|---|
 | `test` | `cargo acceptance run --lane static --lane workspace`：fmt、Clippy `-D warnings`、rustdoc `-D warnings`、swallowed-error、dependency policy、tooling boundary、acceptance-case 状态；`cargo build/test --workspace --locked`（SQLite） | 同命令，或 `cargo test -p <crate>` |
-| `test-pg` | `cargo acceptance run --lane postgres --lane sqlite --lane release`（PG service + `DATABASE_URL`）：storage `--include-ignored` + CLI migrate run/check；三条 lane 共用一次 release build：SQLite migrate run/check、recent-entries 与 CLI JSON 输出契约（product smoke 会剥离继承的 `DATABASE_URL`，仍走 SQLite）；版本 / lockfile / README / binary identity | `DATABASE_URL=… cargo acceptance run --lane postgres --lane sqlite --lane release`（见 [./postgres-deployment.md](./postgres-deployment.md)） |
+| `test-pg` | `cargo acceptance run --lane postgres --lane sqlite --lane release`（PG service + `DATABASE_URL`）：storage `--ignored`（只跑 PG / Docker 用例；普通 storage 用例已在 workspace lane 跑过，且不读 `DATABASE_URL`）+ CLI migrate run/check；三条 lane 共用一次 release build：SQLite migrate run/check、recent-entries 与 CLI JSON 输出契约（product smoke 会剥离继承的 `DATABASE_URL`，仍走 SQLite）；版本 / lockfile / README / binary identity | `DATABASE_URL=… cargo acceptance run --lane postgres --lane sqlite --lane release`（见 [./postgres-deployment.md](./postgres-deployment.md)） |
 | `docker-build` | `docker/build-push-action` 多 stage 构建（不 push）+ 容器 smoke；保留该形式以维护 release 复用的 GHA buildx cache（`scope=runtime`） | `cargo acceptance run --lane docker`，或 `docker build -f docker/Dockerfile .` |
 
 缓存：
@@ -36,6 +36,11 @@ CI 与本地 pre-tag 矩阵执行同一份检查（见 [./acceptance-matrix.md](
 Dockerfile 改用 cache mount 后，改代码的 docker job 中位数由 2.2 min 升到 5.3 min（依赖全量重编）；上述 cargo-chef layer 用于消除这一回退（本地已验证，CI 实测待首次 warm run 确认）。
 旧基线（2026-09-11 前 5 次运行中位数，五 job 布局）：整次 CI 326s，`test-pg` ≈282s，其中 storage PG 测试 181s、
 release build 52s。PG 测试保持 `--test-threads=1`：本地实测 1 线程 108s、4 线程 99s，收益不足以承担连接争用风险。
+
+权限与超时：`ci.yml` 顶层 `permissions: contents: read`（CI 不写仓库或 registry；`audit.yml` / `maintenance.yml` 同样只读，
+`release.yml` 只给两个镜像 job `packages: write`）。每个 job 都设 `timeout-minutes`（默认 360 min），约为实测耗时的 3 倍：
+`test` 30（实测 8–11 min）、`test-pg` 30（6–10.5 min）、`docker-build` 25（3.5–8 min）、audit / security 10、perf 60；
+release 的 verify-* 与 `publish-image` 30、`verify-audit` 与 `promote-tags` 10。
 
 CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks 触发 `cargo fmt`）。
 
@@ -59,6 +64,17 @@ CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks �
 `Cargo.lock`，`cargo audit` 也会失败。
 本地复现：在仓库根目录运行 `bash .ci/check_dependency_security_policy.sh && cargo audit`（cargo-audit 从当前目录读取该配置）。
 
+## Action 与镜像固定（供应链）
+
+- 所有第三方 action（`actions/*`、`docker/*`、`Swatinem/rust-cache`、`dtolnay/rust-toolchain`）都按完整 commit SHA 引用，
+  行尾注释写明对应版本（`# v6.1.0` 等）；`dtolnay/rust-toolchain` 没有版本 tag，固定为某个 `master` commit，注释写日期，
+  工具链版本仍由 `toolchain:` 输入给出。带 `packages: write` 的 release job 因此不会执行被移动的 tag 指向的新代码。
+- `docker/Dockerfile` 的基础镜像按 index digest 固定（`rust:<toolchain>-slim-bookworm@sha256:…`、`debian:bookworm-slim@sha256:…`）。
+- [`.github/dependabot.yml`](../../.github/dependabot.yml) 覆盖 `cargo`、`github-actions` 与 `docker`（`/docker`），三者同样每月、
+  最多 2 个 PR、单组合并、不自动 rebase、忽略 major。`rust` 镜像的版本更新被忽略（工具链升级要同时改全部 pin，见
+  static lane 的 `toolchain-pins` 检查），digest 更新照常提出。
+- composite action `.github/actions/cargo-audit` 不引用第三方 action；它下载的 cargo-audit 二进制按 SHA-256 校验。
+
 ## Release workflow
 
 文件：[`.github/workflows/release.yml`](../../.github/workflows/release.yml)。
@@ -80,17 +96,32 @@ Jobs：
 - `verify-release` —— `cargo acceptance run --lane sqlite --lane release --expected-version "${GITHUB_REF_NAME#v}"`：tag 版本必须与
   workspace / lockfile / README / binary 一致。两者合起来即 `local` profile 的四条 lane，在 tag commit 上通过；
   它们只读 ci.yml 在 `main` 上为同一 commit 保存的缓存（`test-*` / `test-pg-*`），未命中只是变慢。
-- `publish-image`（`needs: [verify-test, verify-release]`）—— 同时构建发布 runtime + scheduler 两套镜像；任一 verify 失败则不推镜像。
+- `verify-postgres` —— `cargo acceptance run --lane postgres`，带与 ci.yml `test-pg` 相同的 PostgreSQL 16 service 与
+  `DATABASE_URL`，读 `test-pg-*` 缓存；
+- `verify-audit` —— 复用 composite action `.github/actions/cargo-audit`（依赖策略脚本 + `cargo audit`），在 tag 的依赖图上
+  拦下自上次 `main` 运行以来新发布的 advisory；
+- `publish-image`（`needs: [verify-test, verify-release, verify-postgres, verify-audit]`）—— 构建并推送 runtime + scheduler
+  两套镜像，**只**打不可变的版本 tag（`X.Y.Z` / `X.Y.Z-scheduler`），并记录两者的 digest；任一 verify 失败则不推镜像。
+- `promote-tags`（`needs: [publish-image]`）—— 两个镜像都推送成功后才运行，用 `docker buildx imagetools create`
+  把 `latest` / `X.Y` 及其 `-scheduler` 对应 tag 指向上一步记录的 digest（不重新构建）。是否晋升由
+  [`.github/scripts/release-promotion.sh`](../../.github/scripts/release-promotion.sh) 根据 `git ls-remote --tags` 决定：
+  只有当该 tag 是仓库内最高的 stable tag 时才动 `latest`，是同一 `X.Y` 线内最高时才动 `X.Y`；
+  因此重跑旧 tag 不会让 `latest` 回退，scheduler 构建失败也不会留下只更新了一半的稳定 tag。该 job 有
+  `concurrency: release-promote-<repo>`（不取消进行中的运行），不同 tag 的晋升串行执行。脚本由 static lane 的
+  `release-promotion` 步骤测试。
+  注意：若存在更高的 tag 但其 release 失败、从未推出镜像，较低版本也不会晋升 `latest`（保守方向）。四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit
+  不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
 
 ## 镜像 tag 规则
 
-由 `docker/metadata-action` 计算：
+版本 tag 由 `docker/metadata-action` 计算，`latest` / `X.Y` 由 `promote-tags` 在两镜像推送后晋升：
 
 | 推送 tag | 生成镜像 tag |
 |---|---|
-| `v0.7.0` | `0.7.0`、`0.7`、`latest` |
-| `v0.7.0-rc.1` | `0.7.0-rc.1`（仅完整版；**不**打 `latest`） |
-| `v1.0.0` | `1.0.0`、`1.0`、`latest` |
+| `v0.7.0`（且为最高 stable tag） | `0.7.0`、`0.7`、`latest` |
+| `v0.6.3`（`v0.7.0` 已存在，`0.6` 线内最高） | `0.6.3`、`0.6`（**不**动 `latest`） |
+| 重跑 `v0.7.0`（`v0.7.1` 已存在） | `0.7.0`（**不**动 `0.7` / `latest`） |
+| `v0.7.0-rc.1` | 不推镜像：verify gate 只接受 `X.Y.Z` |
 
 `develata` lowercase 后即 GHCR 命名空间（owner）。runtime 使用上述 tag；scheduler 位于**同一 package**，
 对应 `<tag>-scheduler`（例如 `ghcr.io/develata/rss-ai-news:0.7.0-scheduler`）。workflow 不生成
@@ -99,8 +130,10 @@ major-only alias（如 `0` / `1`）。
 ## 发版流程
 
 ```bash
-# 1. 完成 feature/fix、将 workspace package version 对齐候选 tag、跑完 security scan/review
-#    并确认 main exact SHA 的三个 CI jobs 全绿
+# 1. 完成 feature/fix、将 workspace package version 对齐候选 tag（同时改 README 的当前版本、
+#    docker/docker-compose.scheduler.yml 的 RSS_AI_NEWS_VERSION 默认值，以及 docker-and-scheduler.md、
+#    postgres-deployment.md、plan/12 与 README 示例命令中的镜像版本——release lane 的 deployment-versions
+#    检查逐一比对），跑完 security scan/review 并确认 main exact SHA 的三个 CI jobs 全绿
 
 git checkout main && git pull
 

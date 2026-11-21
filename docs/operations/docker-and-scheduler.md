@@ -6,12 +6,16 @@ CI release workflow（push tag `v*` 触发）同时发布两套镜像：
 
 | 镜像 | tag 示例 | 入口 | 用途 |
 |---|---|---|---|
-| runtime | `ghcr.io/develata/rss-ai-news:0.7.0` | `rss-ai-news` 二进制直跑 | 一次性命令（migrate / ingest / doctor 等） |
-| scheduler | `ghcr.io/develata/rss-ai-news:0.7.0-scheduler` | `scheduler-entrypoint.sh` + supercronic | 常驻容器按 cron 触发 |
+| runtime | `ghcr.io/develata/rss-ai-news:0.10.4` | `rss-ai-news` 二进制直跑 | 一次性命令（migrate / ingest / doctor 等） |
+| scheduler | `ghcr.io/develata/rss-ai-news:0.10.4-scheduler` | `scheduler-entrypoint.sh` + supercronic | 常驻容器按 cron 触发 |
 
-镜像 tag 规则（`docker/metadata-action`）：
-- 稳定版 `vX.Y.Z` → `X.Y.Z` + `X.Y` + `latest`；scheduler 为各 tag 加 `-scheduler`
-- 预发 `vX.Y.Z-rc.N` → 仅完整版本号，**不**打 `latest`
+GHCR 只发布 `linux/amd64`。Dockerfile 里的 cargo-chef / supercronic 同时固定了 amd64 与 arm64 的 SHA-256，
+arm64 主机可本地构建（`docker build -f docker/Dockerfile --target runtime .`），或用 `--platform linux/amd64` 仿真运行。
+
+镜像 tag 规则（详见 [./ci-and-release.md](./ci-and-release.md) §镜像 tag 规则）：
+- 稳定版 `vX.Y.Z` → `X.Y.Z`；两镜像都推送成功后，最高 stable tag 才晋升 `latest`，`X.Y` 线内最高才晋升 `X.Y`；
+  scheduler 为各 tag 加 `-scheduler`
+- 预发 tag 不推镜像（release verify gate 只接受 `X.Y.Z`）
 - workflow 不维护 `X` major-only alias
 
 ## 一次性 compose（宿主 cron 接管）
@@ -39,15 +43,17 @@ docker compose run --rm rss-ai-news --config-dir /app/configs doctor
 
 ## 常驻 scheduler compose（容器内置 cron）
 
-文件：[`docker/docker-compose.scheduler.yml`](../../docker/docker-compose.scheduler.yml)。
+文件：[`docker/docker-compose.scheduler.yml`](../../docker/docker-compose.scheduler.yml)。镜像版本由 `RSS_AI_NEWS_VERSION`
+选择（`.env` 中设置；缺省为该文件随附的 release，当前 `0.10.4`）。
 
 适合 1panel 风格容器面板部署。两种调度形态（优先级从高到低）：
 
 ### 形态 1：外挂 crontab 文件（推荐）
 
 scheduler 容器入口由环境变量 `RSS_CRONTAB_FILE` 控制（默认 `/app/crontab`）。
-**只要该路径存在且非空**，entrypoint 直接交给 supercronic 跑，**跳过**形态 2 的 env 模式。
-若文件不存在或为空，则自动降级到形态 2。
+**只要该路径是非空普通文件**，entrypoint 直接交给 supercronic 跑，**跳过**形态 2 的 env 模式。
+若文件不存在或为空，则自动降级到形态 2。若该路径存在但不是普通文件——最常见的是 compose 挂载了一个宿主上
+不存在的 `./crontab`，Docker 在容器里建出了同名目录——entrypoint 报错退出，而不是悄悄改用默认调度。
 
 ```bash
 # 1. 准备 crontab 文件（supercronic 兼容格式）
@@ -74,17 +80,28 @@ RSS_CRON_SCHEDULE="0 */6 * * *"
 RSS_CRON_COMMAND="run --max-batches 3"
 ```
 
-entrypoint 在内存里拼一行 crontab 给 supercronic。适合简单场景。
+entrypoint 拼一行 `<RSS_CRON_SCHEDULE> /usr/local/bin/rss-ai-news --config-dir /app/configs <RSS_CRON_COMMAND>`
+给 supercronic（它用 `/bin/sh -c` 执行命令部分）。`RSS_CRON_COMMAND` 按 shell 命令行书写，含空格的参数照常加引号，
+例如 `RSS_CRON_COMMAND="rebuild-report --output 'daily report.md'"`；两个变量都不能含换行或回车。适合简单场景。
 
-## 首次 migrate
+## 首次 migrate 与升级
 
-**任何**部署形态下，scheduler 容器**不**自动 migrate。首次部署必须显式跑一次：
+迁移行为（以代码为准，见 `crates/cli/src/context_factory.rs` 的 `open_write_storage`）：
+- scheduler entrypoint 自身**不** migrate；
+- 任何**写命令**（`ingest`、`ai-run`、`publish`、`publish-all`、`run`、`backfill`、`reindex`（非 dry-run）、`decision-run`）打开数据库时都会先
+  应用 pending migrations 并轮换 active config 版本，所以 cron 触发的第一条写命令会自动完成首次迁移；
+- 只读命令（`doctor`、`recent-entries`、`replay`、`rebuild-report`、`reindex --dry-run`）不 migrate；遇到 pending migration 时
+  `doctor` 跳过 deep scan，其余报错退出。
+
+推荐做法：首次启动前与**每次升级镜像前**，用一次性 runtime 容器显式跑 `migrate run`（必要时再跑 `migrate check`），
+让 schema 变更只在一处、带可见输出地发生，而不是混在某个 cron job 的日志里；`migrate run` 在仍有活动 reindex job 时
+会拒绝执行。
 
 ```bash
 docker run --rm --env-file .env \
   -v "$(pwd)/configs:/app/configs:ro" \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/develata/rss-ai-news:0.7.0 \
+  ghcr.io/develata/rss-ai-news:0.10.4 \
   --config-dir /app/configs migrate run
 ```
 

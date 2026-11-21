@@ -1,4 +1,8 @@
-use std::{thread, time::Duration};
+use std::{
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
 use super::super::{
     executor::LaneExecutor,
@@ -75,16 +79,16 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
             "--name",
             &container,
             "-e",
-            "RSS_CRON_SCHEDULE=0 0 1 1 *",
+            SCHEDULER_SMOKE_SCHEDULE,
             "-e",
-            "RSS_CRON_COMMAND=--help",
+            SCHEDULER_SMOKE_COMMAND,
             &scheduler_tag,
         ]),
         &[],
         0,
     );
     if !executor.dry_run() && executor.can_continue() {
-        thread::sleep(Duration::from_secs(3));
+        wait_for_scheduler_job(&container);
     }
     let inspect = executor.command(
         "docker-scheduler-running",
@@ -102,13 +106,25 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
                 .ok_or_else(|| format!("docker inspect returned {:?}", output.stdout.trim())),
         );
     }
-    executor.command(
+    // supercronic logs to stderr; fold it into stdout for the contract check.
+    let logs = executor.command(
         "docker-scheduler-logs",
-        "docker",
-        &strings(["logs", &container]),
+        "sh",
+        &strings(["-c", &format!("docker logs {container} 2>&1")]),
         &[],
         0,
     );
+    if let Some(output) = logs {
+        executor.check(
+            "docker-scheduler-job-contract",
+            "scheduler ran one job with its spaced argument intact",
+            output
+                .stdout
+                .contains(SCHEDULER_SMOKE_MARKER)
+                .then_some(())
+                .ok_or_else(|| format!("scheduler logs lack {SCHEDULER_SMOKE_MARKER:?}")),
+        );
+    }
     let Some(smoke) = prepare_smoke_workspace(
         executor,
         "docker",
@@ -138,4 +154,32 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
     );
 
     cleanup.finish(executor);
+}
+
+/// Seven fields (seconds first): fire every 2 s, so one job runs promptly.
+const SCHEDULER_SMOKE_SCHEDULE: &str = "RSS_CRON_SCHEDULE=*/2 * * * * * *";
+/// Side-effect free (clap rejects the extra positional before any config or
+/// database access); the space proves the generated crontab line keeps a
+/// quoted argument as one argv element.
+const SCHEDULER_SMOKE_COMMAND: &str = "RSS_CRON_COMMAND=validate-config 'spaced arg'";
+const SCHEDULER_SMOKE_MARKER: &str = "unexpected argument 'spaced arg'";
+const SCHEDULER_SMOKE_TIMEOUT: Duration = Duration::from_secs(75);
+
+/// Polls the container's logs until the smoke job has run or the timeout
+/// passes; the logs step and its contract check report the outcome.
+fn wait_for_scheduler_job(container: &str) {
+    let deadline = Instant::now() + SCHEDULER_SMOKE_TIMEOUT;
+    while Instant::now() < deadline {
+        let ran = Command::new("docker")
+            .args(["logs", container])
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout).contains(SCHEDULER_SMOKE_MARKER)
+                    || String::from_utf8_lossy(&output.stderr).contains(SCHEDULER_SMOKE_MARKER)
+            });
+        if ran {
+            return;
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
 }

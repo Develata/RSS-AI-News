@@ -21,6 +21,7 @@ mod reindex_job_impl;
 mod reindex_job_impl_pg;
 mod reindex_job_impl_sqlite;
 mod reindex_job_sql;
+pub mod replay;
 pub mod rule_version;
 pub mod run_event;
 
@@ -80,6 +81,9 @@ pub use raw_artifact::{NewRawArtifact, RawArtifactRepo, RawArtifactRepository};
 pub use reindex_job::{
     ClaimedReindexJob, FinishReindexTxOutcome, ReindexJob, ReindexJobRepo, ReindexJobRepository,
     StartReindexTxOutcome,
+};
+pub use replay::{
+    HtmlReplaySource, ReplayArticleDigest, ReplayProjectionRepo, ReplayProjectionRepository,
 };
 pub use rule_version::{ConfigRotation, RuleVersion, RuleVersionRepo, RuleVersionRepository};
 pub use run_event::{NewRunEvent, RunEventRepo, RunEventRepository};

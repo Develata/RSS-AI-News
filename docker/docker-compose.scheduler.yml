@@ -11,15 +11,17 @@
 #
 # 使用方式：
 #   1. 复制本文件到服务器 /opt/1panel/apps/rss-ai-news/docker-compose.yml
-#   2. 同目录建 .env（参考下方 README）
-#   3. `docker compose up -d` 启动；首次需要先 migrate（见下）
+#   2. 同目录建 .env（参考下方 README）；镜像版本由 RSS_AI_NEWS_VERSION 选择，
+#      默认是本文件随附的 release（发版时同步更新下面的默认值）
+#   3. `docker compose up -d` 启动。entrypoint 不 migrate，但第一条写命令（如 run）
+#      会自动应用 pending migrations；推荐首次启动前与每次升级前先显式 migrate（见下）
 #
-# 注意：本 compose 仅启动 scheduler 长驻容器；首次 migrate / 手动 doctor
+# 注意：本 compose 仅启动 scheduler 长驻容器；显式 migrate / 手动 doctor
 # 使用同目录 `.env` 与 mounts 直接运行 runtime image：
 #   docker run --rm --env-file .env \
 #     -v "$(pwd)/configs:/app/configs:ro" \
 #     -v "$(pwd)/data:/app/data" \
-#     ghcr.io/develata/rss-ai-news:0.7.0 \
+#     ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4} \
 #     --config-dir /app/configs migrate run
 
 networks:
@@ -31,7 +33,9 @@ services:
     container_name: rss-ai-news-scheduler
     # scheduler image：runtime 之上叠了一层 supercronic + entrypoint。
     # 与 runtime 镜像版本对齐：发版时 release workflow 同步推两个 image。
-    image: ghcr.io/develata/rss-ai-news:0.7.0-scheduler
+    # 版本只在 RSS_AI_NEWS_VERSION 一处选择（.env 可覆盖）；默认值由 release
+    # acceptance lane 对照候选版本检查。
+    image: ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4}-scheduler
     restart: unless-stopped
     env_file:
       - .env

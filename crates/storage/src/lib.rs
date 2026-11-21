@@ -39,3 +39,6 @@ pub use repo::{
     RunEventRepository, StartReindexTxOutcome, TerminalAdvanceOutcome, TerminalAdvanceStatus,
     UpdateContentHashOutcome, UpdateLinkHashOutcome,
 };
+pub use repo::{
+    HtmlReplaySource, ReplayArticleDigest, ReplayProjectionRepo, ReplayProjectionRepository,
+};

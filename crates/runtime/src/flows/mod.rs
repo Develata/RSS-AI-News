@@ -8,6 +8,7 @@ pub mod publish;
 pub mod rebuild_report;
 pub mod recent_entries;
 pub mod reindex;
+pub mod replay;
 
 pub use ai_run::{
     AiProcessSummary, AiRunFlow, AiRunOptions, AiRunSummary, AiTaskOutcome, AiTaskStatus,
@@ -42,4 +43,8 @@ pub use recent_entries::{
 };
 pub use reindex::{
     ReindexAbortOutcome, ReindexFlow, ReindexOptions, ReindexSummary, ReindexTarget,
+};
+pub use replay::{
+    REPLAY_FEED_SAMPLE_LIMIT, REPLAY_PLACEHOLDER_BASE_URI, ReplayBaseUri, ReplayDiff, ReplayFlow,
+    ReplayFlowDeps, ReplayKind, ReplayOptions, ReplayOutcome, ReplayParsed, ReplaySelector,
 };
