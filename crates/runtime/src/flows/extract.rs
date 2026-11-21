@@ -825,6 +825,27 @@ impl EntryRelease<'_> {
         )
     }
 }
+/// Parse + database time allowed per concurrency wave on top of the HTTP
+/// timeout in [`extract_lease_budget_seconds`]: Readability on a page at the
+/// `max_body_bytes` limit, the artifact write and the article/entry writes.
+/// Deliberately generous (measured parse times are well under a second).
+pub const EXTRACT_WAVE_MARGIN_SECONDS: u64 = 5;
+
+/// Worst-case seconds one claimed batch holds its lease: the batch is claimed
+/// with one `lease.fetch_duration_seconds` and processed in
+/// `ceil(batch / concurrent_fetches)` waves, each bounded by the HTTP timeout
+/// plus [`EXTRACT_WAVE_MARGIN_SECONDS`]. Callers check it against the lease
+/// before running (mirrors [`crate::ai_lease_budget_seconds`]); a batch that
+/// outlives its lease is reclaimed and fetched twice.
+pub fn extract_lease_budget_seconds(
+    batch_size: u32,
+    concurrent_fetches: u32,
+    http_timeout_seconds: u64,
+) -> u64 {
+    let waves = u64::from(batch_size.max(1).div_ceil(concurrent_fetches.max(1)));
+    waves.saturating_mul(http_timeout_seconds.saturating_add(EXTRACT_WAVE_MARGIN_SECONDS))
+}
+
 /// Shortest retry cooldown, applied after the first failed attempt.
 const RETRY_BACKOFF_BASE: Duration = Duration::minutes(10);
 /// Longest retry cooldown; later attempts stop doubling here.
@@ -910,6 +931,20 @@ impl ExtractSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lease_budget_counts_waves_times_timeout_plus_margin() {
+        // Defaults: batch 50, 5 concurrent, 30 s → 10 waves × 35 s.
+        assert_eq!(extract_lease_budget_seconds(50, 5, 30), 350);
+        assert_eq!(extract_lease_budget_seconds(51, 5, 30), 385);
+        assert_eq!(extract_lease_budget_seconds(3, 5, 30), 35);
+        // Zero concurrency / batch are clamped like the flow does.
+        assert_eq!(extract_lease_budget_seconds(0, 0, 10), 15);
+        assert_eq!(
+            extract_lease_budget_seconds(u32::MAX, 1, u64::MAX),
+            u64::MAX
+        );
+    }
 
     #[test]
     fn retry_backoff_doubles_and_is_bounded() {

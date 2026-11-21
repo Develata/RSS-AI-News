@@ -64,6 +64,8 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `claim_is_scoped_to_category_and_active_sources` | `crates/storage/tests/feed_entry_claim_scope_tests.rs` | 分类 + active 源过滤（SQLite） |
 | `unscoped_claim_method_keeps_its_contract` | 同上 | 无分类 claim 仍排除归档源 |
 | `pg_claim_is_scoped_to_category_and_active_sources` | `crates/storage/tests/feed_entry_pg_tests.rs` | 同上（PG，需 docker） |
+| `extract_lease_budget_over_the_lease_fails_fast` | `crates/cli/tests/ingest_cmd_tests.rs` | 批次可能超出 lease → 启动即配置错误；`--skip-fetch` 不校验 |
+| `lease_budget_counts_waves_times_timeout_plus_margin` | `crates/runtime/src/flows/extract.rs`（单元测试） | 预算公式 |
 | `extract_writes_html_artifact_before_strategy` | 同上 | artifact 顺序 |
 | `max_batches_caps_loop_and_reports_reached_flag` | 同上 | 限批生效 |
 | `max_batches_zero_means_unlimited_until_queue_drained` | 同上 | 0 = 不限 |

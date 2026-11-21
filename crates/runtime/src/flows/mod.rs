@@ -22,7 +22,8 @@ pub use decision_run::{
     DecisionRunSettings, DecisionRunSummary,
 };
 pub use extract::{
-    ExtractEntryOutcome, ExtractEntryStatus, ExtractFlow, ExtractOptions, ExtractSummary,
+    EXTRACT_WAVE_MARGIN_SECONDS, ExtractEntryOutcome, ExtractEntryStatus, ExtractFlow,
+    ExtractOptions, ExtractSummary, extract_lease_budget_seconds,
 };
 pub use ingest::{
     IngestFlow, IngestOptions, IngestSourceOutcome, IngestSourceStatus, IngestSummary,

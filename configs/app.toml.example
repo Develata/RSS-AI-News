@@ -87,7 +87,9 @@ max_body_bytes = 1_048_576
 min_body_chars = 100
 
 [lease]
-fetch_duration_seconds = 300
+# 须 ≥ ceil(ingest --batch-size / http.concurrent_fetches) × (http.timeout_seconds + 5)；
+# ingest 启动 extract 前校验（默认 50 / 5 × 35 = 350 s；本示例留余量取 600）。
+fetch_duration_seconds = 600
 ai_duration_seconds = 600
 publish_duration_seconds = 600
 reclaim_interval_seconds = 120

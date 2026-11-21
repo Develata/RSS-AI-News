@@ -135,6 +135,54 @@ async fn ingest_cmd_with_failing_feed_records_error() {
     assert_eq!(summary.entries_inserted, 0);
 }
 
+/// A11: one extract batch that could outlive its lease fails fast with a
+/// config error before any feed is fetched; `--skip-fetch` runs no extract and
+/// is not checked.
+#[tokio::test]
+async fn extract_lease_budget_over_the_lease_fails_fast() {
+    let server = MockServer::start().await;
+    let temp = TempDir::new().expect("temp dir");
+    write_config(temp.path(), &server.uri());
+    let app_path = temp.path().join("app.toml");
+    // batch 50, 1 concurrent fetch, 5 s timeout → 50 × (5 + 5) = 500 s > 400 s.
+    let app = fs::read_to_string(&app_path)
+        .unwrap()
+        .replace("fetch_duration_seconds = 600", "fetch_duration_seconds = 400");
+    fs::write(&app_path, app).unwrap();
+
+    // `IngestArgs::default()` has batch 0; the CLI default is 50.
+    let args = IngestArgs {
+        batch_size: 50,
+        ..IngestArgs::default()
+    };
+    let error = ingest::run(&cli_for(temp.path(), args.clone()), &args)
+        .await
+        .expect_err("lease budget must be rejected");
+    let message = error.to_string();
+    assert!(message.contains("lease.fetch_duration_seconds"), "{message}");
+    assert!(message.contains("500s"), "{message}");
+    assert!(
+        server.received_requests().await.unwrap_or_default().is_empty(),
+        "no feed fetched"
+    );
+
+    let skip = IngestArgs {
+        skip_fetch: true,
+        ..args.clone()
+    };
+    ingest::run(&cli_for(temp.path(), skip.clone()), &skip)
+        .await
+        .expect("--skip-fetch runs no extract and needs no extract lease budget");
+
+    let small = IngestArgs {
+        batch_size: 40,
+        ..IngestArgs::default()
+    };
+    ingest::run(&cli_for(temp.path(), small.clone()), &small)
+        .await
+        .expect("40 × 10 s = 400 s fits the lease exactly");
+}
+
 fn cli_for(config_dir: &Path, args: IngestArgs) -> Cli {
     Cli {
         config_dir: config_dir.to_path_buf(),
@@ -227,7 +275,7 @@ max_body_bytes = 1048576
 min_body_chars = 1
 
 [lease]
-fetch_duration_seconds = 30
+fetch_duration_seconds = 600
 ai_duration_seconds = 30
 publish_duration_seconds = 30
 reclaim_interval_seconds = 30

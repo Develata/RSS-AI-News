@@ -148,6 +148,13 @@ extract 不看分类与源状态，会抓取并改写其他分类及暂停源的
 
 ### 5.2 并发与 lease
 
+lease 预算（2026-11-21）：一批 claim 共用一个 `lease.fetch_duration_seconds`，按
+`http.concurrent_fetches` 分 `ceil(batch / concurrent)` 波处理，每波最多 `http.timeout_seconds`
+加 `EXTRACT_WAVE_MARGIN_SECONDS = 5` 秒解析 / 写库余量。`ingest`（及 `run` 的 ingest 段）在任何 flow
+执行前校验 `ceil(batch / concurrent) × (timeout + 5) ≤ lease.fetch_duration_seconds`，超出即以配置错误失败
+（与 ai-run 的 `ai_lease_budget_seconds` 同构；`--skip-fetch` 不校验）。默认 50 / 5 / 30 s 需 350 s，
+示例配置因此从 300 改为 600；仍为 300 的既有配置在默认批大小下会被拒绝，需调大 lease 或减小 `--batch-size`。
+
 滚动 JoinSet 将存活任务数限制在 `http.concurrent_fetches.max(1)`，不为整个 claim 批次预建等待任务。
 claim 行集合仍占 O(batch size) 内存；CLI 批大小范围见 [09-cli-and-runtime](./09-cli-and-runtime.md)。
 
