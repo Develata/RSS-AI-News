@@ -57,9 +57,9 @@ jobs:
         with:
           shared-key: test
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # The swallowed-error gate needs ripgrep, which the current ubuntu
-      # runner image does not ship.
-      - run: command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
+      # The swallowed-error gate needs ripgrep (not shipped on the ubuntu runner
+      # image) and the release-adapter tests need jq; install whichever is missing.
+      - run: (command -v rg && command -v jq) >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep jq)
       # static first, so fmt / clippy findings lead the log: fmt, clippy
       # -D warnings, swallowed-error gate, dependency policy, tooling boundary,
       # acceptance-case status; then the locked workspace build and tests.
