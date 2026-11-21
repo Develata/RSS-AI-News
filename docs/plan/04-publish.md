@@ -250,6 +250,13 @@ HTTP 状态、GitHub message 的**固定词表摘要**与 `x-github-request-id`�
 GitHub 形状（2–8 组、每组 1–16 位十六进制、以 `:` 分隔，实测形如 `828A:4A44E:40DA1B1:CEE6757:6B01CE59`）且不含 token
 时才保留，否则整值丢弃（不再"过滤成合法字符"）。客户端侧的传输错误文本（无服务端内容）最多 512 字节。
 
+结构化请求上下文（2026-11-22，R1-P-S1）：`GitHubAuthFailed` / `GitHubApiError` / `GitHubRateLimit` / `ResponseTooLarge`
+都带 `GitHubRequestContext { operation, http_status, request_id }`（`PublishError::github_context()`）：401 与无限流信号的
+403 由 `http_status` 区分；403 / 429 限流、超过 16 MiB 的成功响应、缺必需字段（`object.sha` / `tree.sha` / `sha` /
+`commit.sha`）的 2xx 也保留操作、实际状态与 request id（缺字段仍按 502 协议错误分类，显示 `(http 201)` 之类的实际状态）。
+Contents API 200 但无字符串 `sha`（如目录列表）是协议错误，不当作"文件不存在"。runtime 的 `publish_failed` 事件 payload
+增加 `operation` / `http_status` / `request_id` 三个字段。
+
 ### 4.2.1 Atomic batch publish
 
 v0.3 引入：`publish_many(reports: &[RenderedReport])` 在一次 commit 内推送多个 report。

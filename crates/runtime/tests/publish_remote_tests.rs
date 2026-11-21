@@ -342,9 +342,9 @@ struct MockRateLimitTarget;
 #[async_trait]
 impl PublishTarget for MockRateLimitTarget {
     async fn publish(&self, _report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
-        Err(PublishError::GitHubRateLimit {
-            reset_at: OffsetDateTime::from_unix_timestamp(1_800).unwrap(),
-        })
+        Err(PublishError::rate_limit(
+            OffsetDateTime::from_unix_timestamp(1_800).unwrap(),
+        ))
     }
 }
 
@@ -353,7 +353,7 @@ struct MockAuthFailTarget;
 #[async_trait]
 impl PublishTarget for MockAuthFailTarget {
     async fn publish(&self, _report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
-        Err(PublishError::GitHubAuthFailed("bad token".to_string()))
+        Err(PublishError::auth("bad token"))
     }
 }
 
@@ -718,6 +718,12 @@ async fn github_failure_persists_only_sanitized_reason_and_valid_request_id() {
     );
     assert!(!persisted.contains(MARKER), "{persisted}");
     assert!(!persisted.contains(TOKEN), "{persisted}");
+    // R1-P-S1: the event carries the request context as fields.
+    let payload: serde_json::Value =
+        serde_json::from_str(events[0].1.as_deref().expect("event payload")).unwrap();
+    assert_eq!(payload["operation"], "GET contents");
+    assert_eq!(payload["http_status"], 400);
+    assert_eq!(payload["request_id"], "828A:4A44E:40DA1B1:CEE6757:6B01CE59");
 }
 
 // === P-B2: a write cut off by the deadline is verified before release ===

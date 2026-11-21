@@ -129,9 +129,14 @@
 | `plain_hierarchical_branch_ref_route_is_unchanged` | 同上 | 含 `/` 的普通分支名不变 |
 | `contents_get_failure_keeps_operation_status_message_and_request_id` | 同上 | 失败保留操作、状态、固定词表摘要、request id；服务端回显的正文标记与 token 不出现 |
 | `malformed_or_token_bearing_request_id_is_dropped` | 同上 | 形状不符或含 token 的 request id 整值丢弃 |
+| `auth_failures_keep_the_actual_status_and_request_id` | 同上 | 401 / 403 认证失败保留实际状态、操作、request id |
+| `rate_limits_keep_operation_status_and_request_id` | 同上 | 两类 403 限流与 429 保留上下文 |
+| `oversized_success_keeps_its_request_context` | 同上 | 过大成功响应保留上下文 |
+| `success_missing_a_required_field_keeps_its_request_context` | 同上 | 缺字段 2xx：502 + 实际状态 + request id |
+| `contents_200_without_sha_is_a_protocol_error` | 同上 | Contents 200 无 sha → 协议错误 |
 | `response_reason_keeps_only_known_phrases_never_server_text` | `crates/publish/src/github.rs` | 持久化原因只来自固定词表 |
 | `request_id_is_kept_only_in_githubs_shape_and_never_with_the_token` | 同上 | request id 整值校验 |
-| `github_failure_persists_only_sanitized_reason_and_valid_request_id` | `crates/runtime/tests/publish_remote_tests.rs` | `last_error` 与 `publish_failed` 事件均不含回显标记与 token |
+| `github_failure_persists_only_sanitized_reason_and_valid_request_id` | `crates/runtime/tests/publish_remote_tests.rs` | `last_error` 与 `publish_failed` 事件均不含回显标记与 token；事件 payload 含 `operation` / `http_status` / `request_id` |
 | `contents_put_failure_keeps_operation_and_request_id` | 同上 | PUT 失败上下文 |
 | `contents_rate_limited_403_is_still_retryable_with_request_context` | 同上 | 403 限流分类不变 |
 | `rate_limit_maps_to_github_rate_limit` | 同上 | 429 映射 |

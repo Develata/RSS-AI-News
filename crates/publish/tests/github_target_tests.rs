@@ -296,7 +296,7 @@ async fn publish_many_surfaces_422_after_max_retries() {
 
     assert!(matches!(
         &error,
-        PublishError::GitHubApiError { status: 422, message }
+        PublishError::GitHubApiError { status: 422, message, .. }
             if message.contains("not a fast-forward")
     ));
     // 422 lost-update 在 PublishError::is_retryable 中不属于 retryable
@@ -321,7 +321,10 @@ async fn auth_failure_maps_to_github_auth_failed() {
 
     assert!(matches!(
         error,
-        PublishError::GitHubAuthFailed(reason) if reason == "GET contents: bad credentials"
+        PublishError::GitHubAuthFailed { message, context }
+            if message == "bad credentials"
+                && context.operation == Some("GET contents")
+                && context.http_status == Some(401)
     ));
 }
 
@@ -343,7 +346,7 @@ async fn rate_limit_maps_to_github_rate_limit() {
 
     assert!(matches!(
         error,
-        PublishError::GitHubRateLimit { reset_at }
+        PublishError::GitHubRateLimit { reset_at, .. }
             if reset_at == OffsetDateTime::from_unix_timestamp(1_800).unwrap()
     ));
 }
@@ -369,7 +372,7 @@ async fn forbidden_with_exhausted_quota_maps_to_retryable_rate_limit() {
 
     assert!(matches!(
         error,
-        PublishError::GitHubRateLimit { reset_at }
+        PublishError::GitHubRateLimit { reset_at, .. }
             if reset_at == OffsetDateTime::from_unix_timestamp(1_800).unwrap()
     ));
     assert!(error.is_retryable());
@@ -394,7 +397,7 @@ async fn forbidden_with_retry_after_maps_to_retryable_rate_limit() {
     let error = target.publish(&sample_report()).await.unwrap_err();
 
     match &error {
-        PublishError::GitHubRateLimit { reset_at } => {
+        PublishError::GitHubRateLimit { reset_at, .. } => {
             assert!(*reset_at >= before + time::Duration::seconds(120));
         }
         other => panic!("expected rate limit, got {other:?}"),
@@ -421,7 +424,9 @@ async fn forbidden_without_rate_limit_signals_maps_to_auth_failed() {
 
     assert!(matches!(
         &error,
-        PublishError::GitHubAuthFailed(reason) if reason == "GET contents: resource not accessible by token"
+        PublishError::GitHubAuthFailed { message, context }
+            if message == "resource not accessible by token"
+                && context.http_status == Some(403)
     ));
     assert!(!error.is_retryable());
 }

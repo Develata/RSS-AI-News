@@ -666,14 +666,14 @@ impl PublishFlow {
         let batch = match result {
             Ok(batch) if batch.artifacts.len() == prepared.len() => batch,
             Ok(batch) => {
-                let error = PublishError::GitHubApiError {
-                    status: 502,
-                    message: format!(
+                let error = PublishError::api(
+                    502,
+                    format!(
                         "publish_many returned {} artifacts for {} reports",
                         batch.artifacts.len(),
                         prepared.len()
                     ),
-                };
+                );
                 self.release_publish_error_for_prepared(&prepared, &owner, &error, &emitter)
                     .await;
                 for item in prepared {
@@ -886,6 +886,12 @@ impl PublishFlow {
                     "phase": phase,
                     "error_kind": error.error_kind(),
                     "budget_exhausted": budget_exhausted,
+                    // R1-P-S1: where a GitHub failure happened, as fields.
+                    "operation": error.github_context().and_then(|context| context.operation),
+                    "http_status": error.github_context().and_then(|context| context.http_status),
+                    "request_id": error
+                        .github_context()
+                        .and_then(|context| context.request_id.as_deref()),
                 })),
             )
             .await;

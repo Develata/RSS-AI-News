@@ -9,7 +9,7 @@ fn status_401_maps_to_auth_failed() {
 
     assert!(matches!(
         &error,
-        PublishError::GitHubAuthFailed(reason) if reason == "bad credentials"
+        PublishError::GitHubAuthFailed { message: reason, .. } if reason == "bad credentials"
     ));
     assert!(!error.is_retryable());
 }
@@ -20,7 +20,7 @@ fn status_429_maps_to_rate_limit_with_reset_header() {
 
     assert!(matches!(
         error,
-        PublishError::GitHubRateLimit { reset_at }
+        PublishError::GitHubRateLimit { reset_at, .. }
             if reset_at == OffsetDateTime::from_unix_timestamp(1_800).unwrap()
     ));
     assert!(error.is_retryable());
@@ -32,7 +32,7 @@ fn status_500_maps_to_retryable_api_error() {
 
     assert!(matches!(
         &error,
-        PublishError::GitHubApiError { status: 500, message } if message == "server error"
+        PublishError::GitHubApiError { status: 500, message, .. } if message == "server error"
     ));
     assert!(error.is_retryable());
 }
@@ -43,7 +43,7 @@ fn status_409_maps_to_retryable_api_error() {
 
     assert!(matches!(
         &error,
-        PublishError::GitHubApiError { status: 409, message }
+        PublishError::GitHubApiError { status: 409, message, .. }
             if message == "reference update conflict"
     ));
     assert!(error.is_retryable());
@@ -55,7 +55,7 @@ fn status_422_maps_to_permanent_api_error() {
 
     assert!(matches!(
         &error,
-        PublishError::GitHubApiError { status: 422, message } if message == "validation failed"
+        PublishError::GitHubApiError { status: 422, message, .. } if message == "validation failed"
     ));
     assert!(!error.is_retryable());
 }
@@ -71,7 +71,7 @@ fn status_403_naming_a_rate_limit_maps_to_rate_limit() {
         assert!(
             matches!(
                 error,
-                PublishError::GitHubRateLimit { reset_at }
+                PublishError::GitHubRateLimit { reset_at, .. }
                     if reset_at == OffsetDateTime::from_unix_timestamp(1_800).unwrap()
             ),
             "{message}: {error:?}"
@@ -86,7 +86,7 @@ fn status_403_without_rate_limit_signal_maps_to_auth_failed() {
 
     assert!(matches!(
         &error,
-        PublishError::GitHubAuthFailed(reason) if reason == "Must have admin rights"
+        PublishError::GitHubAuthFailed { message: reason, .. } if reason == "Must have admin rights"
     ));
     assert!(!error.is_retryable());
 }
@@ -102,5 +102,5 @@ fn status_401_stays_auth_failed_even_when_quota_is_exhausted() {
         },
     );
 
-    assert!(matches!(error, PublishError::GitHubAuthFailed(_)));
+    assert!(matches!(error, PublishError::GitHubAuthFailed { .. }));
 }

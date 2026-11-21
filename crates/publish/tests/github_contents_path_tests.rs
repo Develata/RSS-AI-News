@@ -392,3 +392,122 @@ async fn chinese_path_leaves_the_client_percent_encoded_on_get_and_put() {
     );
     assert!(lines.iter().all(|line| line.is_ascii()));
 }
+
+// === R1-P-S1: every GitHub failure carries operation, status, request id ===
+
+const REQUEST_ID: &str = "828A:4A44E:40DA1B1:CEE6757:6B01CE59";
+
+async fn get_failure(template: ResponseTemplate) -> PublishError {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(template.insert_header("x-github-request-id", REQUEST_ID))
+        .mount(&server)
+        .await;
+    target(&server, "main")
+        .publish(&report("tech/2026/20261121.md"))
+        .await
+        .unwrap_err()
+}
+
+fn assert_context(error: &PublishError, operation: &str, http_status: u16) {
+    let context = error.github_context().expect("GitHub failure has context");
+    assert_eq!(context.operation, Some(operation), "{error:?}");
+    assert_eq!(context.http_status, Some(http_status), "{error:?}");
+    assert_eq!(context.request_id.as_deref(), Some(REQUEST_ID), "{error:?}");
+    let shown = error.display_user();
+    assert!(shown.contains(operation), "{shown}");
+    assert!(shown.contains(REQUEST_ID), "{shown}");
+}
+
+#[tokio::test]
+async fn auth_failures_keep_the_actual_status_and_request_id() {
+    for status in [401, 403] {
+        let error = get_failure(
+            ResponseTemplate::new(status).set_body_json(json!({"message": "Bad credentials"})),
+        )
+        .await;
+        assert!(
+            matches!(error, PublishError::GitHubAuthFailed { .. }),
+            "{error:?}"
+        );
+        assert_context(&error, "GET contents", status);
+        assert!(error.display_user().contains(&format!("status {status}")));
+    }
+}
+
+#[tokio::test]
+async fn rate_limits_keep_operation_status_and_request_id() {
+    for (status, header, value) in [
+        (403, "x-ratelimit-remaining", "0"),
+        (403, "retry-after", "30"),
+        (429, "x-ratelimit-reset", "1800"),
+    ] {
+        let error = get_failure(
+            ResponseTemplate::new(status)
+                .insert_header(header, value)
+                .set_body_json(json!({"message": "Forbidden"})),
+        )
+        .await;
+        assert!(
+            matches!(error, PublishError::GitHubRateLimit { .. }),
+            "{status} {header}: {error:?}"
+        );
+        assert_context(&error, "GET contents", status);
+    }
+}
+
+#[tokio::test]
+async fn oversized_success_keeps_its_request_context() {
+    let error =
+        get_failure(ResponseTemplate::new(200).set_body_string(" ".repeat(16 * 1024 * 1024 + 1)))
+            .await;
+    assert!(
+        matches!(error, PublishError::ResponseTooLarge { .. }),
+        "{error:?}"
+    );
+    assert_context(&error, "GET contents", 200);
+}
+
+/// A 2xx lacking a required field is a protocol error that still names the
+/// call, its real status and GitHub's request id.
+#[tokio::test]
+async fn success_missing_a_required_field_keeps_its_request_context() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .insert_header("x-github-request-id", REQUEST_ID)
+                .set_body_json(json!({"content": {"sha": "f"}})),
+        )
+        .mount(&server)
+        .await;
+
+    let error = target(&server, "main")
+        .publish(&report("tech/2026/20261121.md"))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, PublishError::GitHubApiError { status: 502, message, .. }
+            if message.contains("commit.sha")),
+        "{error:?}"
+    );
+    assert_context(&error, "PUT contents", 201);
+    assert!(error.display_user().contains("(http 201)"));
+}
+
+/// A 200 contents answer without a `sha` (e.g. a directory) is a protocol
+/// error, not "the file does not exist yet".
+#[tokio::test]
+async fn contents_200_without_sha_is_a_protocol_error() {
+    let error = get_failure(ResponseTemplate::new(200).set_body_json(json!([]))).await;
+    assert!(
+        matches!(error, PublishError::GitHubApiError { status: 502, .. }),
+        "{error:?}"
+    );
+    assert_context(&error, "GET contents", 200);
+}

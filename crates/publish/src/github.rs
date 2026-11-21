@@ -10,7 +10,7 @@ use octocrab::Octocrab;
 use rss_ai_news_domain::{SecretString, dto::publish::RenderedReport};
 use serde_json::{Value, json};
 
-use crate::error::PublishError;
+use crate::error::{GitHubRequestContext, PublishError};
 use crate::target::{PublishTarget, PublishedArtifact, PublishedBatchArtifact};
 
 /// GitHub remote-target configuration. The `token` field is a
@@ -44,7 +44,7 @@ impl GitHubTarget {
                 cfg.token.expose_secret().to_owned(),
             ))
             .build()
-            .map_err(|error| PublishError::GitHubAuthFailed(format!("octocrab build: {error}")))?;
+            .map_err(|error| PublishError::auth(format!("octocrab build: {error}")))?;
         Ok(Self {
             cfg,
             client: Arc::new(client),
@@ -60,9 +60,9 @@ impl GitHubTarget {
                 cfg.token.expose_secret().to_owned(),
             ))
             .base_uri(base_uri)
-            .map_err(|error| PublishError::GitHubAuthFailed(format!("octocrab base_uri: {error}")))?
+            .map_err(|error| PublishError::auth(format!("octocrab base_uri: {error}")))?
             .build()
-            .map_err(|error| PublishError::GitHubAuthFailed(format!("octocrab build: {error}")))?;
+            .map_err(|error| PublishError::auth(format!("octocrab build: {error}")))?;
         Ok(Self {
             cfg,
             client: Arc::new(client),
@@ -212,6 +212,7 @@ fn is_branch_concurrently_updated(error: &PublishError) -> bool {
         PublishError::GitHubApiError {
             status: 422,
             message,
+            ..
         } => is_non_fast_forward_message(message),
         _ => false,
     }
@@ -343,7 +344,11 @@ impl GitHubTarget {
         Ok(receipts_at(artifacts, commit_sha))
     }
 
-    async fn get_json(&self, operation: &'static str, route: &str) -> Result<Value, PublishError> {
+    async fn get_json(
+        &self,
+        operation: &'static str,
+        route: &str,
+    ) -> Result<Responded, PublishError> {
         let response = self.client._get(route).await;
         self.json_response(operation, response).await
     }
@@ -353,7 +358,7 @@ impl GitHubTarget {
         operation: &'static str,
         route: &str,
         body: &Value,
-    ) -> Result<Value, PublishError> {
+    ) -> Result<Responded, PublishError> {
         let response = self.client._post(route, Some(body)).await;
         self.json_response(operation, response).await
     }
@@ -363,7 +368,7 @@ impl GitHubTarget {
         operation: &'static str,
         route: &str,
         body: &Value,
-    ) -> Result<Value, PublishError> {
+    ) -> Result<Responded, PublishError> {
         let response = self.client._patch(route, Some(body)).await;
         self.json_response(operation, response).await
     }
@@ -372,37 +377,53 @@ impl GitHubTarget {
         &self,
         operation: &'static str,
         response: Result<GitHubResponse, octocrab::Error>,
-    ) -> Result<Value, PublishError> {
-        let (status, body, request_id) = self.finish(operation, response).await?;
-        parse_json_value(status, &body)
-            .map_err(|error| with_request_context(error, operation, request_id.as_deref()))
+    ) -> Result<Responded, PublishError> {
+        let (body, context) = self.finish(operation, response).await?;
+        let value = parse_json_value(&body, &context)?;
+        Ok((value, context))
     }
 
     /// Reads and classifies one GitHub REST response. Every failure (transport,
-    /// oversized body, non-2xx) carries `operation` and the response's
-    /// `x-github-request-id`, so a persisted publish failure says which call
-    /// failed and can be traced on GitHub's side (incident 2026-11-21).
+    /// oversized body, non-2xx) and the returned success carry the structured
+    /// request context — operation, answered HTTP status, validated
+    /// `x-github-request-id` — so a persisted publish failure says which call
+    /// failed and can be traced on GitHub's side (incident 2026-11-21,
+    /// R1-P-S1).
     async fn finish(
         &self,
         operation: &'static str,
         response: Result<GitHubResponse, octocrab::Error>,
-    ) -> Result<(u16, Bytes, Option<String>), PublishError> {
+    ) -> Result<(Bytes, GitHubRequestContext), PublishError> {
         let response = response.map_err(|error| {
-            with_request_context(classify::classify_octocrab_error(error), operation, None)
+            with_request_context(
+                classify::classify_octocrab_error(error),
+                &GitHubRequestContext {
+                    operation: Some(operation),
+                    ..GitHubRequestContext::default()
+                },
+            )
         })?;
         let status = response.status().as_u16();
         let rate_limit = classify::RateLimitHints::from_headers(response.headers());
-        let request_id = github_request_id(response.headers(), self.cfg.token.expose_secret());
-        let context = |error| with_request_context(error, operation, request_id.as_deref());
-        let body = read_response_body(response).await.map_err(context)?;
+        let context = GitHubRequestContext {
+            operation: Some(operation),
+            http_status: Some(status),
+            request_id: github_request_id(response.headers(), self.cfg.token.expose_secret()),
+        };
+        let body = read_response_body(response)
+            .await
+            .map_err(|error| with_request_context(error, &context))?;
         if !(200..300).contains(&status) {
-            return Err(context(classify::classify_github_response(
-                status,
-                response_reason(status, &body),
-                &rate_limit,
-            )));
+            return Err(with_request_context(
+                classify::classify_github_response(
+                    status,
+                    response_reason(status, &body),
+                    &rate_limit,
+                ),
+                &context,
+            ));
         }
-        Ok((status, body, request_id))
+        Ok((body, context))
     }
 
     /// Commit sha the configured branch points at now.
@@ -413,15 +434,8 @@ impl GitHubTarget {
             self.cfg.repo,
             encode_repo_path(&self.cfg.branch)
         );
-        let head = self.get_json("GET ref", &ref_route).await?;
-        head.get("object")
-            .and_then(|object| object.get("sha"))
-            .and_then(|sha| sha.as_str())
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| PublishError::GitHubApiError {
-                status: 502,
-                message: "missing object.sha in GitHub ref response".to_string(),
-            })
+        let (head, context) = self.get_json("GET ref", &ref_route).await?;
+        required_str(&head, "/object/sha", "object.sha", &context)
     }
 
     async fn head_commit_and_tree(&self) -> Result<(String, String), PublishError> {
@@ -431,16 +445,8 @@ impl GitHubTarget {
             "/repos/{}/{}/git/commits/{}",
             self.cfg.owner, self.cfg.repo, head_commit_sha
         );
-        let commit = self.get_json("GET commit", &commit_route).await?;
-        let base_tree_sha = commit
-            .get("tree")
-            .and_then(|tree| tree.get("sha"))
-            .and_then(|sha| sha.as_str())
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| PublishError::GitHubApiError {
-                status: 502,
-                message: "missing tree.sha in GitHub commit response".to_string(),
-            })?;
+        let (commit, context) = self.get_json("GET commit", &commit_route).await?;
+        let base_tree_sha = required_str(&commit, "/tree/sha", "tree.sha", &context)?;
         Ok((head_commit_sha, base_tree_sha))
     }
 
@@ -452,15 +458,8 @@ impl GitHubTarget {
         let route = format!("/repos/{}/{}/git/trees", self.cfg.owner, self.cfg.repo);
         let mut body = json!({ "base_tree": base_tree_sha });
         body["tree"] = Value::Array(tree_entries);
-        let value = self.post_json("POST tree", &route, &body).await?;
-        value
-            .get("sha")
-            .and_then(|sha| sha.as_str())
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| PublishError::GitHubApiError {
-                status: 502,
-                message: "missing sha in GitHub tree response".to_string(),
-            })
+        let (value, context) = self.post_json("POST tree", &route, &body).await?;
+        required_str(&value, "/sha", "sha", &context)
     }
 
     async fn create_commit(
@@ -475,15 +474,8 @@ impl GitHubTarget {
             "tree": tree_sha,
             "parents": [parent_commit_sha],
         });
-        let value = self.post_json("POST commit", &route, &body).await?;
-        value
-            .get("sha")
-            .and_then(|sha| sha.as_str())
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| PublishError::GitHubApiError {
-                status: 502,
-                message: "missing sha in GitHub commit response".to_string(),
-            })
+        let (value, context) = self.post_json("POST commit", &route, &body).await?;
+        required_str(&value, "/sha", "sha", &context)
     }
 
     async fn update_branch_ref(&self, commit_sha: &str) -> Result<(), PublishError> {
@@ -552,14 +544,11 @@ impl GitHubTarget {
         if matches!(&response, Ok(response) if response.status().as_u16() == 404) {
             return Ok(None);
         }
-        let (status, body, request_id) = self.finish(OPERATION, response).await?;
-
-        let value = parse_json_value(status, &body)
-            .map_err(|error| with_request_context(error, OPERATION, request_id.as_deref()))?;
-        Ok(value
-            .get("sha")
-            .and_then(|sha| sha.as_str())
-            .map(ToOwned::to_owned))
+        let (body, context) = self.finish(OPERATION, response).await?;
+        let value = parse_json_value(&body, &context)?;
+        // A 200 without a string `sha` (e.g. a directory listing) is a
+        // protocol error, never "not there yet" (R1-P-S1).
+        required_str(&value, "/sha", "sha", &context).map(Some)
     }
 
     async fn put_file(
@@ -580,23 +569,35 @@ impl GitHubTarget {
         const OPERATION: &str = "PUT contents";
         let route = self.contents_route(final_path);
         let response = self.client._put(route.as_str(), Some(&body)).await;
-        let (status, body, request_id) = self.finish(OPERATION, response).await?;
-
-        let value = parse_json_value(status, &body)
-            .map_err(|error| with_request_context(error, OPERATION, request_id.as_deref()))?;
-        value
-            .get("commit")
-            .and_then(|commit| commit.get("sha"))
-            .and_then(|sha| sha.as_str())
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| PublishError::GitHubApiError {
-                status: 502,
-                message: "missing commit.sha in GitHub response".to_string(),
-            })
+        let (body, context) = self.finish(OPERATION, response).await?;
+        let value = parse_json_value(&body, &context)?;
+        required_str(&value, "/commit/sha", "commit.sha", &context)
     }
 }
 
 type GitHubResponse = http::Response<BoxBody<Bytes, octocrab::Error>>;
+
+/// A successful GitHub JSON response and the request context it came with.
+type Responded = (Value, GitHubRequestContext);
+
+/// The string at JSON `pointer`, or a 502 protocol error naming the missing
+/// field with the request context of the (2xx) response that lacked it.
+fn required_str(
+    value: &Value,
+    pointer: &str,
+    field: &str,
+    context: &GitHubRequestContext,
+) -> Result<String, PublishError> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| PublishError::GitHubApiError {
+            status: 502,
+            message: format!("missing {field} in GitHub response"),
+            context: context.clone(),
+        })
+}
 
 /// Git's blob object id: SHA-1 over `"blob {len}\0"` followed by the bytes
 /// (what `git hash-object` prints and what GitHub reports as a file's `sha`).
@@ -658,29 +659,19 @@ fn github_request_id(headers: &http::HeaderMap, token: &str) -> Option<String> {
     (well_formed && !carries_token).then(|| value.to_string())
 }
 
-/// Prefixes the (already sanitized) diagnostic with the failed operation and
-/// appends GitHub's request id. Classification is unchanged: the variant and
-/// status are kept, and the signals the retry logic matches on (`fast forward`,
-/// `rate limit`) were evaluated before and survive the prefix.
-fn with_request_context(
-    error: PublishError,
-    operation: &str,
-    request_id: Option<&str>,
-) -> PublishError {
-    let annotate = |message: String| match request_id {
-        Some(id) => format!("{operation}: {message} (x-github-request-id: {id})"),
-        None => format!("{operation}: {message}"),
-    };
-    match error {
-        PublishError::GitHubApiError { status, message } => PublishError::GitHubApiError {
-            status,
-            message: annotate(message),
-        },
-        PublishError::GitHubAuthFailed(message) => {
-            PublishError::GitHubAuthFailed(annotate(message))
+/// Attaches the request context to a GitHub failure (fields already set are
+/// kept). Classification is unchanged: the variant, status and message — and
+/// with them the signals the retry logic matches on (`fast forward`, `rate
+/// limit`) — were decided before.
+fn with_request_context(mut error: PublishError, context: &GitHubRequestContext) -> PublishError {
+    if let Some(target) = error.github_context_mut() {
+        target.operation = target.operation.or(context.operation);
+        target.http_status = target.http_status.or(context.http_status);
+        if target.request_id.is_none() {
+            target.request_id = context.request_id.clone();
         }
-        other => other,
     }
+    error
 }
 
 /// Includes base64 content returned by GitHub's Contents API. The cap is on
@@ -694,6 +685,7 @@ async fn read_response_body(response: GitHubResponse) -> Result<Bytes, PublishEr
         if (200..300).contains(&status) {
             PublishError::ResponseTooLarge {
                 limit: MAX_RESPONSE_BODY_BYTES,
+                context: GitHubRequestContext::default(),
             }
         } else {
             // The oversized body is never read, so a 403 rate limit can only
@@ -722,10 +714,13 @@ async fn read_response_body(response: GitHubResponse) -> Result<Bytes, PublishEr
             if error.is::<http_body_util::LengthLimitError>() {
                 too_large()
             } else {
-                PublishError::GitHubApiError {
-                    status: 503,
-                    message: format!("failed reading GitHub response: {error}"),
-                }
+                PublishError::api(
+                    503,
+                    rss_ai_news_domain::error::truncate_diagnostic(
+                        format!("failed reading GitHub response: {error}"),
+                        512,
+                    ),
+                )
             }
         })
 }
@@ -817,10 +812,12 @@ fn summarize_github_message(message: &str) -> String {
     }
 }
 
-fn parse_json_value(status: u16, body: &[u8]) -> Result<Value, PublishError> {
+/// A 2xx body that is not JSON: 502 protocol error with the response context.
+fn parse_json_value(body: &[u8], context: &GitHubRequestContext) -> Result<Value, PublishError> {
     serde_json::from_slice::<Value>(body).map_err(|error| PublishError::GitHubApiError {
         status: 502,
-        message: format!("invalid GitHub response for status {status}: {error}"),
+        message: format!("invalid GitHub JSON response: {error}"),
+        context: context.clone(),
     })
 }
 
@@ -828,7 +825,7 @@ pub mod classify {
     use octocrab::Error as OctocrabError;
     use time::{Duration, OffsetDateTime};
 
-    use crate::error::PublishError;
+    use crate::error::{GitHubRequestContext, PublishError};
 
     pub fn classify_octocrab_error(error: OctocrabError) -> PublishError {
         match error {
@@ -852,10 +849,10 @@ pub mod classify {
 
     /// Transport-level failure: retryable 503 with a bounded client message.
     fn network_error(message: String) -> PublishError {
-        PublishError::GitHubApiError {
-            status: 503,
-            message: rss_ai_news_domain::error::truncate_diagnostic(message, 512),
-        }
+        PublishError::api(
+            503,
+            rss_ai_news_domain::error::truncate_diagnostic(message, 512),
+        )
     }
 
     /// Rate-limit headers of a GitHub REST response (GitHub docs, "Rate
@@ -906,20 +903,32 @@ pub mod classify {
             || message.to_ascii_lowercase().contains("rate limit")
     }
 
+    /// The answered `status` is kept as `context.http_status` on every
+    /// variant (R1-P-S1): a 401 and a 403 auth failure stay distinguishable.
     pub fn classify_github_response(
         status: u16,
         message: String,
         hints: &RateLimitHints,
     ) -> PublishError {
+        let context = GitHubRequestContext {
+            http_status: Some(status),
+            ..GitHubRequestContext::default()
+        };
         match status {
             403 if is_rate_limited_403(&message, hints) => PublishError::GitHubRateLimit {
                 reset_at: hints.reset_at(),
+                context,
             },
-            401 | 403 => PublishError::GitHubAuthFailed(message),
+            401 | 403 => PublishError::GitHubAuthFailed { message, context },
             429 => PublishError::GitHubRateLimit {
                 reset_at: hints.reset_at(),
+                context,
             },
-            _ => PublishError::GitHubApiError { status, message },
+            _ => PublishError::GitHubApiError {
+                status,
+                message,
+                context,
+            },
         }
     }
 
