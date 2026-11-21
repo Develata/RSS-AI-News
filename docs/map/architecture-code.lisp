@@ -199,7 +199,10 @@
       :state active
       :notes "5 阶段：init(mod) / freeze / render / store_local / publish_remote(remote)，
               按阶段拆 freeze.rs / render.rs / store_local.rs / remote.rs + dto.rs。
-              远端报告仅加载一次冻结 items，同时派生 article IDs，不重复读取完整快照。")
+              远端报告仅加载一次冻结 items，同时派生 article IDs，不重复读取完整快照。
+              paths.rs：publish-all 写入前按真实日期查跨分类路径碰撞；
+              rule_versions.rs：publish / publish-all 共用的 render + selection_policy 规则版本登记
+              （CLI 不直写 rule_versions；rebuild-report 只读不 seed）。")
 
 (node :id flow-reindex
       :label "ReindexFlow"

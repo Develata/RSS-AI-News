@@ -1,4 +1,3 @@
-use rss_ai_news_storage::RuleVersionRepository;
 use std::io::{self, Write};
 
 use rss_ai_news_config::{self as config, CategoryConfig};
@@ -6,6 +5,7 @@ use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishFreezeStatus, PublishInitOptions, PublishInitOutcome,
     PublishRemoteOptions, PublishRemoteStatus, PublishRenderOptions, PublishRenderStatus,
     PublishStoreLocalOptions, PublishStoreLocalStatus, RuntimeError,
+    flows::publish::{ForceRenderTrace, PublishRuleVersions, bootstrap_publish_rule_versions},
 };
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -193,29 +193,20 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
     } else {
         "remote"
     };
-    // F15-3: --force 显式制造一条新的 render rule_version 行用于 audit
-    // trace；非 force 分支走 active_rule_or_register 读路径。force 行总是
-    // status='pending'（落在 partial unique 之外），新库上也不会成为 active。
-    let render_version = if args.force {
-        // Unique per invocation (run id), never 'active': a force row is an
-        // audit trace and must not become the default render rule.
-        let force_tag = format!("force-{}-{}-{}", category.category.key, date, ctx.run.run_id);
-        rule_version_repo
-            .insert_pending_rule("render", &force_tag, "force render trace", "v1")
-            .await?
-    } else {
-        rule_version_repo
-            .active_rule_or_register("render", "default", "default render", "v1")
-            .await?
-    };
-    let selection_policy_version = rule_version_repo
-        .active_rule_or_register(
-            "selection_policy",
-            "default",
-            "default selection policy",
-            "v1",
-        )
-        .await?;
+    // F15-3: --force records a fresh pending render trace; otherwise the
+    // active rules are resolved (seeded on first use) in the runtime.
+    let PublishRuleVersions {
+        render_version,
+        selection_policy_version,
+    } = bootstrap_publish_rule_versions(
+        &rule_version_repo,
+        args.force.then_some(ForceRenderTrace {
+            scope: &category.category.key,
+            report_date: &date,
+            run_id: &ctx.run.run_id,
+        }),
+    )
+    .await?;
     let init = flow
         .init(PublishInitOptions {
             category_key: category.category.key.clone(),

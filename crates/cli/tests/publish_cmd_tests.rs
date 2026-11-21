@@ -247,8 +247,12 @@ async fn publish_force_creates_unique_non_active_render_versions_on_a_fresh_db()
         local_only: true,
         force: true,
     });
-    let first = publish::run(&cli, publish_args(&cli)).await.expect("force 1");
-    let second = publish::run(&cli, publish_args(&cli)).await.expect("force 2");
+    let first = publish::run(&cli, publish_args(&cli))
+        .await
+        .expect("force 1");
+    let second = publish::run(&cli, publish_args(&cli))
+        .await
+        .expect("force 2");
     assert_ne!(
         first.render_version, second.render_version,
         "each --force invocation needs its own render version"
@@ -260,7 +264,9 @@ async fn publish_force_creates_unique_non_active_render_versions_on_a_fresh_db()
         local_only: true,
         force: false,
     });
-    let normal = publish::run(&cli, publish_args(&cli)).await.expect("normal");
+    let normal = publish::run(&cli, publish_args(&cli))
+        .await
+        .expect("normal");
 
     let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
     let rows: Vec<(i64, String, String)> = sqlx::query_as(

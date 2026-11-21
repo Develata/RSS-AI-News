@@ -261,6 +261,7 @@ Markdown **byte-equal**；跨渲染器版本（例如 YAML 引号规则调整）
 | 内容 | 路径 |
 |---|---|
 | Publish Flow | [`crates/runtime/src/flows/publish/mod.rs`](../../crates/runtime/src/flows/publish/mod.rs) |
+| 发布规则版本登记（render / selection_policy，publish 与 publish-all 共用） | [`crates/runtime/src/flows/publish/rule_versions.rs`](../../crates/runtime/src/flows/publish/rule_versions.rs) |
 | publish_all CLI（atomic batch） | [`crates/cli/src/commands/publish_all.rs`](../../crates/cli/src/commands/publish_all.rs) |
 | PublishTarget trait | [`crates/publish/src/target.rs`](../../crates/publish/src/target.rs) |
 | LocalFsTarget | [`crates/publish/src/local.rs`](../../crates/publish/src/local.rs) |

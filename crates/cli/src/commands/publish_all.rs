@@ -1,4 +1,3 @@
-use rss_ai_news_storage::RuleVersionRepository;
 use std::io::{self, Write};
 
 use rss_ai_news_config::{self as config, CategoryConfig, LoadedConfig};
@@ -6,7 +5,10 @@ use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishInitOptions, PublishInitOutcome,
     PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRenderOptions, RuntimeError,
-    flows::publish::{ReportPathSpec, check_report_path_collisions},
+    flows::publish::{
+        ForceRenderTrace, PublishRuleVersions, ReportPathSpec, bootstrap_publish_rule_versions,
+        check_report_path_collisions,
+    },
 };
 use rss_ai_news_storage::StoragePool;
 use serde::Serialize;
@@ -171,25 +173,18 @@ pub(crate) async fn run_loaded(
     } else {
         "remote"
     };
-    let render_version = if args.force {
-        // Unique per invocation (run id), never 'active' (see publish.rs).
-        let force_tag = format!("force-all-{}-{}", date, ctx.run.run_id);
-        rule_version_repo
-            .insert_pending_rule("render", &force_tag, "force render trace", "v1")
-            .await?
-    } else {
-        rule_version_repo
-            .active_rule_or_register("render", "default", "default render", "v1")
-            .await?
-    };
-    let selection_policy_version = rule_version_repo
-        .active_rule_or_register(
-            "selection_policy",
-            "default",
-            "default selection policy",
-            "v1",
-        )
-        .await?;
+    let PublishRuleVersions {
+        render_version,
+        selection_policy_version,
+    } = bootstrap_publish_rule_versions(
+        &rule_version_repo,
+        args.force.then_some(ForceRenderTrace {
+            scope: "all",
+            report_date: &date,
+            run_id: &ctx.run.run_id,
+        }),
+    )
+    .await?;
 
     let mut summaries = Vec::with_capacity(categories.len());
     let mut remote_items = Vec::new();
