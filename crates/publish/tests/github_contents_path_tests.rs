@@ -456,6 +456,35 @@ async fn rate_limits_keep_operation_status_and_request_id() {
     }
 }
 
+/// R1-P-S11: the only `rate limit` phrase sits past the old 8 KiB
+/// diagnostic cap; the signal is taken from the full text first.
+#[tokio::test]
+async fn rate_limit_phrase_past_the_diagnostic_cap_is_still_a_rate_limit() {
+    let message = format!("{} secondary rate limit", "x".repeat(20_000));
+    let error =
+        get_failure(ResponseTemplate::new(403).set_body_json(json!({ "message": message }))).await;
+    assert!(
+        matches!(error, PublishError::GitHubRateLimit { .. }),
+        "{error:?}"
+    );
+}
+
+/// R1-P-S11: an HTTP-date `retry-after` on a plain 403 is a rate limit.
+#[tokio::test]
+async fn http_date_retry_after_on_a_403_is_a_rate_limit() {
+    let error = get_failure(
+        ResponseTemplate::new(403)
+            .insert_header("retry-after", "Sun, 22 Nov 2026 08:30:00 GMT")
+            .set_body_json(json!({ "message": "Forbidden" })),
+    )
+    .await;
+    assert!(
+        matches!(error, PublishError::GitHubRateLimit { .. }),
+        "{error:?}"
+    );
+    assert_context(&error, "GET contents", 403);
+}
+
 #[tokio::test]
 async fn oversized_success_keeps_its_request_context() {
     let error =

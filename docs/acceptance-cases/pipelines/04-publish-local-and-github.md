@@ -149,6 +149,12 @@
 | `forbidden_without_rate_limit_signals_maps_to_auth_failed` | 同上 | 普通 403 → 认证失败 |
 | `status_403_naming_a_rate_limit_maps_to_rate_limit` | `crates/publish/tests/github_classify_tests.rs` | message 含 (secondary) rate limit |
 | `status_403_without_rate_limit_signal_maps_to_auth_failed` | 同上 | 普通 403 |
+| `forbidden_with_an_http_date_retry_after_is_a_rate_limit_until_that_date` | 同上 | HTTP 日期形式 `retry-after` |
+| `unparsable_retry_after_still_marks_a_403_as_rate_limited` | 同上 | 头存在即限流信号 |
+| `oversized_retry_after_seconds_are_capped_without_overflow` | 同上 | 超大秒数封顶、无溢出 |
+| `past_http_date_retry_after_means_now` | 同上 | 过去日期 = now |
+| `rate_limit_phrase_past_the_diagnostic_cap_is_still_a_rate_limit` | `crates/publish/tests/github_contents_path_tests.rs` | 8 KiB 之后的 "rate limit" 仍识别 |
+| `http_date_retry_after_on_a_403_is_a_rate_limit` | 同上 | 线上 403 + HTTP 日期 |
 | `local_fs_target_rejects_path_with_parent_traversal` | `crates/publish/tests/local_target_tests.rs` | 路径穿越拒绝 |
 | `local_fs_target_creates_parent_directories` | 同上 | 父目录自建 |
 | `local_fs_target_replaces_existing_report_without_truncating_it_in_place` | 同上 | 临时文件 + rename，不原地截断 |

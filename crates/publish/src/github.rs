@@ -869,48 +869,101 @@ pub mod classify {
     /// Rate-limit headers of a GitHub REST response (GitHub docs, "Rate
     /// limits for the REST API" → "Exceeding the rate limit"): a primary limit
     /// answers 403/429 with `x-ratelimit-remaining: 0` and `x-ratelimit-reset`;
-    /// a secondary limit may send `retry-after` (seconds).
+    /// a secondary limit may send `retry-after`.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct RateLimitHints {
         pub reset_epoch_seconds: Option<i64>,
         pub remaining: Option<i64>,
-        pub retry_after_seconds: Option<i64>,
+        /// `None` = no `retry-after` header at all.
+        pub retry_after: Option<RetryAfter>,
+    }
+
+    /// A `retry-after` header (RFC 9110 §10.2.3): delay-seconds or an
+    /// HTTP-date. Its presence alone marks a 403 as a rate limit (R1-P-S11),
+    /// even when its value cannot be turned into a deadline.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RetryAfter {
+        Seconds(u64),
+        At(OffsetDateTime),
+        Unparsable,
+    }
+
+    /// Longest server-requested wait honoured (a day). A larger or overflowing
+    /// value is capped, never added unchecked to the clock.
+    pub const MAX_RETRY_AFTER_SECONDS: u64 = 24 * 60 * 60;
+
+    impl RetryAfter {
+        pub fn parse(value: &str) -> Self {
+            let value = value.trim();
+            if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+                // More digits than u64 holds is still "very long".
+                return Self::Seconds(value.parse().unwrap_or(u64::MAX));
+            }
+            parse_http_date(value).map_or(Self::Unparsable, Self::At)
+        }
+    }
+
+    /// IMF-fixdate, the HTTP-date form senders must generate
+    /// (`Sun, 06 Nov 1994 08:49:37 GMT`).
+    fn parse_http_date(value: &str) -> Option<OffsetDateTime> {
+        // Runtime-parsed description: the workspace `time` has no `macros`.
+        let format = time::format_description::parse_borrowed::<2>(
+            "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT",
+        )
+        .ok()?;
+        time::PrimitiveDateTime::parse(value, &format)
+            .ok()
+            .map(time::PrimitiveDateTime::assume_utc)
     }
 
     impl RateLimitHints {
         pub fn from_headers(headers: &http::HeaderMap) -> Self {
-            let number = |name: &str| {
-                headers
-                    .get(name)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.trim().parse::<i64>().ok())
-            };
+            let text = |name: &str| headers.get(name).map(|value| value.to_str().unwrap_or(""));
+            let number = |name: &str| text(name).and_then(|value| value.trim().parse::<i64>().ok());
             Self {
                 reset_epoch_seconds: number("x-ratelimit-reset"),
                 remaining: number("x-ratelimit-remaining"),
-                retry_after_seconds: number("retry-after"),
+                retry_after: text("retry-after").map(RetryAfter::parse),
             }
         }
 
-        fn reset_at(&self) -> OffsetDateTime {
-            let now = OffsetDateTime::now_utc();
-            self.retry_after_seconds
-                .filter(|seconds| *seconds >= 0)
-                .map(|seconds| now + Duration::seconds(seconds))
+        /// Earliest retry time at `now`: `retry-after` (seconds capped at
+        /// [`MAX_RETRY_AFTER_SECONDS`], a past date means now), then
+        /// `x-ratelimit-reset`, then one minute.
+        pub fn reset_at_from(&self, now: OffsetDateTime) -> OffsetDateTime {
+            let from_retry_after = match self.retry_after {
+                Some(RetryAfter::Seconds(seconds)) => {
+                    let capped = seconds.min(MAX_RETRY_AFTER_SECONDS);
+                    i64::try_from(capped)
+                        .ok()
+                        .and_then(|seconds| now.checked_add(Duration::seconds(seconds)))
+                }
+                Some(RetryAfter::At(at)) => Some(at.max(now)),
+                Some(RetryAfter::Unparsable) | None => None,
+            };
+            from_retry_after
                 .or_else(|| {
                     self.reset_epoch_seconds
                         .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
                 })
-                .unwrap_or_else(|| now + Duration::seconds(60))
+                .or_else(|| now.checked_add(Duration::seconds(60)))
+                .unwrap_or(now)
+        }
+
+        fn reset_at(&self) -> OffsetDateTime {
+            self.reset_at_from(OffsetDateTime::now_utc())
         }
     }
 
     /// A 403 is a rate limit (retryable) rather than a permission failure when
-    /// the quota is exhausted, a `retry-after` is present, or GitHub's message
-    /// names a (secondary) rate limit.
+    /// the quota is exhausted, a `retry-after` header is present (in either
+    /// form, parsable or not), or GitHub's message names a (secondary) rate
+    /// limit. `message` is the fixed-vocabulary reason, whose `rate limit`
+    /// phrase was found anywhere in the full server text (R1-P-B6), so a
+    /// signal past any truncation point is not lost.
     fn is_rate_limited_403(message: &str, hints: &RateLimitHints) -> bool {
         hints.remaining == Some(0)
-            || hints.retry_after_seconds.is_some()
+            || hints.retry_after.is_some()
             || message.to_ascii_lowercase().contains("rate limit")
     }
 
