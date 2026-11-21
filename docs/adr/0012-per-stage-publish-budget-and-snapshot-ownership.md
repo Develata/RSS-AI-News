@@ -130,10 +130,34 @@
   终结一份停在中间阶段、且 lease 已清、阶段预算未耗尽的**更早日期**的记录。归属规则下这样的记录会一直持有其文章，
   使它们进不了之后的报告，直到运维对该日期重跑 `publish --date <那天>`（续跑或失败后释放）或人工把记录置为 `failed`。
   此前同样的记录也不会被续跑，但文章仍可能被重复选入；现在改为"不重复、但需要人工收尾"。
+- **已知限制：`--force` 记录无法定向续跑（R1-P-S5，2026-11-22 记录，暂不新增 CLI 入口）**。force 记录的 render version
+  是一次性的 `pending` trace 行。若它在 freeze 之后、预算未耗尽时停住（例如远端短暂失败），普通 `publish --date <那天>`
+  取 active render 版本、再次 `--force` 又新建 trace 行，两者的幂等键都不是原记录，原记录不会被续跑，而它持有的文章被
+  归属规则排除在之后的报告之外（同日即可发生）。上文"按日期重跑"的办法对 force 记录无效。**人工处理**：确认该记录
+  （`SELECT id, state, render_version FROM publish_records WHERE render_version IN (SELECT id FROM rule_versions WHERE
+  version_tag LIKE 'force-%')`）后把它置为 `failed` 释放文章——`UPDATE publish_records SET state = 'failed',
+  lease_owner = NULL, lease_expires_at = NULL, last_error_kind = 'operator_failed' WHERE id = <id> AND state <> 'failed'`
+  ——再按需重新 `publish --date <那天> --force`。按记录 ID（或原 render version）定向续跑的入口（如 `publish --record <id>`，
+  沿用原目标与快照）列为后续行动。
+- **已知限制：旧版 `stored_local` 记录的本地字节（R1-P-S10，B8）**。`f420d95` 及更早版本渲染时用调用方时间生成本地文件，
+  另一次采样写入 `rendered_at`；升级后远端阶段与 rebuild-report 从 `rendered_at` 重渲染，因此模板含 `{generated_at}` 时，
+  升级前已 `stored_local` 的记录推到 GitHub 的字节可能与本地文件不同（相差的只是该时间戳），0008 也没有原时间可供恢复。
+  字节一致保证只适用于新版首次渲染的记录；不做自动比对。
+- **已知限制：存量 Contents 回执只比对 blob sha（R1-P-S3，后续）**。幂等 / 歧义核对按 Contents API 的 `sha` 比对，
+  不检查目标树条目的 `mode`（`100644` vs `100755`）与类型（Contents API 会解引用指向仓库内普通文件的 symlink）。
+  在固定 commit 上经 Trees API 核对条目类型、mode 与 sha 列为后续行动；目前一个 200 但无 `sha` 的响应已按协议错误处理（R1-P-S1）。
 - 新依赖：`jiff`（IANA 时区；内置 tzdb）、`sha1`（git blob id，lockfile 中已有同版本）。
 
 ### 后续行动
 - 评估为"更早日期的中间态记录"增加有界的自动收尾（例如 maintenance 中按 report_date 过期终结），需另行设计与审批。
+- 按记录 ID 定向续跑 force 记录的 CLI 入口（R1-P-S5，见上文已知限制）。
+- 旧版遗留的 active force trace 修复（R1-P-S6 前半，后续）：B10 之前的版本在空库首次 `--force` 时会把 `force-…` render 行
+  建成 `active`，0008 之后普通发布仍会选中它。识别并恢复明确的 `default` 规则需要迁移或启动期修复，另行设计。人工修复
+  （同一事务内）：`UPDATE rule_versions SET status = 'superseded' WHERE kind = 'render' AND status = 'active' AND version_tag
+  LIKE 'force-%';` 然后 `UPDATE rule_versions SET status = 'active' WHERE kind = 'render' AND version_tag = 'default';`
+  （若无 `default` 行，下一次发布会自行登记）。引导现已拒绝盖上非 active 的版本（R1-P-S6 后半）。
+- 在固定 commit 上经 Trees API 核对条目类型与 mode（R1-P-S3）。
+- 本地写入改为基于目录句柄（`openat` / `renameat`）以消除输出根内并发写者的 TOCTOU（R1-P-B4，见 plan/04 §4.1）。
 - ~~单报告批次走 Contents API，不在本 ADR 的幂等范围内。~~ 已补（2026-11-22，R1-P-S2）：单报告路径在 `GET contents?ref=<branch>`
   取到的 blob sha 与本地 git blob sha 相同时，先按固定 HEAD commit 复核（`find_published`），一致即以该 HEAD commit 记回执、
   不发 PUT（也就不需要写权限）；HEAD 已移动且不含该 blob 时照常 PUT。这覆盖了"批量回执部分落库后中断、重跑只剩一条报告"
