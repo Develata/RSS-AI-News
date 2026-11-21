@@ -9,6 +9,12 @@
 > **整条 retryable 路径的统一设计**落地，不塞进单一分支。探查进一步确认 feed_entries /
 > publish_records 同构卡死，且 `reclaim_expired_leases` 四个 repo 全部实现但生产路径零调用。
 
+
+> **2026-11-21 更新（ADR 0012）**：Publish 的预算改为按阶段计。下文 Publish 行中的
+> `attempt_count`（claim 过滤 `< max`、release 折叠 `>= max`、sweep `>= max`）对 publish_records
+> 一律读作 `stage_attempt_count`；它随 claim 自增、阶段推进成功清零，`attempt_count` 只作累计审计。
+> 互补性论证（§3）对 `stage_attempt_count` 逐字成立。
+
 ## 1. 现状缺口
 
 ### 1.1 缺口一：耗尽卡死（三个 lease 状态机同构）

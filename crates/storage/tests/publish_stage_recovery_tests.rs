@@ -66,9 +66,11 @@ async fn seed_record(
         .expect("record should be new");
     let lease_owner = lease_until.map(|_| "dead-worker".to_string());
     sqlx::query(
-        "UPDATE publish_records SET state = ?, attempt_count = ?, lease_owner = ?, lease_expires_at = ? WHERE id = ?",
+        "UPDATE publish_records SET state = ?, attempt_count = ?, stage_attempt_count = ?, lease_owner = ?, lease_expires_at = ? WHERE id = ?",
     )
     .bind(state)
+    .bind(attempt_count)
+    // Crash-recovery rows spent their attempts in the current stage (ADR 0012).
     .bind(attempt_count)
     .bind(lease_owner)
     .bind(lease_until)

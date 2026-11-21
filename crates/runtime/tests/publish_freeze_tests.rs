@@ -315,11 +315,13 @@ async fn freeze_run_start_maintenance_sweeps_exhausted_pending_record() {
     let (_dir, pool) = make_test_pool().await;
     let flow = flow(pool.clone());
     let exhausted_id = init_record(&flow, &pool).await;
-    sqlx::query("UPDATE publish_records SET attempt_count = 5 WHERE id = ?")
-        .bind(exhausted_id)
-        .execute(&pool)
-        .await
-        .expect("prime exhausted attempt_count");
+    sqlx::query(
+        "UPDATE publish_records SET attempt_count = 5, stage_attempt_count = 5 WHERE id = ?",
+    )
+    .bind(exhausted_id)
+    .execute(&pool)
+    .await
+    .expect("prime exhausted attempt_count");
 
     let outcome = flow.freeze(freeze_opts(true, false)).await;
 

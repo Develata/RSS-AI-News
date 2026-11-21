@@ -195,8 +195,12 @@ retryable 失败**不**作为独立状态。语义上"暂时失败、稍后再�
 | Failed | `failed` | 失败终态 | 中途任一步永久失败 |
 
 **无候选不是失败**：freeze 选不到候选（`SnapshotEmpty`）时，记录释放回可再领取的 `pending`，
-清 lease、退还本次 claim 计入的 `attempt_count`，并记 `last_error_kind = 'snapshot_empty'`。
+清 lease、退还本次 claim 计入的 `attempt_count` 与 `stage_attempt_count`，并记 `last_error_kind = 'snapshot_empty'`。
 同一天后续运行在有新文章时仍能冻结发布；反复空跑不消耗重试预算。
+
+**重试预算按阶段计**（ADR 0012）：每个阶段态（pending / snapshot_frozen / rendered / stored_local）
+各自最多 `retry.publish_max_attempts` 次 claim（`stage_attempt_count`），阶段推进成功即清零；
+某阶段耗尽才转 `failed`。`attempt_count` 为跨阶段累计值，仅供审计。
 
 ### 6.2 不可变契约
 

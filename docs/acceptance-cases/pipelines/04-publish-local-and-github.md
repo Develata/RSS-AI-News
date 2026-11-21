@@ -26,6 +26,7 @@
 - **path 防穿越**：含 `..` / 反斜杠 / 无日期 token 的模板在 validate 阶段就报错（详见 [./06-config-loading.md](./06-config-loading.md)）
 - 远端 publish 成功后 article → `Published`；批次成功后 record → `PublishedRemote`
 - **lease 按时刻判定**：SQLite 上 publish_records 的 claim / reclaim / sweep 用 `julianday()` 比较（lease 写入向上、now 向下取整到毫秒），lease 绝不提前过期；PG 用 `timestamptz`
+- **重试预算按阶段计**：每阶段最多 `publish_max_attempts` 次 claim（`stage_attempt_count`，推进即清零）；`attempt_count` 为累计审计值
 - **record 隔离**：`publish` 与 `publish-all` 的每个阶段（freeze / render / store-local / publish-remote）都只 claim init 得到的 `publish_record_id`；
   单分类 `publish` 不得领取或推进其他分类残留的记录。例外：每阶段 claim 前的全局 maintenance
   （lease 过期 reclaim + 预算耗尽 sweep → `failed`）按设计作用于全表，不区分分类
@@ -60,6 +61,11 @@
 | `freeze_after_empty_snapshot_publishes_articles_that_arrive_later` | 同上 | 空跑不耗预算、后到文章可发布 |
 | `freeze_returns_nothing_to_claim_when_no_pending_records` | 同上 | 空闲 |
 | `freeze_skips_articles_without_correct_category_key` | 同上 | category 隔离 |
+| `small_budget_completes_all_four_stages_without_failures` | `crates/runtime/tests/publish_stage_budget_tests.rs` | 按阶段预算：max=2 无故障走完四阶段 |
+| `one_retryable_failure_per_stage_is_absorbed_by_that_stage_budget` | 同上 | 单阶段 1 次失败可重试 |
+| `exhausting_one_stage_budget_fails_the_record` | 同上 | 单阶段 2 次失败 → failed |
+| `sqlite_0008_gives_existing_rows_a_fresh_stage_budget_and_rolls_back` | `crates/storage/tests/publish_stage_budget_migration_tests.rs` | 存量行迁移 + down（PG 同名 `pg_…`） |
+| `pg_publish_budget_is_per_stage` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 按阶段预算 |
 | `freeze_transient_candidate_load_error_keeps_record_pending_and_next_run_freezes` | 同上 | 瞬时存储错误保态、下轮继续 |
 | `freeze_permanent_candidate_load_error_fails_record` | 同上 | 不可重试存储错误 → failed |
 | `render_advances_snapshot_frozen_to_rendered_when_items_exist` | `crates/runtime/tests/publish_render_tests.rs` | render happy |

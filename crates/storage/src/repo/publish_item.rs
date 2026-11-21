@@ -213,6 +213,7 @@ SET state = 'snapshot_frozen',
     snapshot_frozen_at = $1,
     lease_owner = NULL,
     lease_expires_at = NULL,
+    stage_attempt_count = 0,
     last_error = NULL,
     last_error_kind = NULL,
     updated_at = $2

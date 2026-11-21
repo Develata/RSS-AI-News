@@ -22,11 +22,13 @@ async fn store_local_run_start_maintenance_sweeps_exhausted_rendered_record() {
     let (_dir, pool) = make_test_pool().await;
     let rendered_at = fixed_time();
     let record_id = seed_rendered_publish_record(&pool, None, rendered_at).await;
-    sqlx::query("UPDATE publish_records SET attempt_count = 5 WHERE id = ?")
-        .bind(record_id)
-        .execute(&pool)
-        .await
-        .expect("prime exhausted attempt_count");
+    sqlx::query(
+        "UPDATE publish_records SET attempt_count = 5, stage_attempt_count = 5 WHERE id = ?",
+    )
+    .bind(record_id)
+    .execute(&pool)
+    .await
+    .expect("prime exhausted attempt_count");
     let flow = flow(pool.clone(), Arc::new(MockFailingTarget));
 
     let outcome = flow.store_local(store_opts(rendered_at)).await;
