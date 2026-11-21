@@ -191,7 +191,7 @@
 - 本地写入改为基于目录句柄（`openat` / `renameat`）以消除输出根内并发写者的 TOCTOU（R1-P-B4，见 plan/04 §4.1）。
 - ~~单报告批次走 Contents API，不在本 ADR 的幂等范围内。~~ 已补（2026-11-22，R1-P-S2）：单报告路径在 `GET contents?ref=<branch>`
   取到的 blob sha 与本地 git blob sha 相同时，先按固定 HEAD commit 复核（`find_published`），一致即以该 HEAD commit 记回执、
-  不发 PUT（也就不需要写权限）；HEAD 已移动且不含该 blob 时照常 PUT。这覆盖了"批量回执部分落库后中断、重跑只剩一条报告"
+  不发 PUT（也就不需要写权限）；HEAD 已移动且不含该 blob 时照常 PUT，`sha` 取自固定 HEAD 复核（现有 blob 或缺失，R3F-S2）。这覆盖了"批量回执部分落库后中断、重跑只剩一条报告"
   的恢复。
 
 ## Links

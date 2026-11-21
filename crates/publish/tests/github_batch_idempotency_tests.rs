@@ -407,8 +407,20 @@ async fn remaining_single_report_already_on_head_records_receipt_without_put() {
     assert_eq!(puts, 0, "an identical blob needs no write");
 }
 
-/// The branch blob matches but HEAD moved to a commit without it: the
-/// normal PUT (with the branch blob sha) still runs.
+async fn put_bodies(server: &MockServer) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.method.as_str() == "PUT")
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .collect()
+}
+
+/// The branch blob matches but HEAD moved to a commit where the file is
+/// gone: the PUT still runs, as a create without `sha` — the sha of the
+/// fixed-HEAD lookup, not the stale one from the first lookup (R3F-S2).
 #[tokio::test]
 async fn matching_branch_blob_not_confirmed_at_head_still_puts() {
     let server = MockServer::start().await;
@@ -433,6 +445,34 @@ async fn matching_branch_blob_not_confirmed_at_head_still_puts() {
     let artifact = target(&server).publish(&single_report()).await.unwrap();
 
     assert_eq!(artifact.commit_sha.as_deref(), Some("put-commit"));
+    let bodies = put_bodies(&server).await;
+    assert_eq!(bodies.len(), 1);
+    assert!(bodies[0].get("sha").is_none(), "{}", bodies[0]);
+}
+
+/// R3F-S2: HEAD moved and the file there is now blob B: the PUT replaces B
+/// (the sha the fixed-HEAD lookup saw), not the stale first-lookup blob.
+#[tokio::test]
+async fn matching_branch_blob_changed_at_head_puts_with_the_heads_sha() {
+    const OTHER_BLOB: &str = "1111111111111111111111111111111111111111";
+    let server = MockServer::start().await;
+    mount_head(&server, "moved-head", "moved-tree", None).await;
+    mount_blob(&server, "tech/2026-04-29.md", "main", HELLO_BLOB).await;
+    mount_blob(&server, "tech/2026-04-29.md", "moved-head", OTHER_BLOB).await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": { "sha": HELLO_BLOB },
+            "commit": { "sha": "put-commit" }
+        })))
+        .mount(&server)
+        .await;
+
+    let artifact = target(&server).publish(&single_report()).await.unwrap();
+
+    assert_eq!(artifact.commit_sha.as_deref(), Some("put-commit"));
+    let bodies = put_bodies(&server).await;
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["sha"], OTHER_BLOB, "{}", bodies[0]);
 }
 
 /// A refused write (4xx) is never checked: it cannot have landed.

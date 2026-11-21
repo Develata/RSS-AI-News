@@ -135,7 +135,8 @@
 | `ambiguous_contents_put_with_a_failed_verification_is_unverified` | 同上 | 歧义 PUT + 核对 GET ref 失败 → `remote_write_unverified`（可重试），不是原写入错误 |
 | `ambiguous_ref_update_with_a_rate_limited_verification_keeps_the_deadline` | 同上 | 歧义 PATCH + 核对被限流 → 未核实错误携带核对的限流期限 |
 | `remaining_single_report_already_on_head_records_receipt_without_put` | 同上 | 批量部分回执后重跑剩一条：HEAD 已含 → 零 PUT |
-| `matching_branch_blob_not_confirmed_at_head_still_puts` | 同上 | HEAD 已移动未含该 blob → 照常 PUT |
+| `matching_branch_blob_not_confirmed_at_head_still_puts` | 同上 | HEAD 已移动、文件已删 → 照常 PUT，请求体不带 `sha`（R3F-S2） |
+| `matching_branch_blob_changed_at_head_puts_with_the_heads_sha` | 同上 | HEAD 已移动、文件变为 B → PUT 携带 B 的 sha（复核结果，非旧 sha） |
 | `publish_remote_timeout_on_last_attempt_records_success_when_head_holds_the_report` | `crates/runtime/tests/publish_remote_tests.rs` | 最后一次尝试超时但已落地 → `published_remote` |
 | `publish_remote_timeout_without_the_report_at_head_keeps_the_timeout` | 同上 | 未落地 → 维持超时语义 |
 | `publish_remote_batch_timeout_records_success_when_head_holds_the_batch` | 同上 | 批量超时核对 |

@@ -274,7 +274,9 @@ ref 路由（`GET git/ref/heads/{branch}`、`PATCH git/refs/heads/{branch}`）�
 
 单报告幂等（2026-11-22，R1-P-S2）：`GET contents` 取到的既有 blob sha 等于本地内容的 git blob sha 时，先 `GET ref` 取 HEAD
 commit、按该 commit 复核同一路径；一致 → 以 HEAD commit 记回执，不发 PUT。批量发布中途中断（第一条回执已落库）后重跑只剩
-一条报告、走单报告路径时，因此不再重复提交、也不需要写权限。
+一条报告、走单报告路径时，因此不再重复提交、也不需要写权限。复核不一致（HEAD 已移动）时照常 PUT，且 PUT 携带**复核查询**
+看到的结果（2026-11-22，R3F-S2）：该文件现在的 blob sha，或文件已不存在时不带 `sha`（创建），而不是第一次查询的旧 sha——
+GitHub 只接受被替换文件当前的 blob sha。
 
 GitHub 调用失败时，`PublishError::GitHubApiError` / `GitHubAuthFailed` 的消息带上失败的操作
 （`GET contents` / `PUT contents` / `GET ref` / `GET commit` / `POST tree` / `POST commit` / `PATCH ref`）、
