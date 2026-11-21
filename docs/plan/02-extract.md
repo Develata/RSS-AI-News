@@ -108,6 +108,15 @@ owner guard 落空则整体回滚（不留孤儿 article），报 `LeaseLost`。
 写入成功且未被清理时，`replay --kind html --key <feed_entry_id>` 仍可回放，`--diff` 经 `feed_entries.article_id`
 找到对应 article（R3 审查遗留，2026-11-16 定为既定语义）。
 
+### 4.0 extractor_version（2026-11-21）
+
+`articles.extractor_version` 引用 `rule_versions` 中 `kind='extractor'` 的行：CLI 装配 extract 时
+（`context_factory::resolve_extractor_version`）经 `active_rule_or_register("extractor", EXTRACTOR_RULE_TAG, …)`
+取 active 行，首次使用时登记（tag 见 `rss_ai_news_extractor::EXTRACTOR_RULE_TAG`）。此前两条写入路径写字面量
+`1`，在新库上指向 `kind='config'` 行。历史 article 行**不回写**，其 `extractor_version` 仍为旧值，审计时需按
+`rule_versions.kind` 区分。改变提取规则时提升 tag；同 kind 的 active 轮换未实现（与 config 的 sha 轮换不同），
+已有 active extractor 行时新 tag 不会自动生效。
+
 ### 4.1 与一/二层的区别
 
 - 一/二层在 INSERT 前发生，**不**产生新 `feed_entries` 行

@@ -201,7 +201,8 @@ pub(crate) async fn run_loaded(
     let extract_summary = if args.skip_fetch {
         ExtractSummary::default()
     } else {
-        let extract_flow = ExtractFlow::new(build_extract_deps(loaded, pool, ctx.run.clone())?);
+        let extract_flow =
+            ExtractFlow::new(build_extract_deps(loaded, pool, ctx.run.clone()).await?);
         extract_flow
             .run(ExtractOptions {
                 batch_size: args.batch_size,

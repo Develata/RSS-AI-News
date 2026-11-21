@@ -1585,3 +1585,49 @@ async fn retry_that_finds_its_own_article_is_persisted_not_dedup() {
     );
     assert_eq!(dedup_events, 0);
 }
+
+/// A13：两条写入路径（Readability 与摘要兜底）都把 `ExtractDeps::extractor_version`
+/// 写入 `articles.extractor_version`，不再写字面量 1。
+#[tokio::test]
+async fn both_write_paths_stamp_the_assembled_extractor_version() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_first_rule, source_id) = setup_base(&pool).await;
+    let assembled = seed_extractor_rule_version(&pool).await;
+    assert_ne!(assembled, 1);
+    let extracted = seed_pending_fetch_entry(&pool, source_id, "uid-v-ok", "hash-v-ok", None).await;
+    let fallback = seed_pending_fetch_entry(
+        &pool,
+        source_id,
+        "uid-v-fb",
+        "hash-v-fb",
+        Some("<p>summary body for the fallback article</p>"),
+    )
+    .await;
+    let app = Arc::new(app_config(RetentionPolicy::Off, 1));
+    let mut deps = common::extract_deps(
+        pool.clone(),
+        app,
+        Arc::new(MockHtmlFetcher {
+            responses: Mutex::new(responses([
+                (extracted, Ok(raw(extracted, b"<html>ok</html>"))),
+                (fallback, Err(ExtractorError::HttpStatus { code: 404 })),
+            ])),
+        }),
+        vec![per_entry_success_strategy()],
+    );
+    deps.extractor_version = assembled;
+
+    let summary = ExtractFlow::new(Arc::new(deps)).run(opts(10, 0)).await;
+    let versions: Vec<i64> =
+        sqlx::query_scalar("SELECT extractor_version FROM articles ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("articles");
+
+    assert_eq!(
+        (summary.persisted, summary.fallback_persisted),
+        (1, 1),
+        "{summary:?}"
+    );
+    assert_eq!(versions, vec![assembled, assembled]);
+}

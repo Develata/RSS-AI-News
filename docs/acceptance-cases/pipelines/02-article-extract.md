@@ -75,6 +75,8 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `another_entrys_article_is_a_dedup` | 同上 | 他人 article 仍去重 |
 | `fallback_flag_selects_fallback_persisted` | 同上 | fallback 终态 |
 | `pg_persist_for_entry_is_atomic_and_recognises_own_article` | `crates/storage/tests/article_pg_tests.rs` | 同上（PG，需 docker） |
+| `both_write_paths_stamp_the_assembled_extractor_version` | `crates/runtime/tests/extract_tests.rs` | 两条写入路径写装配的 extractor 版本 |
+| `extractor_version_resolves_to_an_extractor_kind_row` | `crates/cli/tests/context_factory_tests.rs` | 装配期解析 `kind='extractor'` 行，幂等 |
 | `extract_writes_html_artifact_before_strategy` | 同上 | artifact 顺序 |
 | `max_batches_caps_loop_and_reports_reached_flag` | 同上 | 限批生效 |
 | `max_batches_zero_means_unlimited_until_queue_drained` | 同上 | 0 = 不限 |
