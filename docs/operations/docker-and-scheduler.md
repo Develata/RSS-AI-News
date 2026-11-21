@@ -6,8 +6,8 @@ CI release workflow（push tag `v*` 触发）同时发布两套镜像：
 
 | 镜像 | tag 示例 | 入口 | 用途 |
 |---|---|---|---|
-| runtime | `ghcr.io/develata/rss-ai-news:0.7.0` | `rss-ai-news` 二进制直跑 | 一次性命令（migrate / ingest / doctor 等） |
-| scheduler | `ghcr.io/develata/rss-ai-news:0.7.0-scheduler` | `scheduler-entrypoint.sh` + supercronic | 常驻容器按 cron 触发 |
+| runtime | `ghcr.io/develata/rss-ai-news:0.10.4` | `rss-ai-news` 二进制直跑 | 一次性命令（migrate / ingest / doctor 等） |
+| scheduler | `ghcr.io/develata/rss-ai-news:0.10.4-scheduler` | `scheduler-entrypoint.sh` + supercronic | 常驻容器按 cron 触发 |
 
 镜像 tag 规则（详见 [./ci-and-release.md](./ci-and-release.md) §镜像 tag 规则）：
 - 稳定版 `vX.Y.Z` → `X.Y.Z`；两镜像都推送成功后，最高 stable tag 才晋升 `latest`，`X.Y` 线内最高才晋升 `X.Y`；
@@ -40,7 +40,8 @@ docker compose run --rm rss-ai-news --config-dir /app/configs doctor
 
 ## 常驻 scheduler compose（容器内置 cron）
 
-文件：[`docker/docker-compose.scheduler.yml`](../../docker/docker-compose.scheduler.yml)。
+文件：[`docker/docker-compose.scheduler.yml`](../../docker/docker-compose.scheduler.yml)。镜像版本由 `RSS_AI_NEWS_VERSION`
+选择（`.env` 中设置；缺省为该文件随附的 release，当前 `0.10.4`）。
 
 适合 1panel 风格容器面板部署。两种调度形态（优先级从高到低）：
 
@@ -88,7 +89,7 @@ entrypoint 拼一行 `<RSS_CRON_SCHEDULE> /usr/local/bin/rss-ai-news --config-di
 docker run --rm --env-file .env \
   -v "$(pwd)/configs:/app/configs:ro" \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/develata/rss-ai-news:0.7.0 \
+  ghcr.io/develata/rss-ai-news:0.10.4 \
   --config-dir /app/configs migrate run
 ```
 

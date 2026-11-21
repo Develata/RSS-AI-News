@@ -131,7 +131,7 @@ supercronic 把每个 cron job 的 stdout/stderr 透传到自身 stdout，
 docker run --rm --env-file .env \
   -v "$(pwd)/configs:/app/configs:ro" \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/develata/rss-ai-news:0.7.0 \
+  ghcr.io/develata/rss-ai-news:0.10.4 \
   --config-dir /app/configs migrate run
 ```
 

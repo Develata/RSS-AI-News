@@ -262,6 +262,96 @@ pub(crate) fn check_lockfile_versions(repo_root: &Path, expected: &str) -> Resul
     }
 }
 
+/// Deployment files that name a published image version. The compose file
+/// must take it from `${RSS_AI_NEWS_VERSION:-X.Y.Z}`; the documents' example
+/// commands may name it literally. Placeholders such as `<tag>` are skipped.
+pub(crate) const DEPLOYMENT_VERSION_FILES: &[&str] = &[
+    "docker/docker-compose.scheduler.yml",
+    "docs/operations/docker-and-scheduler.md",
+    "docs/operations/postgres-deployment.md",
+    "docs/plan/12-deployment.md",
+    "README.md",
+];
+const IMAGE_PREFIX: &str = "ghcr.io/develata/rss-ai-news:";
+const COMPOSE_VERSION_VARIABLE: &str = "${RSS_AI_NEWS_VERSION:-";
+
+/// Every image version named in `DEPLOYMENT_VERSION_FILES` must be the
+/// release candidate, each file must name at least one (so a format change
+/// cannot pass vacuously), and the compose file must not hard-code one.
+pub(crate) fn check_deployment_image_versions(
+    repo_root: &Path,
+    expected: &str,
+) -> Result<(), String> {
+    let mut problems = Vec::new();
+    for file in DEPLOYMENT_VERSION_FILES {
+        let content = fs::read_to_string(repo_root.join(file))
+            .map_err(|error| format!("cannot read {file}: {error}"))?;
+        let references = image_version_references(&content);
+        if references.is_empty() {
+            problems.push(format!("{file}: names no {IMAGE_PREFIX}<version> image"));
+        }
+        let compose = file.ends_with(".yml");
+        for reference in references {
+            if compose && !reference.from_variable {
+                problems.push(format!(
+                    "{file}:{}: hard-codes {}; use {COMPOSE_VERSION_VARIABLE}{expected}}}",
+                    reference.line, reference.version
+                ));
+            }
+            if reference.version != expected {
+                problems.push(format!(
+                    "{file}:{}: names {}, expected {expected}",
+                    reference.line, reference.version
+                ));
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "deployment image versions do not match {expected}: {problems:?}"
+        ))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ImageVersionReference {
+    line: usize,
+    version: String,
+    from_variable: bool,
+}
+
+/// `ghcr.io/develata/rss-ai-news:X.Y.Z[-scheduler]` and
+/// `ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-X.Y.Z}[-scheduler]`
+/// references with 1-based line numbers. Other tags (`<tag>`, `latest`) are
+/// not version pins.
+fn image_version_references(content: &str) -> Vec<ImageVersionReference> {
+    let mut references = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        for (offset, _) in line.match_indices(IMAGE_PREFIX) {
+            let tag = &line[offset + IMAGE_PREFIX.len()..];
+            let (tag, from_variable) = match tag.strip_prefix(COMPOSE_VERSION_VARIABLE) {
+                Some(rest) => (rest, true),
+                None => (tag, false),
+            };
+            let version = tag
+                .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches('.');
+            if version.split('.').count() == 3 && version.split('.').all(|part| !part.is_empty()) {
+                references.push(ImageVersionReference {
+                    line: index + 1,
+                    version: version.to_string(),
+                    from_variable,
+                });
+            }
+        }
+    }
+    references
+}
+
 pub(crate) fn check_readme_release_identity(
     repo_root: &Path,
     expected: &str,
@@ -490,5 +580,97 @@ mod tests {
     fn repository_toolchain_pins_are_consistent() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         assert_eq!(check_toolchain_pins(&root), Ok(()));
+    }
+
+    use super::{
+        DEPLOYMENT_VERSION_FILES, check_deployment_image_versions, image_version_references,
+        workspace_version,
+    };
+
+    #[test]
+    fn image_version_references_parse_literal_and_variable_tags() {
+        let references = image_version_references(
+            "image: ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4}-scheduler\n\
+             | `ghcr.io/develata/rss-ai-news:<tag>` | `ghcr.io/develata/rss-ai-news:latest` |\n\
+             docker run ghcr.io/develata/rss-ai-news:0.7.0 \\\n\
+             see ghcr.io/develata/rss-ai-news:0.10.4.\n",
+        );
+        let found = references
+            .iter()
+            .map(|reference| {
+                (
+                    reference.line,
+                    reference.version.as_str(),
+                    reference.from_variable,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            vec![
+                (1, "0.10.4", true),
+                (3, "0.7.0", false),
+                (4, "0.10.4", false)
+            ]
+        );
+    }
+
+    fn deployment_repo(name: &str, compose: &str, document: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "rss-ai-news-acceptance-deploy-{name}-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        for file in DEPLOYMENT_VERSION_FILES {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let content = if file.ends_with(".yml") {
+                compose
+            } else {
+                document
+            };
+            fs::write(path, content).unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn deployment_versions_accept_the_candidate() {
+        let root = deployment_repo(
+            "ok",
+            "image: ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-0.10.4}-scheduler\n",
+            "  ghcr.io/develata/rss-ai-news:0.10.4 \\\n",
+        );
+        assert_eq!(check_deployment_image_versions(&root, "0.10.4"), Ok(()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deployment_versions_reject_stale_hard_coded_and_missing_versions() {
+        let root = deployment_repo(
+            "stale",
+            "image: ghcr.io/develata/rss-ai-news:0.7.0-scheduler\n",
+            "no image here\n",
+        );
+        let error = check_deployment_image_versions(&root, "0.10.4").unwrap_err();
+        for expected in [
+            "docker/docker-compose.scheduler.yml:1: hard-codes 0.7.0",
+            "docker/docker-compose.scheduler.yml:1: names 0.7.0, expected 0.10.4",
+            "docs/plan/12-deployment.md: names no ghcr.io/develata/rss-ai-news:<version> image",
+        ] {
+            assert!(error.contains(expected), "{expected} not in {error}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The repository's deployment files name the workspace version, so the
+    /// release lane fails only when a bump misses one of them.
+    #[test]
+    fn repository_deployment_versions_match_the_workspace() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let version = workspace_version(&root).unwrap();
+        assert_eq!(check_deployment_image_versions(&root, &version), Ok(()));
     }
 }

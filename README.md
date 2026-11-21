@@ -682,7 +682,7 @@ compose 里取消注释 `./crontab:/app/crontab:ro` 那行，`docker compose up 
 docker run --rm --env-file .env \
   -v "$(pwd)/configs:/app/configs:ro" \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/develata/rss-ai-news:0.1.0 \
+  ghcr.io/develata/rss-ai-news:0.10.4 \
   --config-dir /app/configs migrate run
 ```
 

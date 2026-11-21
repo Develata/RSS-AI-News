@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use super::super::{
-    checks::{check_lockfile_versions, check_readme_release_identity, workspace_version},
+    checks::{
+        check_deployment_image_versions, check_lockfile_versions, check_readme_release_identity,
+        workspace_version,
+    },
     executor::LaneExecutor,
     util::{release_binary, strings},
 };
@@ -33,6 +36,11 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         "readme-version",
         "README declares the candidate version and acceptance command",
         check_readme_release_identity(executor.repo_root(), &expected),
+    );
+    executor.check(
+        "deployment-versions",
+        "compose default image version and deployment docs name the candidate version",
+        check_deployment_image_versions(executor.repo_root(), &expected),
     );
     executor.command(
         "git-diff-check",

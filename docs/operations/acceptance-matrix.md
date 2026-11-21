@@ -52,7 +52,7 @@ cargo acceptance run --lane release --expected-version 0.10.4
 | `sqlite` | ✓ | ✓ | release binary、SQLite migrate run/check、CLI contract smokes |
 | `postgres` |  | ✓ | PG ignored tests与 CLI migrate parity；要求 `DATABASE_URL` + Docker |
 | `docker` |  | ✓ | runtime/debug/scheduler build 与 container smokes |
-| `release` | ✓ | ✓ | workspace/lock/binary/README/version identity 与 Git diff check |
+| `release` | ✓ | ✓ | workspace/lock/binary/README/version identity、部署镜像版本（compose `RSS_AI_NEWS_VERSION` 默认值与部署文档示例，`deployment-versions`）与 Git diff check |
 
 ## CLI JSON 输出契约 gate
 

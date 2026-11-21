@@ -130,8 +130,10 @@ major-only alias（如 `0` / `1`）。
 ## 发版流程
 
 ```bash
-# 1. 完成 feature/fix、将 workspace package version 对齐候选 tag、跑完 security scan/review
-#    并确认 main exact SHA 的三个 CI jobs 全绿
+# 1. 完成 feature/fix、将 workspace package version 对齐候选 tag（同时改 README 的当前版本、
+#    docker/docker-compose.scheduler.yml 的 RSS_AI_NEWS_VERSION 默认值，以及 docker-and-scheduler.md、
+#    postgres-deployment.md、plan/12 与 README 示例命令中的镜像版本——release lane 的 deployment-versions
+#    检查逐一比对），跑完 security scan/review 并确认 main exact SHA 的三个 CI jobs 全绿
 
 git checkout main && git pull
 
