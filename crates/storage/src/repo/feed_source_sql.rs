@@ -134,6 +134,23 @@ SET etag = $1,
 WHERE id = $6
 "#;
 
+/// 304 write-back: same as [`UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL`]
+/// except that a validator the 304 omitted keeps its stored value (a 304 need
+/// not repeat `ETag` / `Last-Modified`, RFC 9110 §15.4.5). The 200 path keeps
+/// replace semantics: the new representation's validators are the truth.
+pub(super) const UPDATE_FEED_SOURCE_AFTER_NOT_MODIFIED_SQL: &str = r#"
+UPDATE feed_sources
+SET etag = COALESCE($1, etag),
+    last_modified = COALESCE($2, last_modified),
+    last_fetched_at = $3,
+    last_success_at = $4,
+    consecutive_failures = 0,
+    last_error = NULL,
+    last_error_kind = NULL,
+    updated_at = $5
+WHERE id = $6
+"#;
+
 pub(super) const UPDATE_FEED_SOURCE_AFTER_FETCH_FAILURE_SQL: &str = r#"
 UPDATE feed_sources
 SET last_fetched_at = $1,

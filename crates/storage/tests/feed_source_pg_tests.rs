@@ -310,3 +310,36 @@ async fn pg_mark_archived_with_lease_guard_second_call_is_noop() {
         "second archive is no-op (status <> 'archived' filters out)"
     );
 }
+
+/// A7 (PG): a 304 without validators keeps the stored etag / last_modified.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_not_modified_update_keeps_validators_the_304_omits() {
+    let ctx = make_pg_test_pool().await;
+    let rule_id = seed_rule_version(&ctx, "v1").await;
+    let repo = FeedSourceRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .upsert(&sample_feed_source("ai", "validators", rule_id))
+        .await
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    repo.update_after_fetch_success(id, Some("e1"), Some("lm1"), now, now)
+        .await
+        .unwrap();
+
+    assert!(
+        repo.update_after_not_modified(id, None, None, now, now)
+            .await
+            .unwrap()
+    );
+    let row = repo.find_by_id(id).await.unwrap().unwrap();
+    assert_eq!(row.etag.as_deref(), Some("e1"));
+    assert_eq!(row.last_modified.as_deref(), Some("lm1"));
+
+    repo.update_after_not_modified(id, None, Some("lm2"), now, now)
+        .await
+        .unwrap();
+    let row = repo.find_by_id(id).await.unwrap().unwrap();
+    assert_eq!(row.etag.as_deref(), Some("e1"));
+    assert_eq!(row.last_modified.as_deref(), Some("lm2"));
+}

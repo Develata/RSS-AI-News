@@ -26,6 +26,8 @@ const RSS_BODY: &[u8] = include_bytes!("../../feed/tests/fixtures/rss_2.0_minima
 
 struct MockFeedFetcher {
     responses: Mutex<HashMap<i64, MockResponse>>,
+    /// `(If-None-Match, If-Modified-Since)` inputs of every request.
+    validators_sent: Mutex<Vec<(Option<String>, Option<String>)>>,
 }
 
 struct MockResponse {
@@ -36,6 +38,10 @@ struct MockResponse {
 #[async_trait]
 impl FeedFetcher for MockFeedFetcher {
     async fn fetch_raw(&self, req: &FeedFetchRequest) -> Result<RawFeedFetch, FeedError> {
+        self.validators_sent
+            .lock()
+            .await
+            .push((req.etag.clone(), req.last_modified.clone()));
         let response = {
             let mut guard = self.responses.lock().await;
             guard.remove(&req.source_id)
@@ -159,6 +165,61 @@ async fn single_source_304_marks_not_modified_no_entries() {
     assert_eq!(summary.entries_inserted, 0);
     assert_eq!(summary.sources_not_modified, 1);
     assert!(last_success_at.is_some());
+}
+
+/// A7: a 304 without `ETag` / `Last-Modified` keeps the stored validators, so
+/// the next request is still conditional.
+#[tokio::test]
+async fn not_modified_without_validators_keeps_them_for_the_next_request() {
+    let (_dir, pool) = make_test_pool().await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
+    sqlx::query("UPDATE feed_sources SET etag = '\"e1\"', last_modified = 'lm-1' WHERE id = ?")
+        .bind(source_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let bare_304 = || MockResponse {
+        delay: Duration::ZERO,
+        result: Ok(RawFeedFetch {
+            source_id,
+            http_status: 304,
+            etag: None,
+            last_modified: None,
+            not_modified: true,
+            raw_payload_bytes: None,
+        }),
+    };
+    let fetcher = Arc::new(MockFeedFetcher {
+        responses: Mutex::new(responses([(source_id, bare_304())])),
+        validators_sent: Mutex::default(),
+    });
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let ctx = Arc::new(ingest_deps(pool.clone(), app, fetcher.clone()));
+    let flow = IngestFlow::new(ctx, vec![category_with_sources(&["s1"])]);
+
+    assert_eq!(
+        flow.run(IngestOptions::default())
+            .await
+            .sources_not_modified,
+        1
+    );
+    let stored: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT etag, last_modified FROM feed_sources WHERE id = ?")
+            .bind(source_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored,
+        (Some("\"e1\"".to_string()), Some("lm-1".to_string()))
+    );
+
+    fetcher.responses.lock().await.insert(source_id, bare_304());
+    flow.run(IngestOptions::default()).await;
+    let sent = fetcher.validators_sent.lock().await.clone();
+    let expected = (Some("\"e1\"".to_string()), Some("lm-1".to_string()));
+    assert_eq!(sent, vec![expected.clone(), expected]);
 }
 
 #[tokio::test]
@@ -718,6 +779,7 @@ fn flow_with_source_secrets(
     let app = Arc::new(app_config(retention_policy, concurrent_feeds));
     let fetcher = Arc::new(MockFeedFetcher {
         responses: Mutex::new(responses),
+        validators_sent: Mutex::default(),
     });
     let ctx = Arc::new(ingest_deps(pool, app, fetcher));
     IngestFlow::with_source_secrets(ctx, vec![category], source_secrets)

@@ -24,7 +24,8 @@ use super::feed_source_sql::{
     LIST_FEED_SOURCES_BY_CATEGORY_SQL, LIST_RECENT_FEED_SOURCE_HEALTH_SQL,
     MARK_FEED_SOURCE_ARCHIVED_SQL, SELECT_FEED_SOURCE_BY_ID_SQL, SELECT_FEED_SOURCE_BY_KEYS_SQL,
     UPDATE_FEED_SOURCE_AFTER_FETCH_FAILURE_SQL, UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL,
-    UPSERT_FEED_SOURCE_RETURNING_ID_SQL, UPSERT_FEED_SOURCE_SQL,
+    UPDATE_FEED_SOURCE_AFTER_NOT_MODIFIED_SQL, UPSERT_FEED_SOURCE_RETURNING_ID_SQL,
+    UPSERT_FEED_SOURCE_SQL,
 };
 
 // ── trait 实现：按 backend 分发到 sqlite_* / pg_* helper ──
@@ -123,6 +124,7 @@ impl FeedSourceRepository for FeedSourceRepo {
             StoragePool::Sqlite(p) => {
                 sqlite_update_after_fetch_success(
                     p,
+                    UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL,
                     id,
                     etag,
                     last_modified,
@@ -132,8 +134,52 @@ impl FeedSourceRepository for FeedSourceRepo {
                 .await
             }
             StoragePool::Postgres(p) => {
-                pg_update_after_fetch_success(p, id, etag, last_modified, fetched_at, success_at)
-                    .await
+                pg_update_after_fetch_success(
+                    p,
+                    UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL,
+                    id,
+                    etag,
+                    last_modified,
+                    fetched_at,
+                    success_at,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn update_after_not_modified(
+        &self,
+        id: i64,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        fetched_at: OffsetDateTime,
+        success_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_update_after_fetch_success(
+                    p,
+                    UPDATE_FEED_SOURCE_AFTER_NOT_MODIFIED_SQL,
+                    id,
+                    etag,
+                    last_modified,
+                    fetched_at,
+                    success_at,
+                )
+                .await
+            }
+            StoragePool::Postgres(p) => {
+                pg_update_after_fetch_success(
+                    p,
+                    UPDATE_FEED_SOURCE_AFTER_NOT_MODIFIED_SQL,
+                    id,
+                    etag,
+                    last_modified,
+                    fetched_at,
+                    success_at,
+                )
+                .await
             }
         }
     }
@@ -364,13 +410,14 @@ async fn sqlite_mark_archived_with_lease_guard(
 
 async fn sqlite_update_after_fetch_success(
     pool: &SqlitePool,
+    sql: &'static str,
     id: i64,
     etag: Option<&str>,
     last_modified: Option<&str>,
     fetched_at: OffsetDateTime,
     success_at: OffsetDateTime,
 ) -> Result<bool, StorageError> {
-    let result = sqlx::query(UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL)
+    let result = sqlx::query(sql)
         .bind(etag)
         .bind(last_modified)
         .bind(fetched_at)
@@ -570,13 +617,14 @@ async fn pg_mark_archived_with_lease_guard(
 
 async fn pg_update_after_fetch_success(
     pool: &PgPool,
+    sql: &'static str,
     id: i64,
     etag: Option<&str>,
     last_modified: Option<&str>,
     fetched_at: OffsetDateTime,
     success_at: OffsetDateTime,
 ) -> Result<bool, StorageError> {
-    let result = sqlx::query(UPDATE_FEED_SOURCE_AFTER_FETCH_SUCCESS_SQL)
+    let result = sqlx::query(sql)
         .bind(etag)
         .bind(last_modified)
         .bind(fetched_at)

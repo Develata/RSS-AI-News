@@ -103,6 +103,16 @@ pub trait FeedSourceRepository: Send + Sync {
         fetched_at: OffsetDateTime,
         success_at: OffsetDateTime,
     ) -> Result<bool, StorageError>;
+    /// 304 write-back: like [`Self::update_after_fetch_success`], but `None`
+    /// validators keep the stored values instead of clearing them.
+    async fn update_after_not_modified(
+        &self,
+        id: i64,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        fetched_at: OffsetDateTime,
+        success_at: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
     async fn update_after_fetch_failure(
         &self,
         id: i64,

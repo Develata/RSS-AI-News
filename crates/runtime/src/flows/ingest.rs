@@ -408,9 +408,11 @@ impl IngestFlow {
         };
 
         if raw.not_modified {
+            // A 304 need not repeat the validators: keep the stored ones when
+            // absent so the next request stays conditional (AC-P-01).
             if let Err(error) = require_row(
                 ctx.feed_source_repo
-                    .update_after_fetch_success(
+                    .update_after_not_modified(
                         task.source_id,
                         raw.etag.as_deref(),
                         raw.last_modified.as_deref(),

@@ -61,7 +61,9 @@ enabled = true
 - `If-None-Match: <etag>`
 - `If-Modified-Since: <last_modified>`
 
-返回 304 = 跳过本次抓取，状态机 transition 数为 0。
+返回 304 = 跳过本次抓取，状态机 transition 数为 0。304 写回走 `update_after_not_modified`：304 未带的
+`ETag` / `Last-Modified` 保留库中旧值（`COALESCE`，RFC 9110 §15.4.5 允许 304 不重复验证器），带了则更新；
+200 写回仍是替换语义（以新表示的验证器为准）。
 
 ### 3.2 超时与重试
 
