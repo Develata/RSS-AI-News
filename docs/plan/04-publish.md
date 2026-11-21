@@ -93,7 +93,9 @@ SQLite 由此持有写锁、串行化并发 freeze）；② PG 按 id 顺序 `SE
 **有效目标时区**（`--timezone`，否则 `[publish].target_timezone`）下的日历日期，而不是 UTC 日期
 （`runtime::flows::publish::default_report_date`）。例：`Asia/Shanghai` 下 2026-11-21 00:30 运行 → `2026-11-21`。
 时区须为 IANA 时区库中存在的名称（jiff 查询：有系统 zoneinfo 用系统库，否则用内置库；validate-config、doctor 与运行时同一查询）；
-未知时区在任何写入之前报错，绝不回退到 UTC。
+未知时区在任何写入之前报错，绝不回退到 UTC。三处共用一个解析函数 `config::validate::parse_target_timezone`
+（R1-P-S14）：按配置原样解析、不 trim（前后空白不是合法 IANA 名），并拒绝 jiff 的特殊 `Etc/Unknown`（任意大小写；
+该"未知时区"按 UTC 运算，若接受就会悄悄按 UTC 日期发布）。
 
 唯一约束 `(category_key, report_date, render_version)`。重复 freeze 同一组合返回
 `PublishInitOutcome::AlreadyExists`。

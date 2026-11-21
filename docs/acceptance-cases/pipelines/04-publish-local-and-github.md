@@ -186,6 +186,10 @@
 | `publish_default_date_uses_the_effective_timezone_and_rejects_unknown_zones` | `crates/cli/tests/publish_cmd_tests.rs` | 默认日期按目标时区；未知时区写库前报错 |
 | `shanghai_after_midnight_is_the_local_date_not_the_utc_date` | `crates/runtime/src/flows/publish/report_date.rs` | 2026-11-21T00:30+08:00 → 2026-11-21（另含负偏移、夏令时、未知时区用例） |
 | `real_iana_zones_are_accepted_and_made_up_ones_rejected` | `crates/config/src/validate/checks.rs` | validate 按 IANA 库校验 |
+| `etc_unknown_is_rejected_in_any_case` | 同上 | 共享解析拒绝 `Etc/Unknown`（任意大小写） |
+| `surrounding_whitespace_is_not_trimmed_away` | 同上 | 不 trim，三处同规则 |
+| `etc_unknown_is_an_error_not_a_utc_fallback` | `crates/runtime/src/flows/publish/report_date.rs` | 运行时默认日期拒绝 `Etc/Unknown` |
+| `etc_unknown_and_padded_names_fail_like_in_validate` | `crates/runtime/src/doctor/health.rs` | doctor 与 validate 一致 |
 | `publish_category_never_claims_another_categorys_pending_record` | `crates/cli/tests/publish_cmd_tests.rs` | 命令层跨分类 record 隔离 |
 | `sqlite_lease_predicates_compare_instants_not_rfc3339_text` | `crates/storage/tests/publish_stage_recovery_tests.rs` | SQLite lease 谓词按时刻（.5Z vs 整秒 now） |
 | `sqlite_claim_lease_is_not_expired_before_its_instant` | 同上 | claim 写入的 lease 不提前过期 |

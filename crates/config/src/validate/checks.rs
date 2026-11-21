@@ -879,7 +879,28 @@ fn category_source_file(category: &CategoryConfig) -> String {
 /// always resolves there. Formerly a whitelist plus an `Area/Location` shape
 /// check, which accepted any well-formed but nonexistent name.
 fn is_supported_timezone(timezone: &str) -> bool {
-    jiff::tz::TimeZone::get(timezone).is_ok()
+    parse_target_timezone(timezone).is_ok()
+}
+
+/// The single parser for `publish.target_timezone` / `--timezone`, shared by
+/// validate-config, doctor and the runtime report date (R1-P-S14). The name
+/// is taken as configured (no trimming); it must name a zone in the IANA
+/// database (system zoneinfo when present, else jiff's bundled copy), and
+/// jiff's special `Etc/Unknown` zone — accepted by the lookup in any letter
+/// case, behaving like UTC — is refused, so an unknown zone never silently
+/// becomes UTC.
+pub fn parse_target_timezone(name: &str) -> Result<jiff::tz::TimeZone, String> {
+    if name.trim().is_empty() {
+        return Err("empty timezone".to_string());
+    }
+    let zone = jiff::tz::TimeZone::get(name)
+        .map_err(|error| format!("{name:?} is not an IANA time zone: {error}"))?;
+    if zone.is_unknown() {
+        return Err(format!(
+            "{name:?} is jiff's special unknown time zone, not a real IANA zone"
+        ));
+    }
+    Ok(zone)
 }
 
 #[cfg(test)]
@@ -900,6 +921,28 @@ mod timezone_tests {
         for zone in ["Mars/Olympus_Mons", "Asia/Shang hai", "", "+08:00"] {
             assert!(!is_supported_timezone(zone), "{zone:?}");
         }
+    }
+
+    /// R1-P-S14: jiff resolves `Etc/Unknown` (any case) to its special
+    /// "unknown" zone that behaves like UTC; publishing under it would key
+    /// reports by the UTC date while the config claims otherwise.
+    #[test]
+    fn etc_unknown_is_rejected_in_any_case() {
+        for zone in ["Etc/Unknown", "etc/unknown", "ETC/UNKNOWN"] {
+            assert!(!is_supported_timezone(zone), "{zone}");
+            let error = super::parse_target_timezone(zone).unwrap_err();
+            assert!(error.contains("unknown"), "{error}");
+        }
+    }
+
+    /// One rule for every entry point: the configured name as is, no
+    /// trimming (surrounding whitespace is not an IANA name).
+    #[test]
+    fn surrounding_whitespace_is_not_trimmed_away() {
+        for zone in [" Asia/Shanghai", "Asia/Shanghai ", "  "] {
+            assert!(super::parse_target_timezone(zone).is_err(), "{zone:?}");
+        }
+        assert!(super::parse_target_timezone("Asia/Shanghai").is_ok());
     }
 }
 

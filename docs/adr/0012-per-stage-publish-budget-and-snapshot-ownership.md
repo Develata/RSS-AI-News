@@ -98,7 +98,8 @@
 
 未给 `--date` 时，`publish` / `publish-all` 取运行时刻在有效目标时区（`--timezone` / `[publish].target_timezone`）下的日期。
 时区经 jiff 按 IANA 库解析（有系统 zoneinfo 用系统库，否则用内置库），validate-config、doctor 与运行时用同一查询；
-未知时区在任何写入之前报错，不回退 UTC。
+未知时区在任何写入之前报错，不回退 UTC。三处共用 `config::validate::parse_target_timezone`（2026-11-22，R1-P-S14）：
+不 trim，且拒绝 jiff 的特殊 `Etc/Unknown`（`TimeZone::is_unknown()`，任意大小写都能查到、按 UTC 运算）。
 
 ## Alternatives considered
 
