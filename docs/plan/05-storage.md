@@ -157,6 +157,11 @@ WHERE id IN (
 RETURNING *;
 ```
 
+候选子查询 JOIN 了其它表时（如 AI claim 连接 `articles` / `feed_entries` / `feed_sources` 以按分类过滤），
+PG 必须写 `FOR UPDATE OF <被领取表别名> SKIP LOCKED`（AI：`OF aar`）。不带 `OF` 会锁住并跳过所有
+JOIN 表的行，另一事务锁住某个 source / article 行时，本可领取的任务会被当作"已锁"跳过，worker 把空批次
+当成队列耗尽提前结束（测试 `pg_claim_is_not_hidden_by_locked_source_or_article_rows`）。
+
 reclaim：
 
 ```sql

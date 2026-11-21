@@ -364,6 +364,67 @@ async fn pg_insert_pending_and_advance_article_atomically() {
     ctx.cleanup().await;
 }
 
+/// C6：claim 只锁 `article_ai_results` 行（`FOR UPDATE OF aar`）。另一事务锁住
+/// 所属 feed_sources / articles 行时，可领取的 AI 行仍须被领取，而不是被
+/// SKIP LOCKED 当作已锁跳过（worker 会把空批次当成队列耗尽提前结束）。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_claim_is_not_hidden_by_locked_source_or_article_rows() {
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "lock-of").await;
+    let article_id = seed_article(&ctx, "lock-of", "ai_pending").await;
+    let repo = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .insert_pending(&NewAiResult {
+            article_id,
+            prompt_version: prompt_id,
+            output_schema_version: schema_id,
+            model_id: "gpt-4".to_string(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Connection 1 holds row locks on the article and its source (as an
+    // ingest / publish transaction would) and keeps its transaction open.
+    let mut locker = ctx.pg_pool().begin().await.unwrap();
+    sqlx::query(
+        "SELECT a.id FROM articles a \
+         JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id \
+         JOIN feed_sources fs ON fs.id = fe.source_id \
+         WHERE a.id = $1 FOR UPDATE OF a, fs",
+    )
+    .bind(article_id)
+    .fetch_one(&mut *locker)
+    .await
+    .unwrap();
+
+    // Connection 2 claims.
+    let now = OffsetDateTime::now_utc();
+    let claimed = repo
+        .claim_pending(
+            &ClaimRequest {
+                owner: "worker-B".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 4,
+                max_attempts: 3,
+            },
+            "ai",
+        )
+        .await
+        .expect("pg claim_pending");
+    locker.rollback().await.unwrap();
+
+    assert_eq!(
+        claimed.len(),
+        1,
+        "locked parent rows must not hide the AI row"
+    );
+    assert_eq!(claimed[0].id, id);
+    ctx.cleanup().await;
+}
+
 /// C3：身份冲突时按已有行对账仍为 persisted 的 article（PG 加 FOR UPDATE 路径）。
 #[tokio::test]
 #[ignore = "需要 docker daemon"]

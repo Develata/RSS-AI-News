@@ -7,7 +7,7 @@
 //! SQL const 见 `super::article_ai_result_sql`，方言分发实装见
 //! `super::article_ai_result_impl`。
 //!
-//! **§6.4 PG 契约**：`claim_pending` 子查询必须 `FOR UPDATE SKIP LOCKED`，
+//! **§6.4 PG 契约**：`claim_pending` 子查询必须 `FOR UPDATE OF aar SKIP LOCKED`（只锁 AI 行），
 //! 让 ai-run 多 worker 并发 claim 同一 pending 池时各自拿到不同候选。
 //! SQL 因此分裂为 `CLAIM_AI_PENDING_SQLITE_SQL` / `CLAIM_AI_PENDING_PG_SQL`。
 //!

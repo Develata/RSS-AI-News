@@ -46,6 +46,10 @@ WHERE id IN (
 RETURNING id, article_id, prompt_version, output_schema_version, model_id
 "#;
 
+/// PG claim. `FOR UPDATE OF aar`: only the AI rows are locked / skipped. A
+/// bare `FOR UPDATE` would lock every joined table, so a source or article
+/// row locked by another transaction would hide claimable AI rows and the
+/// worker would read the empty batch as an exhausted queue.
 pub(super) const CLAIM_AI_PENDING_PG_SQL: &str = r#"
 UPDATE article_ai_results
 SET state = 'running',
@@ -66,7 +70,7 @@ WHERE id IN (
       AND fs.category_key = $7
     ORDER BY aar.id ASC
     LIMIT $8
-    FOR UPDATE SKIP LOCKED
+    FOR UPDATE OF aar SKIP LOCKED
 )
 RETURNING id, article_id, prompt_version, output_schema_version, model_id
 "#;
