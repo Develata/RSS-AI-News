@@ -409,7 +409,9 @@ impl GitHubTarget {
     async fn head_commit_sha(&self) -> Result<String, PublishError> {
         let ref_route = format!(
             "/repos/{}/{}/git/ref/heads/{}",
-            self.cfg.owner, self.cfg.repo, self.cfg.branch
+            self.cfg.owner,
+            self.cfg.repo,
+            encode_repo_path(&self.cfg.branch)
         );
         let head = self.get_json("GET ref", &ref_route).await?;
         head.get("object")
@@ -487,7 +489,9 @@ impl GitHubTarget {
     async fn update_branch_ref(&self, commit_sha: &str) -> Result<(), PublishError> {
         let route = format!(
             "/repos/{}/{}/git/refs/heads/{}",
-            self.cfg.owner, self.cfg.repo, self.cfg.branch
+            self.cfg.owner,
+            self.cfg.repo,
+            encode_repo_path(&self.cfg.branch)
         );
         let body = json!({
             "sha": commit_sha,
@@ -623,10 +627,12 @@ fn encode_component(value: &str) -> String {
     out
 }
 
-/// Encodes each `/`-separated segment of a repository path, keeping the
-/// separators. GitHub resolves the Contents API path segment by segment; a
-/// literal UTF-8 or reserved character in the request target was rejected
-/// with HTTP 400 in production (incident 2026-11-21).
+/// Encodes each `/`-separated segment of a repository path or branch name,
+/// keeping the separators. GitHub resolves the Contents API path and the Git
+/// ref route segment by segment; a literal UTF-8 or reserved character in the
+/// request target was rejected with HTTP 400 in production (incident
+/// 2026-11-21), and an unencoded `#` / `?` in a branch would cut the route
+/// short (R1-P-B3: `release#daily` became `release`).
 fn encode_repo_path(path: &str) -> String {
     path.split('/')
         .map(encode_component)

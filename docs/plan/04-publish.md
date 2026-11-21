@@ -220,6 +220,10 @@ validate 只用一个样例日期（`2026-01-03`，ADR 0008）渲染，无法发
 
 这是一次提交多个文件的 atomic 操作。优于"循环 PUT contents API"。
 
+ref 路由（`GET git/ref/heads/{branch}`、`PATCH git/refs/heads/{branch}`）中的分支名与 Contents API 路径同规则编码：按 `/` 分段、
+每段一次 RFC 3986 百分号编码，保留层级 `/`（`release#daily/50%` → `release%23daily/50%25`；`release/2026` 不变）。
+未编码时 `#` 之后会被 URI 解析截掉，批量发布会读写另一个分支（R1-P-B3）。回执里的 `remote_target` 仍用逻辑分支名。
+
 单报告（`publish` 单分类，或 `publish_many` 只有一份报告时）走 Contents API：
 `GET /repos/{owner}/{repo}/contents/{path}?ref={branch}` 取既有 sha，再 `PUT /repos/{owner}/{repo}/contents/{path}`
 （更新时带 sha）。`{path}` 按 `/` 分段、每段以 UTF-8 做一次 RFC 3986 百分号编码（仅 unreserved

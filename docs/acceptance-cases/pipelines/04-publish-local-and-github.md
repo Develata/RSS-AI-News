@@ -124,6 +124,8 @@
 | `update_chinese_path_sends_encoded_get_then_put_with_existing_sha` | 同上 | 更新：GET 200 → PUT 带 sha |
 | `space_and_reserved_characters_are_encoded_exactly_once_per_segment` | 同上 | 空格 / `%#?` 只编码一次 |
 | `ascii_path_request_target_is_unchanged` | 同上 | ASCII 路径回归 |
+| `batch_ref_routes_encode_hash_percent_and_keep_slashes_in_the_branch` | `crates/publish/tests/github_ref_route_tests.rs` | ref GET / PATCH 分支名按段编码（原始请求行，`#` `%` `/`） |
+| `plain_hierarchical_branch_ref_route_is_unchanged` | 同上 | 含 `/` 的普通分支名不变 |
 | `contents_get_failure_keeps_operation_status_message_and_request_id` | 同上 | 失败保留操作、状态、脱敏消息、request id |
 | `contents_put_failure_keeps_operation_and_request_id` | 同上 | PUT 失败上下文 |
 | `contents_rate_limited_403_is_still_retryable_with_request_context` | 同上 | 403 限流分类不变 |
