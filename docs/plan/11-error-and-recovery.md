@@ -78,7 +78,7 @@ trait ClassifiedError {
 | 正文提取 | `feed_entries.last_error*` | 同上；fallback 命中时转 `FallbackPersisted`；article 写入 / 摘要回读的存储错误按 `StorageError::is_retryable()` 同样分流（不再一律 `Failed`） |
 | AI 调用 | `article_ai_results.last_error*` | `Running → Pending`（retry）/ `PermanentFailed`（exhausted） |
 | 本地落盘 | `publish_records.last_error*` | retryable 回原态重试 / 耗尽或永久 → `Failed` |
-| GitHub 推送 | `publish_records.last_error*` | 按 `PublishError::is_retryable()`：限流、409、5xx / 传输失败、远端超时 → 保持 `StoredLocal` 并计本阶段预算（耗尽 → `Failed`；歧义写入先只读核对 HEAD，核对未完成 → `RemoteWriteUnverified`：保态、退还 claim、不转 `Failed`；限流写 `next_attempt_at`）；422 non-fast-forward 在同一次尝试内重试一次，第二次 422 及其它 4xx、认证失败、目标漂移、超大成功响应 → 直接 `Failed`。完整表见 [plan/04 §7](./04-publish.md) |
+| GitHub 推送 | `publish_records.last_error*` | 按 `PublishError::is_retryable()`：409、5xx / 传输失败、远端超时、reset 已过去的限流 → 保持 `StoredLocal` 并计本阶段预算（耗尽 → `Failed`；歧义写入先只读核对 HEAD，核对未完成 → `RemoteWriteUnverified`：保态、退还 claim、不转 `Failed`）；写入了等待期限（`next_attempt_at`）的限流 → 保态、退还 claim、不计预算（R3F-S12）；422 non-fast-forward 在同一次尝试内重试一次，第二次 422 及其它 4xx、认证失败、目标漂移、超大成功响应 → 直接 `Failed`。完整表见 [plan/04 §7](./04-publish.md) |
 | Reindex 批次 | `reindex_jobs.last_error*` | `Running → Pending`（retry）/ `Failed`（exhausted） |
 
 `articles` 表**不**承载 `last_error*` 列。错误归属规则见 [./08-state-machines.md §4.2](./08-state-machines.md)。
@@ -108,8 +108,10 @@ Reindex 无预算（claim 不过滤 attempt_count，失败 `mark_failed` 直转�
 - 这样保证：worker 崩溃 / lease 过期不会刷预算，预算严格反映尝试次数
 - **例外（仅 Publish，均不是一次发布尝试，两个计数都退）**：freeze 选不到候选（`SnapshotEmpty`，`release_empty_snapshot`，
   记录回 `pending`）——否则同日反复空跑会耗尽预算、被 sweep 转 `failed`；freeze 输掉文章归属竞争（`release_freeze_conflict`）；
-  按 ID freeze 遇分类不符（`category_mismatch`，同一释放，R1-P-S15）；store_local / remote 写前发现存量重复归属的败方
-  （`release_ownership_conflict`，保持阶段态，R1-P-B1）。见 [./08-state-machines.md](./08-state-machines.md) §6.1
+  store_local / remote 写前发现存量重复归属的败方（`release_ownership_conflict`，保持阶段态，R1-P-B1）；远端写入歧义且只读核对
+  未完成（`remote_write_unverified`，R3F-B2）与写入了等待期限的限流（R3F-S12）——二者用 `release_deferred_retry`（保持阶段态，
+  同时写 / 清 `next_attempt_at`）。按 ID freeze 遇分类不符（`category_mismatch`）自 R3F-S15 起在 claim 的 SQL 中即被排除，
+  记录根本不被领取，无需退还。见 [./08-state-machines.md](./08-state-machines.md) §6.1
 
 **Publish 按阶段计预算（2026-11-21，migration 0008，[ADR 0012](../adr/0012-per-stage-publish-budget-and-snapshot-ownership.md)）**：
 publish_records 有两个计数。`attempt_count` 仍按上述契约累计（审计用，成功不清零）；

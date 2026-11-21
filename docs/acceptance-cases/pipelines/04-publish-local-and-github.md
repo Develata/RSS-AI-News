@@ -153,6 +153,7 @@
 | `publish_remote_unverified_write_on_the_last_attempt_keeps_the_record_and_its_articles` | 同上 | 末次预算：PUT 歧义 + 核对失败 → 保持 `stored_local`、退还 claim、文章仍归属，之后可再领取并发布 |
 | `publish_remote_unverified_write_honours_the_verifications_rate_limit` | 同上 | 核对被限流 → 其期限写入 `next_attempt_at`，期内 `NothingToClaim` |
 | `publish_remote_timeout_with_an_unfinished_check_keeps_the_record_on_the_last_attempt` | 同上 | 远端超时且核对也超时 → 末次预算不 `failed` |
+| `publish_remote_batch_timeout_with_an_unfinished_check_keeps_every_record` | 同上 | 批量同上：每条记录保持 `stored_local`、退还 claim |
 | `sqlite_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait` | `crates/storage/tests/publish_stage_recovery_tests.rs` | 不计预算的释放：保态、清 lease、退还两计数、写 / 清 `next_attempt_at`（PG 同名 `pg_…`） |
 | `git_blob_sha_matches_git_hash_object` | `crates/publish/src/github.rs` | blob sha 与 `git hash-object` 一致（含中文） |
 | `auth_failure_maps_to_github_auth_failed` | 同上 | 401 映射 |

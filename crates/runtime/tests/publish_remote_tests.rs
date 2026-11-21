@@ -1480,3 +1480,47 @@ async fn publish_remote_timeout_with_an_unfinished_check_keeps_the_record_on_the
     assert_eq!(record_counters(&pool, id).await, (0, 0, None));
     assert_referenced_articles_state(&pool, id, "ready_for_publish").await;
 }
+
+/// Batch path of the same case: the cut-off batch write cannot be checked,
+/// so on the last attempt every record stays `stored_local`, refunded.
+#[tokio::test]
+async fn publish_remote_batch_timeout_with_an_unfinished_check_keeps_every_record() {
+    let (_dir, pool) = make_test_pool().await;
+    let first = seed_stored_local_publish_record(&pool).await;
+    let second = seed_stored_local_publish_record(&pool).await;
+    let mut app = app_config(RetentionPolicy::Always, 1);
+    app.lease.publish_duration_seconds = 1;
+    app.retry.publish_max_attempts = 1;
+    let flow = PublishFlow::new(Arc::new(publish_deps(
+        pool.clone(),
+        Arc::new(app),
+        Arc::new(LocalFsTarget::new(std::env::temp_dir())),
+        Some(Arc::new(UnansweredAndUncheckableTarget)),
+    )));
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        flow.publish_remote_batch(PublishRemoteBatchOptions {
+            items: vec![
+                batch_item(first, "AI", "Daily AI"),
+                batch_item(second, "ML", "Daily ML"),
+            ],
+        }),
+    )
+    .await
+    .expect("the check is bounded inside the lease");
+
+    for item in outcome.items {
+        assert!(
+            matches!(&item.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "remote_write_unverified"),
+            "{:?}",
+            item.status
+        );
+        assert_record_state(&pool, item.publish_record_id, "stored_local").await;
+        assert_eq!(
+            record_counters(&pool, item.publish_record_id).await,
+            (0, 0, None)
+        );
+        assert_referenced_articles_state(&pool, item.publish_record_id, "ready_for_publish").await;
+    }
+}
