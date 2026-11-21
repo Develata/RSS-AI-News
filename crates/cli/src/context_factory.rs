@@ -121,6 +121,21 @@ fn hex_sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// The HTML extraction strategies `extractor.strategy_order` enables, in that
+/// order. `summary_fallback` is not an HTML strategy (the extract flow applies
+/// it after the chain fails), so it adds none. Shared by live extraction and
+/// `replay --kind html` so both run the same chain (R3-6).
+pub fn configured_html_strategies(
+    extractor: &config::ExtractorConfig,
+) -> Vec<Arc<dyn ContentStrategy>> {
+    extractor
+        .strategy_order
+        .iter()
+        .filter(|name| name.as_str() == "readability")
+        .map(|_| Arc::new(ReadabilityStrategy) as Arc<dyn ContentStrategy>)
+        .collect()
+}
+
 pub async fn build_extract_deps(
     loaded: &LoadedConfig,
     pool: &StoragePool,
@@ -128,13 +143,7 @@ pub async fn build_extract_deps(
 ) -> Result<Arc<ExtractDeps>, CliError> {
     let app = &loaded.app;
     let extractor_version = resolve_extractor_version(pool).await?;
-    let strategies: Vec<Arc<dyn ContentStrategy>> = app
-        .extractor
-        .strategy_order
-        .iter()
-        .filter(|name| name.as_str() == "readability")
-        .map(|_| Arc::new(ReadabilityStrategy) as Arc<dyn ContentStrategy>)
-        .collect();
+    let strategies = configured_html_strategies(&app.extractor);
     Ok(Arc::new(ExtractDeps {
         run,
         http: app.http.clone(),
@@ -300,6 +309,8 @@ pub struct ReplayDeps {
     pub artifact_repo: Arc<dyn rss_ai_news_storage::RawArtifactRepository>,
     pub article_repo: Arc<dyn rss_ai_news_storage::ArticleRepository>,
     pub feed_entry_repo: Arc<dyn rss_ai_news_storage::FeedEntryRepository>,
+    /// [`configured_html_strategies`] of the loaded config.
+    pub html_strategies: Vec<Arc<dyn ContentStrategy>>,
 }
 
 pub async fn build_replay_deps(cli: &crate::args::Cli) -> Result<ReplayDeps, CliError> {
@@ -317,6 +328,7 @@ pub async fn build_replay_deps(cli: &crate::args::Cli) -> Result<ReplayDeps, Cli
         artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
         article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
         feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool)),
+        html_strategies: configured_html_strategies(&app.extractor),
     })
 }
 

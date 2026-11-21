@@ -98,7 +98,7 @@ rss-ai-news replay --kind feed   --id 678
 | kind | 解析路径 | 输出 |
 |---|---|---|
 | `feed` | `rss_ai_news_feed::parse_feed(bytes, FeedKind::Rss)` | `{ "entry_count": N, "samples": [...] }` |
-| `html` | `ReadabilityStrategy::extract(html_bytes)`，base URI 见下 | 抽取出的 title / word_count / content_quality / body_preview，以及所用 `base_uri` |
+| `html` | 线上同一条策略链：`extractor.strategy_order` 启用的 HTML 策略（当前只有 Readability），由 `context_factory::configured_html_strategies` 为 extract 与 replay 共同构造；base URI 见下 | 抽取出的 title / word_count / content_quality / body_preview，以及所用 `base_uri` |
 | `ai` | `rss_ai_news_ai::parse_response(raw)` | 解析后的 `ParsedResponse`（含 schema 校验） |
 
 副作用：**无**。`replay` 不写任何业务表，仅查询 `raw_artifacts` 并在内存中重做，
@@ -106,6 +106,11 @@ rss-ai-news replay --kind feed   --id 678
 
 `--id` 直查 `raw_artifacts.id`，`--key` 走 `(kind, key)` 联合索引。两者必给其一，
 否则 CLI 报 `replay requires either --id or --key`。
+
+`html` 的策略（R3-6，2026-11-22）：按顺序取第一个抽取成功的策略，全部失败报最后一个策略的错误（只配 Readability 时
+即其结果）。`strategy_order = ["summary_fallback"]` 是合法配置，此时线上抽取根本不解析 HTML（直接用 feed 摘要），
+replay 因此不换用别的策略解析，而是在读取任何 artifact 之前返回契约错误 `REPLAY_HTML_NO_STRATEGY`
+（`RuntimeError::Config`，exit 1），提示加回 `"readability"`。`feed` / `ai` 不受策略配置影响。
 
 `html` 的 base URI：`html_payload` 的 artifact key 是 feed entry id，replay 用该 entry 的
 `normalized_link`（线上抽取开始抓取的链接）作为传给策略的 `final_url` 与 `task.normalized_link`；

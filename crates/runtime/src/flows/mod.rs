@@ -46,6 +46,7 @@ pub use reindex::{
     ReindexAbortOutcome, ReindexFlow, ReindexOptions, ReindexSummary, ReindexTarget,
 };
 pub use replay::{
-    REPLAY_FEED_SAMPLE_LIMIT, REPLAY_PLACEHOLDER_BASE_URI, ReplayBaseUri, ReplayDiff, ReplayFlow,
-    ReplayFlowDeps, ReplayKind, ReplayOptions, ReplayOutcome, ReplayParsed, ReplaySelector,
+    REPLAY_FEED_SAMPLE_LIMIT, REPLAY_HTML_NO_STRATEGY, REPLAY_PLACEHOLDER_BASE_URI, ReplayBaseUri,
+    ReplayDiff, ReplayFlow, ReplayFlowDeps, ReplayKind, ReplayOptions, ReplayOutcome, ReplayParsed,
+    ReplaySelector,
 };

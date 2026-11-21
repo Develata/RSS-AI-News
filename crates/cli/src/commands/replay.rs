@@ -4,7 +4,6 @@ use std::{
 };
 
 use rss_ai_news_ai::ParsedResponse;
-use rss_ai_news_extractor::ReadabilityStrategy;
 use rss_ai_news_runtime::{
     ReplayDiff, ReplayFlow, ReplayFlowDeps, ReplayKind as RuntimeReplayKind, ReplayOptions,
     ReplayOutcome, ReplayParsed, ReplaySelector, RuntimeError,
@@ -54,8 +53,10 @@ pub async fn run(cli: &Cli, args: &ReplayArgs) -> Result<ReplayCommandSummary, C
 }
 
 /// Assembles the read-only [`ReplayFlow`] from the replay dependencies, runs
-/// it and renders its outcome. HTML is re-extracted with Readability
-/// (acceptance AC-C-01).
+/// it and renders its outcome. HTML is re-extracted with the strategies the
+/// configured `extractor.strategy_order` enables, as live extraction does
+/// (Readability; none when only `summary_fallback` is configured, which the
+/// flow reports as an error, acceptance AC-C-01).
 async fn replay(deps: ReplayDeps, args: &ReplayArgs) -> Result<ReplayCommandSummary, CliError> {
     let kind = runtime_kind(args.kind);
     let selector = match (args.id, args.key.as_deref()) {
@@ -70,7 +71,7 @@ async fn replay(deps: ReplayDeps, args: &ReplayArgs) -> Result<ReplayCommandSumm
     let flow = ReplayFlow::new(ReplayFlowDeps {
         artifact_repo: deps.artifact_repo,
         projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(deps.pool)),
-        html_strategy: Arc::new(ReadabilityStrategy),
+        html_strategies: deps.html_strategies,
     });
     let outcome = flow
         .execute(&ReplayOptions {
@@ -202,6 +203,7 @@ mod tests {
             artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
             article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
             feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool)),
+            html_strategies: vec![Arc::new(rss_ai_news_extractor::ReadabilityStrategy)],
         };
         (sqlite, deps)
     }

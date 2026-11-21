@@ -29,6 +29,14 @@ use crate::error::RuntimeError;
 /// reference resolves against it: nothing is invented about the page's host.
 pub const REPLAY_PLACEHOLDER_BASE_URI: &str = "about:blank";
 
+/// Reported by an HTML replay when the configured `extractor.strategy_order`
+/// enables no HTML strategy (only `summary_fallback`): live extraction then
+/// never parses the HTML, so a replay result parsed with some other strategy
+/// would not describe what the pipeline does with these bytes (R3-6).
+pub const REPLAY_HTML_NO_STRATEGY: &str = "html replay needs an HTML extraction strategy, but \
+     extractor.strategy_order enables none (only summary_fallback, which stores the feed summary \
+     without parsing the HTML); add \"readability\" to replay the HTML";
+
 /// Number of parsed feed entries a feed replay returns as samples.
 pub const REPLAY_FEED_SAMPLE_LIMIT: usize = 5;
 
@@ -133,9 +141,11 @@ pub struct ReplayOutcome {
 pub struct ReplayFlowDeps {
     pub artifact_repo: Arc<dyn RawArtifactRepository>,
     pub projection_repo: Arc<dyn ReplayProjectionRepository>,
-    /// Strategy an HTML replay re-extracts with (the CLI wires Readability,
-    /// per acceptance AC-C-01).
-    pub html_strategy: Arc<dyn ContentStrategy>,
+    /// The HTML strategies live extraction runs, in `extractor.strategy_order`
+    /// (the CLI builds both from one function). An HTML replay uses the first
+    /// that extracts, else reports the last strategy's error. Empty when only
+    /// `summary_fallback` is configured: see [`REPLAY_HTML_NO_STRATEGY`].
+    pub html_strategies: Vec<Arc<dyn ContentStrategy>>,
 }
 
 pub struct ReplayFlow {
@@ -152,6 +162,10 @@ impl ReplayFlow {
         &self,
         options: &ReplayOptions,
     ) -> Result<Option<ReplayOutcome>, RuntimeError> {
+        // A configuration contradiction, reported before any lookup.
+        if options.kind == ReplayKind::Html && self.deps.html_strategies.is_empty() {
+            return Err(RuntimeError::Config(REPLAY_HTML_NO_STRATEGY.to_string()));
+        }
         let artifact = match &options.selector {
             ReplaySelector::Id(id) => self.deps.artifact_repo.find_by_id(*id).await?,
             ReplaySelector::Key(key) => {
@@ -239,10 +253,7 @@ impl ReplayFlow {
             summary_raw: None,
             timeout: Duration::from_secs(0),
         };
-        let extracted = self
-            .deps
-            .html_strategy
-            .extract(&task, bytes, base_uri.as_str())?;
+        let extracted = self.extract_html(&task, bytes, base_uri.as_str())?;
         let diff = diff.then(|| match source.and_then(|source| source.article) {
             Some(article) => ReplayDiff::Html {
                 article_id: article.id,
@@ -259,6 +270,30 @@ impl ReplayFlow {
                 article: extracted,
             },
             diff,
+        ))
+    }
+}
+
+impl ReplayFlow {
+    /// The configured chain, in order: the first strategy that extracts wins,
+    /// else the last strategy's error (with Readability alone, exactly its
+    /// result). Callers ensure the chain is not empty.
+    fn extract_html(
+        &self,
+        task: &ArticleFetchTask,
+        bytes: &[u8],
+        base_uri: &str,
+    ) -> Result<ExtractedArticle, RuntimeError> {
+        let mut last_error = None;
+        for strategy in &self.deps.html_strategies {
+            match strategy.extract(task, bytes, base_uri) {
+                Ok(article) => return Ok(article),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.map_or_else(
+            || RuntimeError::Config(REPLAY_HTML_NO_STRATEGY.to_string()),
+            RuntimeError::from,
         ))
     }
 }
@@ -290,8 +325,9 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        REPLAY_PLACEHOLDER_BASE_URI, ReplayBaseUri, ReplayDiff, ReplayFlow, ReplayFlowDeps,
-        ReplayKind, ReplayOptions, ReplayParsed, ReplaySelector, of_kind,
+        REPLAY_HTML_NO_STRATEGY, REPLAY_PLACEHOLDER_BASE_URI, ReplayBaseUri, ReplayDiff,
+        ReplayFlow, ReplayFlowDeps, ReplayKind, ReplayOptions, ReplayParsed, ReplaySelector,
+        of_kind,
     };
 
     fn artifact(kind: ArtifactKind) -> RawArtifact {
@@ -474,7 +510,7 @@ mod tests {
                 projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(
                     self.pool.clone(),
                 )),
-                html_strategy: strategy,
+                html_strategies: vec![strategy],
             })
         }
     }
@@ -615,6 +651,96 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// R3-6: with only `summary_fallback` configured, live extraction never
+    /// parses the HTML, so an HTML replay reports the contract error instead
+    /// of parsing with a strategy the pipeline does not run. Other kinds are
+    /// unaffected.
+    #[tokio::test]
+    async fn html_replay_without_an_html_strategy_reports_the_contract_error() {
+        let fixture = Fixture::new().await;
+        let entry = fixture.entry("first").await;
+        fixture
+            .html_artifact(&entry.to_string(), relative_link_html())
+            .await;
+        let flow = ReplayFlow::new(ReplayFlowDeps {
+            artifact_repo: fixture.artifacts.clone(),
+            projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(fixture.pool.clone())),
+            html_strategies: Vec::new(),
+        });
+        let error = flow
+            .execute(&html(ReplaySelector::Key(entry.to_string()), true))
+            .await
+            .expect_err("no HTML strategy configured");
+        assert_eq!(
+            error.to_string(),
+            format!("config: {REPLAY_HTML_NO_STRATEGY}")
+        );
+
+        let feed = flow
+            .execute(&ReplayOptions {
+                kind: ReplayKind::Feed,
+                selector: ReplaySelector::Key("missing".to_string()),
+                diff: false,
+            })
+            .await
+            .expect("feed replay does not need an HTML strategy");
+        assert!(feed.is_none());
+    }
+
+    /// A strategy that fails is followed by the next one, as in the live
+    /// chain; with every strategy failing the last error is reported.
+    #[tokio::test]
+    async fn html_replay_runs_the_configured_chain_in_order() {
+        struct Failing;
+        impl ContentStrategy for Failing {
+            fn strategy(&self) -> ExtractorStrategy {
+                ExtractorStrategy::Readability
+            }
+            fn extract(
+                &self,
+                _task: &ArticleFetchTask,
+                _html_bytes: &[u8],
+                _final_url: &str,
+            ) -> Result<ExtractedArticle, ExtractorError> {
+                Err(ExtractorError::ParseFailed {
+                    reason: "first strategy fails".to_string(),
+                })
+            }
+        }
+        let fixture = Fixture::new().await;
+        let entry = fixture.entry("first").await;
+        fixture
+            .html_artifact(&entry.to_string(), relative_link_html())
+            .await;
+        let flow = |html_strategies| {
+            ReplayFlow::new(ReplayFlowDeps {
+                artifact_repo: fixture.artifacts.clone(),
+                projection_repo: Arc::new(ReplayProjectionRepo::new_with_storage(
+                    fixture.pool.clone(),
+                )),
+                html_strategies,
+            })
+        };
+        let recording = Arc::new(RecordingStrategy::default());
+        let chain: Vec<Arc<dyn ContentStrategy>> = vec![Arc::new(Failing), recording.clone()];
+        let outcome = flow(chain)
+            .execute(&html(ReplaySelector::Key(entry.to_string()), false))
+            .await
+            .expect("second strategy extracts")
+            .expect("artifact found");
+        assert!(matches!(outcome.parsed, ReplayParsed::Html { .. }));
+        assert_eq!(recording.calls.lock().expect("calls").len(), 1);
+
+        let error = flow(vec![Arc::new(Failing)])
+            .execute(&html(ReplaySelector::Key(entry.to_string()), false))
+            .await
+            .expect_err("every strategy fails");
+        assert!(
+            error.to_string().contains("first strategy fails"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
