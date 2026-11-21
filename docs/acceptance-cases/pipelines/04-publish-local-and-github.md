@@ -141,6 +141,7 @@
 | `ascii_path_request_target_is_unchanged` | 同上 | ASCII 路径回归 |
 | `batch_ref_routes_encode_hash_percent_and_keep_slashes_in_the_branch` | `crates/publish/tests/github_ref_route_tests.rs` | ref GET / PATCH 分支名按段编码（原始请求行，`#` `%` `/`） |
 | `plain_hierarchical_branch_ref_route_is_unchanged` | 同上 | 含 `/` 的普通分支名不变 |
+| `transport_failure_after_the_ref_patch_is_verified_against_head` | 同上 | PATCH 发出后连接断开（传输失败）→ 只读核对 HEAD → 记成功 |
 | `contents_get_failure_keeps_operation_status_message_and_request_id` | 同上 | 失败保留操作、状态、固定词表摘要、request id；服务端回显的正文标记与 token 不出现 |
 | `malformed_or_token_bearing_request_id_is_dropped` | 同上 | 形状不符或含 token 的 request id 整值丢弃 |
 | `auth_failures_keep_the_actual_status_and_request_id` | 同上 | 401 / 403 认证失败保留实际状态、操作、request id |
