@@ -2985,6 +2985,7 @@ dependencies = [
  "rss-ai-news-domain",
  "secrecy",
  "serde_json",
+ "sha1",
  "tempfile",
  "thiserror 2.0.21",
  "time",

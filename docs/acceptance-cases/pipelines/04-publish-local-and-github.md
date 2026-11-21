@@ -43,6 +43,7 @@
 - 远端 403 且 `x-ratelimit-remaining: 0` / 带 `retry-after` / message 提到 rate limit → `GithubRateLimit`（可重试）
 - 远端 429 → `GithubRateLimit`，state 保持、article 不晋升
 - 远端 422 重试达上限 → 仍报错，record 保持 `StoredLocal`
+- 多报告批次重试：HEAD 已逐字节包含整批内容（上次 ref 更新落地、响应丢失）→ 不新建 commit，回执指向该 HEAD
 - promote target article 已被其它流转推进 → `ArticleConflict`
 - 目标漂移：`stored_local` 记录的 `remote_target`（`owner/repo:branch`）与当前配置的远端目标不同 →
   不发任何请求，`TargetMismatch { stored, current }`，record → `failed`（`last_error_kind=remote_target_mismatch`）；
@@ -95,6 +96,10 @@
 | `publish_many_creates_one_commit_for_multiple_reports` | `crates/publish/tests/github_target_tests.rs` | target 层 batch |
 | `publish_many_retries_once_after_non_fast_forward_then_succeeds` | 同上 | 422 重试 |
 | `publish_many_surfaces_422_after_max_retries` | 同上 | 422 超限 |
+| `retry_after_lost_ref_update_response_records_existing_head_without_new_commit` | `crates/publish/tests/github_batch_idempotency_tests.rs` | ref 更新已落地但响应丢失：重试不新建 commit，按 HEAD 记回执 |
+| `one_differing_blob_still_creates_a_commit` | 同上 | 任一 blob 不一致照常提交 |
+| `blob_lookup_error_is_not_treated_as_already_published` | 同上 | 查询出错不当作已发布 |
+| `git_blob_sha_matches_git_hash_object` | `crates/publish/src/github.rs` | blob sha 与 `git hash-object` 一致（含中文） |
 | `auth_failure_maps_to_github_auth_failed` | 同上 | 401 映射 |
 | `chinese_path_leaves_the_client_percent_encoded_on_get_and_put` | `crates/publish/tests/github_contents_path_tests.rs` | 中文路径请求行按段编码（原始字节） |
 | `create_chinese_path_sends_encoded_get_then_put_without_sha` | 同上 | 新建：GET 404 → PUT 无 sha；ref 编码 |

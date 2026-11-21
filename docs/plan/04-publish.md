@@ -227,6 +227,12 @@ HTTP 状态、已脱敏的 GitHub message 与 `x-github-request-id`（若有）�
 v0.3 引入：`publish_many(reports: &[RenderedReport])` 在一次 commit 内推送多个 report。
 减少 commit 噪音 + 节省 API 配额。
 
+**重试幂等（2026-11-21，ADR 0012）**：取到 HEAD commit 后、建 tree/commit 之前，按该 commit sha（不是分支名）
+对批内每个路径 `GET contents?ref=<head commit>`，与本地按 git 规则（SHA-1 over `blob <len>\0` + 内容）算出的 blob sha 比对。
+**全部**路径都存在且 blob 一致 → 视为上一次尝试的 ref 更新已落地（响应丢失），直接以该 HEAD commit 记回执（每份报告一条、按输入顺序），
+不再新建 commit；任何一个路径缺失 / 不一致 → 照常建 commit；查询出错 → 本次失败（按原分类重试），绝不当作"已发布"。
+仅覆盖多报告批次；单报告走 Contents API（§4.2 上文），不在此列。
+
 ### 4.2.2 422 lost-update retry
 
 PATCH refs/heads 时如果 base SHA 不再是 HEAD（并发 push 了别的 commit），GitHub 返 422
