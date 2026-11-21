@@ -641,9 +641,11 @@ fn encode_component(value: &str) -> String {
 
 /// Encodes each `/`-separated segment of a repository path or branch name,
 /// keeping the separators. GitHub resolves the Contents API path and the Git
-/// ref route segment by segment; a literal UTF-8 or reserved character in the
-/// request target was rejected with HTTP 400 in production (incident
-/// 2026-11-21), and an unencoded `#` / `?` in a branch would cut the route
+/// ref route segment by segment. In the 2026-11-21 incident a production
+/// single-report publish failed with HTTP 400 and a read-only control request
+/// with a literal UTF-8 path got 400 where the encoded path got 200 (the
+/// production request line itself was not recorded). An unencoded `#` / `?`
+/// in a branch would cut the route
 /// short (R1-P-B3: `release#daily` became `release`).
 fn encode_repo_path(path: &str) -> String {
     path.split('/')

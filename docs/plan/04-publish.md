@@ -248,7 +248,15 @@ ref 路由（`GET git/ref/heads/{branch}`、`PATCH git/refs/heads/{branch}`）�
 （更新时带 sha）。`{path}` 按 `/` 分段、每段以 UTF-8 做一次 RFC 3986 百分号编码（仅 unreserved
 `A-Z a-z 0-9 - . _ ~` 保留字面），分隔符 `/` 保留；`ref` 作为编码后的查询参数（`release/2026` → `release%2F2026`）。
 记录与产物里的路径（`remote_target`、Git tree JSON 的 `path`、输出文件名）仍是逻辑路径，不编码。
-来由：2026-11-21 中文路径 `科技新闻/…` 的单报告发布以 HTTP 400 失败（请求行含字面 UTF-8）。
+来由（2026-11-21 事故；R1-P-S17 把观测与推断分开写）：
+- **生产事实**：当天只有科技新闻有非空快照，冻结 9 条、本地写出 `output/科技新闻/2026/20261121.md`；publish record 932
+  经 4 次尝试后 `failed`，`last_error` 为 "github api error: status 400"，`remote_published_at` / `commit_sha` 为空。
+  当时的 `publish_failed` 事件既没记失败的操作（GET 还是 PUT），也没记 GitHub request id；生产请求行和返回 400 的网络节点
+  均未留证。
+- **对照试验**（另行、只读、针对仓库内一份已存在的中文路径报告）：请求目标含字面 UTF-8 时返回 400，同一路径百分号编码后
+  返回 200 并带 GitHub request id。400 是经过中间层看到的。
+- **结论**：路径未编码是有证据支持的原因判断，而非对生产请求的完整重建；修复按此在请求边界编码，并补上失败时的操作与
+  request id 记录，以便下次能直接定位。
 
 单报告幂等（2026-11-22，R1-P-S2）：`GET contents` 取到的既有 blob sha 等于本地内容的 git blob sha 时，先 `GET ref` 取 HEAD
 commit、按该 commit 复核同一路径；一致 → 以 HEAD commit 记回执，不发 PUT。批量发布中途中断（第一条回执已落库）后重跑只剩
