@@ -230,6 +230,62 @@ async fn publish_all_refuses_categories_whose_paths_collide_on_the_report_date()
     assert_eq!(summary.exit_code(), ExitCode::Success, "{summary:?}");
 }
 
+/// `--force` on a fresh database: each invocation gets its own render
+/// version (two forces within one second must not collapse into one), and the
+/// force trace rows are never `active`, so a later normal publish still uses
+/// the default render rule instead of a force version.
+#[tokio::test]
+async fn publish_force_creates_unique_non_active_render_versions_on_a_fresh_db() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config(temp.path(), &db_path, &temp.path().join("output"));
+    migrated_pool(&db_path).await.close().await;
+
+    let mut cli = cli_for(temp.path(), "ai");
+    cli.command = Command::Publish(PublishArgs {
+        date: Some(REPORT_DATE.to_string()),
+        local_only: true,
+        force: true,
+    });
+    let first = publish::run(&cli, publish_args(&cli)).await.expect("force 1");
+    let second = publish::run(&cli, publish_args(&cli)).await.expect("force 2");
+    assert_ne!(
+        first.render_version, second.render_version,
+        "each --force invocation needs its own render version"
+    );
+    assert_ne!(first.publish_record_id, second.publish_record_id);
+
+    cli.command = Command::Publish(PublishArgs {
+        date: Some(REPORT_DATE.to_string()),
+        local_only: true,
+        force: false,
+    });
+    let normal = publish::run(&cli, publish_args(&cli)).await.expect("normal");
+
+    let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, version_tag, status FROM rule_versions WHERE kind = 'render' ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("render rules");
+    pool.close().await;
+    for forced in [first.render_version, second.render_version] {
+        let (_, tag, status) = rows
+            .iter()
+            .find(|(id, _, _)| *id == forced)
+            .expect("force row");
+        assert!(tag.starts_with("force-"), "{tag}");
+        assert_ne!(status, "active", "force trace row {tag} must not be active");
+    }
+    let (_, tag, status) = rows
+        .iter()
+        .find(|(id, _, _)| *id == normal.render_version)
+        .expect("normal row");
+    assert_eq!(tag, "default", "{rows:?}");
+    assert_eq!(status, "active");
+}
+
 #[tokio::test]
 async fn ai_run_without_category_runs_every_category_and_reports_each_failure() {
     let temp = TempDir::new().expect("temp dir");

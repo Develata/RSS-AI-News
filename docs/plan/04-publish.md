@@ -71,6 +71,10 @@ UPDATE publish_records SET state='snapshot_frozen' WHERE id=?;
 唯一约束 `(category_key, report_date, render_version)`。重复 freeze 同一组合返回
 `PublishInitOutcome::AlreadyExists`。
 
+`--force`（`publish` / `publish-all`）每次调用都新建一条 `kind='render'` 的 trace 行（tag 含本次 run id，
+同一秒内重复 force 也互不复用），状态恒为 `pending`（ADR 0004 的 partial unique 之外），因此产生新的
+render_version / 新记录，且**不会**成为 active——新库上首次 force 之后，普通发布仍使用 `default` render 规则。
+
 ## 3. Markdown 渲染
 
 `crates/report/src/` 实现。**无持久副作用**，纯函数式：

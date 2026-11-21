@@ -172,13 +172,10 @@ pub(crate) async fn run_loaded(
         "remote"
     };
     let render_version = if args.force {
-        let force_tag = format!(
-            "force-all-{}-{}",
-            date,
-            OffsetDateTime::now_utc().unix_timestamp()
-        );
+        // Unique per invocation (run id), never 'active' (see publish.rs).
+        let force_tag = format!("force-all-{}-{}", date, ctx.run.run_id);
         rule_version_repo
-            .get_or_create("render", &force_tag, "force render trace", "v1")
+            .insert_pending_rule("render", &force_tag, "force render trace", "v1")
             .await?
     } else {
         rule_version_repo

@@ -194,18 +194,14 @@ pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishCommandSummary,
         "remote"
     };
     // F15-3: --force 显式制造一条新的 render rule_version 行用于 audit
-    // trace；非 force 分支走 active_rule_or_register 读路径。force 行落
-    // 在 partial unique 之外（status='pending'，由 get_or_create CASE
-    // 自动选择，因为同 kind 已有 active 行）。
+    // trace；非 force 分支走 active_rule_or_register 读路径。force 行总是
+    // status='pending'（落在 partial unique 之外），新库上也不会成为 active。
     let render_version = if args.force {
-        let force_tag = format!(
-            "force-{}-{}-{}",
-            category.category.key,
-            date,
-            OffsetDateTime::now_utc().unix_timestamp()
-        );
+        // Unique per invocation (run id), never 'active': a force row is an
+        // audit trace and must not become the default render rule.
+        let force_tag = format!("force-{}-{}-{}", category.category.key, date, ctx.run.run_id);
         rule_version_repo
-            .get_or_create("render", &force_tag, "force render trace", "v1")
+            .insert_pending_rule("render", &force_tag, "force render trace", "v1")
             .await?
     } else {
         rule_version_repo
