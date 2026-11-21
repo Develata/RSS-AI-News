@@ -12,6 +12,15 @@
 #                           point the tag at exactly that manifest or index.
 #
 # Usage:
+#   release-promotion.sh tag-commit <X.Y.Z> <sha> < ls-remote-output
+#       stdin: `git ls-remote origin refs/tags/vX.Y.Z 'refs/tags/vX.Y.Z^{}'`.
+#       Succeeds only when the remote tag `vX.Y.Z` still names <sha> (the
+#       peeled commit of an annotated tag). A re-run keeps its original
+#       GITHUB_SHA, so after the tag moved it would push the old commit's
+#       images under the version tag first and block the new commit's run
+#       (R3G-B4); publish-image runs this before its first push. A missing
+#       tag (empty listing) fails too.
+#
 #   release-promotion.sh existing <image> <X.Y.Z> <revision>
 #       Version tags are immutable (R3-7). Prints `runtime-digest=<d>` and
 #       `scheduler-digest=<d>` for $GITHUB_OUTPUT: the digest of an existing
@@ -279,6 +288,16 @@ EOF
     printf '%s\n' "$2" | sed -n 's/^result //p'
 }
 
+cmd_tag_commit() {
+    [ "$#" -eq 2 ] || { echo "usage: release-promotion.sh tag-commit <X.Y.Z> <sha> < ls-remote-output" >&2; exit 2; }
+    is_version "$1" || { echo "release-promotion: expected X.Y.Z, got '$1'" >&2; exit 2; }
+    remote_commit="$(stable_tags | awk -v v="$1" '$1 == v { print $2 }')"
+    [ -n "$remote_commit" ] || die "v$1 is not on the remote (deleted?); nothing is published"
+    [ "$remote_commit" = "$2" ] ||
+        die "v$1 now names $remote_commit, not this run's commit $2 (moved tag?); nothing is published, run the release for the tag's current commit"
+    echo "v$1 still names $2" >&2
+}
+
 cmd_reconcile() {
     [ "$#" -eq 2 ] || { echo "usage: release-promotion.sh reconcile <image> <X.Y.Z> < tags" >&2; exit 2; }
     image="$1"
@@ -309,10 +328,11 @@ $(plan_pair "$image" "$latest_line" "$latest_target")" || exit 1
 command="${1:-}"
 [ "$#" -gt 0 ] && shift
 case "$command" in
+    tag-commit) cmd_tag_commit "$@" ;;
     existing) cmd_existing "$@" ;;
     reconcile) cmd_reconcile "$@" ;;
     *)
-        echo "usage: release-promotion.sh existing|reconcile ..." >&2
+        echo "usage: release-promotion.sh tag-commit|existing|reconcile ..." >&2
         exit 2
         ;;
 esac

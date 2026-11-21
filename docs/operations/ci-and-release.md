@@ -108,6 +108,10 @@ Jobs：
   `release-promotion.sh existing` 读 registry，已存在且 `org.opencontainers.image.revision` 等于本次 commit 的版本 tag 直接复用其
   digest、不重建（重建会因 `org.opencontainers.image.created` 变化得到新 digest），只补建缺失的一侧；已存在但来自别的 commit
   （或版本 label 不符）则失败、不覆盖。job 级 `concurrency: release-publish-<repo>-<tag>`，同一版本的重跑串行。
+  第一次推送之前（持有该版本的锁时）先用 `release-promotion.sh tag-commit` 核对 `git ls-remote origin refs/tags/vV
+  'refs/tags/vV^{}'`：远端 tag 解引用后的 commit 必须等于本次 run 的 `GITHUB_SHA`，tag 缺失或已指向别的 commit 即停止、不推任何
+  镜像（R3G-B4）。原因：重跑沿用原始 `GITHUB_SHA`，`vV` 若已移到新 commit，旧 run 会先占用不可变的版本 tag，使新 commit 的
+  正常 run 无法发布。核对与推送之间仍有一个很短的窗口（tag 恰在其间移动），无法在 workflow 内消除；tag 保护规则才能根除。
 - `promote-tags`（`needs: [publish-image]`）—— 用
   [`.github/scripts/release-promotion.sh`](../../.github/scripts/release-promotion.sh) `reconcile` 把别名**对齐到最高的已发布
   stable 版本**，与触发它的是哪个 tag 无关（R3-2 / R3-3 / R3-4 / R3-22）：

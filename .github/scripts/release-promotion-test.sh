@@ -497,6 +497,59 @@ existing 0.10.4 c4
 expect_rc 1
 done_case
 
+# --- tag-commit (the remote tag still names the run's commit) ---------------
+
+tag_commit() {
+    set +e
+    out="$(sh "$script" tag-commit "$1" "$2" <"$work/tags" 2>"$work/stderr")"
+    rc=$?
+    set -e
+}
+
+start "tag-commit: a lightweight tag at the run's commit passes"
+case_failures=$failures
+tag 1.0.0 c100 >"$work/tags"
+tag_commit 1.0.0 c100
+expect_rc 0
+done_case
+
+start "tag-commit: an annotated tag is compared by its peeled commit"
+case_failures=$failures
+{
+    printf 'tagobject\trefs/tags/v1.0.0\n'
+    printf 'c100\trefs/tags/v1.0.0^{}\n'
+} >"$work/tags"
+tag_commit 1.0.0 c100
+expect_rc 0
+tag_commit 1.0.0 tagobject
+expect_rc 1
+done_case
+
+start "tag-commit: a tag moved to another commit stops the publish"
+case_failures=$failures
+tag 1.0.0 c-moved >"$work/tags"
+tag_commit 1.0.0 c100
+expect_rc 1
+done_case
+
+start "tag-commit: a deleted tag stops the publish"
+case_failures=$failures
+: >"$work/tags"
+tag_commit 1.0.0 c100
+expect_rc 1
+# Only the exact tag counts, not a prerelease or longer name at that commit.
+{ tag 1.0.0-rc.1 c100; tag 11.0.0 c100; } >"$work/tags"
+tag_commit 1.0.0 c100
+expect_rc 1
+done_case
+
+start "tag-commit: a malformed version is rejected"
+case_failures=$failures
+tag 1.0.0 c100 >"$work/tags"
+tag_commit 1.0 c100
+expect_rc 2
+done_case
+
 # --- release-registry.sh (the real adapter) with a stub docker ---------------
 # The stub answers `docker buildx imagetools inspect <ref> <flags>` per mode
 # (raw = `--raw`, manifest = `--format '{{json .Manifest}}'`, image =
