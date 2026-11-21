@@ -80,7 +80,13 @@ Jobs：
 - `verify-release` —— `cargo acceptance run --lane sqlite --lane release --expected-version "${GITHUB_REF_NAME#v}"`：tag 版本必须与
   workspace / lockfile / README / binary 一致。两者合起来即 `local` profile 的四条 lane，在 tag commit 上通过；
   它们只读 ci.yml 在 `main` 上为同一 commit 保存的缓存（`test-*` / `test-pg-*`），未命中只是变慢。
-- `publish-image`（`needs: [verify-test, verify-release]`）—— 同时构建发布 runtime + scheduler 两套镜像；任一 verify 失败则不推镜像。
+- `verify-postgres` —— `cargo acceptance run --lane postgres`，带与 ci.yml `test-pg` 相同的 PostgreSQL 16 service 与
+  `DATABASE_URL`，读 `test-pg-*` 缓存；
+- `verify-audit` —— 复用 composite action `.github/actions/cargo-audit`（依赖策略脚本 + `cargo audit`），在 tag 的依赖图上
+  拦下自上次 `main` 运行以来新发布的 advisory；
+- `publish-image`（`needs: [verify-test, verify-release, verify-postgres, verify-audit]`）—— 同时构建发布 runtime + scheduler
+  两套镜像；任一 verify 失败则不推镜像。四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit
+  不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
 
 ## 镜像 tag 规则
 

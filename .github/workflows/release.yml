@@ -26,9 +26,10 @@ env:
 
 jobs:
   # Gate: the tag must name the version the workspace, lockfile, README and
-  # binary declare, and the credential-free matrix (the `local` profile:
-  # static, workspace, sqlite, release lanes) must pass on the tagged commit.
-  # Images are only pushed after both verify jobs succeed.
+  # binary declare, and on the tagged commit (every job checks out the tag's
+  # SHA) the `local` profile (static, workspace, sqlite, release lanes), the
+  # postgres lane against a PostgreSQL service and `cargo audit` must pass.
+  # Images are only pushed after all four verify jobs succeed.
   #
   # The lanes are split like ci.yml's `test` / `test-pg` jobs and restore the
   # caches those jobs saved on main (same shared-key and env; tag runs may
@@ -68,9 +69,56 @@ jobs:
           save-if: false
       - run: cargo acceptance run --lane sqlite --lane release --expected-version "${GITHUB_REF_NAME#v}"
 
+  # Mirrors ci.yml `test-pg` (same service, DATABASE_URL and cache key), for
+  # the postgres lane only: sqlite and release already run in verify-release.
+  verify-postgres:
+    name: acceptance postgres
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-pg
+          save-if: false
+      - run: cargo acceptance run --lane postgres
+
+  # Same RustSec check as audit.yml / maintenance.yml, on the tagged graph:
+  # an advisory published since the last main run blocks the release.
+  verify-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: ./.github/actions/cargo-audit
+
   publish-image:
     name: publish runtime + scheduler images to GHCR
-    needs: [verify-test, verify-release]
+    needs: [verify-test, verify-release, verify-postgres, verify-audit]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
