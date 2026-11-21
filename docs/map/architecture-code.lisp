@@ -202,7 +202,9 @@
               远端报告仅加载一次冻结 items，同时派生 article IDs，不重复读取完整快照。
               paths.rs：publish-all 写入前按真实日期查跨分类路径碰撞；
               rule_versions.rs：publish / publish-all 共用的 render + selection_policy 规则版本登记
-              （CLI 不直写 rule_versions；rebuild-report 只读不 seed）。")
+              （CLI 不直写 rule_versions；rebuild-report 只读不 seed）；
+              report_date.rs：默认报告日期按有效 target_timezone 计算（共用时区解析器）。
+              阶段预算 / 快照归属 / 歧义写入核对见 ADR 0012。")
 
 (node :id flow-reindex
       :label "ReindexFlow"
@@ -237,6 +239,19 @@
       :downstream (rebuild-report-deps report-crate repo-publish-record repo-publish-item)
       :state active
       :notes "字节相等重建保证由 report::rebuild 实现。")
+
+(node :id flow-replay
+      :label "ReplayFlow"
+      :layer flow-coord
+      :crate runtime
+      :path "crates/runtime/src/flows/replay.rs"
+      :kind struct
+      :upstream (cli-commands)
+      :downstream (repo-replay feed-crate extractor-crate ai-crate)
+      :state active
+      :notes "只读回放 feed / html / ai artifact（2026-11-21 由 CLI 下沉，审计 A1/R3-6/R3-20）。
+              html 先 extractor::decode_html（BOM / meta）再走与线上相同的 strategy_order；
+              唯一存储依赖为只读池上的 ReplayProjectionRepository。")
 
 (node :id flow-recent-entries
       :label "RecentEntriesFlow"
@@ -438,6 +453,15 @@
       :path "crates/storage/src/repo/reindex_job.rs"
       :kind trait
       :state active)
+
+(node :id repo-replay
+      :label "ReplayProjectionRepository"
+      :layer capability
+      :crate storage
+      :path "crates/storage/src/repo/replay.rs"
+      :kind trait
+      :state active
+      :notes "replay 的只读投影：artifact 读取 + feed_entries LEFT JOIN articles（双方言）。")
 
 (node :id report-crate
       :label "report crate"
