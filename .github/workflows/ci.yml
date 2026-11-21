@@ -65,7 +65,8 @@ jobs:
       # acceptance-case status; then the locked workspace build and tests.
       - run: cargo acceptance run --lane static --lane workspace
 
-  # postgres: storage tests with --include-ignored plus CLI migrate run/check
+  # postgres: the ignored (PG / Docker) storage tests (--ignored; the normal
+  # ones run in the workspace lane) plus CLI migrate run/check
   # against the service below (the lane requires DATABASE_URL and the docker
   # CLI; storage fixtures use the runner's docker daemon). sqlite and release
   # reuse its release build: SQLite migrate run/check, recent-entries and the

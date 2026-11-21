@@ -22,6 +22,11 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
     }
 
     executor.command("postgres-docker-info", "docker", &strings(["info"]), &[], 0);
+    // Only the ignored (PostgreSQL / Docker) storage tests: the normal ones
+    // already run in the workspace lane, and none of them reads DATABASE_URL
+    // or any other variable this lane sets, so re-running them here would
+    // only repeat the same result. The PG fixtures start their own
+    // testcontainers instance.
     executor.command(
         "postgres-storage-tests",
         "cargo",
@@ -31,7 +36,7 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
             "rss-ai-news-storage",
             "--locked",
             "--",
-            "--include-ignored",
+            "--ignored",
             "--test-threads=1",
         ]),
         &[],
