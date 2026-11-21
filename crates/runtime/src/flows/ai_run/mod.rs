@@ -35,11 +35,13 @@ impl AiRunFlow {
     /// Phase 1：为 `articles.state='persisted'` 的文章创建 pending AI 任务。
     ///
     /// 一次 pass 推进至多 `task_gen_batch_size` 篇 article（新插入 + 冲突对账，
-    /// 记 `article_advanced`），由两个不相交的列表分享（C9，plan/03 §5.1）：
-    /// - fresh：publish 窗口内（若此刻 freeze 即可入选）且尚无本身份任务的文章，
-    ///   来源时间最早者优先（最先掉出窗口）；
-    /// - backlog：其余 `persisted`（窗口外，或窗口内但已有本身份任务行），按 id
-    ///   升序 + keyset 游标（C3：越过冲突后仍留在 `persisted` 的行，并对账已有任务行）。
+    /// 记 `article_advanced`），由两侧分享（C9，plan/03 §5.1）：
+    /// - fresh：publish 窗口内（若此刻 freeze 即可入选）的文章。先按 id 升序 +
+    ///   keyset 游标对账已有本身份任务行的窗口内文章（C3，每行至多推进一次，
+    ///   推进不了的行被游标越过），再为尚无任务的窗口内文章建任务，来源时间最早者
+    ///   优先（最先掉出窗口）；两者共用 fresh 名额（R3E-B1）；
+    /// - backlog：窗口外的 `persisted`，按 id 升序 + keyset 游标（C3：越过冲突后
+    ///   仍留在 `persisted` 的行，并对账已有任务行）。
     ///
     /// 先行一侧得 `ceil(n/2)`，另一侧得余下，某侧不足时名额转给另一侧（两侧都扫完
     /// 才少于 n）。n ≥ 2 时 fresh 先行；n = 1 时先行侧是该分类上一次 task_gen
@@ -74,6 +76,8 @@ impl AiRunFlow {
             page_size,
             window,
             backlog_cursor: 0,
+            reconcile_cursor: 0,
+            reconcile_exhausted: false,
             stopped: false,
         };
         let fresh_first = if page_size == 1 {
@@ -142,11 +146,60 @@ impl AiRunFlow {
         summary
     }
 
-    /// Drains one task_gen list until `quota` articles advanced, the list is
-    /// exhausted, or a storage error stops the pass.
+    /// Serves one share of the pass. The fresh share drains the in-window
+    /// reconciliation list first, then the fresh insert list, against one
+    /// quota (R3E-B1): reconciliation of an in-window article is fresh work
+    /// and never takes the backlog's slot. Reconciliation goes first because
+    /// each of its rows advances at most once (stuck rows are skipped by the
+    /// cursor), so it cannot starve fresh inserts across runs.
     async fn task_gen_side(
         &self,
         side: TaskGenSide,
+        quota: u32,
+        opts: &AiRunOptions,
+        pass: &mut TaskGenPass,
+        summary: &mut TaskGenSummary,
+    ) -> SideOutcome {
+        if side == TaskGenSide::Backlog {
+            return self
+                .task_gen_list(TaskGenList::Backlog, quota, opts, pass, summary)
+                .await;
+        }
+        let mut handled = 0;
+        if !pass.reconcile_exhausted {
+            let reconciled = self
+                .task_gen_list(TaskGenList::FreshReconcile, quota, opts, pass, summary)
+                .await;
+            handled = reconciled.handled;
+            pass.reconcile_exhausted = reconciled.exhausted;
+            if !reconciled.exhausted {
+                // Quota met or the pass stopped.
+                return SideOutcome {
+                    handled,
+                    exhausted: false,
+                };
+            }
+        }
+        let inserted = self
+            .task_gen_list(
+                TaskGenList::FreshInsert,
+                quota - handled,
+                opts,
+                pass,
+                summary,
+            )
+            .await;
+        SideOutcome {
+            handled: handled + inserted.handled,
+            exhausted: inserted.exhausted,
+        }
+    }
+
+    /// Drains one task_gen list until `quota` articles advanced, the list is
+    /// exhausted, or a storage error stops the pass.
+    async fn task_gen_list(
+        &self,
+        list: TaskGenList,
         quota: u32,
         opts: &AiRunOptions,
         pass: &mut TaskGenPass,
@@ -163,8 +216,8 @@ impl AiRunFlow {
             model_id: opts.model_id.clone(),
         };
         loop {
-            let listed = match side {
-                TaskGenSide::Fresh => {
+            let listed = match list {
+                TaskGenList::FreshInsert => {
                     self.ctx
                         .article_repo
                         .list_fresh_for_ai_task_gen(
@@ -175,7 +228,19 @@ impl AiRunFlow {
                         )
                         .await
                 }
-                TaskGenSide::Backlog => {
+                TaskGenList::FreshReconcile => {
+                    self.ctx
+                        .article_repo
+                        .list_fresh_reconcile_for_ai_task_gen(
+                            &opts.category_key,
+                            &identity,
+                            pass.window,
+                            pass.page_size,
+                            pass.reconcile_cursor,
+                        )
+                        .await
+                }
+                TaskGenList::Backlog => {
                     self.ctx
                         .article_repo
                         .list_backlog_for_ai_task_gen(
@@ -201,8 +266,10 @@ impl AiRunFlow {
             let failed_before = summary.insert_failed;
             let handled_before = outcome.handled;
             for candidate in candidates {
-                if side == TaskGenSide::Backlog {
-                    pass.backlog_cursor = candidate.article_id;
+                match list {
+                    TaskGenList::Backlog => pass.backlog_cursor = candidate.article_id,
+                    TaskGenList::FreshReconcile => pass.reconcile_cursor = candidate.article_id,
+                    TaskGenList::FreshInsert => {}
                 }
                 summary.scanned += 1;
                 let item = NewAiResult {
@@ -212,9 +279,8 @@ impl AiRunFlow {
                 let min_score = i32::from(opts.min_importance_score.get());
                 let now = (self.ctx.clock)();
                 // Batch size 1 records which side the advanced article belongs
-                // to (its own window membership: a backlog reconciliation of
-                // an in-window row counts as fresh), atomically with the
-                // advance (R2-B1).
+                // to (its own window membership), atomically with the advance
+                // (R2-B1).
                 let inserted = if pass.page_size == 1 {
                     let mark = ShareMark {
                         category_key: &opts.category_key,
@@ -283,7 +349,7 @@ impl AiRunFlow {
             }
             // The fresh list is re-read from its head: rows it returned left
             // `persisted`. A page that advanced nothing would be returned again.
-            if side == TaskGenSide::Fresh && outcome.handled == handled_before {
+            if list == TaskGenList::FreshInsert && outcome.handled == handled_before {
                 outcome.exhausted = true;
                 return outcome;
             }
@@ -495,12 +561,28 @@ enum TaskGenSide {
     Backlog,
 }
 
+/// One task_gen list (R3E-B1): the fresh share drains `FreshReconcile`
+/// then `FreshInsert`; the backlog share drains `Backlog`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskGenList {
+    /// In-window, no identity row, source time order (re-read from the head).
+    FreshInsert,
+    /// In-window with an identity row (C3 reconciliation), id order + cursor.
+    FreshReconcile,
+    /// Outside the window, id order + cursor.
+    Backlog,
+}
+
 /// State shared by the sides of one task_gen pass.
 struct TaskGenPass {
     page_size: u32,
     window: FreshWindow,
     /// C3 keyset cursor of the backlog (id-ordered) list.
     backlog_cursor: i64,
+    /// C3 keyset cursor of the in-window reconciliation list.
+    reconcile_cursor: i64,
+    /// The in-window reconciliation list was scanned to its end.
+    reconcile_exhausted: bool,
     /// A storage error ended the pass.
     stopped: bool,
 }

@@ -61,6 +61,9 @@ AI-off 直通模式跳过整段。
 | `batch_size_one_task_gen_alternation_survives_a_moving_window` | `crates/runtime/tests/ai_run_tests.rs` | R2-B1 task_gen 窗口移动后仍交替 |
 | `batch_size_one_claim_alternation_survives_a_moving_window` | 同上 | R2-B1 claim 窗口移动后仍交替 |
 | `batch_size_two_task_gen_backlog_slot_is_not_taken_by_fresh_articles` | 同上 | R2-B1 task_gen 两侧不相交 |
+| `batch_size_two_in_window_reconciliation_does_not_take_the_backlog_slot` | 同上 | R3E-B1 窗口内对账计入 fresh 名额 |
+| `batch_size_one_in_window_reconciliation_is_a_fresh_turn` | 同上 | R3E-B1 batch=1 backlog 轮次给窗口外文章、记录侧正确 |
+| `task_gen_lists_partition_persisted_by_window_and_identity` | `crates/storage/tests/ai_fresh_order_tests.rs` | R3E-B1 三个 task_gen 列表划分 `persisted`（SQLite） |
 | `batch_size_two_claim_backlog_slot_is_not_taken_by_fresh_tasks` | 同上 | R2-B1 claim 两侧不相交 |
 | `batch_size_one_claim_retries_count_as_served_turns` | 同上 | R2-B1 重试也算一轮 |
 | `future_dated_articles_are_not_fresh_for_task_gen` | `crates/runtime/tests/ai_run_tests.rs` | R2-S1 窗口上界 = now（task_gen） |

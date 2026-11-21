@@ -114,11 +114,23 @@ pub trait ArticleRepository: Send + Sync {
 
     async fn find_by_id(&self, id: i64) -> Result<Option<Article>, StorageError>;
 
-    /// C9 task_gen backlog share（R2-B1）：按 id 升序 + keyset 游标扫描
-    /// `state='persisted'` 中**不属于** fresh 列表的 article——窗口外，或窗口内但
-    /// 已有本身份任务行（C3 冲突对账通道）。与 [`Self::list_fresh_for_ai_task_gen`]
-    /// 不相交、并集为全部 `persisted`，故 backlog 名额不会被尚无任务的窗口内文章占用。
+    /// C9 task_gen backlog share（R2-B1, R3E-B1）：按 id 升序 + keyset 游标扫描
+    /// publish 窗口**外**的 `state='persisted'` article（新插入或 C3 冲突对账）。
+    /// 与 [`Self::list_fresh_for_ai_task_gen`]、
+    /// [`Self::list_fresh_reconcile_for_ai_task_gen`] 两两不相交、并集为全部
+    /// `persisted`，故 backlog 名额只给窗口外的文章。
     async fn list_backlog_for_ai_task_gen(
+        &self,
+        category_key: &str,
+        identity: &crate::NewAiResult,
+        window: crate::FreshWindow,
+        batch_size: u32,
+        after_id: i64,
+    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
+    /// C9 task_gen fresh share 的 C3 对账通道（R3E-B1）：窗口**内**、已有本身份
+    /// 任务行、仍为 `persisted` 的 article，按 id 升序 + keyset 游标（推进不了的
+    /// 行如 `permanent_failed` 被游标越过）。计入 fresh 名额，不占 backlog 名额。
+    async fn list_fresh_reconcile_for_ai_task_gen(
         &self,
         category_key: &str,
         identity: &crate::NewAiResult,
@@ -132,7 +144,7 @@ pub trait ArticleRepository: Send + Sync {
     /// time first (they leave the window first), ties by id. The anti-join
     /// keeps rows whose task already exists (and may stay `persisted`, e.g.
     /// `permanent_failed`) out of this list; the id-ordered list
-    /// ([`Self::list_backlog_for_ai_task_gen`]) still reconciles them.
+    /// ([`Self::list_fresh_reconcile_for_ai_task_gen`]) reconciles them.
     async fn list_fresh_for_ai_task_gen(
         &self,
         category_key: &str,
@@ -217,6 +229,57 @@ const SELECT_ARTICLE_ID_BY_CONTENT_HASH_SQL: &str =
 /// two are enough to report ambiguity).
 const SELECT_ARTICLES_OWNED_BY_ENTRY_SQL: &str = "SELECT id, extractor_strategy FROM articles WHERE origin_feed_entry_id = $1 ORDER BY id LIMIT 2";
 
+impl ArticleRepo {
+    /// One of the two id-ordered task_gen lists (R3E-B1): `in_window = false`
+    /// is the backlog (outside the window), `true` the fresh share's C3
+    /// reconciliation list (inside it, identity row present).
+    async fn list_id_ordered_for_ai_task_gen(
+        &self,
+        category_key: &str,
+        identity: &crate::NewAiResult,
+        window: crate::FreshWindow,
+        batch_size: u32,
+        after_id: i64,
+        in_window: bool,
+    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                let (since, until) = super::sqlite_window_bounds(window);
+                sqlx::query_as::<_, ArticleAiTaskCandidate>(
+                    LIST_ID_ORDERED_FOR_AI_TASK_GEN_SQLITE_SQL,
+                )
+                .bind(after_id)
+                .bind(category_key)
+                .bind(since)
+                .bind(identity.prompt_version)
+                .bind(identity.output_schema_version)
+                .bind(&identity.model_id)
+                .bind(i64::from(batch_size))
+                .bind(until)
+                .bind(in_window)
+                .fetch_all(p)
+                .await
+                .map_err(StorageError::from)
+            }
+            StoragePool::Postgres(p) => {
+                sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_ID_ORDERED_FOR_AI_TASK_GEN_PG_SQL)
+                    .bind(after_id)
+                    .bind(category_key)
+                    .bind(window.since)
+                    .bind(identity.prompt_version)
+                    .bind(identity.output_schema_version)
+                    .bind(&identity.model_id)
+                    .bind(i64::from(batch_size))
+                    .bind(window.until)
+                    .bind(in_window)
+                    .fetch_all(p)
+                    .await
+                    .map_err(StorageError::from)
+            }
+        }
+    }
+}
+
 fn ambiguous_entry_ownership(entry_id: i64) -> StorageError {
     StorageError::Integrity {
         table: "articles".to_string(),
@@ -236,12 +299,15 @@ FROM articles
 WHERE id = $1
 "#;
 
-/// C9 backlog task_gen list, SQLite (R2-B1): the complement of
-/// [`LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL`] within `persisted` — outside the
-/// window, or inside it with an identity row already (reconciled here).
-/// Window membership as in the fresh list (`$3` / `$8` the SQLite window
-/// bounds).
-const LIST_BACKLOG_FOR_AI_TASK_GEN_SQLITE_SQL: &str = r#"
+/// C9 id-ordered task_gen lists, SQLite (R2-B1, R3E-B1): `persisted`
+/// articles of the category after the keyset cursor `$1`, in one of two
+/// regions chosen by `$9`: false = outside the window (the backlog list,
+/// insert or reconcile), true = inside it with an identity row already (the
+/// fresh share's C3 reconciliation list). With
+/// [`LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL`] the three lists partition
+/// `persisted`. Window membership as in the fresh list (`$3` / `$8` the
+/// SQLite window bounds).
+const LIST_ID_ORDERED_FOR_AI_TASK_GEN_SQLITE_SQL: &str = r#"
 SELECT article_id, in_window
 FROM (
     SELECT a.id AS article_id,
@@ -261,12 +327,12 @@ FROM (
       AND a.id > $1
       AND fs.category_key = $2
 ) candidates
-WHERE NOT in_window OR has_identity
+WHERE in_window = $9 AND (has_identity OR NOT $9)
 ORDER BY article_id ASC
 LIMIT $7
 "#;
 
-const LIST_BACKLOG_FOR_AI_TASK_GEN_PG_SQL: &str = r#"
+const LIST_ID_ORDERED_FOR_AI_TASK_GEN_PG_SQL: &str = r#"
 SELECT article_id, in_window
 FROM (
     SELECT a.id AS article_id,
@@ -284,7 +350,7 @@ FROM (
       AND a.id > $1
       AND fs.category_key = $2
 ) candidates
-WHERE NOT in_window OR has_identity
+WHERE in_window = $9 AND (has_identity OR NOT $9)
 ORDER BY article_id ASC
 LIMIT $7
 "#;
@@ -429,37 +495,34 @@ impl ArticleRepository for ArticleRepo {
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
-        match &self.pool {
-            StoragePool::Sqlite(p) => {
-                let (since, until) = super::sqlite_window_bounds(window);
-                sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_BACKLOG_FOR_AI_TASK_GEN_SQLITE_SQL)
-                    .bind(after_id)
-                    .bind(category_key)
-                    .bind(since)
-                    .bind(identity.prompt_version)
-                    .bind(identity.output_schema_version)
-                    .bind(&identity.model_id)
-                    .bind(i64::from(batch_size))
-                    .bind(until)
-                    .fetch_all(p)
-                    .await
-                    .map_err(StorageError::from)
-            }
-            StoragePool::Postgres(p) => {
-                sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_BACKLOG_FOR_AI_TASK_GEN_PG_SQL)
-                    .bind(after_id)
-                    .bind(category_key)
-                    .bind(window.since)
-                    .bind(identity.prompt_version)
-                    .bind(identity.output_schema_version)
-                    .bind(&identity.model_id)
-                    .bind(i64::from(batch_size))
-                    .bind(window.until)
-                    .fetch_all(p)
-                    .await
-                    .map_err(StorageError::from)
-            }
-        }
+        self.list_id_ordered_for_ai_task_gen(
+            category_key,
+            identity,
+            window,
+            batch_size,
+            after_id,
+            false,
+        )
+        .await
+    }
+
+    async fn list_fresh_reconcile_for_ai_task_gen(
+        &self,
+        category_key: &str,
+        identity: &crate::NewAiResult,
+        window: crate::FreshWindow,
+        batch_size: u32,
+        after_id: i64,
+    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
+        self.list_id_ordered_for_ai_task_gen(
+            category_key,
+            identity,
+            window,
+            batch_size,
+            after_id,
+            true,
+        )
+        .await
     }
 
     async fn list_fresh_for_ai_task_gen(

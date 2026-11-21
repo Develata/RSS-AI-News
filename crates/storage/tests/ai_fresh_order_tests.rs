@@ -207,3 +207,55 @@ async fn a_sub_millisecond_instant_before_the_window_start_is_not_fresh() {
     assert_eq!(ids, [inside]);
     assert!(!ids.contains(&before));
 }
+/// R3E-B1: the three task_gen lists partition `persisted` on SQLite — fresh
+/// insert (in-window, no identity row), fresh reconciliation (in-window,
+/// identity row, id order + cursor) and backlog (out-of-window only).
+#[tokio::test]
+async fn task_gen_lists_partition_persisted_by_window_and_identity() {
+    let (_dir, f) = Fixture::new().await;
+    let now = now();
+    let pending = f
+        .article("p-pending", &rfc3339(now - Duration::hours(2)))
+        .await;
+    let fresh = f
+        .article("p-fresh", &rfc3339(now - Duration::hours(1)))
+        .await;
+    let old = f.article("p-old", &rfc3339(now - Duration::days(10))).await;
+    let old_with_task = f
+        .article("p-old-task", &rfc3339(now - Duration::days(9)))
+        .await;
+    let failed = f
+        .article("p-failed", &rfc3339(now - Duration::hours(3)))
+        .await;
+    for id in [pending, old_with_task, failed] {
+        f.task(id).await;
+    }
+    let repo = ArticleRepo::new(f.pool.clone());
+    let ids = |rows: Vec<rss_ai_news_storage::ArticleAiTaskCandidate>| {
+        rows.iter()
+            .map(|c| (c.article_id, c.in_window))
+            .collect::<Vec<_>>()
+    };
+
+    let inserts = repo
+        .list_fresh_for_ai_task_gen("ai", &f.identity(), window(now), 10)
+        .await
+        .unwrap();
+    let reconcile = repo
+        .list_fresh_reconcile_for_ai_task_gen("ai", &f.identity(), window(now), 10, 0)
+        .await
+        .unwrap();
+    let after_cursor = repo
+        .list_fresh_reconcile_for_ai_task_gen("ai", &f.identity(), window(now), 10, pending)
+        .await
+        .unwrap();
+    let backlog = repo
+        .list_backlog_for_ai_task_gen("ai", &f.identity(), window(now), 10, 0)
+        .await
+        .unwrap();
+
+    assert_eq!(ids(inserts), [(fresh, true)]);
+    assert_eq!(ids(reconcile), [(pending, true), (failed, true)]);
+    assert_eq!(ids(after_cursor), [(failed, true)]);
+    assert_eq!(ids(backlog), [(old, false), (old_with_task, false)]);
+}
