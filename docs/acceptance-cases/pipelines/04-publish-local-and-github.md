@@ -20,7 +20,8 @@
 - **render**：snapshot_frozen → rendered；空 items 失败
 - **store-local**：写本地文件 + 推进 article 到 `Published`（无远端目标时）/ 保持文章不动（有远端目标待 push）；
   - 分类 `path_template` override 生效
-- **publish-remote**：批量提交一个 commit 覆盖多 publish_records；422 lost-update 自动重试一次；429 保持状态可重试
+- **publish-remote**：批量提交一个 commit 覆盖多 publish_records；422 lost-update 自动重试一次；429 见失败条件（写入等待时保持状态、不计预算）；
+  每个 GitHub 请求只发一次，客户端不透明重发（R3F-B1）
 - **本地原子写**：临时文件 fsync 后 rename 覆盖；越出输出根的符号链接（父目录或目标）被拒绝
 - **跨分类路径碰撞（运行时）**：`publish-all` 在首次写入前按本次报告日期渲染全部分类真实路径并查重；碰撞 → 报错退出，不打开存储（不建库、不迁移、不轮换 config）、不建 record、不登记规则版本、不落盘。
   比较忽略大小写与 Unicode 规范化差异（`ſ`/`s`、组合/分解 `é`，R3F-B3），且一个路径是另一路径的整段父目录也算碰撞（validate 同规则）
@@ -44,14 +45,19 @@
 - 远端 401，或无限流信号的 403 → `GithubAuthFailed`（终态，不重试）
 - 单报告 Contents API：路径按段百分号编码、`ref` 编码为查询参数（中文 / 空格 / 保留字符路径可发布）；任何 GitHub 失败的消息含操作、状态、message 的固定词表摘要与 `x-github-request-id`（整值符合 GitHub 形状且不含 token 时）；服务端回显的自由文本不落库、不进事件
 - 远端 403 且 `x-ratelimit-remaining: 0` / 带 `retry-after` / message 提到 rate limit → `GithubRateLimit`（可重试）
-- 远端 429 → `GithubRateLimit`，state 保持、article 不晋升；GitHub 要求的重试时刻（钳制 1 h）写入 `next_attempt_at`，到点前的运行 `NothingToClaim`
+- 远端 429（及带限流信号的 403）→ `GithubRateLimit`，article 不晋升；GitHub 要求的重试时刻（适用期限中最晚者，钳制 1 h）在未来时
+  写入 `next_attempt_at`，到点前的运行 `NothingToClaim`，且该次尝试**不计预算**（退还 claim、state 保持 `stored_local`，最后一次预算
+  也不转 `failed`）；reset 已过去（不写等待）时按普通 retryable 计本阶段预算，**预算耗尽 → `failed`**（R3F-S12 / R3F-S16）
 - 远端 422 non-fast-forward：同一次尝试内重试一次；第二次 422 为永久错误 → record `failed`（`github_api_error`），文章不晋升
-- 远端 5xx / 传输失败 / 远端超时 / 409 → retryable：保持 `StoredLocal`、计本阶段预算（耗尽 → `failed`）
+- 远端 5xx / 传输失败 / 远端超时 / 409 → retryable：保持 `StoredLocal`、计本阶段预算（耗尽 → `failed`）；
+  写请求之后的 5xx / 传输失败 / 超时先走下面的歧义写入核对，只有"确认未落地"才按此计预算
 - 多报告批次重试：HEAD 已逐字节包含整批内容（上次 ref 更新落地、响应丢失）→ 不新建 commit，回执指向该 HEAD
 - 单报告重试：分支上既有 blob 与本地内容一致且在固定 HEAD commit 复核一致 → 不发 PUT，回执指向该 HEAD
-- 歧义写入（PATCH ref / PUT contents 后传输失败、5xx，或远端 deadline 切断）：释放前只读核对 HEAD，已含全部内容 → 记成功；
-  确认未含 → 按原错误释放；核对本身失败 / 被限流 / 超时 → `remote_write_unverified`：保持 `stored_local`、退还 claim、
-  文章不释放（最后一次预算也不 `failed`），核对的限流期限写入 `next_attempt_at`（R3F-B2）
+- 歧义写入（PATCH ref / PUT contents 后传输失败、5xx，或远端 deadline 切断）：释放前只读核对 HEAD，结果三分（R3F-S16）：
+  - **核对成功且 HEAD 已含全部内容** → 记成功回执（`published_remote`）；只有这一种情况下"已落地的写入"在最后一次预算里也会成功；
+  - **核对成功但 HEAD 不含** → 按原写入错误释放（计预算，最后一次预算 → `failed`）；
+  - **核对未完成**（核对请求失败 / 被限流 / 超时）→ `remote_write_unverified`：保持 `stored_local`、退还 claim、文章归属保留
+    （最后一次预算也不 `failed`），核对的限流期限写入 `next_attempt_at`；下一次尝试的写前 HEAD 比对幂等（R3F-B2）
 - promote target article 已被其它流转推进 → `ArticleConflict`
 - 存量重复归属（0008 前两份未失败快照共享文章）：store_local / remote 写前拦截，已发布者或低 id 者胜出；败方不写外部产物、
   释放 lease、退还 claim、保持阶段态 → `ArticleConflict`（`article_owned_by_active_snapshot`）
