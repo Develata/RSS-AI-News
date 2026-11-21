@@ -37,6 +37,7 @@
   下一次运行可继续推进。不可重试的存储错误 → `failed`
 - store-local 目录不可写 → record → `Failed`，errors 表登记；命令 summary 该阶段 `verdict=failed`、`status=fail`、exit 1
 - 远端 401，或无限流信号的 403 → `GithubAuthFailed`（终态，不重试）
+- 单报告 Contents API：路径按段百分号编码、`ref` 编码为查询参数（中文 / 空格 / 保留字符路径可发布）；任何 GitHub 失败的消息含操作、状态、脱敏 message 与 `x-github-request-id`
 - 远端 403 且 `x-ratelimit-remaining: 0` / 带 `retry-after` / message 提到 rate limit → `GithubRateLimit`（可重试）
 - 远端 429 → `GithubRateLimit`，state 保持、article 不晋升
 - 远端 422 重试达上限 → 仍报错，record 保持 `StoredLocal`
@@ -82,6 +83,14 @@
 | `publish_many_retries_once_after_non_fast_forward_then_succeeds` | 同上 | 422 重试 |
 | `publish_many_surfaces_422_after_max_retries` | 同上 | 422 超限 |
 | `auth_failure_maps_to_github_auth_failed` | 同上 | 401 映射 |
+| `chinese_path_leaves_the_client_percent_encoded_on_get_and_put` | `crates/publish/tests/github_contents_path_tests.rs` | 中文路径请求行按段编码（原始字节） |
+| `create_chinese_path_sends_encoded_get_then_put_without_sha` | 同上 | 新建：GET 404 → PUT 无 sha；ref 编码 |
+| `update_chinese_path_sends_encoded_get_then_put_with_existing_sha` | 同上 | 更新：GET 200 → PUT 带 sha |
+| `space_and_reserved_characters_are_encoded_exactly_once_per_segment` | 同上 | 空格 / `%#?` 只编码一次 |
+| `ascii_path_request_target_is_unchanged` | 同上 | ASCII 路径回归 |
+| `contents_get_failure_keeps_operation_status_message_and_request_id` | 同上 | 失败保留操作、状态、脱敏消息、request id |
+| `contents_put_failure_keeps_operation_and_request_id` | 同上 | PUT 失败上下文 |
+| `contents_rate_limited_403_is_still_retryable_with_request_context` | 同上 | 403 限流分类不变 |
 | `rate_limit_maps_to_github_rate_limit` | 同上 | 429 映射 |
 | `forbidden_with_exhausted_quota_maps_to_retryable_rate_limit` | 同上 | 403 + remaining=0 → 限流 |
 | `forbidden_with_retry_after_maps_to_retryable_rate_limit` | 同上 | 403 + retry-after → 限流 |

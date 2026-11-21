@@ -320,7 +320,7 @@ async fn auth_failure_maps_to_github_auth_failed() {
 
     assert!(matches!(
         error,
-        PublishError::GitHubAuthFailed(reason) if reason == "Bad credentials"
+        PublishError::GitHubAuthFailed(reason) if reason == "GET contents: Bad credentials"
     ));
 }
 
@@ -420,7 +420,7 @@ async fn forbidden_without_rate_limit_signals_maps_to_auth_failed() {
 
     assert!(matches!(
         &error,
-        PublishError::GitHubAuthFailed(reason) if reason == "Resource not accessible by integration"
+        PublishError::GitHubAuthFailed(reason) if reason == "GET contents: Resource not accessible by integration"
     ));
     assert!(!error.is_retryable());
 }

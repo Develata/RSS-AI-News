@@ -194,6 +194,18 @@ validate 只用一个样例日期（`2026-01-03`，ADR 0008）渲染，无法发
 
 这是一次提交多个文件的 atomic 操作。优于"循环 PUT contents API"。
 
+单报告（`publish` 单分类，或 `publish_many` 只有一份报告时）走 Contents API：
+`GET /repos/{owner}/{repo}/contents/{path}?ref={branch}` 取既有 sha，再 `PUT /repos/{owner}/{repo}/contents/{path}`
+（更新时带 sha）。`{path}` 按 `/` 分段、每段以 UTF-8 做一次 RFC 3986 百分号编码（仅 unreserved
+`A-Z a-z 0-9 - . _ ~` 保留字面），分隔符 `/` 保留；`ref` 作为编码后的查询参数（`release/2026` → `release%2F2026`）。
+记录与产物里的路径（`remote_target`、Git tree JSON 的 `path`、输出文件名）仍是逻辑路径，不编码。
+来由：2026-11-21 中文路径 `科技新闻/…` 的单报告发布以 HTTP 400 失败（请求行含字面 UTF-8）。
+
+GitHub 调用失败时，`PublishError::GitHubApiError` / `GitHubAuthFailed` 的消息带上失败的操作
+（`GET contents` / `PUT contents` / `GET ref` / `GET commit` / `POST tree` / `POST commit` / `PATCH ref`）、
+HTTP 状态、已脱敏的 GitHub message 与 `x-github-request-id`（若有），并进入 `last_error` 与
+`publish_failed` 事件；不含凭据与报告正文。分类（auth / rate limit / 422 fast-forward）在附加上下文前完成，不受影响。
+
 ### 4.2.1 Atomic batch publish
 
 v0.3 引入：`publish_many(reports: &[RenderedReport])` 在一次 commit 内推送多个 report。

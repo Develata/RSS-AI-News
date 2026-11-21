@@ -9,7 +9,9 @@ pub enum PublishError {
     InvalidPath(String),
     #[error("github auth failed: {0}")]
     GitHubAuthFailed(String),
-    #[error("github api error: status {status}")]
+    /// `message` is sanitized (token scrubbed, unknown JSON omitted, bounded)
+    /// and carries the failed operation and GitHub request id when known.
+    #[error("github api error: status {status}: {message}")]
     GitHubApiError { status: u16, message: String },
     #[error("remote response body exceeds {limit} bytes")]
     ResponseTooLarge { limit: usize },
