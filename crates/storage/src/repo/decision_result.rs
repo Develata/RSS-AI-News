@@ -241,9 +241,18 @@ pub trait DecisionResultRepository: Send + Sync {
     async fn purge_expired_raw(&self, now: OffsetDateTime, limit: u32)
     -> Result<u64, StorageError>;
 
-    /// Title and body of an article, under the same bounded transaction as
-    /// the task statements. `None` when the row does not exist.
-    async fn load_article(&self, article_id: i64) -> Result<Option<DecisionArticle>, StorageError>;
+    /// Title and the first `max_body_chars` characters of the body (a
+    /// character-boundary prefix), under the same bounded transaction as the
+    /// task statements. `None` when the row does not exist.
+    async fn load_article(
+        &self,
+        article_id: i64,
+        max_body_chars: u32,
+    ) -> Result<Option<DecisionArticle>, StorageError>;
+
+    /// Whether an expired raw response is still stored (one-row probe, same
+    /// predicate as [`Self::purge_expired_raw`]).
+    async fn expired_raw_remains(&self, now: OffsetDateTime) -> Result<bool, StorageError>;
 
     /// `pending` rows of the category that belong to another identity.
     async fn count_other_identity_pending(

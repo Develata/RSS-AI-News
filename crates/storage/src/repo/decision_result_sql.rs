@@ -297,8 +297,31 @@ WHERE id IN (
 )
 "#;
 
+/// Only the first `$2` characters of the body: SQLite `substr` on TEXT and
+/// PostgreSQL `substr` both count characters, so the prefix ends on a
+/// character boundary.
 pub(super) const LOAD_ARTICLE_TEXT_SQL: &str = r#"
-SELECT title, body_text FROM articles WHERE id = $1
+SELECT title, substr(body_text, 1, $2) AS body_text FROM articles WHERE id = $1
+"#;
+
+/// Whether any stored raw response has expired (one-row probe).
+pub(super) const EXPIRED_RAW_EXISTS_SQLITE_SQL: &str = r#"
+SELECT EXISTS (
+    SELECT 1 FROM decision_results
+    WHERE raw_response IS NOT NULL
+      AND raw_response_expires_at IS NOT NULL
+      AND COALESCE(julianday(raw_response_expires_at) < julianday($1),
+                   raw_response_expires_at < $1)
+)
+"#;
+
+pub(super) const EXPIRED_RAW_EXISTS_PG_SQL: &str = r#"
+SELECT EXISTS (
+    SELECT 1 FROM decision_results
+    WHERE raw_response IS NOT NULL
+      AND raw_response_expires_at IS NOT NULL
+      AND raw_response_expires_at < $1
+)
 "#;
 
 /// The statement `repo::run_event` uses, repeated here so decision-run's

@@ -406,6 +406,52 @@ async fn state_body_is_cut_to_max_state_chars_on_a_char_boundary() {
     assert!(SystemOneClient::new(settings, SecretString::from(KEY)).is_err());
 }
 
+/// C8: decision-run reads only `max_state_chars + 1` characters of a body.
+/// That prefix must yield exactly the state (hash, length, truncation flag)
+/// the full body yields, CJK at the boundary included.
+#[tokio::test]
+async fn a_one_char_longer_prefix_sends_the_same_state_as_the_full_body() {
+    let server = serve(ResponseTemplate::new(200).set_body_json(laya_ok())).await;
+    let settings = ClientSettings {
+        provider: Provider::Laya,
+        base_url: Url::parse(&server.uri()).unwrap(),
+        model: "multilingual".to_string(),
+        request_timeout: Duration::from_secs(10),
+        max_state_chars: 3,
+        laya_max_len: 2048,
+        use_env_proxy: false,
+    };
+    let client = SystemOneClient::new(settings, SecretString::from(KEY)).unwrap();
+    let qs = questions();
+    let sent = |body: &'static str| {
+        let client = &client;
+        let qs = &qs;
+        async move {
+            client
+                .decide(
+                    &DecisionRequest {
+                        title: "t",
+                        body,
+                        questions: qs,
+                    },
+                    deadline(),
+                )
+                .await
+                .sent
+                .unwrap()
+        }
+    };
+    // Longer than the limit: the 4-char prefix behaves like the full body.
+    let full = sent("中文正文内容").await;
+    assert_eq!(sent("中文正文").await, full);
+    assert!(full.body_truncated);
+    assert_eq!(full.body_chars, 3);
+    // Exactly at the limit: the prefix is the whole body, not truncated.
+    let exact = sent("中文正").await;
+    assert!(!exact.body_truncated);
+    assert_eq!(exact.body_chars, 3);
+}
+
 fn assert_invalid(
     result: Result<rss_ai_news_decision::DecisionResponse, DecisionError>,
     reason: &str,
@@ -636,6 +682,35 @@ async fn wire_numbers_outside_the_contract_are_rejected() {
     })
     .await
     .unwrap();
+}
+
+/// C8: token counts are bounded at decode, so run summaries and the `i64`
+/// columns cannot overflow on a broken provider response.
+#[tokio::test]
+async fn implausible_token_counts_are_rejected_at_decode() {
+    let huge = u64::MAX;
+    assert_invalid(
+        laya_with(|b| b["usage"]["input_tokens"] = json!(huge)).await,
+        "usage.input_tokens is out of range",
+    );
+    assert_invalid(
+        laya_with(|b| b["usage"]["state_tokens_dropped"] = json!(huge)).await,
+        "usage.state_tokens_dropped is out of range",
+    );
+    let mut body = jev_ok();
+    body["usage"]["input_tokens"] = json!(huge);
+    let jev = ask(
+        Provider::Jev,
+        "jev-1.13.0",
+        ResponseTemplate::new(200).set_body_json(body),
+    )
+    .await
+    .1;
+    assert_invalid(jev, "usage.input_tokens is out of range");
+    // The bound itself is accepted.
+    laya_with(|b| b["usage"]["input_tokens"] = json!(1_u64 << 32))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

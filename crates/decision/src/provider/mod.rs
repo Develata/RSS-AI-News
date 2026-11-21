@@ -102,16 +102,34 @@ pub(crate) fn encode(
     }
 }
 
+/// Largest token count a response may report. `max_state_chars` is at most
+/// 200 000 characters, so any real count is far below this; a larger one is a
+/// broken or hostile response, and bounding it here keeps every sum and
+/// `i64` column downstream exact.
+pub(crate) const MAX_REPORTED_TOKENS: u64 = 1 << 32;
+
 pub(crate) fn decode(
     provider: Provider,
     params: &WireParams<'_>,
     questions: &[QuestionSpec],
     wire: WireResponse,
 ) -> Result<DecisionResponse, String> {
-    match provider {
+    let response = match provider {
         Provider::Jev => jev::decode(params, questions, wire),
         Provider::Laya => laya::decode(params, questions, wire),
+    }?;
+    if response.usage.input_tokens > MAX_REPORTED_TOKENS {
+        return Err("usage.input_tokens is out of range".to_string());
     }
+    if let crate::StateTruncation::Laya {
+        state_tokens_dropped,
+        ..
+    } = response.usage.state
+        && state_tokens_dropped > MAX_REPORTED_TOKENS
+    {
+        return Err("usage.state_tokens_dropped is out of range".to_string());
+    }
+    Ok(response)
 }
 
 /// `{"type":…, "instructions":…, "criteria"?:…}` with the provider's choice

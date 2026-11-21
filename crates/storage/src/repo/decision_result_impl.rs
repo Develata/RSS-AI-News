@@ -15,12 +15,13 @@ use super::decision_result::{
     DecisionResultRepository, DecisionResultState, DecisionSuccess, GeneratedPage,
 };
 use super::decision_result_sql::{
-    CLAIM_PG_SQL, CLAIM_SQLITE_SQL, COUNT_OTHER_IDENTITY_PENDING_SQL, GENERATE_PAGE_END_PG_SQL,
-    GENERATE_PAGE_END_SQLITE_SQL, GENERATE_PENDING_PG_SQL, GENERATE_PENDING_SQLITE_SQL,
-    INSERT_RUN_EVENT_SQL, LOAD_ARTICLE_TEXT_SQL, LOCK_DECISION_RESULTS_SQLITE_SQL,
-    PURGE_EXPIRED_RAW_PG_SQL, PURGE_EXPIRED_RAW_SQLITE_SQL, RECLAIM_EXPIRED_SQL,
-    RECLAIM_EXPIRED_SQLITE_SQL, RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL,
-    TERMINALIZE_EXHAUSTED_SQL, TERMINALIZE_EXHAUSTED_SQLITE_SQL, UPSERT_POLICY_SQL,
+    CLAIM_PG_SQL, CLAIM_SQLITE_SQL, COUNT_OTHER_IDENTITY_PENDING_SQL, EXPIRED_RAW_EXISTS_PG_SQL,
+    EXPIRED_RAW_EXISTS_SQLITE_SQL, GENERATE_PAGE_END_PG_SQL, GENERATE_PAGE_END_SQLITE_SQL,
+    GENERATE_PENDING_PG_SQL, GENERATE_PENDING_SQLITE_SQL, INSERT_RUN_EVENT_SQL,
+    LOAD_ARTICLE_TEXT_SQL, LOCK_DECISION_RESULTS_SQLITE_SQL, PURGE_EXPIRED_RAW_PG_SQL,
+    PURGE_EXPIRED_RAW_SQLITE_SQL, RECLAIM_EXPIRED_SQL, RECLAIM_EXPIRED_SQLITE_SQL,
+    RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL, TERMINALIZE_EXHAUSTED_SQL,
+    TERMINALIZE_EXHAUSTED_SQLITE_SQL, UPSERT_POLICY_SQL,
 };
 use super::{sqlite_instant_cutoff, sqlite_stored_deadline};
 
@@ -513,10 +514,17 @@ impl DecisionResultRepository for DecisionResultRepo {
         }
     }
 
-    async fn load_article(&self, article_id: i64) -> Result<Option<DecisionArticle>, StorageError> {
+    async fn load_article(
+        &self,
+        article_id: i64,
+        max_body_chars: u32,
+    ) -> Result<Option<DecisionArticle>, StorageError> {
         macro_rules! query {
             () => {
-                sqlx::query_as::<_, DecisionArticle>(LOAD_ARTICLE_TEXT_SQL).bind(article_id)
+                sqlx::query_as::<_, DecisionArticle>(LOAD_ARTICLE_TEXT_SQL)
+                    .bind(article_id)
+                    // INTEGER: PostgreSQL has no `substr(text, int, bigint)`.
+                    .bind(i32::try_from(max_body_chars).unwrap_or(i32::MAX))
             };
         }
         match &self.pool {
@@ -528,6 +536,28 @@ impl DecisionResultRepository for DecisionResultRepo {
                 let article = query!().fetch_optional(&mut *tx).await.map_err(bounded)?;
                 tx.commit().await.map_err(bounded)?;
                 Ok(article)
+            }
+        }
+    }
+
+    async fn expired_raw_remains(&self, now: OffsetDateTime) -> Result<bool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(pool) => {
+                sqlx::query_scalar::<_, bool>(EXPIRED_RAW_EXISTS_SQLITE_SQL)
+                    .bind(sqlite_instant_cutoff(now))
+                    .fetch_one(pool)
+                    .await
+                    .map_err(bounded)
+            }
+            StoragePool::Postgres(pool) => {
+                let mut tx = pg_begin_bounded(pool).await?;
+                let remains = sqlx::query_scalar::<_, bool>(EXPIRED_RAW_EXISTS_PG_SQL)
+                    .bind(now)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(bounded)?;
+                tx.commit().await.map_err(bounded)?;
+                Ok(remains)
             }
         }
     }

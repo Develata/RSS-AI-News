@@ -458,8 +458,12 @@ async fn expired_raw_bodies_are_cleared_across_identities_once_and_in_bounded_ba
         .execute(&pool)
         .await
         .unwrap();
+    assert!(repo.expired_raw_remains(now).await.unwrap());
     assert_eq!(repo.purge_expired_raw(now, 4).await.unwrap(), 4);
+    assert!(repo.expired_raw_remains(now).await.unwrap());
     assert_eq!(repo.purge_expired_raw(now, 4).await.unwrap(), 2);
+    // C8: the backlog probe sees nothing once the last row is cleared.
+    assert!(!repo.expired_raw_remains(now).await.unwrap());
     assert_eq!(repo.purge_expired_raw(now, 4).await.unwrap(), 0);
     let left: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM decision_results WHERE raw_response IS NOT NULL OR raw_response_expires_at IS NOT NULL",
@@ -517,13 +521,35 @@ async fn constraints_reject_invalid_rows() {
 async fn the_repo_reads_article_text_and_writes_run_events() {
     let (pool, repo, ids) = setup(1).await;
     assert_eq!(
-        repo.load_article(ids[0]).await.unwrap(),
+        repo.load_article(ids[0], 6001).await.unwrap(),
         Some(DecisionArticle {
             title: "title".to_string(),
             body_text: "body".to_string(),
         })
     );
-    assert_eq!(repo.load_article(ids[0] + 1000).await.unwrap(), None);
+    assert_eq!(repo.load_article(ids[0] + 1000, 6001).await.unwrap(), None);
+    // C8: only a character-boundary prefix of the body is read (CJK).
+    sqlx::query("UPDATE articles SET body_text = '中文正文内容' WHERE id = ?")
+        .bind(ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.load_article(ids[0], 3)
+            .await
+            .unwrap()
+            .unwrap()
+            .body_text,
+        "中文正"
+    );
+    assert_eq!(
+        repo.load_article(ids[0], 100)
+            .await
+            .unwrap()
+            .unwrap()
+            .body_text,
+        "中文正文内容"
+    );
     let id = repo
         .insert(&NewRunEvent {
             run_id: "run-1".to_string(),

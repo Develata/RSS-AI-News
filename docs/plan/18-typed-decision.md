@@ -194,8 +194,8 @@
 
 ### 8.4 运行
 
-- 顺序：留档清理（跨身份，每次运行上限 `max(1000, 2 × 预算)` 行，达到上限时摘要标记 `raw_gc_backlog`，
-  表示可能仍有过期留档）→ 策略快照 → 每个身份的 reclaim 与预算终态化 → 板块轮转。
+- 顺序：留档清理（跨身份，每次运行上限 `max(1000, 2 × 预算)` 行；达到上限后再用单行探测确认仍有过期留档时，
+  摘要才标记 `raw_gc_backlog`，恰好清完最后一行不算积压，与 ADR 0011 §8 一致）→ 策略快照 → 每个身份的 reclaim 与预算终态化 → 板块轮转。
 - 每一步领取一个窗口（≤ `concurrency`，且不超过剩余预算），全部派发、全部收取后再进入下一步；
   没有可领取的行时才生成，每次最多一个窗口。
 - 生成按 ADR 0011 §5 的 keyset 游标分页（2026-11-21）：每个板块每次运行从 0 开始一个游标，每页先取前
@@ -206,9 +206,12 @@
   PostgreSQL 序列可能乱序提交，id 更小的文章晚提交时由下一次运行处理；SQLite 生成前先取写锁。
 - 存储超时包括客户端 5 s 期限，以及 PostgreSQL 报告的 `statement_timeout`（57014）/ `lock_timeout`（55P03）、
   SQLite 的 busy / locked、连接池等待超时：repo 统一映射为 `StorageError::Timeout`，flow 一律按"结果未知"处理。
-- 单行：核对身份 → 读文章（存储期限 5 s；出错则退还并计 `storage_errors`，超时则不再写、留给 lease 回收）
+- 单行：核对身份 → 读文章（只读标题与正文前 `max_state_chars + 1` 个字符——字符边界前缀，SQLite / PG 的
+  `substr` 都按字符计；多读一个字符足以让 `body_truncated` 与 state 哈希与截断全文时完全一致；存储期限 5 s；出错则退还并计 `storage_errors`，超时则不再写、留给 lease 回收）
   → 最后一次 lease 检查（剩余 ≥ 请求超时 + 5 s，否则退还并暂停该板块）→ 调用 → 按 ADR 0011 §10 的类别释放。
   行截止时间从 claim 语句之前算起（`lease_expires_at` 也在那时计算），释放不再额外放宽。
+- 用量：provider 报告的 `input_tokens` / `state_tokens_dropped` 在解码时限定 ≤ 2³²，超出按
+  `InvalidResponse` 处理；运行摘要的 `input_tokens` 求和饱和，不会溢出。
 - 调用额度：每次 `run()` 新建计数器，调用客户端前一刻加一，按计数器结算，因此 panic、取消与"未发出"的调用都计入预算。
 - 中止优先级：配置 / 凭据类（78）> 其它运行级（1）> 限流（0）；限流之后若释放失败，按 1 退出，`rate_limited` 标记仍保留。
 - 收尾：窗口在 `lease_seconds` 内未收完即 `abort_all`，再收取 5 s，未确认的行留给 lease 回收，计 `drain_timeout`。

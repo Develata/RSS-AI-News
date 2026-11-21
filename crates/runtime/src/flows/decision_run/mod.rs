@@ -40,6 +40,10 @@ const CANCEL_GRACE: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone)]
 pub struct DecisionRunSettings {
     pub concurrency: u32,
+    /// The client's `max_state_chars`: an article body is loaded only up to
+    /// one character more (enough to keep `body_truncated` and the state
+    /// hash identical to cutting the full body).
+    pub max_state_chars: u32,
     pub lease_seconds: u32,
     pub max_attempts: u32,
     pub request_timeout: Duration,
@@ -296,15 +300,22 @@ impl DecisionRunFlow {
     }
 
     /// Raw cleanup across all identities, at most `max(1000, 2 × budget)`
-    /// rows per run (ADR 0011 §8). `raw_gc_backlog`: the cap was reached, so
-    /// expired bodies may remain.
+    /// rows per run (ADR 0011 §8). `raw_gc_backlog`: the cap was reached and a
+    /// one-row probe still finds an expired body (ADR 0011 §8: "达到上限后仍有
+    /// 过期行"), so clearing exactly the last row is not reported as backlog.
     async fn purge_raw(&self, opts: &DecisionRunOptions, summary: &mut DecisionRunSummary) {
         let cap = u64::from(opts.max_requests.saturating_mul(2).max(1000));
         let now = OffsetDateTime::now_utc();
         loop {
             let remaining = cap - summary.raw_purged;
             if remaining == 0 {
-                summary.raw_gc_backlog = true;
+                match Self::storage(self.deps.decision_repo.expired_raw_remains(now)).await {
+                    Ok(remains) => summary.raw_gc_backlog = remains,
+                    Err(error) => {
+                        Self::storage_failure(summary, error, "expired_raw_remains");
+                        return;
+                    }
+                }
                 break;
             }
             let batch = u32::try_from(remaining.min(u64::from(RAW_PURGE_BATCH))).unwrap_or(0);
@@ -607,7 +618,9 @@ impl DecisionRunFlow {
     async fn record(&self, outcome: TaskOutcome, summary: &mut DecisionRunSummary) {
         let index = outcome.category_index;
         let category = summary.categories[index].category.clone();
-        summary.input_tokens += outcome.input_tokens;
+        // Bounded per response at decode; saturate anyway (a run summary must
+        // not panic or wrap).
+        summary.input_tokens = summary.input_tokens.saturating_add(outcome.input_tokens);
         match outcome.fault {
             Some("storage_timeout") => summary.storage_timeouts += 1,
             Some(_) => summary.storage_errors += 1,
