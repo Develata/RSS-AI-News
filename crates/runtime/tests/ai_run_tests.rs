@@ -700,6 +700,17 @@ impl rss_ai_news_storage::ArticleRepository for FlakyArticleRepo {
     ) -> Result<rss_ai_news_storage::ArticleInsertOutcome, StorageError> {
         self.inner.insert_or_get_by_content_hash(article).await
     }
+    async fn persist_for_entry(
+        &self,
+        article: &rss_ai_news_storage::NewArticle,
+        owner: &str,
+        fallback: bool,
+        now: OffsetDateTime,
+    ) -> Result<rss_ai_news_storage::EntryPersistOutcome, StorageError> {
+        self.inner
+            .persist_for_entry(article, owner, fallback, now)
+            .await
+    }
     async fn find_by_id(
         &self,
         id: i64,

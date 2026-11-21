@@ -110,6 +110,17 @@ impl ArticleRepository for FlakyArticleRepo {
             .list_persisted_for_ai_task_gen(category_key, batch_size, after_id)
             .await
     }
+    async fn list_fresh_for_ai_task_gen(
+        &self,
+        category_key: &str,
+        identity: &rss_ai_news_storage::NewAiResult,
+        published_since: OffsetDateTime,
+        batch_size: u32,
+    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
+        self.inner
+            .list_fresh_for_ai_task_gen(category_key, identity, published_since, batch_size)
+            .await
+    }
     async fn list_in_window_for_backfill(
         &self,
         date_from: Option<OffsetDateTime>,
