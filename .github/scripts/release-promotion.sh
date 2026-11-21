@@ -17,7 +17,9 @@
 #       `scheduler-digest=<d>` for $GITHUB_OUTPUT: the digest of an existing
 #       `X.Y.Z` / `X.Y.Z-scheduler` tag built from <revision> (re-use it), or
 #       empty when that tag does not exist yet (build it). An existing tag with
-#       another revision or version label fails: it is never overwritten.
+#       another revision or another version label than its role's (`X.Y.Z`
+#       for runtime, `X.Y.Z-scheduler` for scheduler, R3G-B2) fails: it is
+#       never overwritten.
 #
 #   release-promotion.sh reconcile <image> <X.Y.Z> < ls-remote-output
 #       stdin: `git ls-remote --tags origin 'refs/tags/v*'`. Reconciles the
@@ -26,11 +28,16 @@
 #         latest[-scheduler]  -> highest released version overall
 #         X.Y[-scheduler]     -> highest released version of the trigger's line
 #                                and of the line `latest` points at
-#       A version is released when both `V` and `V-scheduler` exist and carry
-#       version label V and revision label = the tag's commit (the peeled
-#       `^{}` SHA of an annotated tag). An alias is never moved to a version
-#       lower than its current `org.opencontainers.image.version` label, so a
-#       deleted higher tag cannot move it backwards. Every alias the run
+#       A version is released when `V` carries version label exactly `V` and
+#       `V-scheduler` exactly `V-scheduler` (the labels metadata-action
+#       writes), both with revision label = the tag's commit (the peeled
+#       `^{}` SHA of an annotated tag). Aliases follow the same role rule: a
+#       runtime alias carries `C`, a scheduler alias `C-scheduler` (R3G-B2).
+#       An alias is never moved to a version lower than its current
+#       `org.opencontainers.image.version` label, so a deleted higher tag
+#       cannot move it backwards; such a retained higher pair must have equal
+#       revisions and be exactly the `C` / `C-scheduler` version tags'
+#       images, else the run fails (R3G-B2). Every alias the run
 #       touches (runtime and scheduler, every line) is read and validated
 #       before the first write, so a read error, an alias without a valid
 #       version label, or a runtime / scheduler pair that would end at
@@ -122,15 +129,22 @@ stable_tags() {
         sort -t . -k1,1nr -k2,2nr -k3,3nr
 }
 
+# role_tag ROLE NAME -> NAME for runtime, NAME-scheduler for scheduler: both
+# the tag name and the exact version label of that role.
+role_tag() {
+    if [ "$1" = runtime ]; then printf '%s\n' "$2"; else printf '%s\n' "$2-scheduler"; fi
+}
+
 # check_version_tag IMAGE VERSION KIND REVISION -> sets checked_digest (empty
-# when the tag does not exist); fails on a tag with other labels.
+# when the tag does not exist); fails on a tag with other labels. The version
+# label must be exactly the role's (`V` / `V-scheduler`), so swapped images
+# never count as a release (R3G-B2).
 check_version_tag() {
-    if [ "$3" = runtime ]; then tag="$2"; else tag="$2-scheduler"; fi
+    tag="$(role_tag "$3" "$2")"
     registry_inspect "$1:$tag"
     checked_digest=""
     [ "$inspect_rc" -eq 0 ] || return 0
-    label="${inspect_version%-scheduler}"
-    if [ "$label" != "$2" ] || [ "$inspect_revision" != "$4" ]; then
+    if [ "$inspect_version" != "$tag" ] || [ "$inspect_revision" != "$4" ]; then
         die "$1:$tag exists with version '$inspect_version' and revision '$inspect_revision', not $2 at $4; version tags are immutable"
     fi
     checked_digest="$inspect_digest"
@@ -169,26 +183,48 @@ $2
 EOF
 }
 
-# plan_alias IMAGE ALIAS VERSION DIGEST -> reads the alias and prints one
-# line `<final-version> <action> <current-digest> <current-revision>`, where
-# action is `keep` (already at a newer version), `unchanged`, `create` or
-# `update:<current-version>` (write DIGEST). Writes nothing.
+# plan_alias IMAGE ALIAS ROLE VERSION DIGEST -> reads the alias and prints
+# one line `<final-version> <action> <current-digest> <current-revision>`,
+# where action is `keep` (already at a newer version), `unchanged`, `create`
+# or `update:<current-version>` (write DIGEST). The alias's version label
+# must be its role's (`C` / `C-scheduler`, R3G-B2). Writes nothing.
 plan_alias() {
     registry_inspect "$1:$2"
     if [ "$inspect_rc" -eq 3 ]; then
-        echo "$3 create - -"
+        echo "$4 create - -"
         return 0
     fi
-    current="${inspect_version%-scheduler}"
-    is_version "$current" ||
-        die "$1:$2 exists without a valid org.opencontainers.image.version label ('$inspect_version'); refusing to move it"
-    if [ "$(version_cmp "$current" "$3")" -eq 1 ]; then
-        echo "$current keep $inspect_digest $inspect_revision"
-    elif [ "$inspect_digest" = "$4" ]; then
-        echo "$3 unchanged $inspect_digest $inspect_revision"
+    if [ "$3" = runtime ]; then
+        current="$inspect_version"
     else
-        echo "$3 update:$current $inspect_digest $inspect_revision"
+        current="${inspect_version%-scheduler}"
     fi
+    if ! is_version "$current" || [ "$inspect_version" != "$(role_tag "$3" "$current")" ]; then
+        die "$1:$2 exists without a valid $3 org.opencontainers.image.version label ('$inspect_version'); refusing to move it"
+    fi
+    if [ "$(version_cmp "$current" "$4")" -eq 1 ]; then
+        echo "$current keep $inspect_digest $inspect_revision"
+    elif [ "$inspect_digest" = "$5" ]; then
+        echo "$4 unchanged $inspect_digest $inspect_revision"
+    else
+        echo "$4 update:$current $inspect_digest $inspect_revision"
+    fi
+}
+
+# check_retained_pair IMAGE ALIAS VERSION RUNTIME-DIGEST RUNTIME-REVISION
+#     SCHEDULER-DIGEST SCHEDULER-REVISION: a pair kept at a version above the
+# target must be one release: equal revisions, and exactly the images of the
+# `VERSION` / `VERSION-scheduler` tags (which must still exist, R3G-B2).
+check_retained_pair() {
+    if [ "$5" = - ] || [ "$5" != "$7" ]; then
+        die "$1:$2 is kept at $3 with revision '$5' but $1:$2-scheduler with '$7'; refusing to keep a mixed pair"
+    fi
+    check_version_tag "$1" "$3" runtime "$5"
+    [ "$checked_digest" = "$4" ] ||
+        die "$1:$2 ($4) is not the $3 version tag's image ('${checked_digest:-missing}'); refusing to keep it"
+    check_version_tag "$1" "$3" scheduler "$5"
+    [ "$checked_digest" = "$6" ] ||
+        die "$1:$2-scheduler ($6) is not the $3-scheduler version tag's image ('${checked_digest:-missing}'); refusing to keep it"
 }
 
 # plan_pair IMAGE ALIAS TARGET (`V runtime-digest scheduler-digest`) ->
@@ -198,13 +234,17 @@ plan_alias() {
 plan_pair() {
     # shellcheck disable=SC2086 # `V runtime-digest scheduler-digest`
     set -- "$1" "$2" $3
-    runtime_plan="$(plan_alias "$1" "$2" "$3" "$4")" || exit 1
-    scheduler_plan="$(plan_alias "$1" "$2-scheduler" "$3" "$5")" || exit 1
+    runtime_plan="$(plan_alias "$1" "$2" runtime "$3" "$4")" || exit 1
+    scheduler_plan="$(plan_alias "$1" "$2-scheduler" scheduler "$3" "$5")" || exit 1
     # shellcheck disable=SC2086 # plan_alias prints four fields
     set -- "$@" $runtime_plan $scheduler_plan
     # $6..$9: runtime final / action / digest / revision; ${10}..${13}: scheduler.
     if [ "$6" != "${10}" ]; then
         die "$1:$2 would be at $6 but $1:$2-scheduler at ${10}; nothing was written. Promote the matching release to pair them"
+    fi
+    # Equal final versions above the target mean both sides are kept.
+    if [ "$7" = keep ]; then
+        check_retained_pair "$1" "$2" "$6" "$8" "$9" "${12}" "${13}"
     fi
     for side in runtime scheduler; do
         if [ "$side" = runtime ]; then

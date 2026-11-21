@@ -324,6 +324,84 @@ expect_rc 1
 no_writes
 done_case
 
+# swap_version_tags VERSION: V points at the scheduler image and vice versa.
+swap_version_tags() {
+    printf 'sha256:sc-%s\n' "$1" >"$FAKE_REGISTRY/tags/$1"
+    printf 'sha256:rt-%s\n' "$1" >"$FAKE_REGISTRY/tags/$1-scheduler"
+}
+
+start "swapped version tags are not a released version"
+case_failures=$failures
+publish 0.10.4 c4
+swap_version_tags 0.10.4
+tag 0.10.4 c4 >"$work/tags"
+reconcile 0.10.4 <"$work/tags"
+expect_rc 1
+no_writes
+done_case
+
+start "swapped aliases are never moved or kept"
+case_failures=$failures
+publish 0.10.4 c4
+publish 0.10.5 c5
+printf 'sha256:sc-0.10.4\n' >"$FAKE_REGISTRY/tags/latest"
+printf 'sha256:rt-0.10.4\n' >"$FAKE_REGISTRY/tags/latest-scheduler"
+{ tag 0.10.4 c4; tag 0.10.5 c5; } >"$work/tags"
+reconcile 0.10.5 <"$work/tags"
+expect_rc 1
+no_writes
+# The same swap at a newer version than the target is not kept either.
+point 0.10 0.10.4
+printf 'sha256:sc-0.10.5\n' >"$FAKE_REGISTRY/tags/latest"
+printf 'sha256:rt-0.10.5\n' >"$FAKE_REGISTRY/tags/latest-scheduler"
+tag 0.10.4 c4 >"$work/tags"
+reconcile 0.10.4 <"$work/tags"
+expect_rc 1
+no_writes
+done_case
+
+start "a retained higher pair with different revisions fails"
+case_failures=$failures
+publish 1.4.3 c143
+publish 1.4.4 c144
+point latest 1.4.4
+point 1.4 1.4.4
+printf '1.4.4-scheduler other\n' >"$FAKE_REGISTRY/blobs/sha256:sc-other"
+printf 'sha256:sc-other\n' >"$FAKE_REGISTRY/tags/latest-scheduler"
+tag 1.4.3 c143 >"$work/tags"
+reconcile 1.4.3 <"$work/tags"
+expect_rc 1
+no_writes
+done_case
+
+start "a retained higher pair must be the exact version tags' images"
+case_failures=$failures
+publish 1.4.3 c143
+publish 1.4.4 c144
+point latest 1.4.4
+point 1.4 1.4.4
+# Same labels as 1.4.4, another image (e.g. a rebuild pushed to the alias).
+printf '1.4.4 c144\n' >"$FAKE_REGISTRY/blobs/sha256:rt-rebuilt"
+printf 'sha256:rt-rebuilt\n' >"$FAKE_REGISTRY/tags/latest"
+tag 1.4.3 c143 >"$work/tags"
+reconcile 1.4.3 <"$work/tags"
+expect_rc 1
+no_writes
+done_case
+
+start "a retained higher pair without its version tags fails closed"
+case_failures=$failures
+publish 1.4.3 c143
+publish 1.4.4 c144
+point latest 1.4.4
+point 1.4 1.4.4
+rm "$FAKE_REGISTRY/tags/1.4.4" "$FAKE_REGISTRY/tags/1.4.4-scheduler"
+tag 1.4.3 c143 >"$work/tags"
+reconcile 1.4.3 <"$work/tags"
+expect_rc 1
+no_writes
+done_case
+
 start "prerelease tags are ignored"
 case_failures=$failures
 publish 0.10.4 c4
@@ -399,6 +477,22 @@ done_case
 start "an existing version tag from another commit is never overwritten"
 case_failures=$failures
 publish 0.10.4 other
+existing 0.10.4 c4
+expect_rc 1
+done_case
+
+start "swapped version tags from the same commit are never reused"
+case_failures=$failures
+publish 0.10.4 c4
+swap_version_tags 0.10.4
+existing 0.10.4 c4
+expect_rc 1
+done_case
+
+start "a runtime tag with a scheduler label is never reused"
+case_failures=$failures
+publish 0.10.4 c4
+printf '0.10.4-scheduler c4\n' >"$FAKE_REGISTRY/blobs/sha256:rt-0.10.4"
 existing 0.10.4 c4
 expect_rc 1
 done_case
