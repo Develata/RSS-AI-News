@@ -392,13 +392,13 @@ impl GitHubTarget {
         })?;
         let status = response.status().as_u16();
         let rate_limit = classify::RateLimitHints::from_headers(response.headers());
-        let request_id = github_request_id(response.headers());
+        let request_id = github_request_id(response.headers(), self.cfg.token.expose_secret());
         let context = |error| with_request_context(error, operation, request_id.as_deref());
         let body = read_response_body(response).await.map_err(context)?;
         if !(200..300).contains(&status) {
             return Err(context(classify::classify_github_response(
                 status,
-                response_message(status, &body, self.cfg.token.expose_secret()),
+                response_reason(status, &body),
                 &rate_limit,
             )));
         }
@@ -640,16 +640,22 @@ fn encode_repo_path(path: &str) -> String {
         .join("/")
 }
 
-/// `x-github-request-id`, restricted to the characters GitHub uses so a
-/// hostile intermediary cannot inject text into persisted diagnostics.
-fn github_request_id(headers: &http::HeaderMap) -> Option<String> {
-    let value = headers.get("x-github-request-id")?.to_str().ok()?;
-    let id: String = value
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '.'))
-        .take(128)
-        .collect();
-    (!id.is_empty()).then_some(id)
+/// `x-github-request-id`, kept only when the whole value has GitHub's shape
+/// and never when it contains the token (R1-P-B6). Observed ids are five
+/// colon-separated groups of upper-case hex digits, e.g.
+/// `828A:4A44E:40DA1B1:CEE6757:6B01CE59`; 2–8 groups of 1–16 hex digits are
+/// accepted. Anything else (an intermediary's own id, injected text, a
+/// token-shaped value) is dropped rather than filtered into shape.
+fn github_request_id(headers: &http::HeaderMap, token: &str) -> Option<String> {
+    let value = headers.get("x-github-request-id")?.to_str().ok()?.trim();
+    let groups = value.split(':').collect::<Vec<_>>();
+    let well_formed = value.len() <= 128
+        && (2..=8).contains(&groups.len())
+        && groups.iter().all(|group| {
+            (1..=16).contains(&group.len()) && group.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+    let carries_token = !token.is_empty() && value.contains(token);
+    (well_formed && !carries_token).then(|| value.to_string())
 }
 
 /// Prefixes the (already sanitized) diagnostic with the failed operation and
@@ -739,41 +745,76 @@ fn validate_path_part(path: &str) -> Result<(), PublishError> {
     Ok(())
 }
 
-fn response_message(status: u16, body: &[u8], token: &str) -> String {
-    // An undecodable body is omitted on purpose (only the 422 retry signal is
-    // kept): unparsed escapes could hide credentials.
-    let message = match serde_json::from_slice::<Value>(body) {
-        Ok(value) => value
-            .get("message")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                // Unknown JSON keys/values may contain escaped credentials.
-                format!("github api returned status {status} with an unrecognized JSON error")
-            }),
+/// The persisted reason of a GitHub error response (R1-P-B6). GitHub's
+/// `message` (or an undecodable body) is free server text that may echo the
+/// request — report fragments, their base64, a credential — so it is only
+/// scanned, in full and in memory, for known phrases; what leaves this
+/// function is a fixed vocabulary. The phrases the retry logic matches on
+/// (`not a fast-forward`, `rate limit`) are part of that vocabulary, so the
+/// 422 / 403 classification sees the same signal it would in the raw text,
+/// wherever it sat in the body (no truncation happens before the scan).
+fn response_reason(status: u16, body: &[u8]) -> String {
+    match serde_json::from_slice::<Value>(body) {
+        Ok(value) => match value.get("message").and_then(Value::as_str) {
+            Some(message) => summarize_github_message(message),
+            // Unknown JSON keys/values may contain escaped credentials.
+            None => format!("github api returned status {status} with an unrecognized JSON error"),
+        },
         Err(_) => {
-            let body = String::from_utf8_lossy(body);
-            if status == 422 && is_non_fast_forward_message(&body.replace(token, "***")) {
-                // Preserve only the retry signal, never the undecodable body.
-                "not a fast-forward".to_string()
-            } else {
-                format!("github api returned status {status}; unreadable error body omitted")
-            }
+            let summary = summarize_github_message(&String::from_utf8_lossy(body));
+            format!("unreadable error body: {summary}")
         }
-    };
-    // Error JSON can encode the token with escapes. Scrub after decoding, before
-    // this message reaches errors, tracing or persisted publish diagnostics.
-    let mut safe = if token.is_empty() {
-        message
-    } else {
-        message.replace(token, "***")
-    };
-    // The atomic publish retry path classifies 422 by message. Preserve its
-    // semantic signal even when the original wording falls outside the prefix.
-    if safe.len() > 8 * 1024 && status == 422 && is_non_fast_forward_message(&safe) {
-        safe.insert_str(0, "not a fast-forward: ");
     }
-    rss_ai_news_domain::error::truncate_diagnostic(safe, 8 * 1024)
+}
+
+/// Known GitHub error phrases (matched case-insensitively as substrings of
+/// the server text) and the fixed wording persisted for each.
+const KNOWN_GITHUB_PHRASES: &[(&[&str], &str)] = &[
+    (&["rate limit"], "rate limit exceeded"),
+    (&["abuse"], "abuse detection"),
+    (&["fast forward", "fast-forward"], "not a fast-forward"),
+    (&["bad credentials"], "bad credentials"),
+    (&["requires authentication"], "requires authentication"),
+    (
+        &["resource not accessible"],
+        "resource not accessible by token",
+    ),
+    (&["permission"], "insufficient permission"),
+    (
+        &["protected branch", "branch protection"],
+        "protected branch",
+    ),
+    (&["not found"], "not found"),
+    (&["validation failed"], "validation failed"),
+    (&["invalid request"], "invalid request"),
+    (&["wasn't supplied", "was not supplied"], "sha not supplied"),
+    (&["does not match"], "sha does not match"),
+    (&["conflict"], "conflict"),
+    (&["too large"], "too large"),
+    (&["bad request"], "bad request"),
+    (&["bad gateway"], "bad gateway"),
+    (&["server error"], "server error"),
+    (&["unavailable"], "service unavailable"),
+    (&["timeout", "timed out"], "timeout"),
+    (&["blocked"], "access blocked"),
+];
+
+/// Fixed-vocabulary summary of free GitHub text; never echoes the input.
+fn summarize_github_message(message: &str) -> String {
+    let lower = message.to_lowercase();
+    let phrases = KNOWN_GITHUB_PHRASES
+        .iter()
+        .filter(|(needles, _)| needles.iter().any(|needle| lower.contains(needle)))
+        .map(|(_, phrase)| *phrase)
+        .collect::<Vec<_>>();
+    if phrases.is_empty() {
+        format!(
+            "unrecognized GitHub message omitted ({} bytes)",
+            message.len()
+        )
+    } else {
+        phrases.join("; ")
+    }
 }
 
 fn parse_json_value(status: u16, body: &[u8]) -> Result<Value, PublishError> {
@@ -791,25 +832,29 @@ pub mod classify {
 
     pub fn classify_octocrab_error(error: OctocrabError) -> PublishError {
         match error {
-            OctocrabError::GitHub { source, .. } => {
-                classify_github_status(source.status_code.as_u16(), source.message.clone(), None)
+            // `source.message` is free server text: persist only its summary.
+            OctocrabError::GitHub { source, .. } => classify_github_status(
+                source.status_code.as_u16(),
+                super::summarize_github_message(&source.message),
+                None,
+            ),
+            // Client-side errors (no server text); bounded all the same.
+            OctocrabError::Http { source, .. } => network_error(format!("network error: {source}")),
+            OctocrabError::Hyper { source, .. } => {
+                network_error(format!("network error: {source}"))
             }
-            OctocrabError::Http { source, .. } => PublishError::GitHubApiError {
-                status: 503,
-                message: format!("network error: {source}"),
-            },
-            OctocrabError::Hyper { source, .. } => PublishError::GitHubApiError {
-                status: 503,
-                message: format!("network error: {source}"),
-            },
-            OctocrabError::Service { source, .. } => PublishError::GitHubApiError {
-                status: 503,
-                message: format!("network error: {source}"),
-            },
-            other => PublishError::GitHubApiError {
-                status: 503,
-                message: format!("octocrab error: {other}"),
-            },
+            OctocrabError::Service { source, .. } => {
+                network_error(format!("network error: {source}"))
+            }
+            other => network_error(format!("octocrab error: {other}")),
+        }
+    }
+
+    /// Transport-level failure: retryable 503 with a bounded client message.
+    fn network_error(message: String) -> PublishError {
+        PublishError::GitHubApiError {
+            status: 503,
+            message: rss_ai_news_domain::error::truncate_diagnostic(message, 512),
         }
     }
 
@@ -906,11 +951,54 @@ mod tests {
     fn diagnostic_cap_preserves_branch_conflict_classification() {
         for (tail, expected) in [("not a fast-forward", true), ("validation failed", false)] {
             let body = format!("{} {tail}", "x".repeat(20_000));
-            let message = response_message(422, body.as_bytes(), "test-token");
-            assert!(message.len() <= 8 * 1024);
-            let error = classify::classify_github_status(422, message, None);
-            assert_eq!(is_branch_concurrently_updated(&error), expected);
+            for raw in [body.clone(), json!({ "message": body }).to_string()] {
+                let message = response_reason(422, raw.as_bytes());
+                assert!(message.len() <= 256, "{message}");
+                let error = classify::classify_github_status(422, message, None);
+                assert_eq!(is_branch_concurrently_updated(&error), expected);
+            }
         }
+    }
+
+    /// R1-P-B6: free server text never reaches the persisted reason.
+    #[test]
+    fn response_reason_keeps_only_known_phrases_never_server_text() {
+        let echo =
+            "Bad request: path 科技新闻 body IyDnp5HmioDmlrDpl7sK REPORT-MARKER token ghp_secret";
+        let reason = response_reason(400, json!({ "message": echo }).to_string().as_bytes());
+        assert_eq!(reason, "bad request");
+        let unknown = response_reason(
+            400,
+            json!({ "message": "REPORT-MARKER" }).to_string().as_bytes(),
+        );
+        assert!(!unknown.contains("REPORT-MARKER"), "{unknown}");
+        assert!(unknown.contains("13 bytes"), "{unknown}");
+        let text = response_reason(502, b"<html>REPORT-MARKER Bad Gateway</html>");
+        assert_eq!(text, "unreadable error body: bad gateway");
+    }
+
+    #[test]
+    fn request_id_is_kept_only_in_githubs_shape_and_never_with_the_token() {
+        let id = |value: &str, token: &str| {
+            let mut headers = http::HeaderMap::new();
+            headers.insert("x-github-request-id", value.parse().unwrap());
+            github_request_id(&headers, token)
+        };
+        assert_eq!(
+            id("828A:4A44E:40DA1B1:CEE6757:6B01CE59", "ghp_x").as_deref(),
+            Some("828A:4A44E:40DA1B1:CEE6757:6B01CE59")
+        );
+        for rejected in [
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "REQ-1 injected text",
+            "828A",
+            "828A::CEE6757",
+            "0123456789ABCDEF0:1",
+        ] {
+            assert_eq!(id(rejected, "ghp_x"), None, "{rejected}");
+        }
+        // A hex token embedded in an otherwise well-formed id is dropped.
+        assert_eq!(id("ABCD:1234DEADBEEF", "1234DEADBEEF"), None);
     }
 
     #[test]

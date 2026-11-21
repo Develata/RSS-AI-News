@@ -36,7 +36,8 @@ async fn provider_error_does_not_expose_configured_token() {
         .await
         .expect_err("401 fails");
     assert!(!format!("{error:?} {error}").contains("review-private-token"));
-    assert!(error.display_user().contains("***"));
+    // R1-P-B6: server text is summarized, so the escaped token never appears.
+    assert!(error.display_user().contains("GET contents"));
 }
 
 #[tokio::test]
@@ -296,7 +297,7 @@ async fn publish_many_surfaces_422_after_max_retries() {
     assert!(matches!(
         &error,
         PublishError::GitHubApiError { status: 422, message }
-            if message.to_lowercase().contains("fast forward")
+            if message.contains("not a fast-forward")
     ));
     // 422 lost-update 在 PublishError::is_retryable 中不属于 retryable
     // (只有 409 / 5xx / rate-limit 才是)，因此一旦透传到上层，会触发
@@ -320,7 +321,7 @@ async fn auth_failure_maps_to_github_auth_failed() {
 
     assert!(matches!(
         error,
-        PublishError::GitHubAuthFailed(reason) if reason == "GET contents: Bad credentials"
+        PublishError::GitHubAuthFailed(reason) if reason == "GET contents: bad credentials"
     ));
 }
 
@@ -420,7 +421,7 @@ async fn forbidden_without_rate_limit_signals_maps_to_auth_failed() {
 
     assert!(matches!(
         &error,
-        PublishError::GitHubAuthFailed(reason) if reason == "GET contents: Resource not accessible by integration"
+        PublishError::GitHubAuthFailed(reason) if reason == "GET contents: resource not accessible by token"
     ));
     assert!(!error.is_retryable());
 }
@@ -532,12 +533,16 @@ async fn github_error_diagnostics_are_bounded() {
             .mount(&server)
             .await;
         let error = target(&server).publish(&sample_report()).await.unwrap_err();
-        assert!(error.display_user().len() <= 16 * 1024);
-        if structured {
-            assert!(error.display_user().contains("[truncated, original_bytes="));
-        } else {
-            assert!(error.display_user().contains("error body omitted"));
-            assert!(!error.display_user().contains("中文"));
+        // R1-P-B6: the reason is a fixed-vocabulary summary, never the text.
+        let shown = error.display_user();
+        assert!(shown.len() <= 512, "{}", shown.len());
+        assert!(
+            shown.contains("unrecognized GitHub message omitted"),
+            "{shown}"
+        );
+        assert!(!shown.contains("中文"));
+        if !structured {
+            assert!(shown.contains("unreadable error body"), "{shown}");
         }
     }
 }

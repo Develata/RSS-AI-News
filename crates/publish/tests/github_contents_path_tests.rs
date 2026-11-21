@@ -14,6 +14,8 @@ use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const TOKEN: &str = "contents-path-test-token";
+/// Harmless stand-in for report text a server could echo back.
+const BODY_MARKER: &str = "REPORT-BODY-MARKER-7f3a";
 
 fn target(server: &MockServer, branch: &str) -> GitHubTarget {
     GitHubTarget::with_base_uri(
@@ -176,7 +178,10 @@ async fn contents_get_failure_keeps_operation_status_message_and_request_id() {
         .respond_with(
             ResponseTemplate::new(400)
                 .insert_header("x-github-request-id", "C0DE:1234:ABCD")
-                .set_body_json(json!({"message": format!("Bad request for {TOKEN}")})),
+                // The server echoes request text: token, report marker, path.
+                .set_body_json(json!({
+                    "message": format!("Bad request for {TOKEN}: {BODY_MARKER} 科技新闻")
+                })),
         )
         .mount(&server)
         .await;
@@ -193,16 +198,19 @@ async fn contents_get_failure_keeps_operation_status_message_and_request_id() {
     let shown = error.display_user();
     assert!(shown.contains("400"), "{shown}");
     assert!(shown.contains("GET contents"), "{shown}");
-    assert!(shown.contains("Bad request for ***"), "{shown}");
+    // R1-P-B6: only the fixed-vocabulary reason survives, never server text.
+    assert!(shown.contains("bad request"), "{shown}");
+    assert!(!shown.contains("Bad request for"), "{shown}");
     assert!(
         shown.contains("x-github-request-id: C0DE:1234:ABCD"),
         "{shown}"
     );
     assert!(!shown.contains(TOKEN), "{shown}");
     assert!(
-        !shown.contains("科技新闻\n"),
-        "report content must not leak: {shown}"
+        !shown.contains(BODY_MARKER),
+        "echoed text must not leak: {shown}"
     );
+    assert!(!shown.contains("科技新闻"), "{shown}");
     assert!(
         received(&server)
             .await
@@ -221,7 +229,7 @@ async fn contents_put_failure_keeps_operation_and_request_id() {
     Mock::given(method("PUT"))
         .respond_with(
             ResponseTemplate::new(422)
-                .insert_header("x-github-request-id", "PUT0:5678")
+                .insert_header("x-github-request-id", "B0D7:5678")
                 .set_body_json(json!({"message": "Invalid request."})),
         )
         .mount(&server)
@@ -238,8 +246,39 @@ async fn contents_put_failure_keeps_operation_and_request_id() {
         PublishError::GitHubApiError { status: 422, .. }
     ));
     assert!(shown.contains("PUT contents"), "{shown}");
-    assert!(shown.contains("Invalid request."), "{shown}");
-    assert!(shown.contains("x-github-request-id: PUT0:5678"), "{shown}");
+    assert!(shown.contains("invalid request"), "{shown}");
+    assert!(shown.contains("x-github-request-id: B0D7:5678"), "{shown}");
+}
+
+/// R1-P-B6: a request id that does not have GitHub's shape, or carries the
+/// token, is dropped instead of being filtered into shape.
+#[tokio::test]
+async fn malformed_or_token_bearing_request_id_is_dropped() {
+    for request_id in [
+        TOKEN.to_string(),
+        "not:an:id".to_string(),
+        format!("ABCD:{BODY_MARKER}"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .insert_header("x-github-request-id", request_id.as_str())
+                    .set_body_json(json!({"message": "Bad request"})),
+            )
+            .mount(&server)
+            .await;
+
+        let shown = target(&server, "main")
+            .publish(&report("tech/2026/20261121.md"))
+            .await
+            .unwrap_err()
+            .display_user();
+
+        assert!(!shown.contains("x-github-request-id"), "{shown}");
+        assert!(!shown.contains(TOKEN), "{shown}");
+        assert!(!shown.contains(BODY_MARKER), "{shown}");
+    }
 }
 
 /// The added request context must not change auth / rate-limit classification

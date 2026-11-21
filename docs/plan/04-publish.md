@@ -239,8 +239,16 @@ ref 路由（`GET git/ref/heads/{branch}`、`PATCH git/refs/heads/{branch}`）�
 
 GitHub 调用失败时，`PublishError::GitHubApiError` / `GitHubAuthFailed` 的消息带上失败的操作
 （`GET contents` / `PUT contents` / `GET ref` / `GET commit` / `POST tree` / `POST commit` / `PATCH ref`）、
-HTTP 状态、已脱敏的 GitHub message 与 `x-github-request-id`（若有），并进入 `last_error` 与
+HTTP 状态、GitHub message 的**固定词表摘要**与 `x-github-request-id`（若有），并进入 `last_error` 与
 `publish_failed` 事件；不含凭据与报告正文。分类（auth / rate limit / 422 fast-forward）在附加上下文前完成，不受影响。
+
+持久化诊断的保密规则（2026-11-22，R1-P-B6）：GitHub 的 `message`（以及无法解码的错误正文）是服务端自由文本，可能回显请求里的
+报告片段、其 Base64 或凭据，因此只在内存中整段扫描已知短语（`rate limit`、`fast forward`、`bad credentials`、`not found`、
+`validation failed`、`bad request` 等，大小写不敏感），持久化的只是对应的固定措辞，多个以 `; ` 连接；一个都不认识时写
+`unrecognized GitHub message omitted (<N> bytes)`；无法解码的正文前缀 `unreadable error body: `。重试分类依赖的信号
+（`not a fast-forward`、`rate limit`）属于该词表，且在任何截断之前从完整文本中提取。`x-github-request-id` 只有整值符合
+GitHub 形状（2–8 组、每组 1–16 位十六进制、以 `:` 分隔，实测形如 `828A:4A44E:40DA1B1:CEE6757:6B01CE59`）且不含 token
+时才保留，否则整值丢弃（不再"过滤成合法字符"）。客户端侧的传输错误文本（无服务端内容）最多 512 字节。
 
 ### 4.2.1 Atomic batch publish
 
@@ -354,6 +362,7 @@ remote 使用 claim 返回的记录元信息，只加载一次 frozen items，�
 网络取消不能撤销服务端已经完成的提交，仍依靠既有幂等发布与重试恢复。
 Octocrab connect/read/write timeout 为5/30/30秒，所有 GitHub 响应最多16 MiB（含 base64 Contents 响应）。
 成功响应超限不可重试；429/5xx 错误页超限仍保留对应 retry 分类。
-GitHub错误消息先解析JSON，再遮蔽当前token，避免JSON转义绕过凭据脱敏；诊断正文最多 8 KiB，包含截断标记；422 的 fast-forward 冲突分类信号在截断后保留。
+GitHub错误消息先解析JSON，再只输出固定词表摘要（见 §4.2，R1-P-B6，取代此前"遮蔽 token + 8 KiB 截断"的做法），
+因此 JSON 转义、回显的报告片段与凭据都不会进入诊断；422 的 fast-forward 冲突分类信号来自完整文本。
 合法 JSON 缺少字符串 `message` 时仅输出状态说明，不回显未知结构中的键或嵌套值。
-JSON 解析失败（含深度超限、截断及纯文本）时省略正文，仅保留状态码及固定的 422 fast-forward 冲突信号，避免未解码转义泄漏凭据。
+JSON 解析失败（含深度超限、截断及纯文本）时同样只输出固定词表摘要，避免未解码转义泄漏凭据。

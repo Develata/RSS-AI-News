@@ -657,6 +657,69 @@ async fn publish_remote_batch_skips_only_the_mismatched_record() {
     assert_record_state(&pool, matching, "published_remote").await;
 }
 
+// === P-B6: persisted diagnostics never carry server-echoed text ===
+
+#[tokio::test]
+async fn github_failure_persists_only_sanitized_reason_and_valid_request_id() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    const TOKEN: &str = "runtime-diagnostics-test-token";
+    const MARKER: &str = "ECHOED-REPORT-MARKER-91c2";
+
+    let (_dir, pool) = make_test_pool().await;
+    let record_id = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .insert_header("x-github-request-id", "828A:4A44E:40DA1B1:CEE6757:6B01CE59")
+                .set_body_json(serde_json::json!({
+                    "message": format!("Bad request: {MARKER} for {TOKEN}")
+                })),
+        )
+        .mount(&server)
+        .await;
+    let target = rss_ai_news_publish::GitHubTarget::with_base_uri(
+        rss_ai_news_publish::GitHubTargetConfig {
+            token: rss_ai_news_domain::SecretString::from(TOKEN),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            branch: "main".to_string(),
+            path_prefix: "reports".to_string(),
+            commit_message_prefix: "auto: publish".to_string(),
+        },
+        &server.uri(),
+    )
+    .unwrap();
+    let flow = flow(pool.clone(), Some(Arc::new(target)));
+
+    let outcome = flow.publish_remote_record(record_id, remote_opts()).await;
+
+    assert!(matches!(outcome.status, PublishRemoteStatus::Failed { .. }));
+    let last_error: String =
+        sqlx::query_scalar("SELECT last_error FROM publish_records WHERE id = ?")
+            .bind(record_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let events: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT message, context_json FROM run_events WHERE event_kind = 'publish_failed'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    let persisted = format!("{last_error} {events:?}");
+    assert!(last_error.contains("GET contents"), "{last_error}");
+    assert!(last_error.contains("bad request"), "{last_error}");
+    assert!(
+        last_error.contains("828A:4A44E:40DA1B1:CEE6757:6B01CE59"),
+        "{last_error}"
+    );
+    assert!(!persisted.contains(MARKER), "{persisted}");
+    assert!(!persisted.contains(TOKEN), "{persisted}");
+}
+
 // === P-B2: a write cut off by the deadline is verified before release ===
 
 /// The write never answers within the lease (its response is lost), but the
