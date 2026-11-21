@@ -59,6 +59,17 @@ CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks �
 `Cargo.lock`，`cargo audit` 也会失败。
 本地复现：在仓库根目录运行 `bash .ci/check_dependency_security_policy.sh && cargo audit`（cargo-audit 从当前目录读取该配置）。
 
+## Action 与镜像固定（供应链）
+
+- 所有第三方 action（`actions/*`、`docker/*`、`Swatinem/rust-cache`、`dtolnay/rust-toolchain`）都按完整 commit SHA 引用，
+  行尾注释写明对应版本（`# v6.1.0` 等）；`dtolnay/rust-toolchain` 没有版本 tag，固定为某个 `master` commit，注释写日期，
+  工具链版本仍由 `toolchain:` 输入给出。带 `packages: write` 的 release job 因此不会执行被移动的 tag 指向的新代码。
+- `docker/Dockerfile` 的基础镜像按 index digest 固定（`rust:<toolchain>-slim-bookworm@sha256:…`、`debian:bookworm-slim@sha256:…`）。
+- [`.github/dependabot.yml`](../../.github/dependabot.yml) 覆盖 `cargo`、`github-actions` 与 `docker`（`/docker`），三者同样每月、
+  最多 2 个 PR、单组合并、不自动 rebase、忽略 major。`rust` 镜像的版本更新被忽略（工具链升级要同时改全部 pin，见
+  static lane 的 `toolchain-pins` 检查），digest 更新照常提出。
+- composite action `.github/actions/cargo-audit` 不引用第三方 action；它下载的 cargo-audit 二进制按 SHA-256 校验。
+
 ## Release workflow
 
 文件：[`.github/workflows/release.yml`](../../.github/workflows/release.yml)。
