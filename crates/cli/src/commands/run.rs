@@ -302,7 +302,7 @@ async fn run_loaded(
         }
     };
     let publish_result = match publish_all::preflight(loaded, &publish_args) {
-        Ok(()) => publish_all::run_loaded(loaded, pool, &publish_args).await,
+        Ok(date) => publish_all::run_loaded(loaded, pool, &publish_args, &date).await,
         Err(err) => Err(err),
     };
     let publish_summary = match publish_result {

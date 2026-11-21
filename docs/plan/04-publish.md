@@ -206,7 +206,9 @@ path_template = "zh-news/{category_key}/{YYYY}/{YYYYMMDD}.md"  # 覆盖全局；
 
 validate 只用一个样例日期（`2026-01-03`，ADR 0008）渲染，无法发现只在部分日期碰撞的组合
 （如 `{YYYY}/{MM}/{DD}.md` 与 `{YYYY}/{DD}/{MM}.md` 在月 = 日时同路径）。因此 `publish-all`（含 `run` 的发布段）
-在任何写入（rule_version 登记、init、落盘）之前，用发布渲染器按**本次报告日期**渲染全部所选分类的真实路径，
+在 preflight 里、即独立 `publish-all` **打开存储之前**（打开存储会跑迁移并轮换 active config 行，R1-P-S7），
+也就在任何写入（迁移、config 轮换、rule_version 登记、init、落盘）之前，确定一次报告日期（同一值传给后续执行），
+用发布渲染器按**本次报告日期**渲染全部所选分类的真实路径，
 归一化（`\` → `/`、去掉空段与 `.` 段）后查重；有碰撞 → `RuntimeError::Config`（列出路径与分类），exit 1。
 实现：[`crates/runtime/src/flows/publish/paths.rs`](../../crates/runtime/src/flows/publish/paths.rs)。
 

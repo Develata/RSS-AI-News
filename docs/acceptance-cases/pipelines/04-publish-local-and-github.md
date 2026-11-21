@@ -22,7 +22,7 @@
   - 分类 `path_template` override 生效
 - **publish-remote**：批量提交一个 commit 覆盖多 publish_records；422 lost-update 自动重试一次；429 保持状态可重试
 - **本地原子写**：临时文件 fsync 后 rename 覆盖；越出输出根的符号链接（父目录或目标）被拒绝
-- **跨分类路径碰撞（运行时）**：`publish-all` 在首次写入前按本次报告日期渲染全部分类真实路径并查重；碰撞 → 报错退出，不建 record、不登记规则版本、不落盘。
+- **跨分类路径碰撞（运行时）**：`publish-all` 在首次写入前按本次报告日期渲染全部分类真实路径并查重；碰撞 → 报错退出，不打开存储（不建库、不迁移、不轮换 config）、不建 record、不登记规则版本、不落盘。
   比较忽略大小写，且一个路径是另一路径的整段父目录也算碰撞（validate 同规则）
 - **--force**：每次调用新建唯一的 `pending` render trace 行与新记录；force 行永不成为 active
 - **path 防穿越**：含 `..` / 反斜杠 / 无日期 token 的模板在 validate 阶段就报错（详见 [./06-config-loading.md](./06-config-loading.md)）
@@ -161,6 +161,7 @@
 | `bootstrap_refuses_a_superseded_default_selection_policy` | 同上 | selection_policy 同规则 |
 | `bootstrap_returns_the_active_rules_and_seeds_them_on_a_fresh_db` | 同上 | 新库登记 active；已有非 default active 行照用 |
 | `publish_all_refuses_categories_whose_paths_collide_on_the_report_date` | `crates/cli/tests/publish_cmd_tests.rs` | 真实日期路径碰撞在写入前拦截 |
+| `publish_all_collision_check_runs_before_any_database_write` | 同上 | 碰撞检查早于打开存储：空库不建库，已有库的 rule_versions（含 config）不变 |
 | `month_day_and_day_month_templates_collide_on_eleven_eleven` | `crates/runtime/src/flows/publish/paths.rs` | 11-11 碰撞 / 其它日期不碰撞 |
 | `paths_differing_only_in_case_collide` | 同上 | 仅大小写不同的路径碰撞 |
 | `a_report_path_that_is_another_reports_directory_collides` | 同上 | 文件路径是另一路径的父目录 → 碰撞 |

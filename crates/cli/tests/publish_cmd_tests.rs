@@ -230,6 +230,88 @@ async fn publish_all_refuses_categories_whose_paths_collide_on_the_report_date()
     assert_eq!(summary.exit_code(), ExitCode::Success, "{summary:?}");
 }
 
+/// R1-P-S7: the real-date collision check runs before storage is opened, so
+/// a refused publish-all neither creates/migrates a database nor rotates the
+/// active config row.
+#[tokio::test]
+async fn publish_all_collision_check_runs_before_any_database_write() {
+    for existing_db in [false, true] {
+        let temp = TempDir::new().expect("temp dir");
+        let db_path = temp.path().join("rss.sqlite");
+        write_config(temp.path(), &db_path, &temp.path().join("output"));
+        for (key, template) in [
+            ("ai", "{YYYY}/{MM}/{DD}.md"),
+            ("math", "{YYYY}/{DD}/{MM}.md"),
+        ] {
+            rewrite(
+                &temp.path().join("categories").join(format!("{key}.toml")),
+                |text| {
+                    text.replace(
+                        "\n[[sources]]",
+                        &format!(
+                            "\n[category.publish_override]\npath_template = \"{template}\"\n\n[[sources]]"
+                        ),
+                    )
+                },
+            );
+        }
+        let rules_before = if existing_db {
+            let pool = migrated_pool(&db_path).await;
+            // An active config row from another config version.
+            let older = insert_rule(&pool, "config", "older").await;
+            sqlx::query("UPDATE rule_versions SET status = 'active' WHERE id = ?")
+                .bind(older)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let rows: Vec<(i64, String)> =
+                sqlx::query_as("SELECT id, status FROM rule_versions ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            pool.close().await;
+            Some(rows)
+        } else {
+            None
+        };
+
+        let mut cli = cli_for(temp.path(), "ai");
+        cli.category = None;
+        cli.command = Command::PublishAll(PublishArgs {
+            date: Some("2026-11-11".to_string()),
+            local_only: true,
+            force: false,
+        });
+        let args = match &cli.command {
+            Command::PublishAll(args) => args,
+            _ => unreachable!(),
+        };
+        publish_all::run(&cli, args)
+            .await
+            .expect_err("colliding report paths must abort publish-all");
+
+        match rules_before {
+            None => assert!(
+                !db_path.exists(),
+                "a refused publish-all must not create the database"
+            ),
+            Some(before) => {
+                let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
+                let after: Vec<(i64, String)> =
+                    sqlx::query_as("SELECT id, status FROM rule_versions ORDER BY id")
+                        .fetch_all(&pool)
+                        .await
+                        .unwrap();
+                pool.close().await;
+                assert_eq!(
+                    after, before,
+                    "no rule version (config included) may change"
+                );
+            }
+        }
+    }
+}
+
 /// `--force` on a fresh database: each invocation gets its own render
 /// version (two forces within one second must not collapse into one), and the
 /// force trace rows are never `active`, so a later normal publish still uses

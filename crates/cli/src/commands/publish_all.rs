@@ -99,13 +99,21 @@ impl CommandSummary for PublishAllCommandSummary {
 
 pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishAllCommandSummary, CliError> {
     let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
-    preflight(&loaded, args)?;
+    // Everything that can refuse the run (incl. the real-date path collision
+    // check) happens before storage is opened: opening it migrates the
+    // database and rotates the active config row (R1-P-S7).
+    let date = preflight(&loaded, args)?;
     let pool = open_write_storage(&loaded).await?;
-    run_loaded(&loaded, &pool, args).await
+    run_loaded(&loaded, &pool, args, &date).await
 }
 
-/// Config / argument checks for publish-all; run before storage is opened.
-pub(crate) fn preflight(loaded: &LoadedConfig, args: &PublishArgs) -> Result<(), CliError> {
+/// Config / argument checks for publish-all, run before storage is opened.
+/// Returns the run's report date, computed once here and passed to
+/// [`run_loaded`]: `--date`, else the date of now in the effective target
+/// timezone (B12). The real paths of every selected category are rendered for
+/// that date and checked for collisions (validate-config only checks one
+/// sample date).
+pub(crate) fn preflight(loaded: &LoadedConfig, args: &PublishArgs) -> Result<String, CliError> {
     config::validate::run_command_checks(
         loaded,
         config::validate::CommandKind::Publish,
@@ -113,39 +121,25 @@ pub(crate) fn preflight(loaded: &LoadedConfig, args: &PublishArgs) -> Result<(),
             local_only: args.local_only,
         },
     )?;
-    if loaded.categories_filtered().next().is_none() {
-        return Err(CliError::Runtime(RuntimeError::Config(
-            "no categories selected".to_string(),
-        )));
-    }
-    if args.date.is_some() {
-        let _ = parse_date_start(args.date.as_deref())?;
-    }
-    Ok(())
-}
-
-/// Publishes every selected category on an already loaded config and opened
-/// pool; callers run [`preflight`] first.
-pub(crate) async fn run_loaded(
-    loaded: &LoadedConfig,
-    pool: &StoragePool,
-    args: &PublishArgs,
-) -> Result<PublishAllCommandSummary, CliError> {
     let categories = loaded
         .categories_filtered()
         .cloned()
         .collect::<Vec<CategoryConfig>>();
-    // `preflight` validated an explicit --date; otherwise the run's date in
-    // the effective target timezone (B12), not UTC.
+    if categories.is_empty() {
+        return Err(CliError::Runtime(RuntimeError::Config(
+            "no categories selected".to_string(),
+        )));
+    }
     let date = match &args.date {
-        Some(date) => date.clone(),
+        Some(date) => {
+            let _ = parse_date_start(Some(date))?;
+            date.clone()
+        }
         None => default_report_date(
             OffsetDateTime::now_utc(),
             &loaded.app.publish.target_timezone,
         )?,
     };
-    // validate-config checks path collisions on one sample date only; render
-    // the real paths for this run's date before any DB or file write.
     let path_templates = categories
         .iter()
         .map(|category| {
@@ -173,6 +167,22 @@ pub(crate) async fn run_loaded(
         })
         .collect::<Vec<_>>();
     check_report_path_collisions(&path_specs, &date)?;
+    Ok(date)
+}
+
+/// Publishes every selected category on an already loaded config and opened
+/// pool, for the `date` [`preflight`] returned.
+pub(crate) async fn run_loaded(
+    loaded: &LoadedConfig,
+    pool: &StoragePool,
+    args: &PublishArgs,
+    date: &str,
+) -> Result<PublishAllCommandSummary, CliError> {
+    let date = date.to_string();
+    let categories = loaded
+        .categories_filtered()
+        .cloned()
+        .collect::<Vec<CategoryConfig>>();
     let ctx = build_publish_deps(loaded, pool, args.local_only)?;
     let rule_version_repo = rss_ai_news_storage::RuleVersionRepo::new_with_storage(pool.clone());
     let flow = PublishFlow::new(ctx.clone());
