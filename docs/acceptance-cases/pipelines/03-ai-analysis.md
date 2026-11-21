@@ -48,6 +48,8 @@ AI-off 直通模式跳过整段。
 | `task_gen_reconciles_finished_rows_to_the_post_ai_state` | 同上 | 成功派生态对账 |
 | `reconcile_uses_another_identitys_success_when_this_one_was_filtered` | 同上 | R2-S3 双身份对账离开 persisted |
 | `reconcile_with_another_low_score_success_reaches_ai_done` | 同上 | R2-S3 低分 → ai_done |
+| `an_insert_error_on_a_short_page_stops_the_pass` | 同上 | R2-S4 短页出错后停止 |
+| `an_insert_error_before_the_quota_is_met_stops_the_pass` | 同上 | R2-S4 名额用满前出错后停止 |
 | `fresh_article_gets_a_task_despite_a_backlog_larger_than_one_batch` | 同上 | C9 fresh 不饥饿 |
 | `fresh_share_prefers_articles_that_leave_the_window_first` | 同上 | C9 fresh 排序 |
 | `older_backlog_keeps_advancing_while_fresh_inflow_continues` | 同上 | C9 旧积压仍推进 |

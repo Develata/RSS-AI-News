@@ -264,15 +264,21 @@ impl AiRunFlow {
                     }
                 }
                 if outcome.handled >= quota {
-                    return outcome;
+                    break;
                 }
+            }
+            // R2-S4: an insert error on this page stops the pass on every
+            // exit path (quota met, short page, next page), so no side scans
+            // on after it.
+            if summary.insert_failed > failed_before {
+                pass.stopped = true;
+                return outcome;
+            }
+            if outcome.handled >= quota {
+                return outcome;
             }
             if page_len < pass.page_size as usize {
                 outcome.exhausted = true;
-                return outcome;
-            }
-            if summary.insert_failed > failed_before {
-                pass.stopped = true;
                 return outcome;
             }
             // The fresh list is re-read from its head: rows it returned left

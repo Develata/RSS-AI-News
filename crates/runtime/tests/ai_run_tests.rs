@@ -1769,3 +1769,52 @@ async fn reconcile_with_another_low_score_success_reaches_ai_done() {
 
     assert_eq!(article_state(&pool, article_id).await, "ai_done");
 }
+// === R2-S4: an insert error stops the pass on every page exit path ===
+
+async fn fail_inserts_for(pool: &SqlitePool, article_id: i64) {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER fail_insert BEFORE INSERT ON article_ai_results \
+         WHEN NEW.article_id = {article_id} \
+         BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END;"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_insert_error_on_a_short_page_stops_the_pass() {
+    let (_dir, pool) = make_test_pool().await;
+    let old = seed_aged(&pool, "s4-short-old", 1, days_ago(10)).await;
+    let fresh = seed_aged(&pool, "s4-short-fresh", 1, hours_ago(1)).await;
+    fail_inserts_for(&pool, fresh[0]).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 4;
+
+    let summary = flow.task_gen(&opts).await;
+
+    assert_eq!(summary.insert_failed, 1);
+    // The fresh page ended short after the failure; the backlog side must
+    // not run in this pass (plan/03: the pass stops after that page).
+    assert_eq!(article_state(&pool, old[0]).await, "persisted");
+}
+
+#[tokio::test]
+async fn an_insert_error_before_the_quota_is_met_stops_the_pass() {
+    let (_dir, pool) = make_test_pool().await;
+    let old = seed_aged(&pool, "s4-quota-old", 1, days_ago(10)).await;
+    // The failing article leaves the window first, so it is tried first.
+    let failing = seed_aged(&pool, "s4-quota-fail", 1, hours_ago(40)).await;
+    let next = seed_aged(&pool, "s4-quota-next", 1, hours_ago(1)).await;
+    fail_inserts_for(&pool, failing[0]).await;
+    let flow = flow(pool.clone(), Arc::new(MockAiClient::default()));
+    let mut opts = opts();
+    opts.task_gen_batch_size = 2; // fresh quota 1, met by `next`
+
+    let summary = flow.task_gen(&opts).await;
+
+    assert_eq!(summary.insert_failed, 1);
+    assert_eq!(article_state(&pool, next[0]).await, "ai_pending");
+    assert_eq!(article_state(&pool, old[0]).await, "persisted");
+}
