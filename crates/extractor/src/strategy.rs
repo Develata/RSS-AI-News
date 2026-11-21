@@ -183,26 +183,46 @@ pub fn word_count(text: &str) -> u32 {
     u32::try_from(words + cjk_chars / 2).unwrap_or(u32::MAX)
 }
 
-/// Han ideographs (URO, extensions A–H, compatibility), Hiragana, Katakana
-/// (incl. phonetic extensions and half-width forms) and Hangul (syllables and
-/// jamo).
+/// Every code point Unicode 17 `Scripts.txt` assigns to Han, Hiragana,
+/// Katakana or Hangul (R2-B4: 〇, Hangzhou numerals, radicals, extension J,
+/// the Kana Supplement / Extended / Small Kana blocks, enclosed and half-width
+/// forms were missing), plus the kana punctuation the first set already
+/// counted (`゠`, `・`, `ー` and their half-width forms, Script=Common).
+/// Unassigned code points inside a block are included; they do not occur in
+/// valid text.
 fn is_cjk(ch: char) -> bool {
     matches!(
         ch,
-        '\u{3005}'                       // 々 ideographic iteration mark
-            | '\u{3040}'..='\u{309F}'   // Hiragana
-            | '\u{30A0}'..='\u{30FF}'   // Katakana
-            | '\u{31F0}'..='\u{31FF}'   // Katakana phonetic extensions
-            | '\u{FF66}'..='\u{FF9F}'   // half-width Katakana
-            | '\u{3400}'..='\u{4DBF}'   // CJK extension A
-            | '\u{4E00}'..='\u{9FFF}'   // CJK unified ideographs
-            | '\u{F900}'..='\u{FAFF}'   // CJK compatibility ideographs
-            | '\u{20000}'..='\u{323AF}' // CJK extensions B–H + compatibility supplement
-            | '\u{1100}'..='\u{11FF}'   // Hangul jamo
-            | '\u{3130}'..='\u{318F}'   // Hangul compatibility jamo
-            | '\u{A960}'..='\u{A97F}'   // Hangul jamo extended-A
-            | '\u{AC00}'..='\u{D7AF}'   // Hangul syllables
-            | '\u{D7B0}'..='\u{D7FF}'   // Hangul jamo extended-B
+        '\u{2E80}'..='\u{2EF3}'       // CJK radicals supplement (Han)
+            | '\u{2F00}'..='\u{2FD5}' // Kangxi radicals (Han)
+            | '\u{3005}'               // 々 ideographic iteration mark
+            | '\u{3007}'               // 〇 ideographic number zero
+            | '\u{3021}'..='\u{3029}' // Hangzhou numerals (Han)
+            | '\u{302E}'..='\u{302F}' // Hangul tone marks
+            | '\u{3038}'..='\u{303B}' // Hangzhou numerals, vertical iteration mark (Han)
+            | '\u{3040}'..='\u{309F}' // Hiragana
+            | '\u{30A0}'..='\u{30FF}' // Katakana
+            | '\u{31F0}'..='\u{31FF}' // Katakana phonetic extensions
+            | '\u{3200}'..='\u{321E}' // parenthesized Hangul
+            | '\u{3260}'..='\u{327E}' // circled Hangul
+            | '\u{32D0}'..='\u{32FE}' // circled Katakana
+            | '\u{3300}'..='\u{3357}' // squared Katakana
+            | '\u{FF66}'..='\u{FF9F}' // half-width Katakana
+            | '\u{FFA0}'..='\u{FFDC}' // half-width Hangul
+            | '\u{3400}'..='\u{4DBF}' // CJK extension A
+            | '\u{4E00}'..='\u{9FFF}' // CJK unified ideographs
+            | '\u{F900}'..='\u{FAFF}' // CJK compatibility ideographs
+            | '\u{16FE2}'..='\u{16FE3}' // Old Chinese marks (Han)
+            | '\u{16FF0}'..='\u{16FF6}' // Vietnamese reading marks (Han)
+            | '\u{1AFF0}'..='\u{1AFFF}' // Kana extended-B
+            | '\u{1B000}'..='\u{1B16F}' // Kana supplement, extended-A, small kana extension
+            | '\u{1F200}'              // squared Hiragana hoka
+            | '\u{20000}'..='\u{3347F}' // CJK extensions B–J + compatibility supplement
+            | '\u{1100}'..='\u{11FF}' // Hangul jamo
+            | '\u{3130}'..='\u{318F}' // Hangul compatibility jamo
+            | '\u{A960}'..='\u{A97F}' // Hangul jamo extended-A
+            | '\u{AC00}'..='\u{D7AF}' // Hangul syllables
+            | '\u{D7B0}'..='\u{D7FF}' // Hangul jamo extended-B
     )
 }
 
@@ -307,5 +327,37 @@ mod tests {
         // Kana and Hangul count like Han characters.
         assert_eq!(word_count("ひらがなカタカナ"), 4);
         assert_eq!(word_count("한국어 문장"), 2);
+    }
+
+    #[test]
+    fn every_documented_cjk_script_range_counts() {
+        // R2-B4: one representative per range Unicode 17 Scripts.txt assigns
+        // to Han / Hiragana / Katakana / Hangul that the first set missed.
+        // Four CJK characters are two words; a non-CJK token would be one.
+        for ch in [
+            '\u{3007}',  // 〇 ideographic number zero (Han)
+            '\u{3021}',  // Hangzhou numeral one (Han)
+            '\u{303B}',  // vertical ideographic iteration mark (Han)
+            '\u{2E80}',  // CJK radicals supplement (Han)
+            '\u{2F00}',  // Kangxi radicals (Han)
+            '\u{16FF0}', // Vietnamese reading mark (Han)
+            '\u{33479}', // CJK extension J, last (Han)
+            '\u{1B000}', // Katakana letter archaic E (Kana Supplement)
+            '\u{1B11F}', // Hiragana, Kana Extended-A
+            '\u{1B150}', // small Hiragana (Small Kana Extension)
+            '\u{1B164}', // small Katakana (Small Kana Extension)
+            '\u{1AFF0}', // Kana Extended-B (Katakana)
+            '\u{1F200}', // squared Hiragana hoka
+            '\u{32D0}',  // circled Katakana
+            '\u{3300}',  // squared Katakana
+            '\u{FFA0}',  // half-width Hangul filler
+            '\u{FFDC}',  // half-width Hangul letter
+            '\u{3200}',  // parenthesized Hangul
+            '\u{3260}',  // circled Hangul
+            '\u{302E}',  // Hangul single dot tone mark
+        ] {
+            let run: String = [ch; 4].iter().collect();
+            assert_eq!(word_count(&run), 2, "U+{:04X}", ch as u32);
+        }
     }
 }
