@@ -155,10 +155,15 @@ jobs:
 
       # Version tag only (v0.1.0 -> 0.1.0); the moving tags are promote-tags'.
       # metadata-action lowercases the image name and supplies the OCI labels.
+      # `latest=false`: its default flavor (`latest=auto`) adds `latest` for
+      # every type=semver tag, which would move latest here, before both
+      # images exist and regardless of tag order.
       - id: meta-runtime
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}}
 
@@ -186,6 +191,7 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           flavor: |
+            latest=false
             suffix=-scheduler
           tags: |
             type=semver,pattern={{version}}
