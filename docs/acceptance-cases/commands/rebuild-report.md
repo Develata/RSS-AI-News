@@ -18,7 +18,7 @@
 ### 命中条件（success path）
 
 - 模板 + render config 与原 publish 一致时 → 重建结果与原文件字节相等
-- generated_at 取自 `publish_records.rendered_at`，仍字节相等
+- generated_at 取自 `publish_records.rendered_at`（首次 render 时确定并持久化，微秒精度），仍字节相等；模板含 `{generated_at}` 时同样成立
 - `--output` 时 summary 输出 publish_record_id + 字节数 + 路径；省略时 stdout 与 `--output` 文件字节一致
 
 ### 失败条件（failure path）
@@ -33,6 +33,8 @@
 | `rebuild_returns_byte_equal_markdown_to_original_render` | `crates/runtime/tests/rebuild_report_tests.rs` | 字节相等 |
 | `rebuild_without_generated_at_override_falls_back_to_record_rendered_at_and_matches_original` | 同上 | fallback 字节相等 |
 | `rebuild_returns_error_when_publish_record_id_not_found` | 同上 | 缺失报错 |
+| `rebuild_with_generated_at_template_matches_first_publish_byte_for_byte` | 同上 | 含 `{generated_at}` 模板：首渲时刻持久化并被 store/rebuild 复用 |
+| `pg_claim_returns_rendered_at_unchanged_at_microsecond_precision` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 往返不丢精度 |
 | `rebuild_returns_byte_equal_markdown_when_render_config_matches` | `crates/report/tests/rebuild_tests.rs` | report 层字节相等 |
 | `rebuild_returns_error_when_publish_record_missing` | 同上 | report 层缺失 |
 | `rebuild_report_summary_pretty_renders` | `crates/cli/tests/w9c_cli_tests.rs` | summary pretty |

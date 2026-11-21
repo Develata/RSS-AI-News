@@ -11,7 +11,7 @@ use time::{Duration, OffsetDateTime};
 
 use super::PublishFlow;
 use super::dto::{PublishStoreLocalOptions, PublishStoreLocalOutcome, PublishStoreLocalStatus};
-use super::render_templates_from_ctx;
+use super::{render_templates_from_ctx, rendered_timestamp};
 use crate::events::RunEventEmitter;
 
 const PHASE: &str = "store_local";
@@ -97,7 +97,7 @@ impl PublishFlow {
         let render_config = RenderConfig {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
-            generated_at: opts.generated_at,
+            generated_at: rendered_timestamp(claimed.rendered_at, opts.generated_at),
             templates: render_templates_from_ctx(&self.ctx, opts.path_template.as_deref()),
         };
         let report = match rss_ai_news_report::rebuild_markdown(

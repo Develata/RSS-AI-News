@@ -14,7 +14,7 @@ use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_report::{RenderTemplates, ReportError};
 use rss_ai_news_storage::NewPublishRecord;
 use serde_json::json;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::context::PublishDeps;
 use crate::events::RunEventEmitter;
@@ -45,6 +45,26 @@ fn render_templates_from_ctx(ctx: &PublishDeps, path_template: Option<&str>) -> 
         report_template: template.report_template.clone(),
         item_template: template.item_template.clone(),
     }
+}
+
+/// The report's `generated_at`, fixed once by the first render and persisted
+/// as `publish_records.rendered_at`: UTC, truncated to whole microseconds, the
+/// finest precision both backends return unchanged (PostgreSQL `timestamptz`
+/// is microseconds; SQLite keeps the text as written). A value that survives
+/// the round trip is what lets store_local, remote retries and rebuild-report
+/// re-render byte-identical Markdown.
+fn report_timestamp(at: OffsetDateTime) -> OffsetDateTime {
+    let at = at.to_offset(UtcOffset::UTC);
+    at - Duration::nanoseconds(i64::from(at.nanosecond() % 1_000))
+}
+
+/// Timestamp for re-rendering an already rendered record: the persisted
+/// `rendered_at`; the caller's value only for a record that has none.
+fn rendered_timestamp(
+    rendered_at: Option<OffsetDateTime>,
+    caller: OffsetDateTime,
+) -> OffsetDateTime {
+    rendered_at.unwrap_or(caller)
 }
 
 impl PublishFlow {
@@ -210,5 +230,23 @@ impl PublishFlow {
     ) {
         self.release_classified_failure(publish_record_id, owner, error, phase, now, emitter)
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_timestamp_is_utc_and_truncated_to_whole_microseconds() {
+        let at = OffsetDateTime::from_unix_timestamp_nanos(1_763_700_000_123_456_789)
+            .unwrap()
+            .to_offset(UtcOffset::from_hms(8, 0, 0).unwrap());
+
+        let normalized = report_timestamp(at);
+
+        assert_eq!(normalized.offset(), UtcOffset::UTC);
+        assert_eq!(normalized.unix_timestamp_nanos(), 1_763_700_000_123_456_000);
+        assert_eq!(report_timestamp(normalized), normalized, "idempotent");
     }
 }

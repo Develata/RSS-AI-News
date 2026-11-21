@@ -499,3 +499,59 @@ async fn pg_select_ai_off_passthrough_handles_null_columns() {
     assert_eq!(rows[0].importance_score, None);
     assert_eq!(rows[0].category_key, "ai");
 }
+
+/// B8: the render timestamp is fixed at microsecond precision so it survives
+/// the PostgreSQL `timestamptz` round trip unchanged; later stages read it
+/// back from the claim to re-render byte-identical reports.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_claim_returns_rendered_at_unchanged_at_microsecond_precision() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "rendered-at").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .create_if_new(&new_record("idem-rendered-at", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE publish_records SET state = 'snapshot_frozen' WHERE id = $1")
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    let request = |owner: &str| ClaimRequest {
+        owner: owner.to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+    let claimed = repo
+        .claim_publish_by_ids(&request("render"), PublishState::SnapshotFrozen, &[id])
+        .await
+        .unwrap();
+    assert_eq!(claimed[0].rendered_at, None);
+    let rendered_at = OffsetDateTime::from_unix_timestamp_nanos(1_763_700_000_123_456_000).unwrap();
+    assert!(
+        repo.release_advance(
+            id,
+            "render",
+            PublishState::SnapshotFrozen,
+            PublishState::Rendered,
+            PublishTimestampField::RenderedAt,
+            rendered_at,
+            PublishAdvanceExtras::default(),
+        )
+        .await
+        .unwrap()
+    );
+
+    let claimed = repo
+        .claim_rendered_for_local_store(&request("store"))
+        .await
+        .unwrap();
+
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].rendered_at, Some(rendered_at));
+}

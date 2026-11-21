@@ -24,7 +24,7 @@ use super::dto::{
     PublishRemoteBatchOptions, PublishRemoteBatchOutcome, PublishRemoteOptions,
     PublishRemoteOutcome, PublishRemoteStatus,
 };
-use super::render_templates_from_ctx;
+use super::{render_templates_from_ctx, rendered_timestamp};
 use crate::events::RunEventEmitter;
 
 struct PreparedRemote {
@@ -252,7 +252,7 @@ impl PublishFlow {
         let render_config = RenderConfig {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
-            generated_at: opts.generated_at,
+            generated_at: rendered_timestamp(claimed.rendered_at, opts.generated_at),
             templates: render_templates_from_ctx(&self.ctx, opts.path_template.as_deref()),
         };
         let (report, promote_article_ids) = match prepare_remote_report(
@@ -522,7 +522,7 @@ impl PublishFlow {
             let render_config = RenderConfig {
                 category_display_name: item.category_display_name,
                 report_title: item.report_title,
-                generated_at: item.generated_at,
+                generated_at: rendered_timestamp(claimed.rendered_at, item.generated_at),
                 templates: render_templates_from_ctx(&self.ctx, item.path_template.as_deref()),
             };
             let (report, promote_article_ids) = match prepare_remote_report(
@@ -905,6 +905,7 @@ mod deadline_tests {
             state: "stored_local".into(),
             remote_target: None,
             attempt_count: 1,
+            rendered_at: None,
         };
         let config = RenderConfig {
             category_display_name: "AI".into(),

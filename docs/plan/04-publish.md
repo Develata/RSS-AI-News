@@ -94,8 +94,10 @@ generated_at: 2026-06-04T12:34:56Z
 ---
 ```
 
-`generated_at` 来自 `publish_records.rendered_at`（首次 render 时写入；rebuild-report 重渲染时
-作为输入参数，保证 byte-equal）。
+`generated_at` 来自 `publish_records.rendered_at`：render 阶段取**一个**时刻（UTC，截断到整微秒——PostgreSQL
+`timestamptz` 与 SQLite 都能原样往返的精度），既渲染进报告、又写入 `rendered_at`；store_local、remote 重试
+（单条与批量）与 rebuild-report 一律从记录读回该值重渲染（调用方传入的 `generated_at` 只在记录尚无
+`rendered_at` 时兜底；rebuild 的显式 override 优先），保证含 `{generated_at}` 的模板也 byte-equal。
 
 ### 3.2 正文格式
 

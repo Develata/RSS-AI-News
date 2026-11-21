@@ -91,7 +91,7 @@ WHERE id IN (
 )
 RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           render_version, selection_policy_version, state, remote_target,
-          attempt_count
+          attempt_count, rendered_at
 "#;
 
 /// PG claim：§6.4 契约——子查询 `FOR UPDATE SKIP LOCKED`，让 publish flow
@@ -112,7 +112,7 @@ WHERE id IN (
 )
 RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           render_version, selection_policy_version, state, remote_target,
-          attempt_count
+          attempt_count, rendered_at
 "#;
 
 pub(super) const ADVANCE_SNAPSHOT_SQL: &str = "UPDATE publish_records SET state = $1, snapshot_frozen_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";

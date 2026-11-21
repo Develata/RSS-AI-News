@@ -439,7 +439,7 @@ async fn sqlite_claim_by_ids(
         .push(") AND attempt_count < ")
         .push_bind(i64::from(request.max_attempts))
         .push(" RETURNING id, idempotency_key, category_key, report_date, target_timezone, ")
-        .push("render_version, selection_policy_version, state, remote_target, attempt_count");
+        .push("render_version, selection_policy_version, state, remote_target, attempt_count, rendered_at");
 
     builder
         .build_query_as::<ClaimedPublishRecord>()
@@ -672,7 +672,7 @@ async fn pg_claim_by_ids(
         .push_bind(i64::from(request.max_attempts))
         .push(" ORDER BY id FOR UPDATE SKIP LOCKED)")
         .push(" RETURNING id, idempotency_key, category_key, report_date, target_timezone, ")
-        .push("render_version, selection_policy_version, state, remote_target, attempt_count");
+        .push("render_version, selection_policy_version, state, remote_target, attempt_count, rendered_at");
 
     builder
         .build_query_as::<ClaimedPublishRecord>()

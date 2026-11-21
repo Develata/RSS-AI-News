@@ -5,7 +5,8 @@ use std::sync::Arc;
 use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_publish::LocalFsTarget;
 use rss_ai_news_runtime::{
-    PublishFlow, PublishStoreLocalOptions, RebuildReportFlow, RebuildReportOptions, RuntimeError,
+    PublishFlow, PublishRenderOptions, PublishRenderStatus, PublishStoreLocalOptions,
+    RebuildReportFlow, RebuildReportOptions, RuntimeError,
 };
 use time::OffsetDateTime;
 
@@ -114,6 +115,86 @@ async fn rebuild_returns_error_when_publish_record_id_not_found() {
         .unwrap_err();
 
     assert!(matches!(error, RuntimeError::Config(_)));
+}
+
+/// AC-C-07 with a template that renders `{generated_at}`: the first render
+/// fixes one timestamp, persists it as `rendered_at`, and every later stage and
+/// rebuild reuses it. The stages deliberately receive different caller
+/// timestamps (as a resumed run would), so only the persisted value can make
+/// the bytes match.
+#[tokio::test]
+async fn rebuild_with_generated_at_template_matches_first_publish_byte_for_byte() {
+    let (_dir, pool) = make_test_pool().await;
+    let record_id = common::seed_snapshot_frozen_publish_record(&pool, None).await;
+    let output_dir = tempfile::tempdir().unwrap();
+    let mut app = app_config(RetentionPolicy::Always, 1);
+    app.publish.template.report_template =
+        "{frontmatter}\ngenerated: {generated_at}\n{items}".to_string();
+    let ctx = Arc::new(publish_deps(
+        pool.clone(),
+        Arc::new(app),
+        Arc::new(LocalFsTarget::new(output_dir.path().to_path_buf())),
+        None,
+    ));
+    let flow = PublishFlow::new(ctx.clone());
+    let render_caller_time = OffsetDateTime::from_unix_timestamp(1_000).unwrap();
+    let store_caller_time = OffsetDateTime::from_unix_timestamp(2_000).unwrap();
+
+    let rendered = flow
+        .render_record(
+            record_id,
+            PublishRenderOptions {
+                category_display_name: "AI".to_string(),
+                report_title: "Daily AI".to_string(),
+                generated_at: render_caller_time,
+                path_template: None,
+            },
+        )
+        .await;
+    assert_eq!(rendered.status, PublishRenderStatus::Rendered);
+    let stored = flow
+        .store_local_record(
+            record_id,
+            PublishStoreLocalOptions {
+                category_display_name: "AI".to_string(),
+                report_title: "Daily AI".to_string(),
+                generated_at: store_caller_time,
+                path_template: None,
+            },
+        )
+        .await;
+    let path = stored.local_path.expect("local path should be set");
+    let original = tokio::fs::read_to_string(path).await.unwrap();
+
+    let rendered_at: OffsetDateTime =
+        sqlx::query_scalar("SELECT rendered_at FROM publish_records WHERE id = ?")
+            .bind(record_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let stamp = rendered_at
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .unwrap();
+    assert!(
+        original.contains(&format!("generated: {stamp}\n")),
+        "stored report must carry the persisted rendered_at {stamp}:\n{original}"
+    );
+
+    let rebuilt = RebuildReportFlow::new(Arc::new(rss_ai_news_runtime::RebuildReportDeps {
+        template: ctx.template.clone(),
+        publish_record_repo: ctx.publish_record_repo.clone(),
+        publish_item_repo: ctx.publish_item_repo.clone(),
+    }))
+    .rebuild(RebuildReportOptions {
+        publish_record_id: record_id,
+        category_display_name: "AI".to_string(),
+        report_title: "Daily AI".to_string(),
+        generated_at_override: None,
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(rebuilt.markdown_content, original);
 }
 
 fn fixed_time() -> OffsetDateTime {

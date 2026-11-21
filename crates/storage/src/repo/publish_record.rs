@@ -53,6 +53,10 @@ pub struct ClaimedPublishRecord {
     pub state: String,
     pub remote_target: Option<String>,
     pub attempt_count: i64,
+    /// The timestamp fixed by the first render (rendered into
+    /// `{generated_at}`); later stages re-render with it so stored, remote and
+    /// rebuilt reports stay byte-identical. `None` before render.
+    pub rendered_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
