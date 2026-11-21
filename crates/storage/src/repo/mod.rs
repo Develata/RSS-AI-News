@@ -78,8 +78,8 @@ pub use publish_record::{
 };
 pub use raw_artifact::{NewRawArtifact, RawArtifactRepo, RawArtifactRepository};
 pub use reindex_job::{
-    ClaimedReindexJob, FinishReindexTxOutcome, ReindexJob, ReindexJobRepo, ReindexJobRepository,
-    StartReindexTxOutcome,
+    ClaimedReindexJob, FinishReindexTxOutcome, ReindexBatchCheckpoint, ReindexJob, ReindexJobRepo,
+    ReindexJobRepository, ResumeReindexOutcome, StartReindexTxOutcome,
 };
 pub use rule_version::{ConfigRotation, RuleVersion, RuleVersionRepo, RuleVersionRepository};
 pub use run_event::{NewRunEvent, RunEventRepo, RunEventRepository};

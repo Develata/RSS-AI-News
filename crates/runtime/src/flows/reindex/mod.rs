@@ -6,7 +6,10 @@
 
 use std::sync::Arc;
 
-use rss_ai_news_storage::{build_owner_id, lease_expires_at};
+use rss_ai_news_storage::{
+    ClaimedReindexJob, ReindexBatchCheckpoint, ResumeReindexOutcome, StorageError, build_owner_id,
+    lease_expires_at,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
@@ -60,52 +63,82 @@ impl ReindexFlow {
             .await;
         emit_maintenance_outcome(&emitter, "reindex_jobs", reclaimed, None).await;
 
-        // F15-7 W9-F4: 跨表 start TX —— rule_versions(status='pending') +
-        // reindex_jobs(state='pending') 同事务写入；任一冲突整段回滚，
-        // 避免 rule_versions 留"孤儿 pending"行或同 target 启动两条活动 job。
-        // rule_versions 的 status='pending' 在 F15-9 finish TX 接入后会被
-        // 推进到 'active'（旧 active → 'superseded'）。
-        let started_at = OffsetDateTime::now_utc();
+        // 05-storage §8.1 续跑：先在单事务内领取同 target、同规则（kind +
+        // sha256）且无存活 lease 的活动 job，从其 checkpoint 继续；没有活动 job
+        // 才走 F15-7 跨表 start TX（rule_versions(status='pending') +
+        // reindex_jobs(state='pending') 同事务写入，任一冲突整段回滚）。活动 job
+        // 规则不同或 lease 仍存活 → 显式冲突，提示 `reindex --abort <id>`，不改任何行。
+        // lease 时长复用 `lease.ai_duration_seconds`（reindex 工作负载与 AI 接近：
+        // 长批处理 + 大量 I/O），每批 checkpoint 续租。
         let target_str = opts.target.to_string();
-        let start = self
-            .ctx
-            .reindex_job_repo
-            .start_reindex_tx(
-                "reindex",
-                &opts.new_rule_version_tag,
-                &opts.new_rule_version_description,
-                &opts.new_rule_version_sha256,
-                &target_str,
-                started_at,
-            )
-            .await?;
-        let rule_id = start.rule_version_id;
-        let job_id = start.job_id;
-
-        // F15-8 W9-F3: 按 id 寻址 claim 自己刚 INSERT 的 pending job——
-        // 不能走 claim_pending 的 `(created_at ASC, id ASC)` 扫描，否则在
-        // 库里残留旧 pending 时会拿错 job。claim_by_id 把 pending → running，
-        // 写 lease（lease_owner / lease_expires_at）+ started_at(COALESCE) +
-        // attempt_count += 1。lease 时长复用 `lease.ai_duration_seconds`
-        // （reindex 工作负载与 AI 接近：长批处理 + 大量 I/O；独立的
-        // `reindex_duration_seconds` 字段留给后续 config schema 演进）。
         let owner = build_owner_id();
         let claim_now = OffsetDateTime::now_utc();
-        let claim_lease = lease_expires_at(
-            claim_now,
-            Duration::seconds(self.ctx.lease.ai_duration_seconds as i64),
-        );
-        let claimed = self
+        let resume = self
             .ctx
             .reindex_job_repo
-            .claim_by_id(job_id, &owner, claim_now, claim_lease)
-            .await?
-            .ok_or_else(|| {
-                RuntimeError::Config(format!(
-                    "reindex_job#{job_id} claim_by_id 未命中：start_reindex_tx 刚创建的 \
-                     pending job 应当立即可 claim（owner={owner}）"
-                ))
-            })?;
+            .claim_resumable_by_target(
+                &target_str,
+                "reindex",
+                &opts.new_rule_version_sha256,
+                &owner,
+                claim_now,
+                self.lease_deadline(claim_now),
+            )
+            .await?;
+        let claimed = match resume {
+            ResumeReindexOutcome::Resumed(claimed) => {
+                tracing::info!(
+                    stage = "reindex",
+                    target = %target_str,
+                    job_id = claimed.id,
+                    last_processed_id = ?claimed.last_processed_id,
+                    "resuming reindex job from its checkpoint"
+                );
+                emitter
+                    .emit(
+                        "reindex_resumed",
+                        "info",
+                        Some("reindex_job"),
+                        Some(claimed.id),
+                        "reindex resumed from checkpoint",
+                        Some(json!({
+                            "target": target_str,
+                            "last_processed_id": claimed.last_processed_id,
+                            "attempt_count": claimed.attempt_count,
+                        })),
+                    )
+                    .await;
+                claimed
+            }
+            ResumeReindexOutcome::NoActiveJob => {
+                self.start_new_job(&opts, &target_str, &owner).await?
+            }
+            ResumeReindexOutcome::RuleMismatch {
+                job_id,
+                state,
+                version_tag,
+                payload_sha256,
+            } => {
+                return Err(active_job_conflict(
+                    &target_str,
+                    job_id,
+                    &format!(
+                        "{state} job #{job_id} runs rule {version_tag} (sha256 {payload_sha256}), \
+                         this run requests sha256 {}",
+                        opts.new_rule_version_sha256
+                    ),
+                ));
+            }
+            ResumeReindexOutcome::Busy { job_id, state } => {
+                return Err(active_job_conflict(
+                    &target_str,
+                    job_id,
+                    &format!("{state} job #{job_id} is held by another worker with a live lease"),
+                ));
+            }
+        };
+        let rule_id = claimed.rule_version_id;
+        let job_id = claimed.id;
 
         let mut summary = ReindexSummary {
             new_rule_version_id: rule_id,
@@ -309,42 +342,64 @@ impl ReindexFlow {
         }
     }
 
-    /// 把 `last_processed_id` 推进到 SQLite（reindex_jobs.advance_checkpoint）。
-    /// guard 失败（`lease_owner != owner` 或 `state != 'running'`）说明
-    /// abort / reclaim 已经发生——本 worker 没资格继续推进。
-    ///
-    /// **F15-fix2**：以前在 guard 失败时只 warn 然后 `Ok(())` 继续下一批；
-    /// 那会让旧 worker 在 lease 已易主后继续写数据、与新 worker 的写入
-    /// 竞争（abort 会立刻释放 `uq_reindex_jobs_target_active`，新 job
-    /// 可同 target 重启）。改为直接返 `RuntimeError::LeaseConflict`，让
-    /// 外层 `run()` 走 Err 分支 → mark_failed（lease 已失会 no-op，符合
-    /// 预期）→ 原始 LeaseConflict 向上抛 → CLI 非零退出。
-    async fn checkpoint(
+    /// F15-7 跨表 start TX + 按 id 领取自己刚建的 pending job（F15-8 W9-F3：
+    /// 不走 `claim_pending` 的 `(created_at, id)` 扫描，避免拿错残留 job）。
+    async fn start_new_job(
         &self,
-        job_id: i64,
+        opts: &ReindexOptions,
+        target_str: &str,
         owner: &str,
-        last_processed_id: i64,
-    ) -> Result<(), RuntimeError> {
-        let updated = self
+    ) -> Result<ClaimedReindexJob, RuntimeError> {
+        let start = self
             .ctx
             .reindex_job_repo
-            .advance_checkpoint(job_id, owner, last_processed_id, OffsetDateTime::now_utc())
+            .start_reindex_tx(
+                "reindex",
+                &opts.new_rule_version_tag,
+                &opts.new_rule_version_description,
+                &opts.new_rule_version_sha256,
+                target_str,
+                OffsetDateTime::now_utc(),
+            )
             .await?;
-        if !updated {
-            tracing::warn!(
-                stage = "reindex",
-                job_id,
-                owner = %owner,
-                last_processed_id,
-                "advance_checkpoint guard 失败：state≠'running' 或 lease_owner 不匹配；中止本 worker 后续批次写入"
-            );
-            return Err(RuntimeError::LeaseConflict {
-                table: "reindex_jobs",
-                id: job_id,
-                expected_owner: owner.to_string(),
-            });
+        let job_id = start.job_id;
+        let claim_now = OffsetDateTime::now_utc();
+        self.ctx
+            .reindex_job_repo
+            .claim_by_id(job_id, owner, claim_now, self.lease_deadline(claim_now))
+            .await?
+            .ok_or_else(|| {
+                RuntimeError::Config(format!(
+                    "reindex_job#{job_id} claim_by_id 未命中：start_reindex_tx 刚创建的 \
+                     pending job 应当立即可 claim（owner={owner}）"
+                ))
+            })
+    }
+
+    fn lease_deadline(&self, now: OffsetDateTime) -> OffsetDateTime {
+        lease_expires_at(
+            now,
+            Duration::seconds(self.ctx.lease.ai_duration_seconds as i64),
+        )
+    }
+
+    /// 一批的 checkpoint 参数：`last_processed_id` 为本页最后扫描到的 id，lease
+    /// 从现在起续租。批写入、owner 校验与 checkpoint 在 storage 同一事务内完成，
+    /// 已失去 lease 的 worker 不会改动任何业务行（F15-fix2 的 guard 前移到写入前）。
+    fn batch_checkpoint<'a>(
+        &self,
+        job_id: i64,
+        owner: &'a str,
+        last_processed_id: i64,
+    ) -> ReindexBatchCheckpoint<'a> {
+        let now = OffsetDateTime::now_utc();
+        ReindexBatchCheckpoint {
+            job_id,
+            owner,
+            last_processed_id,
+            now,
+            lease_expires_at: self.lease_deadline(now),
         }
-        Ok(())
     }
 
     /// F15-fix7：lease 校验失败统一映射为 `RuntimeError::LeaseConflict`，
@@ -362,6 +417,17 @@ impl ReindexFlow {
             expected_owner: owner.to_string(),
         }
     }
+}
+
+/// An active job of the target blocks this run; nothing was changed.
+fn active_job_conflict(target: &str, job_id: i64, detail: &str) -> RuntimeError {
+    RuntimeError::Storage(StorageError::Conflict {
+        table: "reindex_jobs".to_string(),
+        key: format!(
+            "target={target}: {detail}; resume it with the same rule, or run \
+             `reindex --abort {job_id}` first"
+        ),
+    })
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

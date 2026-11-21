@@ -209,15 +209,16 @@ ORDER BY id ASC
 LIMIT $2
 "#;
 
-const UPDATE_ARTICLE_CONTENT_HASH_SQL: &str = r#"
+pub(super) const UPDATE_ARTICLE_CONTENT_HASH_SQL: &str = r#"
 UPDATE articles
 SET content_hash = $1, updated_at = $2
 WHERE id = $3
 "#;
 
-const SELECT_ARTICLE_CONTENT_HASH_SQL: &str = "SELECT content_hash FROM articles WHERE id = $1";
+pub(super) const SELECT_ARTICLE_CONTENT_HASH_SQL: &str =
+    "SELECT content_hash FROM articles WHERE id = $1";
 
-const SELECT_ARTICLE_CONTENT_HASH_COLLISION_SQL: &str = "SELECT CASE WHEN EXISTS(SELECT 1 FROM articles WHERE content_hash = $1 AND id <> $2) THEN 1 ELSE 0 END";
+pub(super) const SELECT_ARTICLE_CONTENT_HASH_COLLISION_SQL: &str = "SELECT CASE WHEN EXISTS(SELECT 1 FROM articles WHERE content_hash = $1 AND id <> $2) THEN 1 ELSE 0 END";
 
 // ── trait 实现：按 backend 分发 ─────────────────────────────────
 

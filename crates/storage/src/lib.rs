@@ -34,8 +34,9 @@ pub use repo::{
     PublishRecord, PublishRecordRepo, PublishRecordRepository, PublishState, PublishTimestampField,
     RawArtifactRepo, RawArtifactRepository, RecentFeedEntry, RecentFeedEntryFilter,
     RecentFeedEntryRepository, RecentFeedSourceHealth, RecentFeedSourceHealthRepository,
-    ReindexJob, ReindexJobRepo, ReindexJobRepository, ReleaseSuccessOutcome, ResetFailedFilter,
-    ResetFailedOutcome, RuleVersion, RuleVersionRepo, RuleVersionRepository, RunEventRepo,
-    RunEventRepository, StartReindexTxOutcome, TerminalAdvanceOutcome, TerminalAdvanceStatus,
-    UpdateContentHashOutcome, UpdateLinkHashOutcome,
+    ReindexBatchCheckpoint, ReindexJob, ReindexJobRepo, ReindexJobRepository,
+    ReleaseSuccessOutcome, ResetFailedFilter, ResetFailedOutcome, ResumeReindexOutcome,
+    RuleVersion, RuleVersionRepo, RuleVersionRepository, RunEventRepo, RunEventRepository,
+    StartReindexTxOutcome, TerminalAdvanceOutcome, TerminalAdvanceStatus, UpdateContentHashOutcome,
+    UpdateLinkHashOutcome,
 };

@@ -563,7 +563,7 @@ async fn sqlite_update_link_hash(
     Ok(outcome)
 }
 
-async fn reconcile_link_hash_move_sqlite(
+pub(super) async fn reconcile_link_hash_move_sqlite(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: i64,
     old_link_hash: &str,
@@ -875,31 +875,46 @@ async fn pg_update_link_hash(
         return Ok(UpdateLinkHashOutcome::Missing);
     };
 
+    let outcome =
+        reconcile_link_hash_move_pg(&mut tx, id, &old_link_hash, new_link_hash, now).await?;
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(outcome)
+}
+
+/// The link-hash move of [`pg_update_link_hash`] inside a caller's
+/// transaction (which already holds `LOCK_FEED_ENTRIES_FOR_REINDEX_PG_SQL`).
+/// Shared with the reindex batch writer.
+pub(super) async fn reconcile_link_hash_move_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: i64,
+    old_link_hash: &str,
+    new_link_hash: &str,
+    now: OffsetDateTime,
+) -> Result<UpdateLinkHashOutcome, StorageError> {
     sqlx::query(DEMOTE_LINK_HASH_GROUPS_SQL)
         .bind(now)
-        .bind(&old_link_hash)
+        .bind(old_link_hash)
         .bind(new_link_hash)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(StorageError::from)?;
     sqlx::query(UPDATE_LINK_HASH_SQL)
         .bind(new_link_hash)
         .bind(now)
         .bind(id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(StorageError::from)?;
-    promote_link_hash_canonical_pg(&mut tx, &old_link_hash, now).await?;
+    promote_link_hash_canonical_pg(tx, old_link_hash, now).await?;
     if new_link_hash != old_link_hash {
-        promote_link_hash_canonical_pg(&mut tx, new_link_hash, now).await?;
+        promote_link_hash_canonical_pg(tx, new_link_hash, now).await?;
     }
 
     let shadow = sqlx::query_scalar::<_, bool>(SELECT_LINK_HASH_SHADOW_BY_ID_SQL)
         .bind(id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(StorageError::from)?;
-    tx.commit().await.map_err(StorageError::from)?;
     Ok(if shadow {
         UpdateLinkHashOutcome::ConflictShadowed
     } else {

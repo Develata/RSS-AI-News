@@ -37,6 +37,7 @@ impl ReindexFlow {
             if rows.is_empty() {
                 break;
             }
+            let mut updates = Vec::new();
             for row in rows {
                 after_id = row.id;
                 summary.scanned += 1;
@@ -50,19 +51,22 @@ impl ReindexFlow {
                 if normalized.link_hash == row.link_hash {
                     summary.unchanged += 1;
                 } else {
-                    match self
-                        .ctx
-                        .feed_entry_repo
-                        .update_link_hash(row.id, &normalized.link_hash)
-                        .await?
-                    {
-                        UpdateLinkHashOutcome::Updated => summary.updated += 1,
-                        UpdateLinkHashOutcome::ConflictShadowed => summary.conflict_skipped += 1,
-                        UpdateLinkHashOutcome::Missing => summary.errors += 1,
-                    }
+                    updates.push((row.id, normalized.link_hash));
                 }
             }
-            self.checkpoint(job_id, owner, after_id).await?;
+            let outcomes = self
+                .ctx
+                .reindex_job_repo
+                .apply_link_hash_batch(self.batch_checkpoint(job_id, owner, after_id), &updates)
+                .await?
+                .ok_or_else(|| Self::lease_lost(job_id, owner))?;
+            for outcome in outcomes {
+                match outcome {
+                    UpdateLinkHashOutcome::Updated => summary.updated += 1,
+                    UpdateLinkHashOutcome::ConflictShadowed => summary.conflict_skipped += 1,
+                    UpdateLinkHashOutcome::Missing => summary.errors += 1,
+                }
+            }
         }
         Ok(())
     }
@@ -85,26 +89,30 @@ impl ReindexFlow {
             if rows.is_empty() {
                 break;
             }
+            let mut updates = Vec::new();
             for row in rows {
                 after_id = row.id;
                 summary.scanned += 1;
                 let new_hash = sha256_hex(row.body_text.as_bytes());
                 if new_hash == row.content_hash {
                     summary.unchanged += 1;
-                    continue;
+                } else {
+                    updates.push((row.id, new_hash));
                 }
-                match self
-                    .ctx
-                    .article_repo
-                    .update_content_hash(row.id, &new_hash)
-                    .await?
-                {
+            }
+            let outcomes = self
+                .ctx
+                .reindex_job_repo
+                .apply_content_hash_batch(self.batch_checkpoint(job_id, owner, after_id), &updates)
+                .await?
+                .ok_or_else(|| Self::lease_lost(job_id, owner))?;
+            for outcome in outcomes {
+                match outcome {
                     UpdateContentHashOutcome::Updated => summary.updated += 1,
                     UpdateContentHashOutcome::Conflict => summary.conflict_skipped += 1,
                     UpdateContentHashOutcome::Unchanged => summary.unchanged += 1,
                 }
             }
-            self.checkpoint(job_id, owner, after_id).await?;
         }
         Ok(())
     }

@@ -298,6 +298,16 @@ active rule resolver 保证 reindex 中途 `active_rule(kind)` 仍返回旧 acti
 - partial unique index `UNIQUE (target) WHERE state IN ('pending', 'running')` 保证同 target
   只能有一个 active job
 - lease 过期 reclaim → 保留 last_processed_id checkpoint，下轮从 checkpoint resume
+- 续跑入口（2026-11-21）：每次 `reindex` 先在单事务内查该 target 的活动 job（`pending`，或 `running`
+  但 lease 已过期——reclaim 是 best-effort），规则 `kind` + `payload_sha256` 与本次请求一致即由本 worker
+  领取并从 `last_processed_id` 之后继续（`reindex_resumed` 事件）；没有活动 job 才新建
+  （`start_reindex_tx`）。`version_tag` 只是 CLI 每次自动生成的标签（`reindex-<target>-<unix-ts>`），
+  不参与匹配，否则普通重跑永远无法续跑。规则不一致或另一 worker 持有存活 lease → 显式
+  `StorageError::Conflict { table: "reindex_jobs" }`，信息含 `reindex --abort <id>`，不改任何行。
+- 每批一个事务：先执行 owner-guarded 的 checkpoint UPDATE（`last_processed_id` + 续租
+  `lease_expires_at`，同时取得 SQLite 写锁 / PG job 行锁，使 abort / reclaim 与本批串行化），再改写本批
+  业务行；owner 校验失败整批回滚，已失去 lease 的 worker 不会改动任何业务行。PG 的单行冲突用事务内预检
+  （不靠捕获失败语句，失败语句会中止整个 PG 事务）。
 - crash-after-batch：已 commit 批次保留，未 commit 丢失，从 checkpoint 重做
 
 测试覆盖：[`crates/runtime/tests/`](../../crates/runtime/tests/) 中的 reindex_* 测试。
