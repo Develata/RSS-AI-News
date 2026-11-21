@@ -97,6 +97,13 @@ retryable 错误：超时、5xx、429（限流，`error_kind = http_429`）、�
 | `JsonFeed` | 自实现 `serde_json` parser | jsonfeed.org 1.1 |
 | `RssHub` | 走 RSS 分支 | RSSHub 输出始终是 RSS 2.0 |
 
+（实现现为 `feed-rs` 统一解析；上表为历史设计，漂移未改。）
+
+文章链接选取（2026-11-21）：Atom entry 可在文章链接前列出 `self` / `enclosure` / `related`。
+`parse_feed` 优先 `rel="alternate"`（缺省 `rel` 即 alternate，RFC 4287 §4.2.7.2），其中优先
+`text/html` / `application/xhtml+xml`；无 alternate 时取第一个 HTML 链接，再退回第一个链接。
+测试 `atom_prefers_alternate_link_over_self_and_enclosure`。
+
 ### 4.2 FeedEntryMeta 规范化
 
 所有 parser 输出统一的 `FeedEntryMeta` DTO（见 `crates/domain/src/dto/`）：

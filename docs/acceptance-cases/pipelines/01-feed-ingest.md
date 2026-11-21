@@ -44,6 +44,7 @@
 | `source_success_writeback_matching_no_row_is_a_storage_failure` | `crates/runtime/tests/ingest_tests.rs` | 成功 / 304 写回 0 行 = 存储失败 |
 | `source_failure_writeback_matching_no_row_is_a_storage_failure` | 同上 | 失败记录写回 0 行 = 存储失败 |
 | `unreadable_upserted_source_fails_that_source_without_panicking` | 同上 | upsert 后回读不到行不 panic |
+| `atom_prefers_alternate_link_over_self_and_enclosure` | `crates/feed/src/parser.rs`（单元测试） | Atom 取 alternate 文章链接 |
 | `cross_host_redirect_does_not_leak_rsshub_key_via_referer` | `crates/feed/tests/fetcher_tests.rs` | 跨主机重定向不经 Referer 泄漏 RSSHub key |
 | `multi_source_concurrent_within_limit` | 同上 | 并发上限 |
 | `ingest_bootstrap_writes_config_kind_id_into_feed_sources_config_version` | 同上 | bootstrap rule 绑定 |
