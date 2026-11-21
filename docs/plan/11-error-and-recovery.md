@@ -75,7 +75,7 @@ trait ClassifiedError {
 | 失败发生位置 | 持久化字段 | 状态变化 |
 |---|---|---|
 | feed 抓取 | `feed_entries.last_error*` | `Fetching → PendingFetch`（retry）/ `Failed`（exhausted） |
-| 正文提取 | `feed_entries.last_error*` | 同上；fallback 命中时转 `FallbackPersisted` |
+| 正文提取 | `feed_entries.last_error*` | 同上；fallback 命中时转 `FallbackPersisted`；article 写入 / 摘要回读的存储错误按 `StorageError::is_retryable()` 同样分流（不再一律 `Failed`） |
 | AI 调用 | `article_ai_results.last_error*` | `Running → Pending`（retry）/ `PermanentFailed`（exhausted） |
 | 本地落盘 | `publish_records.last_error*` | retryable 回原态重试 / 耗尽或永久 → `Failed` |
 | GitHub 推送 | `publish_records.last_error*` | 422 → 重试一次后 `Failed`；其它直接 `Failed` |

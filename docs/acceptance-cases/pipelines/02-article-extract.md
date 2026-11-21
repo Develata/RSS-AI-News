@@ -31,6 +31,8 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
   release 落空的情形），而 run 期间才到期、本 run 未尝试过的行可以被领取
 - 只剩冷却中的行 → claim 为空，run 立即结束（不空转）
 - 4xx 且 summary 为空 → state=`Failed`，不计入下一轮 claim
+- article 写入或摘要回读遇到可重试存储错误 → 走 retryable 冷却 release（预算内回 `PendingFetch`，
+  最后一次尝试折叠 `Failed`），`last_error_kind` 为真实存储错误；不可重试存储错误 → `Failed`
 - 策略链 + fallback 都失败 → state=`Failed`，artifact 仍保留（按 policy）
 - content_hash 在 articles 表已存在但 link 不同 → repo 层报 `ArticleConflict`（用 `dedup_tests::articles_content_hash_duplicate_is_conflict` 兜底）
 
@@ -47,6 +49,11 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `extract_fetch_403_with_summary_persists_fallback` | 同上 | W18 抓取失败兜底 |
 | `extract_fetch_403_without_summary_fails_permanent` | 同上 | W18 无摘要仍 Failed |
 | `extract_fetch_5xx_with_summary_stays_retryable` | 同上 | W18 可重试不降级 |
+| `transient_article_insert_failure_is_retried_with_cooldown` | `crates/runtime/tests/extract_storage_failure_tests.rs` | 瞬时写入失败回队 + 冷却 |
+| `transient_article_insert_failure_on_last_attempt_folds_to_failed` | 同上 | 最后一次尝试折叠 failed |
+| `non_retryable_article_insert_failure_is_permanent` | 同上 | 不可重试存储错误终态 |
+| `transient_summary_read_failure_after_403_is_not_terminal` | 同上 | 摘要回读瞬时失败不终态（抓取 403） |
+| `transient_summary_read_failure_after_parse_failure_is_not_terminal` | 同上 | 摘要回读瞬时失败不终态（解析失败） |
 | `extract_writes_html_artifact_before_strategy` | 同上 | artifact 顺序 |
 | `max_batches_caps_loop_and_reports_reached_flag` | 同上 | 限批生效 |
 | `max_batches_zero_means_unlimited_until_queue_drained` | 同上 | 0 = 不限 |

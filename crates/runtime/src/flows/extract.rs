@@ -7,7 +7,7 @@ use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_domain::state::{ContentQuality, ExtractorStrategy};
 use rss_ai_news_extractor::{ExtractorError, RawHtmlFetch, decode_html, summary_fallback};
 use rss_ai_news_storage::{
-    ArticleInsertOutcome, ClaimRequest, ClaimedFeedEntry, NewArticle, build_owner_id,
+    ArticleInsertOutcome, ClaimRequest, ClaimedFeedEntry, NewArticle, StorageError, build_owner_id,
     lease_expires_at,
 };
 use serde_json::json;
@@ -263,9 +263,15 @@ impl ExtractFlow {
             stage: "extract",
             repo: ctx.event_repo.as_ref(),
         };
-        let retry = RetrySchedule {
-            max_attempts,
-            attempt_count: claimed.attempt_count,
+        let entry = EntryRelease {
+            ctx: &ctx,
+            emitter: &emitter,
+            owner: &owner,
+            feed_entry_id: claimed.id,
+            retry: RetrySchedule {
+                max_attempts,
+                attempt_count: claimed.attempt_count,
+            },
         };
         let fetch_task = ArticleFetchTask {
             feed_entry_id: claimed.id,
@@ -283,23 +289,25 @@ impl ExtractFlow {
                 // 且 feed 摘要可用时降级成文，与下方解析链失败分支对称。
                 // 可重试错误（超时/5xx）不消费摘要——重试仍有机会拿到全文，
                 // W15 预算路径维持不变。
-                if !error.is_retryable()
-                    && let Some(fallback) = load_summary_fallback(&ctx, &fetch_task).await
-                {
-                    tracing::info!(
-                        feed_entry_id = claimed.id,
-                        error_kind = error.error_kind(),
-                        "permanent fetch failure; falling back to feed summary"
-                    );
-                    return persist_fallback(
-                        &ctx, &emitter, &owner, claimed.id, fallback, None, now,
-                    )
-                    .await;
+                if !error.is_retryable() {
+                    match load_summary_fallback(&ctx, &fetch_task).await {
+                        Ok(Some(fallback)) => {
+                            tracing::info!(
+                                feed_entry_id = claimed.id,
+                                error_kind = error.error_kind(),
+                                "permanent fetch failure; falling back to feed summary"
+                            );
+                            return entry.persist_fallback(fallback, None, now).await;
+                        }
+                        Ok(None) => {}
+                        // Reading the summary failed: our storage, not the page,
+                        // decides the release (a transient error is retried).
+                        Err(storage_error) => {
+                            return entry.release_failure(&storage_error, now).await;
+                        }
+                    }
                 }
-                return release_extract_error(
-                    &ctx, &emitter, claimed.id, &owner, error, retry, now,
-                )
-                .await;
+                return entry.release_failure(&error, now).await;
             }
         };
 
@@ -320,70 +328,51 @@ impl ExtractFlow {
         }
         match chain {
             ChainResult::Extracted(article) => {
-                persist_extracted(
-                    &ctx,
-                    &emitter,
-                    &owner,
-                    claimed.id,
-                    article,
-                    html_artifact_id,
-                    now,
-                )
-                .await
-            }
-            ChainResult::Retryable(error) => {
-                release_extract_error(&ctx, &emitter, claimed.id, &owner, error, retry, now).await
-            }
-            ChainResult::Failed(errors) => {
-                if let Some(fallback) = load_summary_fallback(&ctx, &fetch_task).await {
-                    persist_fallback(
-                        &ctx,
-                        &emitter,
-                        &owner,
-                        claimed.id,
-                        fallback,
-                        html_artifact_id,
-                        now,
-                    )
+                entry
+                    .persist_extracted(article, html_artifact_id, now)
                     .await
-                } else {
+            }
+            ChainResult::Retryable(error) => entry.release_failure(&error, now).await,
+            ChainResult::Failed(errors) => match load_summary_fallback(&ctx, &fetch_task).await {
+                Ok(Some(fallback)) => {
+                    entry
+                        .persist_fallback(fallback, html_artifact_id, now)
+                        .await
+                }
+                Ok(None) => {
                     let message = errors
                         .last()
                         .map(ClassifiedError::display_user)
                         .unwrap_or_else(|| "no extractor strategy succeeded".to_string());
-                    release_permanent_failure(
-                        &ctx,
-                        &emitter,
-                        claimed.id,
-                        &owner,
-                        &message,
-                        "html_parse",
-                        now,
-                    )
-                    .await
+                    entry.release_permanent(&message, "html_parse", now).await
                 }
-            }
+                Err(storage_error) => entry.release_failure(&storage_error, now).await,
+            },
         }
     }
 }
 
+/// Reads `summary_raw` lazily (only after a permanent fetch or parse failure).
+/// `Ok(None)`: the entry has no usable summary. `Err`: the read itself failed;
+/// the caller classifies it like any other storage error instead of treating
+/// it as "no summary" (which would terminalize the entry on a transient blip).
 async fn load_summary_fallback(
     ctx: &ExtractDeps,
     task: &ArticleFetchTask,
-) -> Option<FallbackArticle> {
+) -> Result<Option<FallbackArticle>, StorageError> {
     match ctx.feed_entry_repo.find_by_id(task.feed_entry_id).await {
         Ok(Some(entry)) => {
             let mut fallback_task = task.clone();
             fallback_task.summary_raw = entry.summary_raw;
-            summary_fallback(&fallback_task)
+            Ok(summary_fallback(&fallback_task))
         }
-        Ok(None) => None,
+        Ok(None) => Ok(None),
         Err(error) => {
             tracing::warn!(
                 feed_entry_id = task.feed_entry_id,
                 "failed to load fallback summary: {error}"
             );
-            None
+            Err(error)
         }
     }
 }
@@ -437,218 +426,225 @@ async fn write_html_artifact(
     }
 }
 
-async fn persist_extracted(
-    ctx: &ExtractDeps,
-    emitter: &RunEventEmitter<'_>,
-    owner: &str,
+/// Everything one claimed entry's release needs. Borrowed for the duration
+/// of `process_entry`; one shared lifetime suffices because the emitter and
+/// the owner string both outlive every call made through this struct.
+struct EntryRelease<'a> {
+    ctx: &'a ExtractDeps,
+    emitter: &'a RunEventEmitter<'a>,
+    owner: &'a str,
     feed_entry_id: i64,
-    article: ExtractedArticle,
-    html_artifact_id: Option<i64>,
-    now: OffsetDateTime,
-) -> ExtractEntryOutcome {
-    let new_article = NewArticle {
-        content_hash: article.content_hash,
-        canonical_link: article.canonical_link,
-        title: article.title,
-        body_text: article.body_text,
-        body_html_artifact_id: html_artifact_id,
-        extractor_strategy: strategy_to_str(article.extractor_strategy).to_string(),
-        extractor_version: 1,
-        content_quality: quality_to_str(article.content_quality).to_string(),
-        word_count: i64::from(article.word_count),
-        origin_feed_entry_id: feed_entry_id,
-    };
-    persist_article(ctx, emitter, owner, feed_entry_id, new_article, false, now).await
+    retry: RetrySchedule,
 }
 
-async fn persist_fallback(
-    ctx: &ExtractDeps,
-    emitter: &RunEventEmitter<'_>,
-    owner: &str,
-    feed_entry_id: i64,
-    fallback: FallbackArticle,
-    html_artifact_id: Option<i64>,
-    now: OffsetDateTime,
-) -> ExtractEntryOutcome {
-    let new_article = NewArticle {
-        content_hash: fallback.content_hash,
-        canonical_link: fallback.canonical_link,
-        title: fallback.title,
-        body_text: fallback.body_text,
-        body_html_artifact_id: html_artifact_id,
-        extractor_strategy: strategy_to_str(ExtractorStrategy::SummaryFallback).to_string(),
-        extractor_version: 1,
-        content_quality: quality_to_str(ContentQuality::Fallback).to_string(),
-        word_count: i64::from(fallback.word_count),
-        origin_feed_entry_id: feed_entry_id,
-    };
-    persist_article(ctx, emitter, owner, feed_entry_id, new_article, true, now).await
-}
+impl EntryRelease<'_> {
+    async fn persist_extracted(
+        &self,
+        article: ExtractedArticle,
+        html_artifact_id: Option<i64>,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        let new_article = NewArticle {
+            content_hash: article.content_hash,
+            canonical_link: article.canonical_link,
+            title: article.title,
+            body_text: article.body_text,
+            body_html_artifact_id: html_artifact_id,
+            extractor_strategy: strategy_to_str(article.extractor_strategy).to_string(),
+            extractor_version: 1,
+            content_quality: quality_to_str(article.content_quality).to_string(),
+            word_count: i64::from(article.word_count),
+            origin_feed_entry_id: self.feed_entry_id,
+        };
+        self.persist_article(new_article, false, now).await
+    }
 
-async fn persist_article(
-    ctx: &ExtractDeps,
-    emitter: &RunEventEmitter<'_>,
-    owner: &str,
-    feed_entry_id: i64,
-    article: NewArticle,
-    fallback_path: bool,
-    now: OffsetDateTime,
-) -> ExtractEntryOutcome {
-    let insert = match ctx
-        .article_repo
-        .insert_or_get_by_content_hash(&article)
-        .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            tracing::error!(feed_entry_id, "failed to persist article: {error}");
-            return release_permanent_failure(
-                ctx,
-                emitter,
+    async fn persist_fallback(
+        &self,
+        fallback: FallbackArticle,
+        html_artifact_id: Option<i64>,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        let new_article = NewArticle {
+            content_hash: fallback.content_hash,
+            canonical_link: fallback.canonical_link,
+            title: fallback.title,
+            body_text: fallback.body_text,
+            body_html_artifact_id: html_artifact_id,
+            extractor_strategy: strategy_to_str(ExtractorStrategy::SummaryFallback).to_string(),
+            extractor_version: 1,
+            content_quality: quality_to_str(ContentQuality::Fallback).to_string(),
+            word_count: i64::from(fallback.word_count),
+            origin_feed_entry_id: self.feed_entry_id,
+        };
+        self.persist_article(new_article, true, now).await
+    }
+
+    async fn persist_article(
+        &self,
+        article: NewArticle,
+        fallback_path: bool,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        let ctx = self.ctx;
+        let feed_entry_id = self.feed_entry_id;
+        let insert = match ctx
+            .article_repo
+            .insert_or_get_by_content_hash(&article)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::error!(feed_entry_id, "failed to persist article: {error}");
+                // plan/11 §3：retryable storage errors take the budgeted
+                // cooldown release, keeping the real error kind.
+                return self.release_failure(&error, now).await;
+            }
+        };
+
+        if !insert.newly_created {
+            return self.release_dedup_skipped(insert, now).await;
+        }
+
+        let released = if fallback_path {
+            ctx.feed_entry_repo
+                .release_fallback_persisted(feed_entry_id, self.owner, insert.article_id, now)
+                .await
+        } else {
+            ctx.feed_entry_repo
+                .release_success(feed_entry_id, self.owner, insert.article_id, now)
+                .await
+        };
+
+        match released {
+            Ok(true) if fallback_path => {
+                tracing::info!(
+                    target = "feed_entry.transition",
+                    id = feed_entry_id,
+                    from = "fetching",
+                    to = "fallback_persisted",
+                    reason = "summary_fallback"
+                );
+                ExtractEntryOutcome {
+                    feed_entry_id,
+                    status: ExtractEntryStatus::FallbackPersisted,
+                    article_id: Some(insert.article_id),
+                    error_kind: None,
+                }
+            }
+            Ok(true) => {
+                tracing::info!(
+                    target = "feed_entry.transition",
+                    id = feed_entry_id,
+                    from = "fetching",
+                    to = "persisted",
+                    reason = "extract_success"
+                );
+                ExtractEntryOutcome {
+                    feed_entry_id,
+                    status: ExtractEntryStatus::Persisted,
+                    article_id: Some(insert.article_id),
+                    error_kind: None,
+                }
+            }
+            Ok(false) => {
+                tracing::warn!(feed_entry_id, "feed entry release conflicted");
+                ExtractEntryOutcome {
+                    feed_entry_id,
+                    status: ExtractEntryStatus::PermanentFailed,
+                    article_id: Some(insert.article_id),
+                    error_kind: Some("lease_conflict".to_string()),
+                }
+            }
+            Err(error) => {
+                tracing::error!(feed_entry_id, "feed entry release failed: {error}");
+                ExtractEntryOutcome {
+                    feed_entry_id,
+                    status: ExtractEntryStatus::PermanentFailed,
+                    article_id: Some(insert.article_id),
+                    error_kind: Some(error.error_kind().to_string()),
+                }
+            }
+        }
+    }
+
+    async fn release_dedup_skipped(
+        &self,
+        insert: ArticleInsertOutcome,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        let feed_entry_id = self.feed_entry_id;
+        let released = self
+            .ctx
+            .feed_entry_repo
+            .release_dedup_skipped(
                 feed_entry_id,
-                owner,
-                &error.display_user(),
-                error.error_kind(),
+                self.owner,
+                insert.article_id,
+                "hash_dup",
                 now,
             )
             .await;
-        }
-    };
-
-    if !insert.newly_created {
-        return release_dedup_skipped(ctx, emitter, owner, feed_entry_id, insert, now).await;
-    }
-
-    let released = if fallback_path {
-        ctx.feed_entry_repo
-            .release_fallback_persisted(feed_entry_id, owner, insert.article_id, now)
-            .await
-    } else {
-        ctx.feed_entry_repo
-            .release_success(feed_entry_id, owner, insert.article_id, now)
-            .await
-    };
-
-    match released {
-        Ok(true) if fallback_path => {
-            tracing::info!(
-                target = "feed_entry.transition",
-                id = feed_entry_id,
-                from = "fetching",
-                to = "fallback_persisted",
-                reason = "summary_fallback"
-            );
-            ExtractEntryOutcome {
-                feed_entry_id,
-                status: ExtractEntryStatus::FallbackPersisted,
-                article_id: Some(insert.article_id),
-                error_kind: None,
+        match released {
+            Ok(true) => {
+                self.emitter
+                    .emit(
+                        "entry_dedup_skipped",
+                        "info",
+                        Some("feed_entry"),
+                        Some(feed_entry_id),
+                        "feed entry skipped by content hash dedup",
+                        Some(json!({
+                            "existing_article_id": insert.article_id,
+                            "decision": "hash_dup",
+                        })),
+                    )
+                    .await;
+                tracing::info!(
+                    target = "feed_entry.transition",
+                    id = feed_entry_id,
+                    from = "fetching",
+                    to = "dedup_skipped",
+                    reason = "hash_dup"
+                );
+                ExtractEntryOutcome {
+                    feed_entry_id,
+                    status: ExtractEntryStatus::DedupSkipped,
+                    article_id: Some(insert.article_id),
+                    error_kind: None,
+                }
             }
-        }
-        Ok(true) => {
-            tracing::info!(
-                target = "feed_entry.transition",
-                id = feed_entry_id,
-                from = "fetching",
-                to = "persisted",
-                reason = "extract_success"
-            );
-            ExtractEntryOutcome {
-                feed_entry_id,
-                status: ExtractEntryStatus::Persisted,
-                article_id: Some(insert.article_id),
-                error_kind: None,
-            }
-        }
-        Ok(false) => {
-            tracing::warn!(feed_entry_id, "feed entry release conflicted");
-            ExtractEntryOutcome {
+            Ok(false) => ExtractEntryOutcome {
                 feed_entry_id,
                 status: ExtractEntryStatus::PermanentFailed,
                 article_id: Some(insert.article_id),
                 error_kind: Some("lease_conflict".to_string()),
-            }
-        }
-        Err(error) => {
-            tracing::error!(feed_entry_id, "feed entry release failed: {error}");
-            ExtractEntryOutcome {
+            },
+            Err(error) => ExtractEntryOutcome {
                 feed_entry_id,
                 status: ExtractEntryStatus::PermanentFailed,
                 article_id: Some(insert.article_id),
                 error_kind: Some(error.error_kind().to_string()),
-            }
+            },
         }
     }
-}
 
-async fn release_dedup_skipped(
-    ctx: &ExtractDeps,
-    emitter: &RunEventEmitter<'_>,
-    owner: &str,
-    feed_entry_id: i64,
-    insert: ArticleInsertOutcome,
-    now: OffsetDateTime,
-) -> ExtractEntryOutcome {
-    let released = ctx
-        .feed_entry_repo
-        .release_dedup_skipped(feed_entry_id, owner, insert.article_id, "hash_dup", now)
-        .await;
-    match released {
-        Ok(true) => {
-            emitter
-                .emit(
-                    "entry_dedup_skipped",
-                    "info",
-                    Some("feed_entry"),
-                    Some(feed_entry_id),
-                    "feed entry skipped by content hash dedup",
-                    Some(json!({
-                        "existing_article_id": insert.article_id,
-                        "decision": "hash_dup",
-                    })),
-                )
-                .await;
-            tracing::info!(
-                target = "feed_entry.transition",
-                id = feed_entry_id,
-                from = "fetching",
-                to = "dedup_skipped",
-                reason = "hash_dup"
-            );
-            ExtractEntryOutcome {
-                feed_entry_id,
-                status: ExtractEntryStatus::DedupSkipped,
-                article_id: Some(insert.article_id),
-                error_kind: None,
-            }
+    /// Classified release: retryable errors (network, 5xx, transient storage)
+    /// return the row to `pending_fetch` with a cooldown inside the retry
+    /// budget (W15 folds the last attempt into `failed`); others are permanent.
+    /// `last_error*` always carry the real error.
+    async fn release_failure(
+        &self,
+        error: &(dyn ClassifiedError + Sync),
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        let message = error.display_user();
+        let kind = error.error_kind().to_string();
+        if !error.is_retryable() {
+            return self.release_permanent(&message, &kind, now).await;
         }
-        Ok(false) => ExtractEntryOutcome {
-            feed_entry_id,
-            status: ExtractEntryStatus::PermanentFailed,
-            article_id: Some(insert.article_id),
-            error_kind: Some("lease_conflict".to_string()),
-        },
-        Err(error) => ExtractEntryOutcome {
-            feed_entry_id,
-            status: ExtractEntryStatus::PermanentFailed,
-            article_id: Some(insert.article_id),
-            error_kind: Some(error.error_kind().to_string()),
-        },
-    }
-}
-
-async fn release_extract_error(
-    ctx: &ExtractDeps,
-    emitter: &RunEventEmitter<'_>,
-    feed_entry_id: i64,
-    owner: &str,
-    error: ExtractorError,
-    retry: RetrySchedule,
-    now: OffsetDateTime,
-) -> ExtractEntryOutcome {
-    let message = error.display_user();
-    let kind = error.error_kind().to_string();
-    if error.is_retryable() {
+        let ctx = self.ctx;
+        let feed_entry_id = self.feed_entry_id;
         // One instant for the row's `updated_at` and the cooldown: `now` may
         // predate artifact writes and the strategy chain, which would shorten
         // the cooldown and misdate the release.
@@ -658,11 +654,11 @@ async fn release_extract_error(
             .feed_entry_repo
             .release_retryable_failure(
                 feed_entry_id,
-                owner,
+                self.owner,
                 &message,
                 &kind,
-                retry.max_attempts,
-                retry.next_attempt_at(released_at),
+                self.retry.max_attempts,
+                self.retry.next_attempt_at(released_at),
                 released_at,
             )
             .await
@@ -682,7 +678,7 @@ async fn release_extract_error(
             }
         };
         if outcome.exhausted {
-            emitter
+            self.emitter
                 .emit(
                     "entry_permanent_failed",
                     "error",
@@ -718,51 +714,48 @@ async fn release_extract_error(
             article_id: None,
             error_kind: Some(kind),
         }
-    } else {
-        release_permanent_failure(ctx, emitter, feed_entry_id, owner, &message, &kind, now).await
     }
-}
 
-async fn release_permanent_failure(
-    ctx: &ExtractDeps,
-    emitter: &RunEventEmitter<'_>,
-    feed_entry_id: i64,
-    owner: &str,
-    message: &str,
-    kind: &str,
-    now: OffsetDateTime,
-) -> ExtractEntryOutcome {
-    match ctx
-        .feed_entry_repo
-        .release_permanent_failure(feed_entry_id, owner, message, kind, now)
-        .await
-    {
-        Ok(false) => tracing::warn!(feed_entry_id, "permanent release conflicted"),
-        Err(error) => tracing::error!(feed_entry_id, "permanent release failed: {error}"),
-        Ok(true) => {}
-    }
-    emitter
-        .emit(
-            "entry_permanent_failed",
-            "error",
-            Some("feed_entry"),
-            Some(feed_entry_id),
-            message,
-            Some(json!({ "error_kind": kind })),
-        )
-        .await;
-    tracing::error!(
-        target = "feed_entry.transition",
-        id = feed_entry_id,
-        from = "fetching",
-        to = "failed",
-        reason = kind
-    );
-    ExtractEntryOutcome {
-        feed_entry_id,
-        status: ExtractEntryStatus::PermanentFailed,
-        article_id: None,
-        error_kind: Some(kind.to_string()),
+    async fn release_permanent(
+        &self,
+        message: &str,
+        kind: &str,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        let feed_entry_id = self.feed_entry_id;
+        match self
+            .ctx
+            .feed_entry_repo
+            .release_permanent_failure(feed_entry_id, self.owner, message, kind, now)
+            .await
+        {
+            Ok(false) => tracing::warn!(feed_entry_id, "permanent release conflicted"),
+            Err(error) => tracing::error!(feed_entry_id, "permanent release failed: {error}"),
+            Ok(true) => {}
+        }
+        self.emitter
+            .emit(
+                "entry_permanent_failed",
+                "error",
+                Some("feed_entry"),
+                Some(feed_entry_id),
+                message,
+                Some(json!({ "error_kind": kind })),
+            )
+            .await;
+        tracing::error!(
+            target = "feed_entry.transition",
+            id = feed_entry_id,
+            from = "fetching",
+            to = "failed",
+            reason = kind
+        );
+        ExtractEntryOutcome {
+            feed_entry_id,
+            status: ExtractEntryStatus::PermanentFailed,
+            article_id: None,
+            error_kind: Some(kind.to_string()),
+        }
     }
 }
 

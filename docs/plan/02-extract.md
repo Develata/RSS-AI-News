@@ -224,6 +224,7 @@ rss-ai-news replay --kind html --key <feed_entry_id> --diff
 | payload 过大 | `ExtractorError::TooLarge` | false | 尝试 fallback（W18）；无摘要则 `failed` |
 | 提取失败 | `ExtractorError::ParseFailed` | false | 尝试 fallback；失败则 `failed` |
 | 内容太短 | `ExtractorError::ContentTooShort` | false | 尝试 fallback；失败则 `failed` |
+| article 写入 / 摘要回读的存储错误 | `StorageError`（`is_retryable()`） | 按分类 | 可重试（池超时、PG 40001/40P01、SQLite busy）→ 回 `pending_fetch` + 冷却，耗尽折叠 `failed`，`last_error_kind` 为真实存储错误；不可重试 → `failed`。摘要回读失败不再当作"无摘要" |
 | content_hash 命中 | 非错误 | — | 转 `dedup_skipped` |
 | fallback 成功 | 非错误 | — | 转 `fallback_persisted` |
 
