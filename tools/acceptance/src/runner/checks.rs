@@ -373,7 +373,9 @@ mod tests {
             "rss-ai-news-acceptance-toolchain-{name}-{}",
             std::process::id()
         ));
-        let _ = fs::remove_dir_all(&root);
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
         fs::create_dir_all(root.join(".github/workflows")).unwrap();
         fs::create_dir_all(root.join("docker")).unwrap();
         fs::write(
