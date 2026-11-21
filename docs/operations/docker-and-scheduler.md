@@ -9,6 +9,9 @@ CI release workflow（push tag `v*` 触发）同时发布两套镜像：
 | runtime | `ghcr.io/develata/rss-ai-news:0.10.4` | `rss-ai-news` 二进制直跑 | 一次性命令（migrate / ingest / doctor 等） |
 | scheduler | `ghcr.io/develata/rss-ai-news:0.10.4-scheduler` | `scheduler-entrypoint.sh` + supercronic | 常驻容器按 cron 触发 |
 
+GHCR 只发布 `linux/amd64`。Dockerfile 里的 cargo-chef / supercronic 同时固定了 amd64 与 arm64 的 SHA-256，
+arm64 主机可本地构建（`docker build -f docker/Dockerfile --target runtime .`），或用 `--platform linux/amd64` 仿真运行。
+
 镜像 tag 规则（详见 [./ci-and-release.md](./ci-and-release.md) §镜像 tag 规则）：
 - 稳定版 `vX.Y.Z` → `X.Y.Z`；两镜像都推送成功后，最高 stable tag 才晋升 `latest`，`X.Y` 线内最高才晋升 `X.Y`；
   scheduler 为各 tag 加 `-scheduler`
@@ -81,9 +84,18 @@ entrypoint 拼一行 `<RSS_CRON_SCHEDULE> /usr/local/bin/rss-ai-news --config-di
 给 supercronic（它用 `/bin/sh -c` 执行命令部分）。`RSS_CRON_COMMAND` 按 shell 命令行书写，含空格的参数照常加引号，
 例如 `RSS_CRON_COMMAND="rebuild-report --output 'daily report.md'"`；两个变量都不能含换行或回车。适合简单场景。
 
-## 首次 migrate
+## 首次 migrate 与升级
 
-**任何**部署形态下，scheduler 容器**不**自动 migrate。首次部署必须显式跑一次：
+迁移行为（以代码为准，见 `crates/cli/src/context_factory.rs` 的 `open_write_storage`）：
+- scheduler entrypoint 自身**不** migrate；
+- 任何**写命令**（`ingest`、`ai-run`、`publish`、`publish-all`、`run`、`backfill`、`reindex`（非 dry-run）、`decision-run`）打开数据库时都会先
+  应用 pending migrations 并轮换 active config 版本，所以 cron 触发的第一条写命令会自动完成首次迁移；
+- 只读命令（`doctor`、`recent-entries`、`replay`、`rebuild-report`、`reindex --dry-run`）不 migrate；遇到 pending migration 时
+  `doctor` 跳过 deep scan，其余报错退出。
+
+推荐做法：首次启动前与**每次升级镜像前**，用一次性 runtime 容器显式跑 `migrate run`（必要时再跑 `migrate check`），
+让 schema 变更只在一处、带可见输出地发生，而不是混在某个 cron job 的日志里；`migrate run` 在仍有活动 reindex job 时
+会拒绝执行。
 
 ```bash
 docker run --rm --env-file .env \

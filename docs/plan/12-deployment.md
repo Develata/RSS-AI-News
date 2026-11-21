@@ -32,6 +32,10 @@ push tag `v*` 时同时构建发布两套镜像：
 
 底层共享同一 builder stage；scheduler 镜像只在 runtime 镜像基础上多装 supercronic。
 
+GHCR 只发布 `linux/amd64` 镜像（release runner 为 amd64，不做 QEMU 交叉构建）。Dockerfile 为 cargo-chef 与 supercronic
+同时固定了 amd64 / arm64 的 SHA-256，所以 arm64 主机可以本地 `docker build`；需要 arm64 镜像时在本机构建，或在
+arm64 主机上以 `--platform linux/amd64` 仿真运行已发布镜像。
+
 镜像标签规则：
 - `vX.Y.Z` → 先推 `X.Y.Z`（及 `X.Y.Z-scheduler`）；两镜像都成功后，若为仓库最高 stable tag 再晋升 `latest`，
   若为 `X.Y` 线内最高再晋升 `X.Y`（各带 `-scheduler` 对应 tag）；重跑旧 tag 不会让它们回退。
@@ -126,7 +130,16 @@ supercronic 把每个 cron job 的 stdout/stderr 透传到自身 stdout，
 - 常驻：状态走 docker 原生，cron 改环境即可调整；多一个 supercronic 进程
 - 一次性：cron job 失败由 1panel 计划任务可见性更好；需宿主侧维护 cron
 
-无论哪种形态，**首次 migrate 都必须显式执行一次**：
+迁移行为（以代码为准，见 `crates/cli/src/context_factory.rs` 的 `open_write_storage`）：
+- scheduler entrypoint 自身**不** migrate；
+- 任何**写命令**（`ingest`、`ai-run`、`publish`、`publish-all`、`run`、`backfill`、`reindex`（非 dry-run）、`decision-run`）打开数据库时都会先
+  应用 pending migrations 并轮换 active config 版本，所以 cron 触发的第一条写命令会自动完成首次迁移；
+- 只读命令（`doctor`、`recent-entries`、`replay`、`rebuild-report`、`reindex --dry-run`）不 migrate；遇到 pending migration 时
+  `doctor` 跳过 deep scan，其余报错退出。
+
+推荐做法：首次启动前与**每次升级镜像前**，用一次性 runtime 容器显式跑 `migrate run`（必要时再跑 `migrate check`），
+让 schema 变更只在一处、带可见输出地发生，而不是混在某个 cron job 的日志里；`migrate run` 在仍有活动 reindex job 时
+会拒绝执行。
 
 ```bash
 docker run --rm --env-file .env \
@@ -135,8 +148,6 @@ docker run --rm --env-file .env \
   ghcr.io/develata/rss-ai-news:0.10.4 \
   --config-dir /app/configs migrate run
 ```
-
-scheduler 容器不会在启动时自动 migrate（避免脏数据 / 误升级风险）。
 
 ## 6. CI workflow
 

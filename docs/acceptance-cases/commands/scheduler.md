@@ -23,7 +23,9 @@
   给 supercronic；supercronic 以 `/bin/sh -c` 执行命令部分，`RSS_CRON_COMMAND` 只经一次 shell 解析，
   带引号的含空格参数（如 `--output 'daily report.md'`）保持为一个 argv 元素
 - cron job 的 stdout/stderr 透传到容器 stdout，`docker logs` 可见
-- 首次 migrate **必须**通过一次性 runtime 镜像执行，scheduler 容器**不**自动 migrate
+- entrypoint 自身不 migrate；cron 触发的第一条写命令（`run` / `ingest` / `publish` 等，经 `open_write_storage`）会自动应用
+  pending migrations。推荐在首次启动前与每次升级前用一次性 runtime 容器显式执行 `migrate run`
+  （见 [../../plan/12-deployment.md](../../plan/12-deployment.md) §5）
 
 ### 失败条件（failure path）
 

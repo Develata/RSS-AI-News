@@ -13,9 +13,10 @@
 #   1. 复制本文件到服务器 /opt/1panel/apps/rss-ai-news/docker-compose.yml
 #   2. 同目录建 .env（参考下方 README）；镜像版本由 RSS_AI_NEWS_VERSION 选择，
 #      默认是本文件随附的 release（发版时同步更新下面的默认值）
-#   3. `docker compose up -d` 启动；首次需要先 migrate（见下）
+#   3. `docker compose up -d` 启动。entrypoint 不 migrate，但第一条写命令（如 run）
+#      会自动应用 pending migrations；推荐首次启动前与每次升级前先显式 migrate（见下）
 #
-# 注意：本 compose 仅启动 scheduler 长驻容器；首次 migrate / 手动 doctor
+# 注意：本 compose 仅启动 scheduler 长驻容器；显式 migrate / 手动 doctor
 # 使用同目录 `.env` 与 mounts 直接运行 runtime image：
 #   docker run --rm --env-file .env \
 #     -v "$(pwd)/configs:/app/configs:ro" \
