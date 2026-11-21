@@ -84,7 +84,7 @@ async fn run_with_invalid_rsshub_base_url_still_publishes_stored_articles() {
     }
     let temp = TempDir::new().expect("temp dir");
     let db_path = temp.path().join("rss.sqlite");
-    write_config(temp.path(), &db_path, "{RSSHUB}/feed.xml");
+    write_config(temp.path(), &db_path, "{RSSHUB}/feed.xml", false);
     let pool = migrated_pool(&db_path).await;
     seed_persisted_article(&pool, "ai").await;
     pool.close().await;
@@ -120,6 +120,169 @@ async fn run_with_invalid_rsshub_base_url_still_publishes_stored_articles() {
         .expect("ai category published");
     assert_eq!(ai.items, 1, "the stored article is published: {publish:?}");
     assert_eq!(summary.exit_code(), ExitCode::ConfigError);
+}
+
+/// An ingest preflight failure (a source uses the RSSHub placeholder but
+/// RSSHUB_BASE_URL is unset) is recorded, yet publish still runs on the
+/// stored state and the exit code still reports the ingest failure.
+#[tokio::test]
+async fn ingest_preflight_failure_still_runs_publish() {
+    if !run_in_isolated_child("ingest_preflight_failure_still_runs_publish", &[]) {
+        return;
+    }
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config(temp.path(), &db_path, "{RSSHUB}/feed.xml", false);
+    let pool = migrated_pool(&db_path).await;
+    seed_persisted_article(&pool, "ai").await;
+    pool.close().await;
+
+    let cli = cli_for(temp.path());
+    let summary = run::run(&cli, run_args(&cli)).await.expect("run summary");
+    assert!(summary.ingest.is_none());
+    assert_eq!(
+        stage_exit_codes(&summary),
+        vec![("ingest", 78)],
+        "{:?}",
+        summary.stage_failures
+    );
+    assert_eq!(
+        summary.ai_run_skip_reason,
+        Some(run::AI_RUN_SKIP_REASON_DISABLED)
+    );
+    assert_eq!(published_items(&summary), Some(1));
+    assert_eq!(summary.exit_code(), ExitCode::ConfigError);
+    assert_eq!(summary.status(), "fail");
+}
+
+/// With AI enabled (and no credentials in the child's environment), ai-run is
+/// attempted too after the ingest failure and reports its own failure.
+#[tokio::test]
+async fn ingest_preflight_failure_still_attempts_ai_run() {
+    if !run_in_isolated_child("ingest_preflight_failure_still_attempts_ai_run", &[]) {
+        return;
+    }
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config(temp.path(), &db_path, "{RSSHUB}/feed.xml", true);
+    let cli = cli_for(temp.path());
+    let summary = run::run(&cli, run_args(&cli)).await.expect("run summary");
+    assert!(summary.ai_run_skip_reason.is_none());
+    let stages = stage_exit_codes(&summary);
+    assert!(stages.contains(&("ingest", 78)), "{stages:?}");
+    assert!(
+        stages.iter().any(|(stage, _)| *stage == "ai-run"),
+        "ai-run was not attempted: {stages:?}"
+    );
+    assert!(summary.publish.is_some(), "publish must still run");
+    assert_eq!(summary.exit_code(), ExitCode::ConfigError);
+}
+
+/// The ingest stage itself returning `Err` (here: registering the extractor
+/// rule version fails after the feeds were polled) is recorded, and ai-run /
+/// publish still process the stored article (R3-14: this path had no test).
+#[tokio::test]
+async fn ingest_execution_error_still_publishes_stored_articles() {
+    if !run_in_isolated_child(
+        "ingest_execution_error_still_publishes_stored_articles",
+        &[],
+    ) {
+        return;
+    }
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    // Connection refused at once: the feed poll fails fast and is only counted.
+    write_config(temp.path(), &db_path, "http://127.0.0.1:9/feed.xml", false);
+    let pool = migrated_pool(&db_path).await;
+    seed_persisted_article(&pool, "ai").await;
+    // No active extractor rule, and registering one fails: the extract stage
+    // cannot be assembled, so `ingest::run_loaded` returns a storage error.
+    sqlx::query("UPDATE rule_versions SET status = 'superseded' WHERE kind = 'extractor'")
+        .execute(&pool)
+        .await
+        .expect("retire extractor rule");
+    sqlx::query(
+        "CREATE TRIGGER block_extractor_rule BEFORE INSERT ON rule_versions \
+         WHEN NEW.kind = 'extractor' BEGIN SELECT RAISE(ABORT, 'test: extractor rule blocked'); END",
+    )
+    .execute(&pool)
+    .await
+    .expect("trigger");
+    pool.close().await;
+
+    let cli = cli_for(temp.path());
+    let summary = run::run(&cli, run_args(&cli)).await.expect("run summary");
+    assert!(summary.ingest.is_none(), "ingest returned Err");
+    assert_eq!(
+        stage_exit_codes(&summary),
+        vec![("ingest", 1)],
+        "{:?}",
+        summary.stage_failures
+    );
+    assert!(
+        summary.stage_failures[0]
+            .message
+            .contains("extractor rule blocked"),
+        "{:?}",
+        summary.stage_failures
+    );
+    assert_eq!(published_items(&summary), Some(1));
+    assert_eq!(summary.exit_code(), ExitCode::RuntimeError);
+}
+
+/// The database is every stage's precondition: when it cannot be opened
+/// nothing downstream runs, and the failure sets the exit code.
+#[tokio::test]
+async fn unavailable_database_skips_every_stage() {
+    if !run_in_isolated_child("unavailable_database_skips_every_stage", &[]) {
+        return;
+    }
+    let temp = TempDir::new().expect("temp dir");
+    // A path below a regular file can never be created.
+    let blocker = temp.path().join("not-a-directory");
+    fs::write(&blocker, b"file").expect("blocker file");
+    write_config(
+        temp.path(),
+        &blocker.join("run.sqlite"),
+        "https://example.invalid/feed.xml",
+        true,
+    );
+    let cli = cli_for(temp.path());
+    let summary = run::run(&cli, run_args(&cli)).await.expect("run summary");
+    assert!(summary.ingest.is_none());
+    assert!(summary.ai_run.is_none());
+    assert!(summary.publish.is_none());
+    assert_eq!(
+        summary.ai_run_skip_reason,
+        Some(run::AI_RUN_SKIP_REASON_NO_DATABASE)
+    );
+    assert_eq!(
+        summary.stage_failures.len(),
+        1,
+        "{:?}",
+        summary.stage_failures
+    );
+    assert_eq!(summary.stage_failures[0].stage, "ingest");
+    assert_ne!(summary.exit_code(), ExitCode::Success);
+}
+
+fn stage_exit_codes(summary: &run::RunCommandSummary) -> Vec<(&'static str, i32)> {
+    summary
+        .stage_failures
+        .iter()
+        .map(|failure| (failure.stage, failure.exit_code_value))
+        .collect()
+}
+
+/// Items of the `ai` category's report, when publish ran.
+fn published_items(summary: &run::RunCommandSummary) -> Option<u32> {
+    summary.publish.as_ref().and_then(|publish| {
+        publish
+            .categories
+            .iter()
+            .find(|category| category.category == "ai")
+            .map(|category| category.items)
+    })
 }
 
 fn run_args(cli: &Cli) -> &RunArgs {
@@ -208,9 +371,10 @@ async fn seed_persisted_article(pool: &sqlx::SqlitePool, category: &str) {
         .expect("link");
 }
 
-/// SQLite config, AI disabled, unscored articles published, one category
-/// `ai` whose single source reads `feed_url`.
-fn write_config(root: &Path, db_path: &Path, feed_url: &str) {
+/// SQLite config, unscored articles published, one category `ai` whose single
+/// source reads `feed_url`. With `ai_enabled`, credentials come from the
+/// (isolated) environment, which holds none.
+fn write_config(root: &Path, db_path: &Path, feed_url: &str, ai_enabled: bool) {
     fs::create_dir_all(root.join("categories")).expect("create categories");
     let db_path = db_path.to_string_lossy().replace('\\', "/");
     let output_dir = root.join("output").to_string_lossy().replace('\\', "/");
@@ -236,7 +400,7 @@ concurrent_feeds = 1
 concurrent_fetches = 1
 
 [ai]
-enabled = false
+enabled = {ai_enabled}
 model = "test-model"
 max_tokens = 1024
 temperature = 0.0
