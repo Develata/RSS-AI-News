@@ -53,16 +53,14 @@ pub fn parse_feed(bytes: &[u8], feed_kind: FeedKind) -> Result<Vec<FeedEntryMeta
 
 /// The entry's article URL among its links. Atom entries may list `self`,
 /// `enclosure`, `related`… before the article: prefer `rel="alternate"` (a
-/// missing `rel` means alternate, RFC 4287 §4.2.7.2), among those an HTML
+/// missing `rel` means alternate, and the IANA IRI form is the same relation,
+/// RFC 4287 §4.2.7.2), among those an HTML
 /// one; without any alternate, the first HTML link; else the first link.
 /// RSS and JSON Feed entries carry a single rel-less link, so they are
 /// unaffected.
 fn article_link(links: &[feed_rs::model::Link]) -> Option<&feed_rs::model::Link> {
-    let is_alternate = |link: &&feed_rs::model::Link| {
-        link.rel
-            .as_deref()
-            .is_none_or(|rel| rel.trim().eq_ignore_ascii_case("alternate"))
-    };
+    let is_alternate =
+        |link: &&feed_rs::model::Link| link.rel.as_deref().is_none_or(is_alternate_rel);
     let is_html = |link: &&feed_rs::model::Link| {
         link.media_type.as_deref().is_some_and(|media_type| {
             let essence = media_type
@@ -81,6 +79,22 @@ fn article_link(links: &[feed_rs::model::Link]) -> Option<&feed_rs::model::Link>
         .or_else(|| links.iter().find(is_alternate))
         .or_else(|| links.iter().find(is_html))
         .or_else(|| links.first())
+}
+
+/// `rel` names the `alternate` relation (R2-S13): the registered name
+/// (case-insensitive) or its RFC 4287 §4.2.7.2 IRI
+/// `http://www.iana.org/assignments/relation/alternate` (scheme and host
+/// case-insensitive, path exact, RFC 3986 §6.2.2.1).
+fn is_alternate_rel(rel: &str) -> bool {
+    const IANA: &str = "http://www.iana.org/";
+    let rel = rel.trim();
+    if rel.eq_ignore_ascii_case("alternate") {
+        return true;
+    }
+    rel.len() > IANA.len()
+        && rel.is_char_boundary(IANA.len())
+        && rel[..IANA.len()].eq_ignore_ascii_case(IANA)
+        && &rel[IANA.len()..] == "assignments/relation/alternate"
 }
 
 /// 仅当 atom `<content>` 是文本/HTML/XML 类型时返回其 body 作为摘要回退。
@@ -145,6 +159,47 @@ mod tests {
         assert_eq!(entries[0].feed_entry_uid, "json-1");
         assert_eq!(entries[0].title_raw, "JSON item 1");
         assert_eq!(entries[0].link_raw, "https://example.com/json/1");
+    }
+
+    #[test]
+    fn atom_alternate_rel_iri_counts_as_alternate() {
+        // R2-S13: RFC 4287 §4.2.7.2 — a registered name equals the IANA IRI
+        // `http://www.iana.org/assignments/relation/<name>`. An HTML `self`
+        // link listed first must not win over the IRI-form alternate.
+        let atom = br#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>IRI</title>
+  <entry>
+    <id>iri-1</id>
+    <title>x</title>
+    <link rel="self" type="text/html" href="https://example.com/self"/>
+    <link rel="http://www.iana.org/assignments/relation/alternate" type="text/html" href="https://example.com/article"/>
+  </entry>
+</feed>"#;
+
+        let entries = parse_feed(atom, FeedKind::Atom).expect("atom should parse");
+
+        assert_eq!(entries[0].link_raw, "https://example.com/article");
+    }
+
+    #[test]
+    fn rel_alternate_forms() {
+        for rel in [
+            "alternate",
+            " Alternate ",
+            "http://www.iana.org/assignments/relation/alternate",
+            "HTTP://WWW.IANA.ORG/assignments/relation/alternate",
+        ] {
+            assert!(is_alternate_rel(rel), "{rel}");
+        }
+        for rel in [
+            "self",
+            "http://www.iana.org/assignments/relation/self",
+            "http://www.iana.org/assignments/relation/Alternate",
+            "https://example.com/alternate",
+        ] {
+            assert!(!is_alternate_rel(rel), "{rel}");
+        }
     }
 
     #[test]

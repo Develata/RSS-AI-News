@@ -105,9 +105,10 @@ retryable 错误：超时、5xx、429（限流，`error_kind = http_429`）、�
 （实现现为 `feed-rs` 统一解析；上表为历史设计，漂移未改。）
 
 文章链接选取（2026-11-21）：Atom entry 可在文章链接前列出 `self` / `enclosure` / `related`。
-`parse_feed` 优先 `rel="alternate"`（缺省 `rel` 即 alternate，RFC 4287 §4.2.7.2），其中优先
+`parse_feed` 优先 `rel="alternate"`（缺省 `rel` 即 alternate；等价的注册关系 IRI
+`http://www.iana.org/assignments/relation/alternate` 同样算 alternate，scheme / host 不分大小写，R2-S13；RFC 4287 §4.2.7.2），其中优先
 `text/html` / `application/xhtml+xml`；无 alternate 时取第一个 HTML 链接，再退回第一个链接。
-测试 `atom_prefers_alternate_link_over_self_and_enclosure`。
+测试 `atom_prefers_alternate_link_over_self_and_enclosure`、`atom_alternate_rel_iri_counts_as_alternate`。
 
 ### 4.2 FeedEntryMeta 规范化
 
