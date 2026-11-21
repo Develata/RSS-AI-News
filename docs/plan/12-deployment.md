@@ -49,7 +49,8 @@ builder  →  runtime  →  debug
 
 ### 3.1 `builder` stage
 
-- 从 Rust 1.97.0 bookworm 镜像直接 COPY 真实源码，不再构造占位源码或忽略构建失败。
+- 基于 `rust:1.97.0-slim-bookworm`（按 index digest 固定；digest 由 dependabot docker 生态刷新），直接 COPY 真实源码，
+  不再构造占位源码或忽略构建失败。
 - BuildKit cache mounts 复用 Cargo registry、git 与 target；执行 `cargo build --release --locked --bin rss-ai-news`。
 - 将二进制复制到 cache mount 外的 `/app/rss-ai-news` 并 strip，供后续 stage 复制。
 
@@ -60,7 +61,7 @@ builder  →  runtime  →  debug
 
 ### 3.3 `runtime` stage
 
-- `debian:bookworm-slim` 基础
+- `debian:bookworm-slim` 基础，按 index digest 固定（Debian 12 LTS 至 2028-06-30，暂不换发行版）
 - 安装最小运行时依赖（`ca-certificates` 等）
 - 从 builder 的 `/app/rss-ai-news` 复制最终二进制到 `/usr/local/bin/`。
 - `ENTRYPOINT ["/usr/local/bin/rss-ai-news"]`，以 UID/GID 10001 的 `appuser` 运行。
