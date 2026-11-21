@@ -158,7 +158,8 @@ lease 字段约束见 [./08-state-machines.md](./08-state-machines.md) §2.3 + [
 - 每次 claim 按该次 claim 的时刻判断是否到期：冷却行在 `LIMIT` 前被过滤、不占批次名额；
   run 期间到期的行（包括上一 run 留下的冷却）在同一 run 内即可被领取。
 - 本 run 尝试过的行不会被本 run 再次领取：claim 排除本 run 已领取、且未确认终态成功
-  （persisted / fallback_persisted / dedup_skipped 的 release 已落库）的 id。失败行即使在
+  （persisted / fallback_persisted / dedup_skipped 的 release 已落库）的 id。release 落空报 `LeaseLost`、
+  release 报错报 `ReleaseFailed`（计入 `storage_failed`），二者都不冒充已落库的转移。失败行即使在
   run 结束前冷却到期、或 release 落空（lease 过期被并发 run reclaim，owner guard 拦下
   release，行回到 `pending_fetch` 且无冷却）、或被并发 backfill reset，也留给之后的 run。
   排除集合只随本 run 的失败数增长。跨 run 的过期 lease 恢复不变。

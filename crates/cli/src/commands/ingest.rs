@@ -36,6 +36,12 @@ pub struct IngestCommandSummary {
     /// Sources that failed because of our own storage (entry inserts, source
     /// rows); included in `sources_failed`.
     pub sources_storage_failed: u32,
+    /// Extract entries whose path hit a failure of our own storage (article
+    /// write, summary read, release); a run failure like the source count.
+    pub extract_storage_failed: u32,
+    /// Extract releases that matched no row because another run reclaimed the
+    /// lease; reported, not a run failure (that run owns the entry now).
+    pub extract_lease_lost: u32,
     pub duration_seconds: f64,
 }
 
@@ -50,6 +56,15 @@ impl IngestCommandSummary {
                 message: format!(
                     "{} sources failed to persist entries",
                     self.sources_storage_failed
+                ),
+            });
+        }
+        if self.extract_storage_failed > 0 {
+            errors.push(RenderedError {
+                kind: "extract_storage_failed".to_string(),
+                message: format!(
+                    "{} extract entries hit a storage failure",
+                    self.extract_storage_failed
                 ),
             });
         }
@@ -107,6 +122,11 @@ impl CommandSummary for IngestCommandSummary {
         )?;
         writeln!(writer, "  Articles fallback:    {}", self.articles_fallback)?;
         writeln!(writer, "  Fetch failed:         {}", self.fetch_failed)?;
+        writeln!(
+            writer,
+            "  Extract lease lost:   {}",
+            self.extract_lease_lost
+        )?;
         writeln!(writer, "  Tasks panicked:       {}", self.tasks_panicked)?;
         writeln!(
             writer,
@@ -178,6 +198,45 @@ pub(crate) async fn run_loaded(
         tasks_panicked: ingest_summary.tasks_panicked + extract_summary.tasks_panicked,
         extract_claim_error: extract_summary.claim_error,
         sources_storage_failed: ingest_summary.sources_storage_failed,
+        extract_storage_failed: extract_summary.storage_failed,
+        extract_lease_lost: extract_summary.lease_lost,
         duration_seconds: started.elapsed().as_secs_f64(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary() -> IngestCommandSummary {
+        IngestCommandSummary {
+            sources_attempted: 1,
+            sources_succeeded: 1,
+            sources_not_modified: 0,
+            sources_failed: 0,
+            entries_discovered: 1,
+            entries_inserted: 1,
+            articles_persisted: 0,
+            articles_fallback: 0,
+            fetch_failed: 0,
+            tasks_panicked: 0,
+            extract_claim_error: None,
+            sources_storage_failed: 0,
+            extract_storage_failed: 0,
+            extract_lease_lost: 0,
+            duration_seconds: 0.0,
+        }
+    }
+
+    #[test]
+    fn extract_storage_failures_fail_the_run_but_lost_leases_do_not() {
+        let mut lost = summary();
+        lost.extract_lease_lost = 2;
+        assert_eq!(lost.exit_code(), ExitCode::Success);
+
+        let mut failed = summary();
+        failed.extract_storage_failed = 1;
+        assert_eq!(failed.exit_code(), ExitCode::RuntimeError);
+        assert_eq!(failed.errors()[0].kind, "extract_storage_failed");
+    }
 }

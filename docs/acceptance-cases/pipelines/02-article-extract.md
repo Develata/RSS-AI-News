@@ -54,6 +54,10 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `non_retryable_article_insert_failure_is_permanent` | 同上 | 不可重试存储错误终态 |
 | `transient_summary_read_failure_after_403_is_not_terminal` | 同上 | 摘要回读瞬时失败不终态（抓取 403） |
 | `transient_summary_read_failure_after_parse_failure_is_not_terminal` | 同上 | 摘要回读瞬时失败不终态（解析失败） |
+| `permanent_release_that_misses_reports_lease_lost_without_event` | `crates/runtime/tests/extract_tests.rs` | 永久 release 落空报 LeaseLost、无事件 |
+| `success_release_that_misses_reports_lease_lost` | 同上 | 成功 release 落空不报 Persisted |
+| `failed_permanent_release_reports_release_failed` | `crates/runtime/tests/extract_storage_failure_tests.rs` | release 报错为 ReleaseFailed + storage_failed |
+| `extract_storage_failures_fail_the_run_but_lost_leases_do_not` | `crates/cli/src/commands/ingest.rs`（单元测试） | extract 存储失败进入退出码 |
 | `extract_writes_html_artifact_before_strategy` | 同上 | artifact 顺序 |
 | `max_batches_caps_loop_and_reports_reached_flag` | 同上 | 限批生效 |
 | `max_batches_zero_means_unlimited_until_queue_drained` | 同上 | 0 = 不限 |

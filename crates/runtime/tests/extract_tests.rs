@@ -1182,6 +1182,9 @@ async fn entry_whose_lease_was_reclaimed_is_not_claimed_again_in_the_same_run() 
 
     assert_eq!(*fetcher.calls.lock().await, [slow, healthy]);
     assert_eq!((summary.claimed, summary.persisted), (2, 1));
+    // A5: the missed release is reported as such, not as a retryable failure.
+    assert_eq!((summary.lease_lost, summary.retryable_failed), (1, 0));
+    assert!(!summary.retryable_deferred);
     assert_eq!(
         entry_row(&pool, slow).await,
         ("pending_fetch".to_string(), 1, None)
@@ -1371,4 +1374,59 @@ async fn oldest_first_backlog_still_starves_fresh_entries_under_cap() {
     assert!(summary.max_batches_reached);
     assert!(!fetcher.calls.lock().await.contains(&fresh));
     assert_eq!(entry_row(&pool, fresh).await.0, "pending_fetch");
+}
+
+/// A5：永久失败的 release 落空（lease 被并发 run reclaim）→ 报 `LeaseLost`，
+/// 不写 `entry_permanent_failed` 事件，也不计入 `permanent_failed`。
+#[tokio::test]
+async fn permanent_release_that_misses_reports_lease_lost_without_event() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry = seed_at(&pool, source_id, "uid-lost", 0).await;
+    let clock = TestClock::at(t0());
+    let (flow, _fetcher) = recording_flow_with(
+        &pool,
+        &clock,
+        responses([(entry, Ok(raw(entry, b"<html>x</html>")))]),
+        vec![(entry, OnFetch::ReclaimLease(entry))],
+        vec![parse_failed_strategy()],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+    let events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM run_events WHERE event_kind = 'entry_permanent_failed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("event count");
+
+    assert_eq!(summary.permanent_failed, 0, "{summary:?}");
+    assert_eq!(summary.lease_lost, 1);
+    assert_eq!(summary.storage_failed, 0);
+    assert_eq!(events, 0, "no event for a transition that did not land");
+    assert_eq!(entry_row(&pool, entry).await.0, "pending_fetch");
+}
+
+/// A5：成功路径的 release 落空同样报 `LeaseLost`，不报 `Persisted`。
+#[tokio::test]
+async fn success_release_that_misses_reports_lease_lost() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry = seed_at(&pool, source_id, "uid-lost-ok", 0).await;
+    let clock = TestClock::at(t0());
+    let (flow, _fetcher) = recording_flow(
+        &pool,
+        &clock,
+        responses([(entry, Ok(raw(entry, b"<html>ok</html>")))]),
+        vec![(entry, OnFetch::ReclaimLease(entry))],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+
+    assert_eq!(
+        (summary.persisted, summary.lease_lost),
+        (0, 1),
+        "{summary:?}"
+    );
+    assert_eq!(entry_row(&pool, entry).await.0, "pending_fetch");
 }

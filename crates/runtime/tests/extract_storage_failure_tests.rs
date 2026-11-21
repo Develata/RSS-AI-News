@@ -144,6 +144,7 @@ impl ArticleRepository for FlakyArticleRepo {
 struct FlakyFeedEntryRepo {
     inner: FeedEntryRepo,
     find_by_id: FailNext,
+    release_permanent: FailNext,
 }
 
 #[async_trait]
@@ -207,6 +208,9 @@ impl FeedEntryRepository for FlakyFeedEntryRepo {
         kind: &str,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        if let Some(error) = self.release_permanent.take() {
+            return Err(error);
+        }
         self.inner
             .release_permanent_failure(id, owner, error, kind, now)
             .await
@@ -342,6 +346,7 @@ fn flow(
     strategies: Vec<Arc<dyn ContentStrategy>>,
     article_insert: FailNext,
     find_by_id: FailNext,
+    release_permanent: FailNext,
 ) -> ExtractFlow {
     let app = Arc::new(app_config(RetentionPolicy::Off, 1));
     let fetcher = Arc::new(MapFetcher {
@@ -355,6 +360,7 @@ fn flow(
     deps.feed_entry_repo = Arc::new(FlakyFeedEntryRepo {
         inner: FeedEntryRepo::new(setup.pool.clone()),
         find_by_id,
+        release_permanent,
     });
     ExtractFlow::new(Arc::new(deps))
 }
@@ -389,6 +395,7 @@ async fn transient_article_insert_failure_is_retried_with_cooldown() {
         vec![Arc::new(FixedStrategy)],
         FailNext::new(1, retryable),
         FailNext::none(),
+        FailNext::none(),
     );
 
     let summary = flow.run(opts(5)).await;
@@ -396,6 +403,7 @@ async fn transient_article_insert_failure_is_retried_with_cooldown() {
 
     assert_eq!(summary.retryable_failed, 1, "{summary:?}");
     assert_eq!(summary.permanent_failed, 0);
+    assert_eq!(summary.storage_failed, 1, "counted as a storage failure");
     assert_eq!(state, "pending_fetch");
     assert_eq!(attempts, 1, "budget not exhausted");
     assert_eq!(kind.as_deref(), Some("db_unavailable"), "real error kind");
@@ -420,6 +428,7 @@ async fn transient_article_insert_failure_on_last_attempt_folds_to_failed() {
         vec![Arc::new(FixedStrategy)],
         FailNext::new(1, retryable),
         FailNext::none(),
+        FailNext::none(),
     );
 
     let summary = flow.run(opts(5)).await;
@@ -438,6 +447,7 @@ async fn non_retryable_article_insert_failure_is_permanent() {
         ok_html(setup.entry_id),
         vec![Arc::new(FixedStrategy)],
         FailNext::new(1, non_retryable),
+        FailNext::none(),
         FailNext::none(),
     );
 
@@ -458,6 +468,7 @@ async fn transient_summary_read_failure_after_403_is_not_terminal() {
         vec![Arc::new(FixedStrategy)],
         FailNext::none(),
         FailNext::new(1, retryable),
+        FailNext::none(),
     );
 
     let summary = flow.run(opts(5)).await;
@@ -479,6 +490,7 @@ async fn transient_summary_read_failure_after_parse_failure_is_not_terminal() {
         Vec::new(),
         FailNext::none(),
         FailNext::new(1, retryable),
+        FailNext::none(),
     );
 
     let summary = flow.run(opts(5)).await;
@@ -487,4 +499,34 @@ async fn transient_summary_read_failure_after_parse_failure_is_not_terminal() {
     assert_eq!(summary.retryable_failed, 1, "{summary:?}");
     assert_eq!(state, "pending_fetch");
     assert_eq!(kind.as_deref(), Some("db_unavailable"));
+}
+
+/// A5: a release that itself fails is `ReleaseFailed` (storage failure), never
+/// reported as `PermanentFailed`, and writes no `entry_permanent_failed` event.
+#[tokio::test]
+async fn failed_permanent_release_reports_release_failed() {
+    let setup = setup(None).await;
+    let flow = flow(
+        &setup,
+        Err(ExtractorError::HttpStatus { code: 404 }),
+        vec![Arc::new(FixedStrategy)],
+        FailNext::none(),
+        FailNext::none(),
+        FailNext::new(1, retryable),
+    );
+
+    let summary = flow.run(opts(5)).await;
+    let events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM run_events WHERE event_kind = 'entry_permanent_failed'",
+    )
+    .fetch_one(&setup.pool)
+    .await
+    .expect("event count");
+    let (state, _, _, _) = entry_row(&setup.pool, setup.entry_id).await;
+
+    assert_eq!(summary.permanent_failed, 0, "{summary:?}");
+    assert_eq!(summary.release_failed, 1);
+    assert_eq!(summary.storage_failed, 1);
+    assert_eq!(events, 0);
+    assert_eq!(state, "fetching", "lease stays until expiry reclaim");
 }

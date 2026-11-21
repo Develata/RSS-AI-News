@@ -37,6 +37,16 @@ pub struct ExtractSummary {
     pub dedup_skipped: u32,
     pub retryable_failed: u32,
     pub permanent_failed: u32,
+    /// Releases whose owner guard matched no row: another run reclaimed the
+    /// expired lease, so this run changed nothing (the row is that run's).
+    pub lease_lost: u32,
+    /// Releases that failed with a storage error; the row keeps its lease
+    /// until expiry reclaim returns it to `pending_fetch`.
+    pub release_failed: u32,
+    /// Entries whose outcome involved our own storage failing (article write,
+    /// summary read or the release itself), whatever the final status. The
+    /// CLI reports them as run failures, like `sources_storage_failed`.
+    pub storage_failed: u32,
     /// Tasks that panicked or were cancelled; leases recover on expiry.
     pub tasks_panicked: u32,
     /// 实际执行的批次数（F6-3）。命中 `max_batches` 上限时等于上限值；
@@ -47,9 +57,9 @@ pub struct ExtractSummary {
     /// 配合一条 INFO 日志（cli-semantics §4.4 line 198）让运维知晓本次 run
     /// 是否需要后续调度兜底。
     pub max_batches_reached: bool,
-    /// `true` 表示本 run 至少有一行 retryable 失败；本 run 不再尝试这些行，重试
-    /// 推迟到之后的 run。通常该行已带 cooldown 回到 `pending_fetch`；若 release
-    /// 落空（lease 已被并发 run reclaim），该行不带 cooldown，由其他 run 处理。
+    /// `true` 表示本 run 至少有一行 retryable 失败且其 release 已落库（带 cooldown
+    /// 回到 `pending_fetch`）；本 run 不再尝试这些行，重试推迟到之后的 run。
+    /// release 落空计入 `lease_lost`，不计入此处。
     /// 它不终止循环，因此可与 `max_batches_reached` 同时为 `true`。
     pub retryable_deferred: bool,
     /// `error_kind` when claiming a batch failed; the loop stopped there.
@@ -63,8 +73,54 @@ pub struct ExtractEntryOutcome {
     pub status: ExtractEntryStatus,
     pub article_id: Option<i64>,
     pub error_kind: Option<String>,
+    /// Our own storage failed on this entry's path (see
+    /// [`ExtractSummary::storage_failed`]).
+    pub storage_failed: bool,
 }
 
+impl ExtractEntryOutcome {
+    fn new(
+        feed_entry_id: i64,
+        status: ExtractEntryStatus,
+        article_id: Option<i64>,
+        error_kind: Option<String>,
+    ) -> Self {
+        Self {
+            feed_entry_id,
+            status,
+            article_id,
+            error_kind,
+            storage_failed: false,
+        }
+    }
+
+    /// The owner-guarded release matched no row.
+    fn lease_lost(feed_entry_id: i64, article_id: Option<i64>) -> Self {
+        Self::new(
+            feed_entry_id,
+            ExtractEntryStatus::LeaseLost,
+            article_id,
+            Some("lease_conflict".to_string()),
+        )
+    }
+
+    /// The release itself failed; nothing is known to have landed.
+    fn release_failed(feed_entry_id: i64, article_id: Option<i64>, error: &StorageError) -> Self {
+        Self {
+            storage_failed: true,
+            ..Self::new(
+                feed_entry_id,
+                ExtractEntryStatus::ReleaseFailed,
+                article_id,
+                Some(error.error_kind().to_string()),
+            )
+        }
+    }
+}
+
+/// Outcome of one claimed entry. Every status except `LeaseLost` and
+/// `ReleaseFailed` is reported only after its owner-guarded release returned
+/// `Ok(true)`, i.e. the transition it names has landed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtractEntryStatus {
     Persisted,
@@ -72,6 +128,10 @@ pub enum ExtractEntryStatus {
     DedupSkipped,
     RetryableFailed,
     PermanentFailed,
+    /// Release matched no row: the lease was reclaimed by another run.
+    LeaseLost,
+    /// Release failed with a storage error; the lease expires and is reclaimed.
+    ReleaseFailed,
 }
 
 pub struct ExtractFlow {
@@ -240,6 +300,9 @@ impl ExtractFlow {
                     "dedup_skipped": summary.dedup_skipped,
                     "retryable_failed": summary.retryable_failed,
                     "permanent_failed": summary.permanent_failed,
+                    "lease_lost": summary.lease_lost,
+                    "release_failed": summary.release_failed,
+                    "storage_failed": summary.storage_failed,
                     "tasks_panicked": summary.tasks_panicked,
                     "batches_executed": summary.batches_executed,
                     "max_batches_reached": summary.max_batches_reached,
@@ -303,7 +366,7 @@ impl ExtractFlow {
                         // Reading the summary failed: our storage, not the page,
                         // decides the release (a transient error is retried).
                         Err(storage_error) => {
-                            return entry.release_failure(&storage_error, now).await;
+                            return entry.release_storage_failure(&storage_error, now).await;
                         }
                     }
                 }
@@ -346,7 +409,7 @@ impl ExtractFlow {
                         .unwrap_or_else(|| "no extractor strategy succeeded".to_string());
                     entry.release_permanent(&message, "html_parse", now).await
                 }
-                Err(storage_error) => entry.release_failure(&storage_error, now).await,
+                Err(storage_error) => entry.release_storage_failure(&storage_error, now).await,
             },
         }
     }
@@ -498,7 +561,7 @@ impl EntryRelease<'_> {
                 tracing::error!(feed_entry_id, "failed to persist article: {error}");
                 // plan/11 §3：retryable storage errors take the budgeted
                 // cooldown release, keeping the real error kind.
-                return self.release_failure(&error, now).await;
+                return self.release_storage_failure(&error, now).await;
             }
         };
 
@@ -517,53 +580,36 @@ impl EntryRelease<'_> {
         };
 
         match released {
-            Ok(true) if fallback_path => {
-                tracing::info!(
-                    target = "feed_entry.transition",
-                    id = feed_entry_id,
-                    from = "fetching",
-                    to = "fallback_persisted",
-                    reason = "summary_fallback"
-                );
-                ExtractEntryOutcome {
-                    feed_entry_id,
-                    status: ExtractEntryStatus::FallbackPersisted,
-                    article_id: Some(insert.article_id),
-                    error_kind: None,
-                }
-            }
             Ok(true) => {
+                let (to, reason, status) = if fallback_path {
+                    (
+                        "fallback_persisted",
+                        "summary_fallback",
+                        ExtractEntryStatus::FallbackPersisted,
+                    )
+                } else {
+                    (
+                        "persisted",
+                        "extract_success",
+                        ExtractEntryStatus::Persisted,
+                    )
+                };
                 tracing::info!(
                     target = "feed_entry.transition",
                     id = feed_entry_id,
                     from = "fetching",
-                    to = "persisted",
-                    reason = "extract_success"
+                    to,
+                    reason
                 );
-                ExtractEntryOutcome {
-                    feed_entry_id,
-                    status: ExtractEntryStatus::Persisted,
-                    article_id: Some(insert.article_id),
-                    error_kind: None,
-                }
+                ExtractEntryOutcome::new(feed_entry_id, status, Some(insert.article_id), None)
             }
             Ok(false) => {
                 tracing::warn!(feed_entry_id, "feed entry release conflicted");
-                ExtractEntryOutcome {
-                    feed_entry_id,
-                    status: ExtractEntryStatus::PermanentFailed,
-                    article_id: Some(insert.article_id),
-                    error_kind: Some("lease_conflict".to_string()),
-                }
+                ExtractEntryOutcome::lease_lost(feed_entry_id, Some(insert.article_id))
             }
             Err(error) => {
                 tracing::error!(feed_entry_id, "feed entry release failed: {error}");
-                ExtractEntryOutcome {
-                    feed_entry_id,
-                    status: ExtractEntryStatus::PermanentFailed,
-                    article_id: Some(insert.article_id),
-                    error_kind: Some(error.error_kind().to_string()),
-                }
+                ExtractEntryOutcome::release_failed(feed_entry_id, Some(insert.article_id), &error)
             }
         }
     }
@@ -607,25 +653,34 @@ impl EntryRelease<'_> {
                     to = "dedup_skipped",
                     reason = "hash_dup"
                 );
-                ExtractEntryOutcome {
+                ExtractEntryOutcome::new(
                     feed_entry_id,
-                    status: ExtractEntryStatus::DedupSkipped,
-                    article_id: Some(insert.article_id),
-                    error_kind: None,
-                }
+                    ExtractEntryStatus::DedupSkipped,
+                    Some(insert.article_id),
+                    None,
+                )
             }
-            Ok(false) => ExtractEntryOutcome {
-                feed_entry_id,
-                status: ExtractEntryStatus::PermanentFailed,
-                article_id: Some(insert.article_id),
-                error_kind: Some("lease_conflict".to_string()),
-            },
-            Err(error) => ExtractEntryOutcome {
-                feed_entry_id,
-                status: ExtractEntryStatus::PermanentFailed,
-                article_id: Some(insert.article_id),
-                error_kind: Some(error.error_kind().to_string()),
-            },
+            Ok(false) => {
+                tracing::warn!(feed_entry_id, "dedup release conflicted");
+                ExtractEntryOutcome::lease_lost(feed_entry_id, Some(insert.article_id))
+            }
+            Err(error) => {
+                tracing::error!(feed_entry_id, "dedup release failed: {error}");
+                ExtractEntryOutcome::release_failed(feed_entry_id, Some(insert.article_id), &error)
+            }
+        }
+    }
+
+    /// [`Self::release_failure`] for a failure of our own storage: the outcome
+    /// is flagged `storage_failed` whatever release it ends in.
+    async fn release_storage_failure(
+        &self,
+        error: &StorageError,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        ExtractEntryOutcome {
+            storage_failed: true,
+            ..self.release_failure(error, now).await
         }
     }
 
@@ -663,20 +718,16 @@ impl EntryRelease<'_> {
             )
             .await
         {
-            Ok(outcome) => {
-                if !outcome.released {
-                    tracing::warn!(feed_entry_id, "retryable release conflicted");
-                }
-                outcome
-            }
+            Ok(outcome) => outcome,
             Err(error) => {
                 tracing::error!(feed_entry_id, "retryable release failed: {error}");
-                rss_ai_news_storage::ReleaseFailureOutcome {
-                    released: false,
-                    exhausted: false,
-                }
+                return ExtractEntryOutcome::release_failed(feed_entry_id, None, &error);
             }
         };
+        if !outcome.released {
+            tracing::warn!(feed_entry_id, "retryable release conflicted");
+            return ExtractEntryOutcome::lease_lost(feed_entry_id, None);
+        }
         if outcome.exhausted {
             self.emitter
                 .emit(
@@ -696,26 +747,28 @@ impl EntryRelease<'_> {
                 reason = %kind,
                 budget_exhausted = true
             );
-            return ExtractEntryOutcome {
+            return ExtractEntryOutcome::new(
                 feed_entry_id,
-                status: ExtractEntryStatus::PermanentFailed,
-                article_id: None,
-                error_kind: Some(kind),
-            };
+                ExtractEntryStatus::PermanentFailed,
+                None,
+                Some(kind),
+            );
         }
         tracing::warn!(
             feed_entry_id,
             error_kind = %kind,
             "extract retryable failure"
         );
-        ExtractEntryOutcome {
+        ExtractEntryOutcome::new(
             feed_entry_id,
-            status: ExtractEntryStatus::RetryableFailed,
-            article_id: None,
-            error_kind: Some(kind),
-        }
+            ExtractEntryStatus::RetryableFailed,
+            None,
+            Some(kind),
+        )
     }
 
+    /// Permanent release. The `entry_permanent_failed` event and transition
+    /// log are written only when the release landed.
     async fn release_permanent(
         &self,
         message: &str,
@@ -729,9 +782,15 @@ impl EntryRelease<'_> {
             .release_permanent_failure(feed_entry_id, self.owner, message, kind, now)
             .await
         {
-            Ok(false) => tracing::warn!(feed_entry_id, "permanent release conflicted"),
-            Err(error) => tracing::error!(feed_entry_id, "permanent release failed: {error}"),
             Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(feed_entry_id, "permanent release conflicted");
+                return ExtractEntryOutcome::lease_lost(feed_entry_id, None);
+            }
+            Err(error) => {
+                tracing::error!(feed_entry_id, "permanent release failed: {error}");
+                return ExtractEntryOutcome::release_failed(feed_entry_id, None, &error);
+            }
         }
         self.emitter
             .emit(
@@ -750,15 +809,14 @@ impl EntryRelease<'_> {
             to = "failed",
             reason = kind
         );
-        ExtractEntryOutcome {
+        ExtractEntryOutcome::new(
             feed_entry_id,
-            status: ExtractEntryStatus::PermanentFailed,
-            article_id: None,
-            error_kind: Some(kind.to_string()),
-        }
+            ExtractEntryStatus::PermanentFailed,
+            None,
+            Some(kind.to_string()),
+        )
     }
 }
-
 /// Shortest retry cooldown, applied after the first failed attempt.
 const RETRY_BACKOFF_BASE: Duration = Duration::minutes(10);
 /// Longest retry cooldown; later attempts stop doubling here.
@@ -808,7 +866,7 @@ fn quality_to_str(quality: ContentQuality) -> &'static str {
 impl ExtractEntryStatus {
     /// `true` only when the row's terminal release landed: these statuses are
     /// produced exclusively after `release_*` returned `Ok(true)`. Conflicts and
-    /// release errors are reported as `RetryableFailed` / `PermanentFailed`.
+    /// release errors are reported as `LeaseLost` / `ReleaseFailed`.
     fn is_terminal_success(&self) -> bool {
         matches!(
             self,
@@ -829,12 +887,13 @@ impl ExtractSummary {
                 self.retryable_deferred = true;
             }
             ExtractEntryStatus::PermanentFailed => self.permanent_failed += 1,
+            ExtractEntryStatus::LeaseLost => self.lease_lost += 1,
+            ExtractEntryStatus::ReleaseFailed => self.release_failed += 1,
         }
-        if matches!(
-            outcome.status,
-            ExtractEntryStatus::RetryableFailed | ExtractEntryStatus::PermanentFailed
-        ) && self.failure_samples.len() < 32
-        {
+        if outcome.storage_failed {
+            self.storage_failed += 1;
+        }
+        if !outcome.status.is_terminal_success() && self.failure_samples.len() < 32 {
             self.failure_samples.push(outcome);
         }
     }
@@ -874,9 +933,10 @@ mod tests {
         assert!(Persisted.is_terminal_success());
         assert!(FallbackPersisted.is_terminal_success());
         assert!(DedupSkipped.is_terminal_success());
-        // Includes lease conflicts and failed releases, which also map here.
         assert!(!RetryableFailed.is_terminal_success());
         assert!(!PermanentFailed.is_terminal_success());
+        assert!(!LeaseLost.is_terminal_success());
+        assert!(!ReleaseFailed.is_terminal_success());
     }
 
     #[test]
@@ -891,12 +951,14 @@ mod tests {
                 article_id: None,
                 status: ExtractEntryStatus::Persisted,
                 error_kind: None,
+                storage_failed: false,
             });
             summary.record(ExtractEntryOutcome {
                 feed_entry_id: 1,
                 article_id: None,
                 status: ExtractEntryStatus::PermanentFailed,
                 error_kind: Some("failure".into()),
+                storage_failed: true,
             });
         }
         summary.record(ExtractEntryOutcome {
@@ -904,8 +966,12 @@ mod tests {
             article_id: None,
             status: ExtractEntryStatus::RetryableFailed,
             error_kind: None,
+            storage_failed: false,
         });
+        summary.record(ExtractEntryOutcome::lease_lost(2, None));
         assert_eq!(summary.persisted, 10_000);
+        assert_eq!(summary.storage_failed, 10_000);
+        assert_eq!(summary.lease_lost, 1);
         assert_eq!(summary.permanent_failed, 10_000);
         assert_eq!(summary.retryable_failed, 1);
         assert_eq!(summary.failure_samples.len(), 32);

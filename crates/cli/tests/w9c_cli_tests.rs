@@ -579,6 +579,8 @@ fn run_summary() -> RunCommandSummary {
             tasks_panicked: 0,
             extract_claim_error: None,
             sources_storage_failed: 0,
+            extract_storage_failed: 0,
+            extract_lease_lost: 0,
             duration_seconds: 1.0,
         }),
         ai_run: Some(ai_summary()),
