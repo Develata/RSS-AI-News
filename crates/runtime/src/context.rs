@@ -79,6 +79,7 @@ pub struct AiDeps {
     pub ai_result_repo: Arc<dyn ArticleAiResultRepository>,
     pub artifact_repo: Arc<dyn RawArtifactRepository>,
     pub event_repo: Arc<dyn RunEventRepository>,
+    pub clock: Clock,
 }
 
 pub struct PublishDeps {

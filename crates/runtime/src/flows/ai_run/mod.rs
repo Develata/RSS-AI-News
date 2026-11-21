@@ -7,7 +7,7 @@ use std::sync::Arc;
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_storage::{ClaimRequest, NewAiResult, build_owner_id, lease_expires_at};
 use serde_json::json;
-use time::{Duration, OffsetDateTime};
+use time::Duration;
 use tokio::task::JoinSet;
 
 use crate::context::AiDeps;
@@ -92,7 +92,7 @@ impl AiRunFlow {
             match self
                 .ctx
                 .ai_result_repo
-                .insert_pending_and_advance_article(&item, OffsetDateTime::now_utc())
+                .insert_pending_and_advance_article(&item, (self.ctx.clock)())
                 .await
             {
                 Ok(outcome) => {
@@ -156,7 +156,7 @@ impl AiRunFlow {
 
         purge_expired_artifacts(self.ctx.artifact_repo.as_ref(), &emitter).await;
         // W15 §5：首次 claim 前执行一次 ① reclaim + ② sweep（顺序固定，best-effort）。
-        let maintenance_now = OffsetDateTime::now_utc();
+        let maintenance_now = (self.ctx.clock)();
         let reclaimed = self
             .ctx
             .ai_result_repo
@@ -192,7 +192,7 @@ impl AiRunFlow {
                 break;
             }
 
-            let now = OffsetDateTime::now_utc();
+            let now = (self.ctx.clock)();
             let claimed = match self
                 .ctx
                 .ai_result_repo

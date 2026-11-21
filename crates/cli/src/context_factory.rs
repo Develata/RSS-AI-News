@@ -145,6 +145,7 @@ pub fn build_ai_deps(
         ai_result_repo: Arc::new(ArticleAiResultRepo::new_with_storage(pool.clone())),
         artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
         event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+        clock: system_clock(),
     }))
 }
 

@@ -8,6 +8,7 @@ use rss_ai_news_ai::{AiClient, AiError, AiResponse, AiTask, TokenUsage};
 use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_domain::Score0To100;
 use rss_ai_news_runtime::{AiRunFlow, AiRunOptions};
+use rss_ai_news_storage::StorageError;
 use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Mutex;
@@ -678,4 +679,214 @@ async fn oversized_ai_failures_remain_bounded_in_database_and_events() {
             }
         );
     }
+}
+
+// === C1: storage errors reading the article follow the retry contract ===
+
+/// Delegates to the real repository; `find_by_id` fails with `error` for the
+/// first `failures` calls.
+struct FlakyArticleRepo {
+    inner: rss_ai_news_storage::ArticleRepo,
+    failures: std::sync::atomic::AtomicUsize,
+    error: fn() -> StorageError,
+}
+
+#[async_trait]
+impl rss_ai_news_storage::ArticleRepository for FlakyArticleRepo {
+    async fn insert_or_get_by_content_hash(
+        &self,
+        article: &rss_ai_news_storage::NewArticle,
+    ) -> Result<rss_ai_news_storage::ArticleInsertOutcome, StorageError> {
+        self.inner.insert_or_get_by_content_hash(article).await
+    }
+    async fn find_by_id(
+        &self,
+        id: i64,
+    ) -> Result<Option<rss_ai_news_domain::model::Article>, StorageError> {
+        let left = self.failures.load(std::sync::atomic::Ordering::SeqCst);
+        if left > 0 {
+            self.failures
+                .store(left - 1, std::sync::atomic::Ordering::SeqCst);
+            return Err((self.error)());
+        }
+        self.inner.find_by_id(id).await
+    }
+    async fn list_persisted_for_ai_task_gen(
+        &self,
+        category_key: &str,
+        batch_size: u32,
+        after_id: i64,
+    ) -> Result<Vec<rss_ai_news_storage::ArticleAiTaskCandidate>, StorageError> {
+        self.inner
+            .list_persisted_for_ai_task_gen(category_key, batch_size, after_id)
+            .await
+    }
+    async fn list_in_window_for_backfill(
+        &self,
+        date_from: Option<OffsetDateTime>,
+        date_to: Option<OffsetDateTime>,
+        batch_size: u32,
+        after_id: i64,
+    ) -> Result<Vec<rss_ai_news_storage::BackfillArticleCandidate>, StorageError> {
+        self.inner
+            .list_in_window_for_backfill(date_from, date_to, batch_size, after_id)
+            .await
+    }
+    async fn list_for_content_hash_reindex(
+        &self,
+        after_id: i64,
+        batch_size: u32,
+    ) -> Result<Vec<rss_ai_news_storage::ContentHashReindexCandidate>, StorageError> {
+        self.inner
+            .list_for_content_hash_reindex(after_id, batch_size)
+            .await
+    }
+    async fn list_content_hashes(
+        &self,
+        after_id: i64,
+        batch_size: u32,
+    ) -> Result<Vec<rss_ai_news_storage::ArticleContentHash>, StorageError> {
+        self.inner.list_content_hashes(after_id, batch_size).await
+    }
+    async fn update_content_hash(
+        &self,
+        id: i64,
+        new_content_hash: &str,
+    ) -> Result<rss_ai_news_storage::UpdateContentHashOutcome, StorageError> {
+        self.inner.update_content_hash(id, new_content_hash).await
+    }
+    async fn peek_content_hash_outcome(
+        &self,
+        id: i64,
+        new_content_hash: &str,
+    ) -> Result<rss_ai_news_storage::UpdateContentHashOutcome, StorageError> {
+        self.inner
+            .peek_content_hash_outcome(id, new_content_hash)
+            .await
+    }
+}
+
+fn flaky_flow(
+    pool: SqlitePool,
+    client: Arc<MockAiClient>,
+    failures: usize,
+    error: fn() -> StorageError,
+) -> AiRunFlow {
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let mut deps = common::ai_deps(pool.clone(), app, client);
+    deps.article_repo = Arc::new(FlakyArticleRepo {
+        inner: rss_ai_news_storage::ArticleRepo::new(pool),
+        failures: std::sync::atomic::AtomicUsize::new(failures),
+        error,
+    });
+    AiRunFlow::new(Arc::new(deps))
+}
+
+async fn ai_result_state_and_attempts(pool: &SqlitePool, ai_result_id: i64) -> (String, i64) {
+    sqlx::query_as("SELECT state, attempt_count FROM article_ai_results WHERE id = ?")
+        .bind(ai_result_id)
+        .fetch_one(pool)
+        .await
+        .expect("AI result should be readable")
+}
+
+#[tokio::test]
+async fn transient_article_read_error_returns_task_to_pending_with_budget_intact() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "ai-read-transient", "title", "body").await;
+    let client = Arc::new(MockAiClient::default());
+    let flow = flaky_flow(pool.clone(), Arc::clone(&client), 1, || {
+        StorageError::Timeout
+    });
+    flow.task_gen(&opts()).await;
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+
+    let summary = flow.process_ai_tasks(&opts()).await;
+
+    assert_eq!(summary.retryable_failed, 1);
+    assert_eq!(summary.permanent_failed, 0);
+    // The claim spent one attempt of three; the row is claimable again.
+    assert_eq!(
+        ai_result_state_and_attempts(&pool, ai_result_id).await,
+        ("pending".to_string(), 1)
+    );
+    assert_eq!(article_state(&pool, article_id).await, "ai_pending");
+
+    // The next run reads the article and succeeds.
+    client.insert_success(ai_result_id, output_json(80)).await;
+    let summary = flow.process_ai_tasks(&opts()).await;
+    assert_eq!(summary.succeeded, 1);
+    assert_eq!(ai_result_state(&pool, ai_result_id).await, "succeeded");
+}
+
+#[tokio::test]
+async fn transient_article_read_error_on_last_attempt_is_permanent() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "ai-read-last", "title", "body").await;
+    let client = Arc::new(MockAiClient::default());
+    let flow = flaky_flow(pool.clone(), client, 1, || StorageError::Timeout);
+    let mut opts = opts();
+    opts.max_attempts = 1;
+    flow.task_gen(&opts).await;
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+
+    let summary = flow.process_ai_tasks(&opts).await;
+
+    assert_eq!(summary.permanent_failed, 1);
+    assert_eq!(summary.retryable_failed, 0);
+    let (state, kind): (String, Option<String>) =
+        sqlx::query_as("SELECT state, last_error_kind FROM article_ai_results WHERE id = ?")
+            .bind(ai_result_id)
+            .fetch_one(&pool)
+            .await
+            .expect("AI result should be readable");
+    assert_eq!(state, "permanent_failed");
+    assert_eq!(kind.as_deref(), Some("db_timeout"));
+}
+
+#[tokio::test]
+async fn non_retryable_article_read_error_is_permanent() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "ai-read-corrupt", "title", "body").await;
+    let client = Arc::new(MockAiClient::default());
+    let flow = flaky_flow(pool.clone(), client, 1, || {
+        StorageError::Corruption("bad row".to_string())
+    });
+    flow.task_gen(&opts()).await;
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+
+    let summary = flow.process_ai_tasks(&opts()).await;
+
+    assert_eq!(summary.permanent_failed, 1);
+    assert_eq!(
+        ai_result_state_and_attempts(&pool, ai_result_id).await,
+        ("permanent_failed".to_string(), 1)
+    );
+}
+
+#[tokio::test]
+async fn ai_run_uses_the_injected_clock() {
+    let (_dir, pool) = make_test_pool().await;
+    let article_id = seed_persisted_article(&pool, "ai-clock", "title", "body").await;
+    let client = Arc::new(MockAiClient::default());
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let mut deps = common::ai_deps(pool.clone(), app, Arc::clone(&client) as Arc<dyn AiClient>);
+    let fixed = OffsetDateTime::now_utc().replace_nanosecond(0).unwrap() - Duration::days(400);
+    deps.clock = Arc::new(move || fixed);
+    let flow = AiRunFlow::new(Arc::new(deps));
+    flow.task_gen(&opts()).await;
+    let ai_result_id = ai_result_id_by_article(&pool, article_id).await;
+    client.insert_success(ai_result_id, output_json(80)).await;
+
+    let summary = flow.process_ai_tasks(&opts()).await;
+
+    assert_eq!(summary.succeeded, 1);
+    let (started, completed): (OffsetDateTime, OffsetDateTime) =
+        sqlx::query_as("SELECT started_at, completed_at FROM article_ai_results WHERE id = ?")
+            .bind(ai_result_id)
+            .fetch_one(&pool)
+            .await
+            .expect("AI result should be readable");
+    assert_eq!(started, fixed);
+    assert_eq!(completed, fixed);
 }

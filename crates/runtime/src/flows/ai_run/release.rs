@@ -63,7 +63,7 @@ pub(super) async fn finish_ai_success(
             actual_model,
             claimed.article_id,
             i32::from(opts.min_importance_score.get()),
-            OffsetDateTime::now_utc(),
+            (ctx.clock)(),
         )
         .await;
 
@@ -144,7 +144,7 @@ pub(super) async fn finish_ai_failure(
     max_attempts: u32,
     attempts: &[serde_json::Value],
 ) -> AiTaskOutcome {
-    let now = OffsetDateTime::now_utc();
+    let now = (ctx.clock)();
     if attempts.len() > 1 {
         emitter
             .emit(
@@ -163,29 +163,41 @@ pub(super) async fn finish_ai_failure(
             .await;
     }
 
+    let message = error.display_user();
+    let kind = error.error_kind().to_string();
     if error.is_retryable() {
-        release_retryable_ai_failure(ctx, emitter, owner, claimed, error, max_attempts, now).await
+        release_retryable_ai_failure(
+            ctx,
+            emitter,
+            owner,
+            claimed,
+            &message,
+            &kind,
+            max_attempts,
+            now,
+        )
+        .await
     } else {
-        let message = error.display_user();
-        let kind = error.error_kind().to_string();
         release_permanent_ai_failure(ctx, emitter, owner, claimed, &message, &kind, now).await
     }
 }
 
-async fn release_retryable_ai_failure(
+/// Retryable release with the W15 budget fold; shared by AI errors and
+/// transient storage errors reading the article.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn release_retryable_ai_failure(
     ctx: &AiDeps,
     emitter: &RunEventEmitter<'_>,
     owner: &str,
     claimed: &ClaimedAiResult,
-    error: AiError,
+    message: &str,
+    kind: &str,
     max_attempts: u32,
     now: OffsetDateTime,
 ) -> AiTaskOutcome {
-    let message = error.display_user();
-    let kind = error.error_kind().to_string();
     let outcome = match ctx
         .ai_result_repo
-        .release_retryable_failure(claimed.id, owner, &message, &kind, max_attempts, now)
+        .release_retryable_failure(claimed.id, owner, message, kind, max_attempts, now)
         .await
     {
         Ok(outcome) => {
@@ -214,7 +226,7 @@ async fn release_retryable_ai_failure(
             if exhausted { "error" } else { "warn" },
             Some("article_ai_result"),
             Some(claimed.id),
-            &message,
+            message,
             Some(json!({
                 "article_id": claimed.article_id,
                 "article_ai_result_id": claimed.id,
@@ -233,7 +245,7 @@ async fn release_retryable_ai_failure(
             AiTaskStatus::RetryableFailed
         },
         article_advance: None,
-        error_kind: Some(kind),
+        error_kind: Some(kind.to_string()),
     }
 }
 
