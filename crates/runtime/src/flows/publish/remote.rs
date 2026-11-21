@@ -83,6 +83,25 @@ async fn verify_after_timeout(
     }
 }
 
+/// Longest wait a rate limit may impose on the next claim. GitHub's primary
+/// quota resets within the hour; a larger (or hostile) reset time must not
+/// park a record — which keeps owning its snapshot's articles — for longer.
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::hours(1);
+
+/// R1-P-S12: GitHub asks to wait until `reset_at` (Retry-After or quota
+/// reset) before trying again; persisted so the next claim honours it.
+/// Clamped to `[now, now + MAX_RATE_LIMIT_WAIT]`; `None` for other errors.
+fn rate_limit_retry_not_before(
+    error: &PublishError,
+    now: OffsetDateTime,
+) -> Option<OffsetDateTime> {
+    let PublishError::GitHubRateLimit { reset_at, .. } = error else {
+        return None;
+    };
+    let latest = now.checked_add(MAX_RATE_LIMIT_WAIT).unwrap_or(now);
+    Some((*reset_at).clamp(now, latest))
+}
+
 enum RemotePreparationError {
     Report(ReportError),
     Timeout,
@@ -837,16 +856,18 @@ impl PublishFlow {
     ) {
         let now = OffsetDateTime::now_utc();
         let message = error.display_user();
+        let retry_not_before = rate_limit_retry_not_before(error, now);
         let mut budget_exhausted = false;
         let release_result = if error.is_retryable() {
             self.ctx
                 .publish_record_repo
-                .release_retryable_failure(
+                .release_retryable_failure_until(
                     publish_record_id,
                     owner,
                     &message,
                     error.error_kind(),
                     self.ctx.retry.publish_max_attempts,
+                    retry_not_before,
                     now,
                 )
                 .await
@@ -892,6 +913,7 @@ impl PublishFlow {
                     "request_id": error
                         .github_context()
                         .and_then(|context| context.request_id.as_deref()),
+                    "retry_not_before": retry_not_before.map(|at| at.to_string()),
                 })),
             )
             .await;

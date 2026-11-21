@@ -346,7 +346,7 @@ Markdown **byte-equal**；跨渲染器版本（例如 YAML 引号规则调整）
 | 阶段内读库 / 冻结写入失败 | `ReportError::Storage` / `StorageError`（保留类型） | 按 `is_retryable()`：可重试 → 维持阶段态 + 计预算（耗尽 → `failed`）；否则 `failed` |
 | 本地落盘失败 | `PublishError::LocalStoreFailed` | state='failed'，无 retry |
 | GitHub 401；无限流信号的 403 | `PublishError::GitHubAuthFailed` | state='failed' |
-| GitHub 429；带限流信号的 403（`x-ratelimit-remaining: 0`、存在 `retry-after`，或 message 含 "rate limit" / "secondary rate limit"，见 GitHub REST 文档 "Exceeding the rate limit"） | `PublishError::GitHubRateLimit { reset_at }`（`retry-after` > `x-ratelimit-reset` > now+60s；`retry-after` 接受秒数与 IMF-fixdate HTTP 日期两种形式（RFC 9110 §10.2.3），秒数封顶 24 h、受检加法，过去的日期视为 now；只要有 `retry-after` 头（即使无法解析）403 就算限流；message 中的 "rate limit" 从完整文本提取，R1-P-S11） | retryable：维持阶段态 + 计预算 |
+| GitHub 429；带限流信号的 403（`x-ratelimit-remaining: 0`、存在 `retry-after`，或 message 含 "rate limit" / "secondary rate limit"，见 GitHub REST 文档 "Exceeding the rate limit"） | `PublishError::GitHubRateLimit { reset_at }`（`retry-after` > `x-ratelimit-reset` > now+60s；`retry-after` 接受秒数与 IMF-fixdate HTTP 日期两种形式（RFC 9110 §10.2.3），秒数封顶 24 h、受检加法，过去的日期视为 now；只要有 `retry-after` 头（即使无法解析）403 就算限流；message 中的 "rate limit" 从完整文本提取，R1-P-S11） | retryable：维持阶段态 + 计预算；`reset_at`（钳制到 1 h 内）写入 `next_attempt_at`，claim 到点前不领取（R1-P-S12） |
 | GitHub 422 lost-update | `is_branch_concurrently_updated` | retry 1 次，仍失败 → state='failed' |
 | GitHub 5xx | `PublishError::GitHubApiError {5xx}` | state='failed'，本地文件保留 |
 | GitHub timeout | `PublishError::GitHubApiError` | state='failed' |

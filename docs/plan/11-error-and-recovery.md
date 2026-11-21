@@ -118,6 +118,10 @@ publish_records 有两个计数。`attempt_count` 仍按上述契约累计（审
 "每个阶段最多 N 次尝试"，`N = 1` 的无故障运行也能走完四个阶段；旧的"四阶段共享预算"不再成立。
 0008 之前的行迁移后 `stage_attempt_count = 0`（当前阶段重新拿到完整预算；终态行不受影响）。
 
+**限流等待（2026-11-22，R1-P-S12）**：远端 `GitHubRateLimit` 的 retryable release 同时写 `next_attempt_at`
+（GitHub 给的最早重试时刻，钳制到 1 小时内），claim 在此之前不领取该记录（不耗预算、不发请求）；
+任一阶段推进或非限流的 retryable release 清空它。见 ADR 0012 §3a。
+
 ## 5. exit code 速查
 
 CLI 退出码由 [`crates/cli/src/exit_code.rs`](../../crates/cli/src/exit_code.rs) 的 `ExitCode` enum 决定。
@@ -137,7 +141,8 @@ CLI 退出码由 [`crates/cli/src/exit_code.rs`](../../crates/cli/src/exit_code.
 - `publish` / `publish-all`：每个阶段带 `verdict`。`ok`；`skipped`（`SnapshotEmpty`、`NothingToClaim`、
   `Conflicted`——无可发布内容，或记录被其他 worker 持有 / 已推进，下次调度接手）→ exit 0；
   `failed`（`Failed`、`ArticleConflict`、`MissingTarget`）→ exit 1。已知缺口：record 绑定 claim 时
-  `NothingToClaim` 也可能表示重试预算耗尽，由 sweep 转 `failed` 后下一次运行以 `PublishConflict` 报出。
+  `NothingToClaim` 也可能表示重试预算耗尽，由 sweep 转 `failed` 后下一次运行以 `PublishConflict` 报出；
+  或表示记录仍在限流等待期（`next_attempt_at` 未到），等待期过后的运行照常续跑。
 - `publish-all`：分类级 init 失败或已终态 `failed` 记录（`conflict` 阶段）只记入该分类 summary（exit 1），
   其他分类与已就绪的远端 batch 照常执行。单分类 `publish` 遇终态记录仍直接报 `PublishConflict`。
 - `ingest` / `ai-run`：自身存储失败（entry 插入、source 行、claim / 候选查询、pending 行插入）→ exit 1；

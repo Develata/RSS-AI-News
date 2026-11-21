@@ -93,6 +93,7 @@ async fn sqlite_0008_gives_existing_rows_a_fresh_stage_budget_and_rolls_back() {
             .await
             .unwrap();
     assert!(!columns.iter().any(|name| name == "stage_attempt_count"));
+    assert!(!columns.iter().any(|name| name == "next_attempt_at"));
     let kept: Vec<(i64, String, i64)> =
         sqlx::query_as("SELECT id, state, attempt_count FROM publish_records ORDER BY id")
             .fetch_all(&pool)
@@ -135,14 +136,17 @@ async fn pg_0008_gives_existing_rows_a_fresh_stage_budget_and_rolls_back() {
     assert_eq!(claimed.iter().map(|r| r.id).collect::<Vec<_>>(), vec![9102]);
 
     migrator.undo(ctx.pg_pool(), 7).await.unwrap();
-    let has_column: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
-         WHERE table_schema = current_schema() AND table_name = 'publish_records' \
-         AND column_name = 'stage_attempt_count')",
-    )
-    .fetch_one(ctx.pg_pool())
-    .await
-    .unwrap();
-    assert!(!has_column);
+    for column in ["stage_attempt_count", "next_attempt_at"] {
+        let has_column: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND table_name = 'publish_records' \
+             AND column_name = $1)",
+        )
+        .bind(column)
+        .fetch_one(ctx.pg_pool())
+        .await
+        .unwrap();
+        assert!(!has_column, "{column}");
+    }
     ctx.cleanup().await;
 }

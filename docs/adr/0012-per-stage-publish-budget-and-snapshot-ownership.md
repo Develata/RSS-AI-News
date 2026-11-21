@@ -82,6 +82,18 @@
 **残留限制**：进程在写请求之后、核对之前崩溃，且该阶段预算已耗尽时，过期清扫仍会把记录转 `failed`（未核对、归属释放）；
 预算未耗尽时，下一次运行的多报告幂等比对 / 单报告幂等（§3 下文）会补回执。
 
+### 3a. 限流等待写入记录（2026-11-22，R1-P-S12，同属未发布的 migration 0008）
+
+- `publish_records.next_attempt_at`（SQLite `TEXT` / PG `TIMESTAMPTZ`，可空）：远端阶段遇 `GitHubRateLimit` 时，
+  retryable release 写入 GitHub 要求的最早重试时刻（`retry-after` / `x-ratelimit-reset`，见 plan/04 §7），
+  并钳制到 `[now, now + 1 h]`——记录在等待期间仍持有文章归属，过远的时刻（或恶意头）不能把它长期挂起；
+  其它 retryable release 把它写回 NULL，每次阶段推进（含 freeze）清零。
+- 四个 claim 入口（按状态扫描的 SQLite / PG SQL 与两个按 ID 的构造器）都要求 `next_attempt_at IS NULL OR <= now`；
+  SQLite 照 lease 的做法按 `julianday` 比较（写入向上、now 向下取整到毫秒），不会提前领取。
+- 等待期内的运行领不到记录：`NothingToClaim`（verdict `skipped`，exit 0），不发任何 GitHub 请求、不耗预算；
+  `publish_failed` 事件带 `retry_not_before`。耗尽 sweep 不看该列（耗尽行本就不会被领取）。
+- 存量行为 NULL；down 迁移删除该列。
+
 ### 4. 默认报告日期按目标时区
 
 未给 `--date` 时，`publish` / `publish-all` 取运行时刻在有效目标时区（`--timezone` / `[publish].target_timezone`）下的日期。

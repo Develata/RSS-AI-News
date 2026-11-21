@@ -657,6 +657,95 @@ async fn publish_remote_batch_skips_only_the_mismatched_record() {
     assert_record_state(&pool, matching, "published_remote").await;
 }
 
+// === P-S12: a rate limit's reset time gates the next claim ===
+
+/// Rate-limited until `reset_at` on the first call, succeeds afterwards.
+struct RateLimitedOnce {
+    reset_at: OffsetDateTime,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl PublishTarget for RateLimitedOnce {
+    async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Err(PublishError::rate_limit(self.reset_at));
+        }
+        MockSuccessTarget.publish(report).await
+    }
+}
+
+#[tokio::test]
+async fn publish_remote_rate_limit_persists_the_reset_and_skips_claims_until_then() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+    let before = OffsetDateTime::now_utc();
+    let target = Arc::new(RateLimitedOnce {
+        reset_at: before + time::Duration::minutes(10),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let first = flow.publish_remote_record(id, remote_opts()).await;
+    assert!(
+        matches!(first.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "github_rate_limit")
+    );
+    let wait: Option<OffsetDateTime> =
+        sqlx::query_scalar("SELECT next_attempt_at FROM publish_records WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let wait = wait.expect("the reset time is persisted");
+    assert!(wait >= before + time::Duration::minutes(10), "{wait}");
+
+    // A rerun inside the window does not claim (and does not call GitHub).
+    let second = flow.publish_remote_record(id, remote_opts()).await;
+    assert_eq!(second.status, PublishRemoteStatus::NothingToClaim);
+    assert_eq!(
+        target.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "no request inside the rate-limit window"
+    );
+
+    // Once the window has passed the record publishes.
+    sqlx::query("UPDATE publish_records SET next_attempt_at = ? WHERE id = ?")
+        .bind(OffsetDateTime::now_utc() - time::Duration::seconds(1))
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let third = flow.publish_remote_record(id, remote_opts()).await;
+    assert_eq!(third.status, PublishRemoteStatus::PublishedRemote);
+}
+
+/// A reset far in the future is clamped to one hour: the record keeps owning
+/// its articles, so it must not be parked for longer.
+#[tokio::test]
+async fn publish_remote_rate_limit_wait_is_clamped_to_one_hour() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+    let target = Arc::new(RateLimitedOnce {
+        reset_at: OffsetDateTime::now_utc() + time::Duration::days(30),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let flow = flow(pool.clone(), Some(target));
+
+    flow.publish_remote_record(id, remote_opts()).await;
+
+    let wait: Option<OffsetDateTime> =
+        sqlx::query_scalar("SELECT next_attempt_at FROM publish_records WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let wait = wait.unwrap();
+    assert!(
+        wait <= OffsetDateTime::now_utc() + time::Duration::hours(1),
+        "{wait}"
+    );
+}
+
 // === P-B6: persisted diagnostics never carry server-echoed text ===
 
 #[tokio::test]

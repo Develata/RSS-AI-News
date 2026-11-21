@@ -685,6 +685,94 @@ async fn pg_publish_budget_is_per_stage() {
     assert_eq!(counters().await, ("failed".to_string(), 2, 1));
 }
 
+/// R1-P-S12 on PostgreSQL: the rate-limit wait blocks the state-scan and
+/// the by-id claim until its instant, and the next advance clears it.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advance() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "rl-wait").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .create_if_new(&new_record("idem-rl-wait", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE publish_records SET state = 'stored_local' WHERE id = $1")
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    let request = |owner: &str, now: OffsetDateTime| ClaimRequest {
+        owner: owner.to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+    let first = OffsetDateTime::now_utc();
+    assert_eq!(
+        repo.claim_local_for_remote_publish(&request("w1", first))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let not_before = first + time::Duration::milliseconds(60_500);
+    repo.release_retryable_failure_until(
+        id,
+        "w1",
+        "rate limited",
+        "github_rate_limit",
+        5,
+        Some(not_before),
+        first,
+    )
+    .await
+    .unwrap();
+
+    let early = not_before - time::Duration::milliseconds(1);
+    assert!(
+        repo.claim_local_for_remote_publish(&request("w2", early))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.claim_publish_by_ids(&request("w2", early), PublishState::StoredLocal, &[id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        repo.claim_publish_by_ids(&request("w3", not_before), PublishState::StoredLocal, &[id])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        repo.release_advance(
+            id,
+            "w3",
+            PublishState::StoredLocal,
+            PublishState::PublishedRemote,
+            PublishTimestampField::RemotePublishedAt,
+            not_before,
+            PublishAdvanceExtras::default(),
+        )
+        .await
+        .unwrap()
+    );
+    let wait: Option<OffsetDateTime> =
+        sqlx::query_scalar("SELECT next_attempt_at FROM publish_records WHERE id = $1")
+            .bind(id)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+    assert_eq!(wait, None);
+}
+
 /// B2 (ADR 0012) on PostgreSQL under READ COMMITTED: a freeze locks its
 /// articles before the ownership re-check, so it waits for a concurrent
 /// freeze of the same article and then sees that snapshot's committed items

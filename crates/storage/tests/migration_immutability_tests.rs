@@ -75,11 +75,12 @@ const PINNED_UP_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "migrations/sqlite/0008_publish_stage_budget_and_item_article_index.up.sql",
-        "fc2828122d403b93a09ffdb3196322d6c6a866605db9a6c9d55a5bdd7a1fd5b6",
+        // Amended before release for R1-P-S12 (publish_records.next_attempt_at).
+        "7608efb6dc0eb3439dc7b7aaa3b9c99cffb40e2a70fdf19250adffb841a23fca",
     ),
     (
         "migrations/postgres/0008_publish_stage_budget_and_item_article_index.up.sql",
-        "9d13b40ab1753066ba251ca5e45979f4b3e0d342644c3a40ee0b0b5dc759b90b",
+        "10f594c3577e7ed4ad3c53d6bf71f4fce30fe2b99a10d7a0ecfd943fd1a137d3",
     ),
 ];
 

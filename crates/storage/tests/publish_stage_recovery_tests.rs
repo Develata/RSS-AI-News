@@ -283,3 +283,118 @@ async fn sqlite_claim_lease_is_not_expired_before_its_instant() {
         1
     );
 }
+
+fn claim_at(at: OffsetDateTime, owner: &str) -> ClaimRequest {
+    ClaimRequest {
+        owner: owner.to_string(),
+        now: at,
+        lease_expires_at: lease_expires_at(at, Duration::seconds(30)),
+        batch_size: 1,
+        max_attempts: MAX_ATTEMPTS,
+    }
+}
+
+/// R1-P-S12: a rate-limited release persists `next_attempt_at`; neither the
+/// state-scan nor the by-id claim takes the record before that instant
+/// (sub-second precise), both take it from then on, and the next advance
+/// clears the wait. A plain retryable release clears it too.
+#[tokio::test]
+async fn sqlite_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advance() {
+    use rss_ai_news_storage::{PublishAdvanceExtras, PublishState, PublishTimestampField};
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_record(&pool, "wait", "stored_local", 0, None).await;
+    let repo = PublishRecordRepo::new(pool.clone());
+    let first = now() + Duration::nanoseconds(100_000_000);
+    assert_eq!(
+        repo.claim_local_for_remote_publish(&claim_at(first, "w1"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let not_before = first + Duration::seconds(60) + Duration::nanoseconds(500_000_000);
+    let outcome = repo
+        .release_retryable_failure_until(
+            id,
+            "w1",
+            "rate limited",
+            "github_rate_limit",
+            MAX_ATTEMPTS,
+            Some(not_before),
+            first,
+        )
+        .await
+        .unwrap();
+    assert!(outcome.released && !outcome.exhausted);
+
+    let early = not_before - Duration::milliseconds(1);
+    assert!(
+        repo.claim_local_for_remote_publish(&claim_at(early, "w2"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.claim_publish_by_ids(&claim_at(early, "w2"), PublishState::StoredLocal, &[id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        attempt_count(&pool, id).await,
+        1,
+        "a skipped claim costs nothing"
+    );
+
+    let claimed = repo
+        .claim_publish_by_ids(
+            &claim_at(not_before, "w3"),
+            PublishState::StoredLocal,
+            &[id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1, "claimable from the instant on");
+    assert!(
+        repo.release_advance(
+            id,
+            "w3",
+            PublishState::StoredLocal,
+            PublishState::PublishedRemote,
+            PublishTimestampField::RemotePublishedAt,
+            not_before,
+            PublishAdvanceExtras::default(),
+        )
+        .await
+        .unwrap()
+    );
+    let wait: Option<String> =
+        sqlx::query_scalar("SELECT next_attempt_at FROM publish_records WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(wait, None, "advance clears the wait");
+
+    // A retryable release without a wait clears an earlier one.
+    let other = seed_record(&pool, "wait-clear", "rendered", 0, None).await;
+    sqlx::query("UPDATE publish_records SET next_attempt_at = ? WHERE id = ?")
+        .bind(first - Duration::seconds(1))
+        .bind(other)
+        .execute(&pool)
+        .await
+        .unwrap();
+    repo.claim_publish_by_ids(&claim_at(first, "w4"), PublishState::Rendered, &[other])
+        .await
+        .unwrap();
+    repo.release_retryable_failure(other, "w4", "io", "local_io_error", MAX_ATTEMPTS, first)
+        .await
+        .unwrap();
+    let wait: Option<String> =
+        sqlx::query_scalar("SELECT next_attempt_at FROM publish_records WHERE id = ?")
+            .bind(other)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(wait, None);
+}

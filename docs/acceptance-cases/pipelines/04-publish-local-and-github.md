@@ -43,7 +43,7 @@
 - 远端 401，或无限流信号的 403 → `GithubAuthFailed`（终态，不重试）
 - 单报告 Contents API：路径按段百分号编码、`ref` 编码为查询参数（中文 / 空格 / 保留字符路径可发布）；任何 GitHub 失败的消息含操作、状态、message 的固定词表摘要与 `x-github-request-id`（整值符合 GitHub 形状且不含 token 时）；服务端回显的自由文本不落库、不进事件
 - 远端 403 且 `x-ratelimit-remaining: 0` / 带 `retry-after` / message 提到 rate limit → `GithubRateLimit`（可重试）
-- 远端 429 → `GithubRateLimit`，state 保持、article 不晋升
+- 远端 429 → `GithubRateLimit`，state 保持、article 不晋升；GitHub 要求的重试时刻（钳制 1 h）写入 `next_attempt_at`，到点前的运行 `NothingToClaim`
 - 远端 422 重试达上限 → 仍报错，record 保持 `StoredLocal`
 - 多报告批次重试：HEAD 已逐字节包含整批内容（上次 ref 更新落地、响应丢失）→ 不新建 commit，回执指向该 HEAD
 - 单报告重试：分支上既有 blob 与本地内容一致且在固定 HEAD commit 复核一致 → 不发 PUT，回执指向该 HEAD
@@ -102,6 +102,10 @@
 | `publish_remote_record_claims_only_the_requested_record` | 同上 | 远端 claim 指定 record |
 | `publish_remote_batch_succeeds_with_one_commit_for_multiple_records` | 同上 | 多 record 单 commit |
 | `publish_remote_rate_limit_keeps_state_and_articles` | 同上 | 429 |
+| `publish_remote_rate_limit_persists_the_reset_and_skips_claims_until_then` | 同上 | 限流 reset 写入 `next_attempt_at`；期内重跑不领取、不请求；到点后发布 |
+| `publish_remote_rate_limit_wait_is_clamped_to_one_hour` | 同上 | 远期 reset 钳制到 1 h |
+| `sqlite_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advance` | `crates/storage/tests/publish_stage_recovery_tests.rs` | SQLite 两类 claim 按时刻遵守等待；推进 / 普通 release 清空 |
+| `pg_rate_limit_wait_is_honoured_by_every_claim_and_cleared_on_advance` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 同语义 |
 | `publish_remote_auth_failed_is_terminal_without_promoting_articles` | 同上 | 401 终态 |
 | `publish_remote_rejects_record_frozen_for_another_target_without_sending` | 同上 | 目标漂移拦截 |
 | `publish_remote_sends_record_whose_stored_target_matches` | 同上 | 目标一致照常发布 |

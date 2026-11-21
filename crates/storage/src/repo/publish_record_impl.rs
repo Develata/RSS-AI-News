@@ -147,22 +147,28 @@ impl PublishRecordRepository for PublishRecordRepo {
         }
     }
 
-    async fn release_retryable_failure(
+    async fn release_retryable_failure_until(
         &self,
         id: i64,
         owner: &str,
         error: &str,
         kind: &str,
         max_attempts: u32,
+        retry_not_before: Option<OffsetDateTime>,
         now: OffsetDateTime,
     ) -> Result<ReleaseFailureOutcome, StorageError> {
+        let release = RetryableRelease {
+            id,
+            owner,
+            error,
+            kind,
+            max_attempts,
+            retry_not_before,
+            now,
+        };
         match self.storage_pool() {
-            StoragePool::Sqlite(p) => {
-                sqlite_release_retryable_failure(p, id, owner, error, kind, max_attempts, now).await
-            }
-            StoragePool::Postgres(p) => {
-                pg_release_retryable_failure(p, id, owner, error, kind, max_attempts, now).await
-            }
+            StoragePool::Sqlite(p) => sqlite_release_retryable_failure(p, release).await,
+            StoragePool::Postgres(p) => pg_release_retryable_failure(p, release).await,
         }
     }
 
@@ -409,22 +415,31 @@ async fn sqlite_release_advance(
     Ok(result.rows_affected() == 1)
 }
 
+/// Arguments of a retryable release (both dialects bind them in SQL order).
+struct RetryableRelease<'a> {
+    id: i64,
+    owner: &'a str,
+    error: &'a str,
+    kind: &'a str,
+    max_attempts: u32,
+    retry_not_before: Option<OffsetDateTime>,
+    now: OffsetDateTime,
+}
+
 async fn sqlite_release_retryable_failure(
     pool: &SqlitePool,
-    id: i64,
-    owner: &str,
-    error: &str,
-    kind: &str,
-    max_attempts: u32,
-    now: OffsetDateTime,
+    release: RetryableRelease<'_>,
 ) -> Result<ReleaseFailureOutcome, StorageError> {
     let state = sqlx::query_scalar::<_, String>(RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL)
-        .bind(i64::from(max_attempts))
-        .bind(error)
-        .bind(kind)
-        .bind(now)
-        .bind(id)
-        .bind(owner)
+        .bind(i64::from(release.max_attempts))
+        .bind(release.error)
+        .bind(release.kind)
+        .bind(release.now)
+        .bind(release.id)
+        .bind(release.owner)
+        // Written rounded up to a whole millisecond and compared by
+        // julianday against a rounded-down now: never claimable early.
+        .bind(release.retry_not_before.map(sqlite_stored_deadline))
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;
@@ -510,6 +525,11 @@ async fn sqlite_claim_by_ids(
         .push(") AND (lease_expires_at IS NULL OR COALESCE(julianday(lease_expires_at) < julianday(")
         .push_bind(cutoff)
         .push("), lease_expires_at < ")
+        .push_bind(cutoff)
+        // Rate-limit wait (R1-P-S12), instant-correct like the lease.
+        .push(")) AND (next_attempt_at IS NULL OR COALESCE(julianday(next_attempt_at) <= julianday(")
+        .push_bind(cutoff)
+        .push("), next_attempt_at <= ")
         .push_bind(cutoff)
         .push(")) AND stage_attempt_count < ")
         .push_bind(i64::from(request.max_attempts))
@@ -644,20 +664,16 @@ async fn pg_release_advance(
 
 async fn pg_release_retryable_failure(
     pool: &PgPool,
-    id: i64,
-    owner: &str,
-    error: &str,
-    kind: &str,
-    max_attempts: u32,
-    now: OffsetDateTime,
+    release: RetryableRelease<'_>,
 ) -> Result<ReleaseFailureOutcome, StorageError> {
     let state = sqlx::query_scalar::<_, String>(RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL)
-        .bind(i64::from(max_attempts))
-        .bind(error)
-        .bind(kind)
-        .bind(now)
-        .bind(id)
-        .bind(owner)
+        .bind(i64::from(release.max_attempts))
+        .bind(release.error)
+        .bind(release.kind)
+        .bind(release.now)
+        .bind(release.id)
+        .bind(release.owner)
+        .bind(release.retry_not_before)
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;
@@ -742,6 +758,8 @@ async fn pg_claim_by_ids(
     }
     builder
         .push(") AND (lease_expires_at IS NULL OR lease_expires_at < ")
+        .push_bind(request.now)
+        .push(") AND (next_attempt_at IS NULL OR next_attempt_at <= ")
         .push_bind(request.now)
         .push(") AND stage_attempt_count < ")
         .push_bind(i64::from(request.max_attempts))

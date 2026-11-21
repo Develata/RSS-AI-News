@@ -166,6 +166,23 @@ pub trait PublishRecordRepository: Send + Sync {
         kind: &str,
         max_attempts: u32,
         now: OffsetDateTime,
+    ) -> Result<ReleaseFailureOutcome, StorageError> {
+        self.release_retryable_failure_until(id, owner, error, kind, max_attempts, None, now)
+            .await
+    }
+    /// [`Self::release_retryable_failure`] that also persists the earliest
+    /// time the record may be claimed again (`next_attempt_at`, R1-P-S12):
+    /// `Some` after a rate limit, `None` clears any earlier wait.
+    #[allow(clippy::too_many_arguments)]
+    async fn release_retryable_failure_until(
+        &self,
+        id: i64,
+        owner: &str,
+        error: &str,
+        kind: &str,
+        max_attempts: u32,
+        retry_not_before: Option<OffsetDateTime>,
+        now: OffsetDateTime,
     ) -> Result<ReleaseFailureOutcome, StorageError>;
     /// Releases a `pending` record whose freeze found no candidates back to
     /// claimable `pending`, refunding the claim's attempt. Returns `false` when
