@@ -258,52 +258,20 @@ impl AiRunFlow {
         }
     }
 
-    /// Claims one batch, sharing it between in-window ("fresh") pending tasks
-    /// and all pending tasks by id (C9, plan/03 §5.2): the leading side gets
-    /// `ceil(n/2)`, the other the rest, and a side that runs short passes its
-    /// share on. `n ≥ 2` leads with fresh; `n = 1` leads with the side the
-    /// category's most recent first claim did not serve.
+    /// Claims one batch, shared between in-window ("fresh") pending tasks and
+    /// the rest (C9, plan/03 §5.2), as one storage transaction (R2-B2): a
+    /// failing side rolls the whole batch back instead of stranding claimed
+    /// rows the flow never receives.
     async fn claim_batch(
         &self,
         opts: &AiRunOptions,
         request: &ClaimRequest,
     ) -> Result<Vec<ClaimedAiResult>, rss_ai_news_storage::StorageError> {
-        let repo = &self.ctx.ai_result_repo;
-        let n = request.batch_size;
         let since = ai_fresh_since(request.now, opts.candidate_window_hours);
-        let fresh_first = n > 1
-            || !repo
-                .last_claim_is_fresh(&opts.category_key, since)
-                .await?
-                .unwrap_or(false);
-        let claim = |fresh: bool, limit: u32| {
-            let request = ClaimRequest {
-                batch_size: limit,
-                ..request.clone()
-            };
-            async move {
-                if fresh {
-                    repo.claim_pending_fresh(&request, &opts.category_key, since)
-                        .await
-                } else {
-                    repo.claim_pending(&request, &opts.category_key).await
-                }
-            }
-        };
-        let first_quota = n.div_ceil(2);
-        let mut claimed = claim(fresh_first, first_quota).await?;
-        let first_short = (claimed.len() as u32) < first_quota;
-        let rest = n - claimed.len() as u32;
-        let second = claim(!fresh_first, rest).await?;
-        let second_short = (second.len() as u32) < rest;
-        claimed.extend(second);
-        let left = n - claimed.len() as u32;
-        // "All pending" short means nothing is left at all; fresh short means
-        // no fresh task is left.
-        if left > 0 && !first_short && !(second_short && fresh_first) {
-            claimed.extend(claim(fresh_first, left).await?);
-        }
-        Ok(claimed)
+        self.ctx
+            .ai_result_repo
+            .claim_pending_shared(request, &opts.category_key, since)
+            .await
     }
 
     /// Phase 2：claim pending AI 任务，并发调用 AI、写 artifact、解析并 release。

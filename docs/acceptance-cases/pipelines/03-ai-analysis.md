@@ -53,6 +53,7 @@ AI-off 直通模式跳过整段。
 | `window_zero_treats_every_article_as_fresh` | 同上 | C9 窗口 0 |
 | `claim_gives_fresh_tasks_a_share_when_older_tasks_fill_the_queue` | 同上 | C9 claim 份额 |
 | `batch_size_one_claims_alternate_between_fresh_and_older_tasks_across_runs` | 同上 | C9 claim 交替 |
+| `a_failed_second_claim_side_leaves_the_first_side_unclaimed` | `crates/runtime/tests/ai_run_tests.rs` | R2-B2 整批同事务回滚 |
 | `pg_fresh_share_lists_claims_and_signals_by_source_time` | `crates/storage/tests/article_ai_result_pg_tests.rs` | C9 PG SQL |
 | `process_succeeds_high_score_advances_article_to_ready_for_publish` | 同上 | 高分 happy |
 | `process_succeeds_low_score_advances_article_to_ai_done` | 同上 | 低分跳过候选 |

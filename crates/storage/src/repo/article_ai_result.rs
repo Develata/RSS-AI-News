@@ -101,6 +101,17 @@ pub trait ArticleAiResultRepository: Send + Sync {
         published_since: OffsetDateTime,
     ) -> Result<Vec<ClaimedAiResult>, StorageError>;
 
+    /// C9 / R2-B2：一个逻辑批次（`request.batch_size` 个名额）在 fresh 与全部
+    /// pending 之间分享（plan/03 §5.2），**整批同一事务**：任一侧查询失败则整批
+    /// 回滚——不会留下已 `running`、已计 attempt 却没交给调用方的行；名额为 0 的
+    /// 一侧不发查询。返回顺序即服务顺序。
+    async fn claim_pending_shared(
+        &self,
+        request: &ClaimRequest,
+        category_key: &str,
+        published_since: OffsetDateTime,
+    ) -> Result<Vec<ClaimedAiResult>, StorageError>;
+
     /// C9 batch=1 轮换信号（task_gen）：该分类最新（id 最大）的 AI 任务是否属于
     /// 窗口内文章；分类尚无任务 → `None`。
     async fn newest_task_is_fresh(

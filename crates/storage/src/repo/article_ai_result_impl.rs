@@ -75,6 +75,66 @@ fn conflict_outcome(article_state: Option<&str>, advanced: bool) -> InsertPendin
     }
 }
 
+/// Quota bookkeeping of one shared claim batch (C9, plan/03 §5.2).
+///
+/// Steps: ① the leading side gets `ceil(n/2)`; ② the other side gets what
+/// ① left; ③ if ① was not short and slots remain, the leading side takes
+/// them. A step whose limit is 0 issues no query (R2-B2).
+/// Invariant: the sum of recorded rows never exceeds `n`.
+struct SharedClaimPlan {
+    n: u32,
+    fresh_first: bool,
+    step: usize,
+    current: usize,
+    got: [u32; 3],
+}
+
+impl SharedClaimPlan {
+    fn new(n: u32, fresh_first: bool) -> Self {
+        Self {
+            n,
+            fresh_first,
+            step: 0,
+            current: 0,
+            got: [0; 3],
+        }
+    }
+
+    /// The next `(fresh side?, limit)` query, skipping zero-limit steps.
+    fn next_query(&mut self) -> Option<(bool, u32)> {
+        while self.step < 3 {
+            let step = self.step;
+            self.step += 1;
+            let lead_quota = self.n.div_ceil(2);
+            let query = match step {
+                0 => (self.fresh_first, lead_quota),
+                1 => (!self.fresh_first, self.n - self.got[0]),
+                _ => {
+                    let rest = self.n - self.got[0];
+                    let left = rest - self.got[1];
+                    let lead_short = self.got[0] < lead_quota;
+                    // "All pending" short means nothing is left at all; fresh
+                    // short means no fresh task is left.
+                    let other_exhausted = self.got[1] < rest && self.fresh_first;
+                    if lead_short || other_exhausted {
+                        continue;
+                    }
+                    (self.fresh_first, left)
+                }
+            };
+            if query.1 > 0 {
+                self.current = step;
+                return Some(query);
+            }
+        }
+        None
+    }
+
+    fn record(&mut self, rows: usize) {
+        self.got[self.current] = rows as u32;
+    }
+}
+
 // ── trait 实现 ─────────────────────────────────────────────────
 
 #[async_trait]
@@ -133,6 +193,22 @@ impl ArticleAiResultRepository for ArticleAiResultRepo {
                     .fetch_all(p)
                     .await
                     .map_err(StorageError::from)
+            }
+        }
+    }
+
+    async fn claim_pending_shared(
+        &self,
+        request: &ClaimRequest,
+        category_key: &str,
+        published_since: OffsetDateTime,
+    ) -> Result<Vec<ClaimedAiResult>, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlite_claim_pending_shared(p, request, category_key, published_since).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_claim_pending_shared(p, request, category_key, published_since).await
             }
         }
     }
@@ -377,6 +453,64 @@ async fn sqlite_claim_pending(
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)
+}
+
+/// R2-B2: the whole batch in one `BEGIN IMMEDIATE` transaction (the write
+/// lock is taken up front, so the reads inside cannot be invalidated by a
+/// concurrent writer before the claim UPDATEs).
+async fn sqlite_claim_pending_shared(
+    pool: &SqlitePool,
+    request: &ClaimRequest,
+    category_key: &str,
+    published_since: OffsetDateTime,
+) -> Result<Vec<ClaimedAiResult>, StorageError> {
+    let n = request.batch_size;
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(StorageError::from)?;
+    let since = sqlite_instant_cutoff(published_since);
+    let fresh_first = n > 1
+        || !sqlx::query_scalar::<_, Option<bool>>(LAST_CLAIM_IS_FRESH_SQLITE_SQL)
+            .bind(category_key)
+            .bind(since)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from)?
+            .flatten()
+            .unwrap_or(false);
+    let mut plan = SharedClaimPlan::new(n, fresh_first);
+    let mut claimed = Vec::new();
+    while let Some((fresh, limit)) = plan.next_query() {
+        let sql = if fresh {
+            CLAIM_AI_PENDING_FRESH_SQLITE_SQL
+        } else {
+            CLAIM_AI_PENDING_SQLITE_SQL
+        };
+        let mut query = sqlx::query_as::<_, ClaimedAiResult>(sql)
+            .bind(&request.owner)
+            .bind(sqlite_stored_deadline(request.lease_expires_at))
+            .bind(request.now)
+            .bind(request.now)
+            .bind(sqlite_instant_cutoff(request.now))
+            .bind(i64::from(request.max_attempts))
+            .bind(category_key)
+            .bind(i64::from(limit));
+        if fresh {
+            query = query.bind(since);
+        }
+        let rows = query
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+        plan.record(rows.len());
+        claimed.extend(rows);
+    }
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(claimed)
 }
 
 async fn sqlite_release_success(
@@ -790,6 +924,59 @@ async fn pg_claim_pending(
         .map_err(StorageError::from)
 }
 
+/// R2-B2: the whole batch in one transaction; the `FOR UPDATE OF aar SKIP
+/// LOCKED` row locks of every side are held until the single commit.
+async fn pg_claim_pending_shared(
+    pool: &PgPool,
+    request: &ClaimRequest,
+    category_key: &str,
+    published_since: OffsetDateTime,
+) -> Result<Vec<ClaimedAiResult>, StorageError> {
+    let n = request.batch_size;
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    let fresh_first = n > 1
+        || !sqlx::query_scalar::<_, Option<bool>>(LAST_CLAIM_IS_FRESH_PG_SQL)
+            .bind(category_key)
+            .bind(published_since)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from)?
+            .flatten()
+            .unwrap_or(false);
+    let mut plan = SharedClaimPlan::new(n, fresh_first);
+    let mut claimed = Vec::new();
+    while let Some((fresh, limit)) = plan.next_query() {
+        let sql = if fresh {
+            CLAIM_AI_PENDING_FRESH_PG_SQL
+        } else {
+            CLAIM_AI_PENDING_PG_SQL
+        };
+        let mut query = sqlx::query_as::<_, ClaimedAiResult>(sql)
+            .bind(&request.owner)
+            .bind(request.lease_expires_at)
+            .bind(request.now)
+            .bind(request.now)
+            .bind(request.now)
+            .bind(i64::from(request.max_attempts))
+            .bind(category_key)
+            .bind(i64::from(limit));
+        if fresh {
+            query = query.bind(published_since);
+        }
+        let rows = query
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+        plan.record(rows.len());
+        claimed.extend(rows);
+    }
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(claimed)
+}
+
 async fn pg_release_success(
     pool: &PgPool,
     id: i64,
@@ -1165,5 +1352,44 @@ async fn pg_compute_article_advance(
             }
         }
         None => Ok(AiCompleteArticleAdvance::NoChange),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::SharedClaimPlan;
+
+    /// Runs the plan against sides holding `fresh` / `other` rows.
+    fn run(n: u32, fresh_first: bool, fresh: u32, other: u32) -> Vec<(bool, u32)> {
+        let mut plan = SharedClaimPlan::new(n, fresh_first);
+        let (mut fresh_left, mut other_left) = (fresh, other);
+        let mut queries = Vec::new();
+        while let Some((is_fresh, limit)) = plan.next_query() {
+            queries.push((is_fresh, limit));
+            let left = if is_fresh {
+                &mut fresh_left
+            } else {
+                &mut other_left
+            };
+            let got = limit.min(*left);
+            *left -= got;
+            plan.record(got as usize);
+        }
+        queries
+    }
+
+    #[test]
+    fn a_full_leading_side_issues_no_zero_limit_query() {
+        // n = 1: the leading side fills the batch; no LIMIT 0 query follows.
+        assert_eq!(run(1, true, 5, 5), [(true, 1)]);
+        assert_eq!(run(1, false, 5, 5), [(false, 1)]);
+        // n = 2, both sides full: exactly one query per side.
+        assert_eq!(run(2, true, 5, 5), [(true, 1), (false, 1)]);
+    }
+
+    #[test]
+    fn a_short_side_passes_its_share_on() {
+        assert_eq!(run(4, true, 0, 9), [(true, 2), (false, 4)]);
+        assert_eq!(run(4, false, 9, 1), [(false, 2), (true, 3)]);
+        assert_eq!(run(1, true, 0, 3), [(true, 1), (false, 1)]);
     }
 }

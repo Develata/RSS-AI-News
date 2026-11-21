@@ -1417,3 +1417,51 @@ async fn batch_size_one_claims_alternate_between_fresh_and_older_tasks_across_ru
     assert_eq!(served, [true, false, true, false]);
     assert_eq!(done(old_tasks).await, 2);
 }
+// === R2-B2: one logical claim batch commits or rolls back as a whole ===
+
+#[tokio::test]
+async fn a_failed_second_claim_side_leaves_the_first_side_unclaimed() {
+    let (_dir, pool) = make_test_pool().await;
+    let old = seed_aged(&pool, "b2-old", 1, days_ago(10)).await;
+    let fresh = seed_aged(&pool, "b2-fresh", 1, hours_ago(1)).await;
+    let old_task = pending_tasks(&pool, &old).await[0];
+    let fresh_task = pending_tasks(&pool, &fresh).await[0];
+    // The second side (backlog; n = 2 leads with fresh) fails in the database.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE TRIGGER fail_claim BEFORE UPDATE ON article_ai_results \
+         WHEN NEW.state = 'running' AND OLD.id = {old_task} \
+         BEGIN SELECT RAISE(ABORT, 'injected claim failure'); END;"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let client = Arc::new(MockAiClient::default());
+    client.insert_success(fresh_task, output_json(80)).await;
+    client.insert_success(old_task, output_json(80)).await;
+    let flow = flow(pool.clone(), Arc::clone(&client));
+    let mut opts = opts();
+    opts.process_batch_size = 2;
+    opts.max_attempts = 1;
+
+    let summary = flow.process_ai_tasks(&opts).await;
+
+    assert!(summary.claim_error.is_some());
+    assert_eq!(summary.claimed, 0);
+    // The first side's claim rolled back with the batch: no attempt spent and
+    // no lease held, so the last attempt of the budget is still available.
+    assert_eq!(
+        ai_result_state_and_attempts(&pool, fresh_task).await,
+        ("pending".to_string(), 0)
+    );
+    assert_eq!(
+        ai_result_state_and_attempts(&pool, old_task).await,
+        ("pending".to_string(), 0)
+    );
+
+    sqlx::query("DROP TRIGGER fail_claim")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let summary = flow.process_ai_tasks(&opts).await;
+    assert_eq!(summary.succeeded, 2);
+}
