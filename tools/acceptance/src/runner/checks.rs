@@ -140,6 +140,13 @@ pub(crate) const TOOLCHAIN_ENV_REFERENCE: &str = "${{ env.RUST_TOOLCHAIN }}";
 /// (backed by such a definition), and there is one `toolchain:` input per
 /// `dtolnay/rust-toolchain` step. Any other expression fails: it could
 /// resolve to another compiler. The Dockerfile has exactly one `FROM rust:`.
+///
+/// Scope (R3-9, accepted as documented): this is a line scanner that guards
+/// against accidental drift in this repo's own workflows, not a YAML
+/// evaluator. It does not resolve GitHub's env scoping, so a deliberate
+/// job- or step-level `env: { RUST_TOOLCHAIN: ... }` override (block or
+/// inline) next to a `${{ env.RUST_TOOLCHAIN }}` input is not detected;
+/// review catches such hostile edits, the check does not.
 pub(crate) fn check_toolchain_pins(repo_root: &Path) -> Result<(), String> {
     let toolchain = fs::read_to_string(repo_root.join("rust-toolchain.toml"))
         .map_err(|error| format!("cannot read rust-toolchain.toml: {error}"))?;
@@ -455,6 +462,13 @@ pub(crate) fn compose_scheduler_image(expected: &str) -> String {
 /// in a compose file, by indentation (comment and blank lines ignored, a
 /// trailing ` # comment` and quotes stripped). Nested keys of the service
 /// (e.g. under `environment:`) are not its image.
+///
+/// Scope (R3-10, accepted as documented): block-style YAML as this repo
+/// writes it. Flow (inline) mappings, anchors / merge keys and extension
+/// fields (`x-*`) are not parsed, so a deliberately crafted file can hide
+/// the real service image from this scan while `docker compose config`
+/// resolves another one; it guards against accidental drift, not hostile
+/// edits.
 fn compose_service_images(content: &str, service: &str) -> Vec<(usize, String)> {
     let mut images = Vec::new();
     let mut in_services = false;

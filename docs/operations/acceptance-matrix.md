@@ -56,6 +56,11 @@ cargo acceptance run --lane release --expected-version 0.10.4
 `services.rss-ai-news-scheduler.image` 的实际值必须恰为 `ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-<候选>}-scheduler`，
 注释不算数，`0.10.4-rc.1` 之类整段 tag 不再按数字前缀读成 `0.10.4`）与 Git diff check |
 
+`toolchain-pins` 与 compose 镜像检查是**按行扫描**，只防本仓库文件的无意漂移，不防刻意绕过（R3-9 / R3-10，按决议仅文档化，
+不引入 YAML 解析器）：前者不解析 GitHub 的 env 作用域，job / step 级 `env` 对 `RUST_TOOLCHAIN` 的覆盖（块状或行内）配合
+`${{ env.RUST_TOOLCHAIN }}` 输入查不出；后者只认本仓库的块状写法，行内映射、anchor / merge key、`x-*` 扩展字段可以让扫描
+读到的值与 `docker compose config` 实际解析出的服务镜像不同。这类改动靠 review 拦截。
+
 ## CLI JSON 输出契约 gate
 
 SQLite lane 用真实 release binary 运行三条无网络命令，断言 stdout **恰好一个 JSON 文档**且
