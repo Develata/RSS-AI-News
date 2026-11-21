@@ -92,6 +92,8 @@
 | `publish_remote_stops_the_higher_record_sharing_an_article_before_sending` | `crates/runtime/tests/publish_remote_tests.rs` | 存量重复归属：败方不发请求、保态、退还 claim |
 | `publish_remote_stops_a_lower_record_whose_article_a_published_record_holds` | 同上 | 已发布的持有者无论 id 都胜出 |
 | `publish_remote_batch_drops_only_the_record_losing_a_shared_article` | 同上 | 批量只剔除败方 |
+| `three_owners_are_all_told_the_published_record_keeps_the_article` | 同上 | 三方共享：同一排序决定并报告胜方，两个败方都报已发布记录（R3F-P-B1） |
+| `pg_three_owners_all_name_the_same_top_ranked_winner` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 三方共享同一胜方；胜方 failed 后低 id 胜出 |
 | `publish_remote_sends_the_other_record_after_the_keeper_failed` | 同上 | 胜方 failed 后归属释放 |
 | `store_local_stops_the_higher_record_sharing_an_article_before_writing` | `crates/runtime/tests/publish_store_local_tests.rs` | 败方不落盘 |
 | `freeze_transient_candidate_load_error_keeps_record_pending_and_next_run_freezes` | 同上 | 瞬时存储错误保态、下轮继续 |

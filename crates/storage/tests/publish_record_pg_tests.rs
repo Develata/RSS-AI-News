@@ -1219,6 +1219,68 @@ async fn pg_insert_item(ctx: &PgTestContext, record: i64, position: i64, article
     .unwrap();
 }
 
+/// R3F-P-B1 on PostgreSQL: three holders of one article, the highest id
+/// published. Both stopped records name the published one as the winner;
+/// once it fails, the lowest id wins and the other names it.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_three_owners_all_name_the_same_top_ranked_winner() {
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "own-three").await;
+    let records = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let mut ids = Vec::new();
+    for (key, category) in [
+        ("idem-three-a", "ai"),
+        ("idem-three-b", "ml"),
+        ("idem-three-c", "math"),
+    ] {
+        ids.push(
+            records
+                .create_if_new(&new_record(key, category, render, policy))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let (first, second, published) = (ids[0], ids[1], ids[2]);
+    let shared = seed_article(&ctx, "hash-three", "uid-three", "ready_for_publish").await;
+    for id in [first, second, published] {
+        pg_insert_item(&ctx, id, 1, shared).await;
+    }
+    let set_state = |id: i64, state: &'static str| {
+        let pool = ctx.pg_pool().clone();
+        async move {
+            sqlx::query("UPDATE publish_records SET state = $1 WHERE id = $2")
+                .bind(state)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    set_state(first, "stored_local").await;
+    set_state(second, "stored_local").await;
+    set_state(published, "published_remote").await;
+    let items = PublishItemRepo::new_with_storage(ctx.storage_pool().clone());
+    let winner = |id: i64| {
+        let items = &items;
+        async move {
+            items
+                .find_snapshot_ownership_conflict(id)
+                .await
+                .unwrap()
+                .map(|conflict| conflict.owner_record_id)
+        }
+    };
+
+    assert_eq!(winner(first).await, Some(published));
+    assert_eq!(winner(second).await, Some(published));
+
+    set_state(published, "failed").await;
+    assert_eq!(winner(first).await, None);
+    assert_eq!(winner(second).await, Some(first));
+}
+
 /// P-B1 on PostgreSQL: of two (legacy) snapshots sharing an article the
 /// lower id keeps it unless the other is already published; a failed owner
 /// keeps nothing. The release refunds the claim and keeps the stage.

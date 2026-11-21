@@ -1159,6 +1159,55 @@ async fn publish_remote_stops_a_lower_record_whose_article_a_published_record_ho
     assert_record_state(&pool, lower, "stored_local").await;
 }
 
+/// R3F-P-B1: one article in three snapshots — two `stored_local` records and
+/// a higher, already published one. One ranking (published first, then the
+/// lowest id) decides and names the winner: both stopped records are told the
+/// published record keeps the article.
+#[tokio::test]
+async fn three_owners_are_all_told_the_published_record_keeps_the_article() {
+    let (_dir, pool) = make_test_pool().await;
+    let first = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let second = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let published = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let shared = share_first_article(&pool, published, first).await;
+    sqlx::query(
+        "INSERT INTO publish_items (publish_record_id, position, article_id, frozen_title, \
+         frozen_summary, frozen_tags_json, frozen_canonical_link, frozen_source_display_name) \
+         VALUES (?, 3, ?, 'Shared', 's', '[]', 'https://example.com/shared', 'Source')",
+    )
+    .bind(second)
+    .bind(shared)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE publish_records SET state = 'published_remote' WHERE id = ?")
+        .bind(published)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    for loser in [first, second] {
+        let outcome = flow.publish_remote_record(loser, remote_opts()).await;
+        assert_eq!(
+            outcome.status,
+            PublishRemoteStatus::ArticleConflict { article_id: shared }
+        );
+        let last_error: String =
+            sqlx::query_scalar("SELECT last_error FROM publish_records WHERE id = ?")
+                .bind(loser)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            last_error.contains(&format!("in publish record {published},")),
+            "record {loser}: {last_error}"
+        );
+    }
+    assert_eq!(target.sent(), 0);
+}
+
 #[tokio::test]
 async fn publish_remote_batch_drops_only_the_record_losing_a_shared_article() {
     let (_dir, pool) = make_test_pool().await;
