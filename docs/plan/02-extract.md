@@ -69,6 +69,15 @@ Readability 本身也会拒绝空正文；不满足配置最小字数时继续�
 
 quality 由 strategy 自己决定。AI 阶段会跳过 `Fallback` 行（避免分析 summary），见 [./03-ai.md](./03-ai.md)。
 
+字数（`word_count`，Readability 分级与 `articles.word_count` 共用，`strategy::word_count`）：
+`High` 需 ≥ 300 词且有标题，`Medium` 需 ≥ 100 词，不足为 `ContentTooShort`（其 `chars`
+字段报告字符数而非字节数）。不含 CJK 字符的空白分隔 token 记 1 词（与旧
+`split_whitespace` 计数完全一致）；含 CJK 的 token 内，每段含字母或数字的非 CJK 连续片段记
+1 词，CJK 字符（汉字、平假名、片假名、谚文）合计 `⌊n / 2⌋` 词。中英平行文本约 1.6 个汉字对应
+1 个英文词，取 2 偏保守、并向下取整，故 200 个汉字起为 `Medium`、600 个起为 `High`
+（2026-11-21，修复中文长文被判过短）。韩文本身以空格分词，此规则对韩文约高估 1.5 倍。
+存量 article 的 `word_count` 不回写；`replay --diff` 对旧 CJK 文章会显示字数差异。
+
 ## 4. 第三层去重：content_hash
 
 正文提取使用 SHA-256 计算 content_hash，storage::insert_or_get_by_content_hash

@@ -65,6 +65,12 @@ retention policy 留档为 `raw_artifacts.kind='html_payload'`。
 | `readability_extracts_simple_article` | `crates/extractor/tests/strategy_tests.rs` | 策略层 happy |
 | `readability_returns_content_too_short_for_short_article` | 同上 | 太短拒收 |
 | `readability_returns_parse_failed_for_no_content` | 同上 | 无正文 |
+| `readability_grades_a_2340_char_chinese_article_high` | 同上 | 中文长文按 CJK 计词为 High |
+| `content_too_short_reports_characters_not_bytes` | 同上 | `ContentTooShort.chars` 为字符数 |
+| `summary_fallback_counts_cjk_words` | 同上 | fallback 字数同一规则 |
+| `cjk_boundaries_around_medium_and_high` | `crates/extractor/src/strategy.rs`（单元测试） | 199/200、599/600 汉字边界 |
+| `mixed_text_counts_latin_runs_and_halves_cjk` | 同上 | 中英混排、假名、谚文 |
+| `non_cjk_text_counts_like_split_whitespace` | 同上 | 非 CJK 文本计数不变 |
 | `summary_fallback_uses_summary_raw_when_present` | 同上 | fallback 策略 |
 | `summary_fallback_returns_none_when_summary_empty_or_only_html_tags` | 同上 | fallback 边界 |
 | `articles_content_hash_duplicate_is_conflict` | `crates/storage/tests/dedup_tests.rs` | repo 层冲突 |
