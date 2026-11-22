@@ -22,6 +22,11 @@ use rss_ai_news_runtime::{
     PublishFlow, PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRemoteOptions,
     PublishRemoteStatus,
 };
+use rss_ai_news_storage::{
+    ClaimRequest, ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord,
+    PublishRecordRepository, PublishState, PublishTimestampField, ReleaseFailureOutcome,
+    StorageError, TerminalAdvanceOutcome,
+};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use wiremock::matchers::{method, path, path_regex, query_param};
@@ -700,4 +705,480 @@ async fn unverified_record_whose_preparation_times_out_is_deferred() {
     );
     assert_kept_and_refunded(&pool, id).await;
     assert_eq!(target.written.load(Ordering::SeqCst), 0);
+}
+
+// === R5-1: the destination holds the report, its receipt is not recorded ===
+
+/// The real repository, except that the first `failures` terminal advances
+/// fail with `error()` before touching the database — the receipt of a
+/// report the destination already holds is not recorded.
+struct UnrecordedReceipts {
+    inner: rss_ai_news_storage::PublishRecordRepo,
+    failures: AtomicUsize,
+    error: fn() -> StorageError,
+}
+
+impl UnrecordedReceipts {
+    fn new(pool: &SqlitePool, failures: usize, error: fn() -> StorageError) -> Arc<Self> {
+        Arc::new(Self {
+            inner: rss_ai_news_storage::PublishRecordRepo::new(pool.clone()),
+            failures: AtomicUsize::new(failures),
+            error,
+        })
+    }
+}
+
+fn db_unavailable() -> StorageError {
+    StorageError::Unavailable("injected: receipt write lost".to_string())
+}
+
+fn db_corruption() -> StorageError {
+    StorageError::Corruption("injected: receipt write rejected".to_string())
+}
+
+#[async_trait]
+impl PublishRecordRepository for UnrecordedReceipts {
+    async fn create_if_new(&self, item: &NewPublishRecord) -> Result<Option<i64>, StorageError> {
+        self.inner.create_if_new(item).await
+    }
+    async fn find_by_id(&self, id: i64) -> Result<Option<PublishRecord>, StorageError> {
+        self.inner.find_by_id(id).await
+    }
+    async fn find_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<PublishRecord>, StorageError> {
+        self.inner.find_by_idempotency_key(key).await
+    }
+    async fn claim_pending_for_freeze(
+        &self,
+        request: &ClaimRequest,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+        self.inner.claim_pending_for_freeze(request).await
+    }
+    async fn claim_pending_for_freeze_in_category(
+        &self,
+        request: &ClaimRequest,
+        category_key: &str,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+        self.inner
+            .claim_pending_for_freeze_in_category(request, category_key)
+            .await
+    }
+    async fn claim_frozen_for_render(
+        &self,
+        request: &ClaimRequest,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+        self.inner.claim_frozen_for_render(request).await
+    }
+    async fn claim_rendered_for_local_store(
+        &self,
+        request: &ClaimRequest,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+        self.inner.claim_rendered_for_local_store(request).await
+    }
+    async fn claim_local_for_remote_publish(
+        &self,
+        request: &ClaimRequest,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+        self.inner.claim_local_for_remote_publish(request).await
+    }
+    async fn claim_publish_by_ids(
+        &self,
+        request: &ClaimRequest,
+        state: PublishState,
+        ids: &[i64],
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+        self.inner.claim_publish_by_ids(request, state, ids).await
+    }
+    async fn claim_pending_for_freeze_by_id_in_category(
+        &self,
+        request: &ClaimRequest,
+        id: i64,
+        category_key: &str,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+        self.inner
+            .claim_pending_for_freeze_by_id_in_category(request, id, category_key)
+            .await
+    }
+    async fn claim_local_for_remote_publish_by_ids(
+        &self,
+        request: &ClaimRequest,
+        ids: &[i64],
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError> {
+        self.inner
+            .claim_local_for_remote_publish_by_ids(request, ids)
+            .await
+    }
+    async fn release_advance(
+        &self,
+        id: i64,
+        owner: &str,
+        from: PublishState,
+        to: PublishState,
+        timestamp_field: PublishTimestampField,
+        now: OffsetDateTime,
+        extras: PublishAdvanceExtras,
+    ) -> Result<bool, StorageError> {
+        self.inner
+            .release_advance(id, owner, from, to, timestamp_field, now, extras)
+            .await
+    }
+    async fn release_retryable_failure_until(
+        &self,
+        id: i64,
+        owner: &str,
+        error: &str,
+        kind: &str,
+        max_attempts: u32,
+        retry_not_before: Option<OffsetDateTime>,
+        now: OffsetDateTime,
+    ) -> Result<ReleaseFailureOutcome, StorageError> {
+        self.inner
+            .release_retryable_failure_until(
+                id,
+                owner,
+                error,
+                kind,
+                max_attempts,
+                retry_not_before,
+                now,
+            )
+            .await
+    }
+    async fn release_empty_snapshot(
+        &self,
+        id: i64,
+        owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        self.inner.release_empty_snapshot(id, owner, now).await
+    }
+    async fn release_freeze_conflict(
+        &self,
+        id: i64,
+        owner: &str,
+        error: &str,
+        kind: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        self.inner
+            .release_freeze_conflict(id, owner, error, kind, now)
+            .await
+    }
+    async fn release_ownership_conflict(
+        &self,
+        id: i64,
+        owner: &str,
+        state: PublishState,
+        error: &str,
+        kind: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        self.inner
+            .release_ownership_conflict(id, owner, state, error, kind, now)
+            .await
+    }
+    async fn release_deferred_retry(
+        &self,
+        id: i64,
+        owner: &str,
+        state: PublishState,
+        error: &str,
+        kind: &str,
+        retry_not_before: Option<OffsetDateTime>,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        self.inner
+            .release_deferred_retry(id, owner, state, error, kind, retry_not_before, now)
+            .await
+    }
+    async fn release_permanent_failure(
+        &self,
+        id: i64,
+        owner: &str,
+        error: &str,
+        kind: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        self.inner
+            .release_permanent_failure(id, owner, error, kind, now)
+            .await
+    }
+    async fn reclaim_expired_leases(&self, now: OffsetDateTime) -> Result<u64, StorageError> {
+        self.inner.reclaim_expired_leases(now).await
+    }
+    async fn terminalize_exhausted(
+        &self,
+        max_attempts: u32,
+        now: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        self.inner.terminalize_exhausted(max_attempts, now).await
+    }
+    async fn release_terminal_advance_with_articles(
+        &self,
+        id: i64,
+        owner: &str,
+        from: PublishState,
+        to: PublishState,
+        timestamp_field: PublishTimestampField,
+        promote_article_ids: Vec<i64>,
+        extras: PublishAdvanceExtras,
+        now: OffsetDateTime,
+    ) -> Result<TerminalAdvanceOutcome, StorageError> {
+        if self
+            .failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err((self.error)());
+        }
+        self.inner
+            .release_terminal_advance_with_articles(
+                id,
+                owner,
+                from,
+                to,
+                timestamp_field,
+                promote_article_ids,
+                extras,
+                now,
+            )
+            .await
+    }
+}
+
+fn flow_with_repo(
+    pool: SqlitePool,
+    target: Arc<dyn PublishTarget>,
+    repo: Arc<UnrecordedReceipts>,
+) -> PublishFlow {
+    let mut app = app_config(RetentionPolicy::Always, 1);
+    app.retry.publish_max_attempts = 1;
+    let mut deps = publish_deps(
+        pool,
+        Arc::new(app),
+        Arc::new(LocalFsTarget::new(std::env::temp_dir())),
+        Some(target),
+    );
+    deps.publish_record_repo = repo;
+    PublishFlow::new(Arc::new(deps))
+}
+
+/// Anything still leased is past its lease, so the next run's maintenance
+/// reclaims it and sweeps it if its stage budget is spent — the reviewer's
+/// path to `failed`.
+async fn expire_leases(pool: &SqlitePool) {
+    sqlx::query(
+        "UPDATE publish_records SET lease_expires_at = '2000-01-01T00:00:00.000Z' \
+         WHERE lease_owner IS NOT NULL",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// HEAD (`landed-commit`) holds `blob_sha` at every contents path.
+async fn mount_head_holding(server: &MockServer, blob_sha: String) {
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "object": { "sha": "landed-commit" }
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "type": "file",
+            "sha": blob_sha,
+        })))
+        .mount(server)
+        .await;
+}
+
+async fn last_publish_failed(pool: &SqlitePool) -> serde_json::Value {
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT context_json FROM run_events WHERE event_kind = 'publish_failed' ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    serde_json::from_str(events.last().expect("a publish_failed event")).unwrap()
+}
+
+async fn assert_published_without_a_write(
+    server: &MockServer,
+    pool: &SqlitePool,
+    id: i64,
+    outcome: &rss_ai_news_runtime::PublishRemoteOutcome,
+) {
+    assert_eq!(outcome.status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(outcome.commit_sha.as_deref(), Some("landed-commit"));
+    assert_eq!(non_get_requests(server).await, Vec::<String>::new());
+    let (state, _, stage, kind, lease) = record_row(pool, id).await;
+    assert_eq!(
+        (state.as_str(), stage, kind, lease),
+        ("published_remote", 0, None, None)
+    );
+    assert!(
+        article_states(pool, id)
+            .await
+            .iter()
+            .all(|state| state == "published")
+    );
+}
+
+/// The reviewer's sequence (R5-1): a recovering record on its last budget
+/// finds its report at HEAD, but recording the receipt hits a retryable
+/// database error. It must not stay leased (to be reclaimed and swept to
+/// `failed`, releasing articles GitHub already shows): it is deferred with
+/// its recovery mark, and the next run records the receipt without a write.
+#[tokio::test]
+async fn recovered_receipt_not_recorded_is_deferred_and_recorded_next_run() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local(&pool).await;
+    let server = MockServer::start().await;
+    let target = Recording::new(&server.uri());
+    let repo = UnrecordedReceipts::new(&pool, 1, db_unavailable);
+    let flow = flow_with_repo(pool.clone(), target.clone(), repo.clone());
+    first_attempt_left_unverified(&server, &flow, id).await;
+    assert_kept_and_refunded(&pool, id).await;
+
+    server.reset().await;
+    mount_head_holding(&server, target.last_blob_sha()).await;
+    let second = flow.publish_remote_record(id, remote_opts()).await;
+
+    assert!(
+        matches!(&second.status, PublishRemoteStatus::Failed { error_kind } if error_kind == UNVERIFIED),
+        "{:?}",
+        second.status
+    );
+    assert_eq!(repo.failures.load(Ordering::SeqCst), 0, "the advance ran");
+    assert_kept_and_refunded(&pool, id).await;
+    assert_eq!(non_get_requests(&server).await, Vec::<String>::new());
+    let event = last_publish_failed(&pool).await;
+    assert_eq!(event["error_kind"], UNVERIFIED);
+    assert_eq!(event["cause_kind"], "db_unavailable");
+    assert_eq!(event["attempt_refunded"], true);
+
+    expire_leases(&pool).await;
+    server.reset().await;
+    mount_head_holding(&server, target.last_blob_sha()).await;
+    let third = flow.publish_remote_record(id, remote_opts()).await;
+    assert_published_without_a_write(&server, &pool, id, &third).await;
+}
+
+/// The same after a normal write that succeeded: GitHub holds the report,
+/// the receipt write fails — retryable or not — and the record is deferred
+/// for recovery instead of left leased; the next run records the receipt
+/// from HEAD without writing again.
+#[tokio::test]
+async fn written_receipt_not_recorded_is_deferred_and_recorded_next_run() {
+    type InjectedError = fn() -> StorageError;
+    let cases: [(InjectedError, &str); 2] = [
+        (db_unavailable, "db_unavailable"),
+        (db_corruption, "corruption"),
+    ];
+    for (error, cause_kind) in cases {
+        let (_dir, pool) = make_test_pool().await;
+        let id = seed_stored_local(&pool).await;
+        let server = MockServer::start().await;
+        let target = Recording::new(&server.uri());
+        let repo = UnrecordedReceipts::new(&pool, 1, error);
+        let flow = flow_with_repo(pool.clone(), target.clone(), repo);
+        Mock::given(method("GET"))
+            .and(path_regex("^/repos/owner/repo/contents/"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({"message": "Not Found"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "content": { "sha": "file-sha" },
+                "commit": { "sha": "written-commit" }
+            })))
+            .mount(&server)
+            .await;
+        let first = flow.publish_remote_record(id, remote_opts()).await;
+
+        assert!(
+            matches!(&first.status, PublishRemoteStatus::Failed { error_kind } if error_kind == UNVERIFIED),
+            "{cause_kind}: {:?}",
+            first.status
+        );
+        assert_kept_and_refunded(&pool, id).await;
+        assert_eq!(last_publish_failed(&pool).await["cause_kind"], cause_kind);
+
+        expire_leases(&pool).await;
+        server.reset().await;
+        mount_head_holding(&server, target.last_blob_sha()).await;
+        let second = flow.publish_remote_record(id, remote_opts()).await;
+        assert_published_without_a_write(&server, &pool, id, &second).await;
+    }
+}
+
+/// In a batch only the record whose receipt was not recorded is deferred;
+/// the others are published, and the next batch records the deferred one
+/// from HEAD without writing it again.
+#[tokio::test]
+async fn batch_receipt_not_recorded_defers_only_that_record() {
+    let (_dir, pool) = make_test_pool().await;
+    let first = seed_stored_local(&pool).await;
+    let second = seed_stored_local(&pool).await;
+    set_category(&pool, first, "firstcat").await;
+    set_category(&pool, second, "secondcat").await;
+    let repo = UnrecordedReceipts::new(&pool, 1, db_unavailable);
+    let writer = Arc::new(ScriptedTarget {
+        landed: vec![],
+        failing: vec![],
+        written: AtomicUsize::new(0),
+        batches: AtomicUsize::new(0),
+    });
+    let flow = flow_with_repo(pool.clone(), writer.clone(), repo.clone());
+    let items = || PublishRemoteBatchOptions {
+        items: vec![batch_item(first, "First"), batch_item(second, "Second")],
+    };
+    let status = |outcome: &rss_ai_news_runtime::PublishRemoteBatchOutcome, id: i64| {
+        outcome
+            .items
+            .iter()
+            .find(|item| item.publish_record_id == id)
+            .unwrap()
+            .status
+            .clone()
+    };
+
+    let outcome = flow.publish_remote_batch(items()).await;
+
+    assert!(
+        matches!(&status(&outcome, first), PublishRemoteStatus::Failed { error_kind } if error_kind == UNVERIFIED),
+        "{:?}",
+        status(&outcome, first)
+    );
+    assert_kept_and_refunded(&pool, first).await;
+    assert_eq!(
+        status(&outcome, second),
+        PublishRemoteStatus::PublishedRemote
+    );
+    assert_eq!(writer.written.load(Ordering::SeqCst), 2);
+
+    expire_leases(&pool).await;
+    let landed = Arc::new(ScriptedTarget {
+        landed: vec!["firstcat"],
+        failing: vec![],
+        written: AtomicUsize::new(0),
+        batches: AtomicUsize::new(0),
+    });
+    let flow = flow_with_repo(pool.clone(), landed.clone(), repo);
+    let rerun = flow.publish_remote_batch(items()).await;
+
+    assert_eq!(status(&rerun, first), PublishRemoteStatus::PublishedRemote);
+    assert_eq!(landed.written.load(Ordering::SeqCst), 0, "no write again");
+    let (state, _, _, kind, _) = record_row(&pool, first).await;
+    assert_eq!((state.as_str(), kind), ("published_remote", None));
 }

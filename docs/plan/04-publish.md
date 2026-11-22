@@ -321,6 +321,8 @@ v0.3 引入：`publish_many(reports: &[RenderedReport])` 在一次 commit 内推
 先对自己这一份报告做固定 HEAD 只读比对（批量中逐条单独比对）：已含 → 以 HEAD commit 记回执、不写；确认缺失 → 照常写、照常计预算；
 比对再失败 / 被限流 / 超时 → `EarlierWriteUnverified`（同一 `error_kind`）：保态、退还 claim、保留该 kind 与文章归属。
 比对之前的可重试失败（准备超时、快照 / 归属读取的可重试存储错误）同样退还并保留该 kind；目标漂移与永久渲染错误照常 `failed`。
+**远端已有、回执未落库（R5-1，ADR 0012 §3）**：拿到回执后终态推进返回存储错误（可重试与否）→ 同样 deferred：保态、退还、
+写 `remote_write_unverified`，下一次 claim 由恢复比对补回执、不再写；不留 lease 等过期后被 sweep 转 `failed`。
 
 ### 4.2.2 422 lost-update retry
 
@@ -400,6 +402,7 @@ Markdown **byte-equal**；跨渲染器版本（例如 YAML 引号规则调整）
 | 远端 deadline（lease 的 80%）超时 | `PublishError::RemoteTimeout` | 先只读核对 HEAD（已落地 → 成功）；确认未落地 → 保持 `stored_local` + 计预算 |
 | 歧义写入 / 远端超时之后的只读核对本身失败、被限流或超时 | `PublishError::RemoteWriteUnverified { write, verification }`（R3F-B2） | 保持 `stored_local`、**退还**本次 claim（不计预算，最后一次预算也不转 `failed`）、文章归属保留；`verification` 为限流时其期限（钳制 1 h）写入 `next_attempt_at`；下一次 claim 先做只读恢复比对（R4-1） |
 | 上次以 `remote_write_unverified` 释放的记录，本次写前的恢复比对失败、被限流或超时（或比对前的可重试失败） | `PublishError::EarlierWriteUnverified { verification }`（R4-1；`error_kind = remote_write_unverified`） | 未发写请求；保持 `stored_local`、**退还**本次 claim、文章归属与该 kind 保留；`verification` 为限流时其期限写入 `next_attempt_at`；请求上下文取自失败的比对 |
+| 已拿到回执（远端已有报告），终态推进返回存储错误（可重试与否） | `StorageError`（R5-1；结果 `error_kind = remote_write_unverified`，事件 `cause_kind` 为存储错误） | 保持 `stored_local`、**退还**本次 claim、写 `remote_write_unverified`、文章归属保留；下一次 claim 的恢复比对命中即记回执、不写 |
 | 2xx 但超过 16 MiB / 缺必需字段 | `ResponseTooLarge` / `GitHubApiError { status: 502 }` | 前者 `failed`；后者按 5xx 计预算 |
 | 目标漂移：record 的 `remote_target`（init 时写入的 `owner/repo:branch`）≠ 当前配置目标 | `PublishError::RemoteTargetMismatch`（`PublishRemoteStatus::TargetMismatch { stored, current }`） | 发请求前拦截，不重试，state='failed'，`last_error` 含两个目标；恢复配置或 `--force` 由运维决定 |
 

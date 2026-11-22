@@ -61,6 +61,8 @@
   - **下一次 claim 先恢复**（R4-1）：`last_error_kind = remote_write_unverified` 的记录写前先对自己的报告做固定 HEAD 只读比对
     （批量中逐条）：已含 → 记回执、不写；确认缺失 → 照常写、照常计预算；比对再失败 → 保态、退还、保留该 kind 与归属；
     比对前的可重试失败（如准备超时）同样退还
+  - **远端已有、回执未落库**（R5-1）：拿到回执后终态推进返回存储错误（可重试与否）→ 同上 deferred（保态、退还、写该 kind、
+    归属保留，不留 lease 等 sweep）；下一次运行由恢复比对记回执、零写请求
 - promote target article 已被其它流转推进 → `ArticleConflict`
 - 存量重复归属（0008 前两份未失败快照共享文章）：store_local / remote 写前拦截，已发布者或低 id 者胜出；败方不写外部产物、
   释放 lease、退还 claim、保持阶段态 → `ArticleConflict`（`article_owned_by_active_snapshot`）
@@ -168,6 +170,9 @@
 | `unverified_record_confirmed_absent_publishes_with_a_normal_write` | 同上 | 确认缺失 → 正常写入并发布 |
 | `batch_checks_each_unverified_record_on_its_own_before_writing` | 同上 | 批量逐条比对：已落地者记回执不入批、比对失败者 deferred、缺失者与普通记录一起写入 |
 | `unverified_record_whose_preparation_times_out_is_deferred` | 同上 | 比对前准备超时：末次预算仍不 `failed`、保留 kind、零写入 |
+| `recovered_receipt_not_recorded_is_deferred_and_recorded_next_run` | 同上 | 审查序列（R5-1）：末次预算、恢复比对命中、回执落库遇可重试存储错误 → 保态、退还、保留 kind 与归属、清 lease（`cause_kind = db_unavailable`）；lease 过期 + maintenance 后下一次运行记回执、零写请求 |
+| `written_receipt_not_recorded_is_deferred_and_recorded_next_run` | 同上 | 普通写入成功后回执落库失败（可重试 `db_unavailable` 与不可重试 `corruption` 各一遍）→ 同上 deferred，下一次运行由 HEAD 记回执、不再 PUT |
+| `batch_receipt_not_recorded_defers_only_that_record` | 同上 | 批量：只有回执落库失败的那条 deferred，其余照常发布；下一批由恢复比对记回执、不再写 |
 | `git_blob_sha_matches_git_hash_object` | `crates/publish/src/github.rs` | blob sha 与 `git hash-object` 一致（含中文） |
 | `auth_failure_maps_to_github_auth_failed` | 同上 | 401 映射 |
 | `chinese_path_leaves_the_client_percent_encoded_on_get_and_put` | `crates/publish/tests/github_contents_path_tests.rs` | 中文路径请求行按段编码（原始字节） |

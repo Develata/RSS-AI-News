@@ -111,7 +111,7 @@ Publish 后续变化（ADR 0012）：预算列为 `stage_attempt_count`（0008�
 publish 的 claim 还要求 `next_attempt_at` 为空或已到（R1-P-S12）。sweep 谓词不看 `next_attempt_at`。
 另有不计预算的 `release_deferred_retry(id, owner, state, error, kind, retry_not_before, now)`（2026-11-22，R3F-B2 / R3F-S12）：
 保持 `state`、清 lease、两个计数都退还、写 `next_attempt_at`——用于写入歧义且只读核对未完成的远端尝试（以及其下一次 claim
-写前恢复比对仍未出结论的尝试，R4-1），以及所有限流（期限在未来时写入等待，已到 / 已过时写 NULL；R3F-S12，R4-4）。
+写前恢复比对仍未出结论的尝试，R4-1；远端已有报告、回执落库失败的尝试，R5-1），以及所有限流（期限在未来时写入等待，已到 / 已过时写 NULL；R3F-S12，R4-4）。
 因此这两类记录不会被 sweep 收口，
 持续如此的记录会一直持有文章归属（ADR 0012 §3 / §3a 的已知代价）。
 

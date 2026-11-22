@@ -99,6 +99,14 @@
 快照读取或归属检查的可重试存储错误（`release_deferred_retry`，`last_error` 写明原因，事件带 `cause_kind`）；
 归属冲突的败方释放（本就退还 claim）也写 `remote_write_unverified` 而不是 `article_owned_by_active_snapshot`
 （事件 `error_kind` 仍为后者，并带 `earlier_write_unverified: true`）。
+**远端已有、回执未落库（2026-11-22，R5-1）**：远端阶段拿到回执（写入成功、歧义核对命中、单报告幂等命中或上一条的恢复比对命中）
+之后，带 owner 守卫的终态推进（`stored_local → published_remote` 与文章晋升，同一事务）若返回存储错误，记录**不再**留着 lease
+等过期：lease 过期后会被回收，阶段预算已满时被 sweep 转 `failed`、释放文章归属，而这些文章已在远端。改为与上一条相同的
+`release_deferred_retry`：保持 `stored_local`、退还本次 claim、`last_error_kind = remote_write_unverified`、`last_error` 以
+"github holds the report but its receipt was not recorded" 开头，事件 `error_kind = remote_write_unverified`、`cause_kind` 为存储错误的
+kind。下一次 claim 走上一条的恢复比对，命中即记回执、不发写请求。**可重试与不可重试的存储错误一样处理**：远端已有报告时，
+`failed` 从来不是正确终态；代价是持续失败的推进每次运行重复一次只读比对与一次推进（与上一条"比对一直不出结论"同一代价）。
+推进返回的 `ArticleStateConflict`（文章不在 `ready_for_publish`）不在此列，仍按原样处理。
 **代价（未解决）**：每次尝试都以"写入歧义 + 核对未完成"结束、此后比对也一直不出结论的记录（例如 GitHub 长期对读写都不可达）
 不会耗尽预算、一直持有文章归属；它每次运行最多再发一次只读比对。因此 `publish_max_attempts = 1` 或默认预算的最后一次尝试里
 "PATCH 已落地、响应丢失"也会记为 `published_remote`，而不是 `failed` 并释放文章归属。限流（`GitHubRateLimit`）不核对，
@@ -109,6 +117,7 @@
 与永久的渲染错误仍直接 `failed`（运维改了配置或模板，同样需人工核对远端）。
 **残留限制**：进程在写请求之后、核对之前崩溃（或在恢复比对途中崩溃），且该阶段预算已耗尽时，过期清扫仍会把记录转 `failed`
 （未核对、归属释放）；预算未耗尽时，下一次运行的多报告幂等比对 / 单报告幂等（§3 下文）会补回执。
+R5-1 的 deferred 释放与推进写同一个数据库：释放本身也失败时（例如数据库整段不可用），记录同样留着 lease，落入这条残留限制。
 
 ### 3a. 限流等待写入记录（2026-11-22，R1-P-S12，同属未发布的 migration 0008）
 

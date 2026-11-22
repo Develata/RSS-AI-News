@@ -88,6 +88,13 @@ async fn verify_after_timeout(
     }
 }
 
+/// `last_error` reason of a recovery deferred before its check settled (R4-1).
+pub(super) const EARLIER_WRITE_UNVERIFIED: &str =
+    "github write of an earlier attempt still unverified";
+/// `last_error` reason of a receipt the destination holds but the database
+/// did not record (R5-1).
+const RECEIPT_NOT_RECORDED: &str = "github holds the report but its receipt was not recorded";
+
 /// R4-1: the record's previous remote attempt ended
 /// `remote_write_unverified` — its write may have landed.
 fn has_unverified_write(claimed: &ClaimedPublishRecord) -> bool {
@@ -970,31 +977,51 @@ impl PublishFlow {
             Ok(TerminalAdvanceOutcome {
                 status: TerminalAdvanceStatus::ArticleStateConflict { article_id },
             }) => PublishRemoteStatus::ArticleConflict { article_id },
-            Err(error) => PublishRemoteStatus::Failed {
-                error_kind: error.error_kind().to_string(),
-            },
+            // R5-1: every caller holds a receipt, so the destination has the
+            // report; only its record is missing. Left leased, the record
+            // would be reclaimed and — on the last stage budget — swept to
+            // `failed`, releasing articles that are already published. It is
+            // deferred instead, marked for recovery: the next claim finds the
+            // report with a read-only check and records the receipt without a
+            // write. This holds for non-retryable storage errors too: once the
+            // destination holds the report, `failed` is never the right end.
+            Err(error) => {
+                self.release_unverified_recovery(
+                    publish_record_id,
+                    owner,
+                    &error,
+                    RECEIPT_NOT_RECORDED,
+                    phase,
+                    emitter,
+                )
+                .await;
+                PublishRemoteStatus::Failed {
+                    error_kind: REMOTE_WRITE_UNVERIFIED_KIND.to_string(),
+                }
+            }
         }
     }
 
-    /// R4-1: a retryable failure (`cause`: a snapshot or ownership read)
-    /// before the HEAD check of a record whose earlier write is unverified.
-    /// Nothing was written and nothing is settled, so the attempt is
-    /// released like [`PublishError::EarlierWriteUnverified`]: state kept,
-    /// claim refunded, `last_error_kind = remote_write_unverified` so the
-    /// next claim checks again.
+    /// Releases a record whose remote outcome is not on record, without
+    /// charging the stage: state kept, claim refunded,
+    /// `last_error_kind = remote_write_unverified` so the next claim starts
+    /// with the read-only check. `reason` opens `last_error`:
+    /// - [`EARLIER_WRITE_UNVERIFIED`] (R4-1): a retryable failure (`cause`: a
+    ///   snapshot or ownership read) before the HEAD check of a record whose
+    ///   earlier write is unverified — nothing written, nothing settled;
+    /// - [`RECEIPT_NOT_RECORDED`] (R5-1): the destination holds the report
+    ///   but persisting its receipt failed (`cause`).
     pub(super) async fn release_unverified_recovery(
         &self,
         publish_record_id: i64,
         owner: &str,
         cause: &dyn ClassifiedError,
+        reason: &str,
         phase: &'static str,
         emitter: &RunEventEmitter<'_>,
     ) {
         let now = OffsetDateTime::now_utc();
-        let message = format!(
-            "github write of an earlier attempt still unverified: {}",
-            cause.display_user()
-        );
+        let message = format!("{reason}: {}", cause.display_user());
         let released = self
             .ctx
             .publish_record_repo
@@ -1164,6 +1191,7 @@ impl PublishFlow {
                     publish_record_id,
                     owner,
                     error,
+                    EARLIER_WRITE_UNVERIFIED,
                     "publish_remote.prepare",
                     emitter,
                 )

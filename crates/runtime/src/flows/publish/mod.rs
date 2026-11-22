@@ -271,8 +271,15 @@ impl PublishFlow {
             Ok(None) => return OwnershipGuard::Clear,
             Ok(Some(conflict)) => conflict,
             Err(error) if unverified_write && error.is_retryable() => {
-                self.release_unverified_recovery(publish_record_id, owner, &error, phase, emitter)
-                    .await;
+                self.release_unverified_recovery(
+                    publish_record_id,
+                    owner,
+                    &error,
+                    remote::EARLIER_WRITE_UNVERIFIED,
+                    phase,
+                    emitter,
+                )
+                .await;
                 return OwnershipGuard::Failed {
                     error_kind: rss_ai_news_publish::REMOTE_WRITE_UNVERIFIED_KIND.to_string(),
                 };
