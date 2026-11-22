@@ -1,4 +1,5 @@
 use std::{
+    io,
     process::Command,
     thread,
     time::{Duration, Instant},
@@ -6,7 +7,7 @@ use std::{
 
 use super::super::{
     executor::LaneExecutor,
-    process::run_bounded,
+    process::{Finished, run_bounded},
     resources::{DockerCleanup, prepare_smoke_workspace},
     util::{program_exists, strings},
 };
@@ -213,7 +214,8 @@ fn wait_for_scheduler_job(container: &str, step_timeout: Duration) -> bool {
 /// Every poll goes through [`run_bounded`] (capped output, killed process
 /// tree) with the smaller of the remaining time and `step_timeout`, so one
 /// hanging poll cannot outlive the deadline (R3-15). Returns whether the
-/// marker was seen.
+/// marker was seen by a poll that completed before the deadline
+/// ([`poll_saw_marker`], R4-8).
 fn wait_for_marker(
     poll: impl Fn() -> Command,
     marker: &str,
@@ -226,10 +228,8 @@ fn wait_for_marker(
         if remaining.is_zero() {
             return false;
         }
-        let seen = run_bounded(poll(), remaining.min(step_timeout)).is_ok_and(|finished| {
-            finished.stdout.text.contains(marker) || finished.stderr.text.contains(marker)
-        });
-        if seen {
+        let polled = run_bounded(poll(), remaining.min(step_timeout));
+        if poll_saw_marker(&polled, marker, Instant::now(), deadline) {
             return true;
         }
         thread::sleep(
@@ -238,14 +238,37 @@ fn wait_for_marker(
     }
 }
 
+/// Whether one poll saw the marker in time: it must have run to completion
+/// (not killed at its timeout) and returned by `deadline`. `run_bounded`
+/// checks for exit before its timeout every 50 ms, so a child that prints the
+/// marker and exits just past the deadline still returns `timed_out: false`;
+/// the return instant rules that out (R4-8). Conservative: a marker printed
+/// before the deadline by a poll that returns after it does not count.
+fn poll_saw_marker(
+    polled: &io::Result<Finished>,
+    marker: &str,
+    returned_at: Instant,
+    deadline: Instant,
+) -> bool {
+    returned_at <= deadline
+        && polled.as_ref().is_ok_and(|finished| {
+            !finished.timed_out
+                && (finished.stdout.text.contains(marker) || finished.stderr.text.contains(marker))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
+        io,
         process::Command,
         time::{Duration, Instant},
     };
 
-    use super::{SCHEDULER_SMOKE_MARKER, scheduler_job_verdict, wait_for_marker};
+    use super::{
+        super::super::process::{Captured, Finished},
+        SCHEDULER_SMOKE_MARKER, poll_saw_marker, scheduler_job_verdict, wait_for_marker,
+    };
 
     fn sh(script: &str) -> Command {
         let mut command = Command::new("sh");
@@ -314,5 +337,63 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// A poll killed at the deadline does not count, even when it printed
+    /// the marker before it was killed (R4-8).
+    #[test]
+    fn a_timed_out_poll_with_the_marker_is_not_seen() {
+        assert!(!wait_for_marker(
+            || sh("echo marker; sleep 30"),
+            "marker",
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+        ));
+    }
+
+    fn finished(timed_out: bool, stdout: &str) -> io::Result<Finished> {
+        Ok(Finished {
+            exit_code: Some(0),
+            timed_out,
+            pipes_held: false,
+            stdout: Captured {
+                text: stdout.to_owned(),
+                truncated: false,
+            },
+            stderr: Captured::default(),
+        })
+    }
+
+    /// `run_bounded` checks for exit before its timeout every 50 ms, so a
+    /// poll that prints the marker and exits just past the deadline returns
+    /// with `timed_out: false`; it is accepted only when it returned by the
+    /// deadline (R4-8).
+    #[test]
+    fn a_poll_returning_after_the_deadline_is_not_seen() {
+        let deadline = Instant::now();
+        let late = deadline + Duration::from_millis(20);
+        let early = deadline - Duration::from_millis(20);
+        let in_time = finished(false, "ran: marker");
+        assert!(!poll_saw_marker(&in_time, "marker", late, deadline));
+        assert!(poll_saw_marker(&in_time, "marker", early, deadline));
+        assert!(poll_saw_marker(&in_time, "marker", deadline, deadline));
+        assert!(!poll_saw_marker(
+            &finished(true, "ran: marker"),
+            "marker",
+            early,
+            deadline
+        ));
+        assert!(!poll_saw_marker(
+            &finished(false, "no job yet"),
+            "marker",
+            early,
+            deadline
+        ));
+        assert!(!poll_saw_marker(
+            &Err(io::Error::other("spawn failed")),
+            "marker",
+            early,
+            deadline
+        ));
     }
 }
