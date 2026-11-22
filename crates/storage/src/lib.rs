@@ -40,7 +40,7 @@ pub use repo::{
     ReindexJobRepository, ReleaseSuccessOutcome, ResetFailedFilter, ResetFailedOutcome,
     ResumeReindexOutcome, RuleVersion, RuleVersionRepo, RuleVersionRepository, RunEventRepo,
     RunEventRepository, StartReindexTxOutcome, TerminalAdvanceOutcome, TerminalAdvanceStatus,
-    UpdateContentHashOutcome, UpdateLinkHashOutcome,
+    UnverifiedWriteUpdate, UpdateContentHashOutcome, UpdateLinkHashOutcome,
 };
 pub use repo::{FeedEndpoint, FreshWindow, ShareMark, ShareSide, ShareStage};
 pub use repo::{

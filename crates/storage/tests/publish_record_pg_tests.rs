@@ -907,7 +907,16 @@ async fn pg_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait()
     );
     assert!(
         !repo
-            .release_deferred_retry(id, "d1", PublishState::Rendered, "x", "x", None, first)
+            .release_deferred_retry(
+                id,
+                "d1",
+                PublishState::Rendered,
+                "x",
+                "x",
+                None,
+                rss_ai_news_storage::UnverifiedWriteUpdate::Keep,
+                first
+            )
             .await
             .unwrap()
     );
@@ -920,6 +929,7 @@ async fn pg_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait()
             "verification incomplete",
             "remote_write_unverified",
             Some(not_before),
+            rss_ai_news_storage::UnverifiedWriteUpdate::Keep,
             first,
         )
         .await
@@ -958,6 +968,7 @@ async fn pg_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait()
             "x",
             "y",
             None,
+            rss_ai_news_storage::UnverifiedWriteUpdate::Keep,
             not_before
         )
         .await
@@ -970,6 +981,160 @@ async fn pg_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait()
         .unwrap();
     assert_eq!(scanned.len(), 1);
     assert_eq!(scanned[0].last_error_kind.as_deref(), Some("y"));
+}
+
+/// R5-2 on PostgreSQL: a deferred release records the unverified write, a
+/// later one keeps it, both claims project it, and a charged retryable
+/// release and a stage advance clear it.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_deferred_retry_records_keeps_and_clears_the_unverified_write() {
+    use rss_ai_news_domain::dto::publish::RemoteBlob;
+    use rss_ai_news_storage::UnverifiedWriteUpdate;
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "recorded").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .create_if_new(&new_record("idem-recorded", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE publish_records SET state = 'stored_local' WHERE id = $1")
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    let at = OffsetDateTime::now_utc();
+    let request = |owner: &str| ClaimRequest {
+        owner: owner.to_string(),
+        now: at,
+        lease_expires_at: lease_expires(at),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+    let columns = || {
+        let pool = ctx.pg_pool().clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                "SELECT unverified_write_path, unverified_write_blob_sha FROM publish_records \
+                 WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let blob = RemoteBlob {
+        path: "reports/ai/2026/20260517.md".to_string(),
+        blob_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+    };
+    async fn defer(
+        repo: &PublishRecordRepo,
+        id: i64,
+        owner: &str,
+        update: UnverifiedWriteUpdate<'_>,
+        at: OffsetDateTime,
+    ) {
+        assert!(
+            repo.release_deferred_retry(
+                id,
+                owner,
+                PublishState::StoredLocal,
+                "unverified",
+                "remote_write_unverified",
+                None,
+                update,
+                at,
+            )
+            .await
+            .unwrap(),
+            "{owner}"
+        );
+    }
+    let blob = &blob;
+
+    let by_id = |owner: &'static str| {
+        let repo = repo.clone();
+        async move {
+            let claimed = repo
+                .claim_publish_by_ids(&request(owner), PublishState::StoredLocal, &[id])
+                .await
+                .unwrap();
+            assert_eq!(claimed.len(), 1, "{owner}");
+            claimed.into_iter().next().unwrap()
+        }
+    };
+    assert_eq!(by_id("p1").await.unverified_write(), None);
+    defer(
+        &repo,
+        id,
+        "p1",
+        UnverifiedWriteUpdate::Record(Some(blob)),
+        at,
+    )
+    .await;
+    let scanned = repo
+        .claim_local_for_remote_publish(&request("p2"))
+        .await
+        .unwrap();
+    assert_eq!(scanned.len(), 1);
+    assert_eq!(
+        scanned[0].unverified_write(),
+        Some(blob.clone()),
+        "scan claim"
+    );
+    defer(&repo, id, "p2", UnverifiedWriteUpdate::Keep, at).await;
+    assert_eq!(
+        by_id("p3").await.unverified_write(),
+        Some(blob.clone()),
+        "kept"
+    );
+    defer(&repo, id, "p3", UnverifiedWriteUpdate::Record(None), at).await;
+    assert_eq!(columns().await, (None, None), "Record(None) clears");
+
+    by_id("p4").await;
+    defer(
+        &repo,
+        id,
+        "p4",
+        UnverifiedWriteUpdate::Record(Some(blob)),
+        at,
+    )
+    .await;
+    by_id("p5").await;
+    let released = repo
+        .release_retryable_failure(id, "p5", "refused", "github_api_error", 5, at)
+        .await
+        .unwrap();
+    assert!(released.released && !released.exhausted);
+    assert_eq!(columns().await, (None, None), "a charged release clears");
+
+    by_id("p6").await;
+    defer(
+        &repo,
+        id,
+        "p6",
+        UnverifiedWriteUpdate::Record(Some(blob)),
+        at,
+    )
+    .await;
+    by_id("p7").await;
+    let advanced = repo
+        .release_terminal_advance_with_articles(
+            id,
+            "p7",
+            PublishState::StoredLocal,
+            PublishState::PublishedRemote,
+            PublishTimestampField::RemotePublishedAt,
+            Vec::new(),
+            PublishAdvanceExtras::default(),
+            at,
+        )
+        .await
+        .unwrap();
+    assert_eq!(advanced.status, TerminalAdvanceStatus::Advanced);
+    assert_eq!(columns().await, (None, None), "the advance clears");
 }
 
 /// B2 (ADR 0012) on PostgreSQL under READ COMMITTED: a freeze locks its

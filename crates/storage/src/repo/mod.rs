@@ -114,7 +114,7 @@ pub use publish_item::{
 pub use publish_record::{
     ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord, PublishRecordRepo,
     PublishRecordRepository, PublishState, PublishTimestampField, TerminalAdvanceOutcome,
-    TerminalAdvanceStatus,
+    TerminalAdvanceStatus, UnverifiedWriteUpdate,
 };
 pub use raw_artifact::{NewRawArtifact, RawArtifactRepo, RawArtifactRepository};
 pub use reindex_job::{

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use rss_ai_news_domain::dto::publish::RenderedReport;
+use rss_ai_news_domain::dto::publish::{RemoteBlob, RenderedReport};
 
 use crate::error::PublishError;
 
@@ -39,6 +39,32 @@ pub trait PublishTarget: Send + Sync {
         _reports: &[RenderedReport],
     ) -> Result<Option<PublishedBatchArtifact>, PublishError> {
         Ok(None)
+    }
+
+    /// R5-2: the destination path and blob a write of `report` would put
+    /// there, recorded with a write whose outcome is not on record so that
+    /// its recovery checks the same blob at the same path even after the
+    /// configured paths or templates change. Pure, no request. `None` = the
+    /// target records nothing (the default); such a record's recovery
+    /// re-renders and uses [`Self::find_published`].
+    fn remote_blob(&self, _report: &RenderedReport) -> Option<RemoteBlob> {
+        None
+    }
+
+    /// R5-2: read-only lookup of a recorded write: `Some` receipt (at the
+    /// commit the lookup read) iff the destination holds `blob.blob_sha` at
+    /// `blob.path`; `None` = it does not. Never writes. Only a target whose
+    /// [`Self::remote_blob`] records blobs is asked; the default answers
+    /// with a retryable error, which leaves the recovery unsettled rather
+    /// than reading as "absent".
+    async fn find_remote_blob(
+        &self,
+        _blob: &RemoteBlob,
+    ) -> Result<Option<PublishedArtifact>, PublishError> {
+        Err(PublishError::api(
+            501,
+            "this publish target cannot look up a recorded write",
+        ))
     }
 
     async fn publish_many(

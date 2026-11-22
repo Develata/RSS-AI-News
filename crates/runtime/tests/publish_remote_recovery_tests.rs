@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rss_ai_news_config::RetentionPolicy;
-use rss_ai_news_domain::dto::publish::RenderedReport;
+use rss_ai_news_domain::dto::publish::{RemoteBlob, RenderedReport};
 use rss_ai_news_publish::{
     GitHubTarget, GitHubTargetConfig, LocalFsTarget, PublishError, PublishTarget,
     PublishedArtifact, PublishedBatchArtifact,
@@ -25,7 +25,7 @@ use rss_ai_news_runtime::{
 use rss_ai_news_storage::{
     ClaimRequest, ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord,
     PublishRecordRepository, PublishState, PublishTimestampField, ReleaseFailureOutcome,
-    StorageError, TerminalAdvanceOutcome,
+    StorageError, TerminalAdvanceOutcome, UnverifiedWriteUpdate,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -163,13 +163,18 @@ struct Recording {
 
 impl Recording {
     fn new(uri: &str) -> Arc<Self> {
+        Self::with_prefix(uri, "reports")
+    }
+
+    /// Same destination (`owner/repo:main`) under another `path_prefix`.
+    fn with_prefix(uri: &str, path_prefix: &str) -> Arc<Self> {
         let inner = GitHubTarget::with_base_uri(
             GitHubTargetConfig {
                 token: rss_ai_news_domain::SecretString::from("recovery-test-token"),
                 owner: "owner".to_string(),
                 repo: "repo".to_string(),
                 branch: "main".to_string(),
-                path_prefix: "reports".to_string(),
+                path_prefix: path_prefix.to_string(),
                 commit_message_prefix: "auto: publish".to_string(),
             },
             uri,
@@ -215,6 +220,18 @@ impl PublishTarget for Recording {
             self.remember(report);
         }
         self.inner.find_published(reports).await
+    }
+
+    fn remote_blob(&self, report: &RenderedReport) -> Option<RemoteBlob> {
+        self.remember(report);
+        self.inner.remote_blob(report)
+    }
+
+    async fn find_remote_blob(
+        &self,
+        blob: &RemoteBlob,
+    ) -> Result<Option<PublishedArtifact>, PublishError> {
+        self.inner.find_remote_blob(blob).await
     }
 }
 
@@ -518,6 +535,26 @@ impl PublishTarget for ScriptedTarget {
     async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
         self.written.fetch_add(1, Ordering::SeqCst);
         Ok(Self::artifact(report, "single-commit"))
+    }
+
+    /// Records no blobs of its own (`remote_blob` stays `None`), but answers
+    /// for a recorded write the same way it answers `find_published`.
+    async fn find_remote_blob(
+        &self,
+        blob: &RemoteBlob,
+    ) -> Result<Option<PublishedArtifact>, PublishError> {
+        let path = blob.path.to_lowercase();
+        if self.failing.iter().any(|name| path.contains(name)) {
+            return Err(PublishError::api(503, "unavailable"));
+        }
+        if self.landed.iter().any(|name| path.contains(name)) {
+            return Ok(Some(PublishedArtifact {
+                local_path: None,
+                commit_sha: Some("landed-commit".to_string()),
+                remote_target: Some(format!("github://owner/repo/main/{}", blob.path)),
+            }));
+        }
+        Ok(None)
     }
 
     async fn find_published(
@@ -887,10 +924,20 @@ impl PublishRecordRepository for UnrecordedReceipts {
         error: &str,
         kind: &str,
         retry_not_before: Option<OffsetDateTime>,
+        unverified_write: UnverifiedWriteUpdate<'_>,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
         self.inner
-            .release_deferred_retry(id, owner, state, error, kind, retry_not_before, now)
+            .release_deferred_retry(
+                id,
+                owner,
+                state,
+                error,
+                kind,
+                retry_not_before,
+                unverified_write,
+                now,
+            )
             .await
     }
     async fn release_permanent_failure(
@@ -1181,4 +1228,238 @@ async fn batch_receipt_not_recorded_defers_only_that_record() {
     assert_eq!(landed.written.load(Ordering::SeqCst), 0, "no write again");
     let (state, _, _, kind, _) = record_row(&pool, first).await;
     assert_eq!((state.as_str(), kind), ("published_remote", None));
+}
+
+// === R5-2: recovery checks the recorded write, not the current paths ===
+
+/// `(unverified_write_path, unverified_write_blob_sha)`.
+async fn recorded_write(pool: &SqlitePool, id: i64) -> (Option<String>, Option<String>) {
+    sqlx::query_as(
+        "SELECT unverified_write_path, unverified_write_blob_sha FROM publish_records \
+         WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// HEAD (`landed-commit`) holds `blob_sha` under `reports/` only; the same
+/// report under `archive/` is absent.
+async fn mount_head_holding_only_under_reports(server: &MockServer, blob_sha: String) {
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "object": { "sha": "landed-commit" }
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/reports/"))
+        .and(query_param("ref", "landed-commit"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "type": "file",
+            "sha": blob_sha,
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/archive/"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(serde_json::json!({"message": "Not Found"})),
+        )
+        .mount(server)
+        .await;
+}
+
+async fn contents_paths(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|request| request.url.path().to_string())
+        .filter(|path| path.starts_with("/repos/owner/repo/contents/"))
+        .collect()
+}
+
+/// The reviewer's sequence (R5-2): the write under `reports/` is ambiguous
+/// and its check fails; `github_path_prefix` then changes to `archive`. The
+/// recovery must look for the recorded blob under `reports/` — where the
+/// write went — find it there and record that receipt, never confirm the
+/// report "absent" under `archive/` and write it a second time.
+#[tokio::test]
+async fn recovery_after_a_prefix_change_checks_the_recorded_path_and_writes_nothing() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local(&pool).await;
+    let server = MockServer::start().await;
+    let before = Recording::new(&server.uri());
+    first_attempt_left_unverified(&server, &github_flow(pool.clone(), before.clone()), id).await;
+    assert_kept_and_refunded(&pool, id).await;
+    let (path, blob_sha) = recorded_write(&pool, id).await;
+    let path = path.expect("the ambiguous write's path is recorded");
+    assert!(path.starts_with("reports/"), "{path}");
+    assert_eq!(blob_sha.as_deref(), Some(before.last_blob_sha().as_str()));
+
+    // The prefix changes; the next check fails again: the record keeps the
+    // write it inherited.
+    let after = Recording::with_prefix(&server.uri(), "archive");
+    let flow = github_flow(pool.clone(), after.clone());
+    server.reset().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(503).set_body_json(serde_json::json!({"message": "unavailable"})),
+        )
+        .mount(&server)
+        .await;
+    let second = flow.publish_remote_record(id, remote_opts()).await;
+    assert!(
+        matches!(&second.status, PublishRemoteStatus::Failed { error_kind } if error_kind == UNVERIFIED),
+        "{:?}",
+        second.status
+    );
+    assert_kept_and_refunded(&pool, id).await;
+    assert_eq!(
+        recorded_write(&pool, id).await,
+        (Some(path.clone()), blob_sha.clone()),
+        "kept"
+    );
+
+    // HEAD holds the report under the old prefix only.
+    server.reset().await;
+    mount_head_holding_only_under_reports(&server, blob_sha.clone().unwrap()).await;
+    let third = flow.publish_remote_record(id, remote_opts()).await;
+
+    assert_eq!(third.status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(third.commit_sha.as_deref(), Some("landed-commit"));
+    assert_eq!(
+        third.remote_target,
+        Some(format!("github://owner/repo/main/{path}"))
+    );
+    assert_eq!(non_get_requests(&server).await, Vec::<String>::new());
+    let looked_up = contents_paths(&server).await;
+    assert!(
+        !looked_up.is_empty() && looked_up.iter().all(|p| p.contains("/contents/reports/")),
+        "only the recorded path is looked up: {looked_up:?}"
+    );
+    let (state, _, _, kind, _) = record_row(&pool, id).await;
+    assert_eq!((state.as_str(), kind), ("published_remote", None));
+    assert_eq!(recorded_write(&pool, id).await, (None, None), "cleared");
+}
+
+/// R5-1 meets R5-2: a write under `reports/` succeeds but its receipt is not
+/// recorded; after the prefix changes to `archive`, the next run finds the
+/// recorded blob under `reports/` and records it without writing.
+#[tokio::test]
+async fn unrecorded_receipt_is_found_at_its_recorded_path_after_a_prefix_change() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local(&pool).await;
+    let server = MockServer::start().await;
+    let before = Recording::new(&server.uri());
+    let repo = UnrecordedReceipts::new(&pool, 1, db_unavailable);
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(serde_json::json!({"message": "Not Found"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "content": { "sha": "file-sha" },
+            "commit": { "sha": "written-commit" }
+        })))
+        .mount(&server)
+        .await;
+    let first = flow_with_repo(pool.clone(), before.clone(), repo.clone())
+        .publish_remote_record(id, remote_opts())
+        .await;
+    assert!(
+        matches!(&first.status, PublishRemoteStatus::Failed { error_kind } if error_kind == UNVERIFIED),
+        "{:?}",
+        first.status
+    );
+    assert_kept_and_refunded(&pool, id).await;
+    let (path, blob_sha) = recorded_write(&pool, id).await;
+    let path = path.expect("the receipt's path is recorded");
+    assert!(path.starts_with("reports/"), "{path}");
+    assert_eq!(blob_sha.as_deref(), Some(before.last_blob_sha().as_str()));
+
+    let after = Recording::with_prefix(&server.uri(), "archive");
+    server.reset().await;
+    mount_head_holding_only_under_reports(&server, blob_sha.unwrap()).await;
+    let second = flow_with_repo(pool.clone(), after, repo)
+        .publish_remote_record(id, remote_opts())
+        .await;
+
+    assert_eq!(second.status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(
+        second.remote_target,
+        Some(format!("github://owner/repo/main/{path}"))
+    );
+    assert_eq!(non_get_requests(&server).await, Vec::<String>::new());
+}
+
+/// In a batch each recovering record is checked against its own recorded
+/// write: the landed one is recorded at its recorded path without a write,
+/// the absent one is written with the batch.
+#[tokio::test]
+async fn batch_recovery_checks_each_recorded_write() {
+    let (_dir, pool) = make_test_pool().await;
+    let landed = seed_stored_local(&pool).await;
+    let absent = seed_stored_local(&pool).await;
+    set_category(&pool, landed, "landedcat").await;
+    set_category(&pool, absent, "absentcat").await;
+    for (id, recorded) in [
+        (landed, "old-prefix/landedcat.md"),
+        (absent, "old-prefix/absentcat.md"),
+    ] {
+        mark_unverified(&pool, id).await;
+        sqlx::query(
+            "UPDATE publish_records SET unverified_write_path = ?, \
+             unverified_write_blob_sha = 'recorded-blob' WHERE id = ?",
+        )
+        .bind(recorded)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    // `find_published` would call neither landed (no name matches the
+    // current paths): only the recorded paths can say "landed".
+    let target = Arc::new(ScriptedTarget {
+        landed: vec!["old-prefix/landedcat"],
+        failing: vec![],
+        written: AtomicUsize::new(0),
+        batches: AtomicUsize::new(0),
+    });
+    let flow = scripted_flow(pool.clone(), target.clone());
+
+    let outcome = flow
+        .publish_remote_batch(PublishRemoteBatchOptions {
+            items: vec![batch_item(landed, "Landed"), batch_item(absent, "Absent")],
+        })
+        .await;
+
+    let item = |id: i64| {
+        outcome
+            .items
+            .iter()
+            .find(|item| item.publish_record_id == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(item(landed).status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(item(landed).commit_sha.as_deref(), Some("landed-commit"));
+    assert_eq!(
+        item(landed).remote_target.as_deref(),
+        Some("github://owner/repo/main/old-prefix/landedcat.md")
+    );
+    assert_eq!(item(absent).status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(item(absent).commit_sha.as_deref(), Some("batch-commit"));
+    assert_eq!(
+        target.written.load(Ordering::SeqCst),
+        1,
+        "only the absent one"
+    );
 }

@@ -8,7 +8,10 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Limited, combinators::BoxBody};
 use octocrab::Octocrab;
 use octocrab::service::middleware::retry::RetryConfig;
-use rss_ai_news_domain::{SecretString, dto::publish::RenderedReport};
+use rss_ai_news_domain::{
+    SecretString,
+    dto::publish::{RemoteBlob, RenderedReport},
+};
 use serde_json::{Value, json};
 
 use crate::error::{GitHubRequestContext, PublishError};
@@ -177,6 +180,40 @@ impl PublishTarget for GitHubTarget {
             .await?
         {
             Ok(Some(receipts_at(artifacts, head_commit_sha)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// The final path (prefix included) and the git blob id of the content
+    /// — what [`Self::publish`] would compare and write. `None` for a path
+    /// the target rejects (no write of it can have been sent).
+    fn remote_blob(&self, report: &RenderedReport) -> Option<RemoteBlob> {
+        let path = self.join_path(&report.relative_path).ok()?;
+        Some(RemoteBlob {
+            path,
+            blob_sha: git_blob_sha(report.markdown_content.as_bytes()),
+        })
+    }
+
+    /// The recorded path is used as stored (it was joined and validated when
+    /// recorded), never re-joined with the current prefix: the point is to
+    /// look where the earlier write went.
+    async fn find_remote_blob(
+        &self,
+        blob: &RemoteBlob,
+    ) -> Result<Option<PublishedArtifact>, PublishError> {
+        let head_commit_sha = self.head_commit_sha().await?;
+        let expected = [(blob.path.clone(), blob.blob_sha.clone())];
+        if self
+            .head_contains_blobs(&head_commit_sha, &expected)
+            .await?
+        {
+            Ok(Some(PublishedArtifact {
+                local_path: None,
+                commit_sha: Some(head_commit_sha),
+                remote_target: Some(self.remote_target_url(&blob.path)),
+            }))
         } else {
             Ok(None)
         }

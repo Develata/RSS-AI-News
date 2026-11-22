@@ -323,6 +323,10 @@ v0.3 引入：`publish_many(reports: &[RenderedReport])` 在一次 commit 内推
 比对之前的可重试失败（准备超时、快照 / 归属读取的可重试存储错误）同样退还并保留该 kind；目标漂移与永久渲染错误照常 `failed`。
 **远端已有、回执未落库（R5-1，ADR 0012 §3）**：拿到回执后终态推进返回存储错误（可重试与否）→ 同样 deferred：保态、退还、
 写 `remote_write_unverified`，下一次 claim 由恢复比对补回执、不再写；不留 lease 等过期后被 sweep 转 `failed`。
+**恢复按记录的写入核对（R5-2，migration 0010，ADR 0012 §3）**：以 `remote_write_unverified` 释放时同时记录那次写入的最终路径
+（含 `github_path_prefix`）与 git blob id（`unverified_write_path` / `_blob_sha`）；恢复比对在固定 HEAD 上核对**这一对原值**，
+不按当前前缀 / 路径模板 / 报告模板重新计算，因此其间改配置不会让恢复去新路径判"缺失"再写一份。比对未出结论时保留记录；
+确认缺失后按当前配置照常写入。没有记录的存量行与不记录 blob 的目标退回按当前渲染比对。
 
 ### 4.2.2 422 lost-update retry
 

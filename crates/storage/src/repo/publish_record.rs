@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use rss_ai_news_domain::dto::publish::RemoteBlob;
 use sqlx::{FromRow, SqlitePool};
 use time::OffsetDateTime;
 
@@ -63,6 +64,39 @@ pub struct ClaimedPublishRecord {
     /// write may have landed, so its next attempt starts with a read-only
     /// HEAD check instead of a write.
     pub last_error_kind: Option<String>,
+    /// R5-2: destination path of the write the record was last released
+    /// with as `remote_write_unverified` (with
+    /// [`Self::unverified_write_blob_sha`]); see [`Self::unverified_write`].
+    pub unverified_write_path: Option<String>,
+    pub unverified_write_blob_sha: Option<String>,
+}
+
+impl ClaimedPublishRecord {
+    /// R5-2: the recorded write whose outcome is not on record — its
+    /// recovery checks exactly this blob at this path. `None` when nothing
+    /// is recorded (or half of it is missing). Meaningful only while
+    /// `last_error_kind` is `remote_write_unverified`.
+    pub fn unverified_write(&self) -> Option<RemoteBlob> {
+        match (&self.unverified_write_path, &self.unverified_write_blob_sha) {
+            (Some(path), Some(blob_sha)) => Some(RemoteBlob {
+                path: path.clone(),
+                blob_sha: blob_sha.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// R5-2: what a deferred release does with the recorded write whose outcome
+/// is not on record (`unverified_write_path` / `_blob_sha`).
+#[derive(Debug, Clone, Copy)]
+pub enum UnverifiedWriteUpdate<'a> {
+    /// Leave it as it is: a recovery attempt that settled nothing keeps
+    /// checking the write it inherited.
+    Keep,
+    /// Record this write (`None`: nothing to record — the target records no
+    /// blobs, or nothing is unsettled; clears the columns).
+    Record(Option<&'a RemoteBlob>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,7 +276,9 @@ pub trait PublishRecordRepository: Send + Sync {
     /// lease cleared, claim refunded on both counters, `state` kept,
     /// `last_error*` set and `next_attempt_at = retry_not_before` (`None`
     /// clears a wait; SQLite stores it rounded up to the millisecond like
-    /// every deadline). Returns `false` when the lease was lost.
+    /// every deadline); `unverified_write` keeps or records the write whose
+    /// outcome is not on record (R5-2). Returns `false` when the lease was
+    /// lost.
     #[allow(clippy::too_many_arguments)]
     async fn release_deferred_retry(
         &self,
@@ -252,6 +288,7 @@ pub trait PublishRecordRepository: Send + Sync {
         error: &str,
         kind: &str,
         retry_not_before: Option<OffsetDateTime>,
+        unverified_write: UnverifiedWriteUpdate<'_>,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
     async fn release_permanent_failure(

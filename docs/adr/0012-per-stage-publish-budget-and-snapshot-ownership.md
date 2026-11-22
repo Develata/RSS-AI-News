@@ -107,6 +107,22 @@
 kind。下一次 claim 走上一条的恢复比对，命中即记回执、不发写请求。**可重试与不可重试的存储错误一样处理**：远端已有报告时，
 `failed` 从来不是正确终态；代价是持续失败的推进每次运行重复一次只读比对与一次推进（与上一条"比对一直不出结论"同一代价）。
 推进返回的 `ArticleStateConflict`（文章不在 `ready_for_publish`）不在此列，仍按原样处理。
+**恢复按记录的写入核对（2026-11-22，R5-2，migration 0010，Develata 按宪法 §7.1 批准）**：此前恢复比对用当前配置重渲染报告、
+重新拼路径；歧义写入之后、恢复之前改了 `github_path_prefix`（目标身份 `owner/repo:branch` 不含前缀）、路径模板或报告模板时，
+比对会去新路径找、得到 404 判为"确认缺失"，再写一份。现在：
+- `publish_records` 增加 `unverified_write_path`、`unverified_write_blob_sha`（可空）：记录以 `remote_write_unverified` 释放时
+  那次写入的**最终路径**（含前缀）与 **git blob id**。`PublishTarget::remote_blob(report)` 给出这一对（GitHub：`join_path` +
+  `git_blob_sha`，纯计算；默认 `None`），`PublishTarget::find_remote_blob(blob)` 在固定 HEAD commit 上只读比对**原样**的路径与
+  blob（不再按当前前缀拼接），命中即以该 commit 记回执，`remote_target` 指向记录的路径。
+- 写入规则（`release_deferred_retry` 的 `UnverifiedWriteUpdate`，每个调用点显式选择）：新的歧义写入核对未完成
+  （`RemoteWriteUnverified`）→ 记录本次写入；恢复比对未出结论（`EarlierWriteUnverified`、比对前的可重试失败）与持有恢复标记的
+  归属败方 → 保留原记录；R5-1 回执未落库 → 记录该回执对应的 blob；限流 deferral（此时没有未定写入）→ 清空。阶段推进与计预算的
+  retryable release 清空（后者只发生在比对已确认缺失或本不在恢复中时）；永久失败保留，供人工核对。只在 `last_error_kind =
+  remote_write_unverified` 时读取。
+- 恢复比对确认缺失后照常按**当前**配置写入；该写入再歧义时记录新的一对，替换已确认缺失的旧值。
+- 存量（0010 之前已带恢复标记、没有记录）与不记录 blob 的目标：退回按当前渲染比对（`find_published`），行为同 R4-1。
+  `find_remote_blob` 的默认实现返回可重试错误，使"有记录但目标查不了"的恢复保持未决，而不是当作缺失。
+**代价**：记录的是写入时的路径；恢复命中时记录被标为发布在旧路径上（这正是那次写入的去处），之后的报告才按新配置。
 **代价（未解决）**：每次尝试都以"写入歧义 + 核对未完成"结束、此后比对也一直不出结论的记录（例如 GitHub 长期对读写都不可达）
 不会耗尽预算、一直持有文章归属；它每次运行最多再发一次只读比对。因此 `publish_max_attempts = 1` 或默认预算的最后一次尝试里
 "PATCH 已落地、响应丢失"也会记为 `published_remote`，而不是 `failed` 并释放文章归属。限流（`GitHubRateLimit`）不核对，
@@ -186,7 +202,8 @@ R5-1 的 deferred 释放与推进写同一个数据库：释放本身也失败�
      WHERE kind = 'render' AND version_tag LIKE 'force-%')`。
   2. **先核实远端回执**：`stored_local` 记录（尤其 `last_error_kind = remote_write_unverified` / `remote_timeout`）的远端写入
      可能已落地而回执未落库。在目标分支 HEAD 上比对报告路径的 blob 与本地文件（`git hash-object <local_path>`，GitHub
-     `GET contents/<path>?ref=<branch>` 的 `sha`）。**已存在则不要置 `failed`**：其文章已在远端发布，置 `failed` 会释放归属、
+     `GET contents/<path>?ref=<branch>` 的 `sha`）。行上有 `unverified_write_path` / `unverified_write_blob_sha`（R5-2）时，
+     以它们为准：那是那次写入的确切路径与 blob。**已存在则不要置 `failed`**：其文章已在远端发布，置 `failed` 会释放归属、
      让它们重新入选；保留记录，等待定向续跑入口（见后续行动）。
   3. 只对确认未发布、且没有进程正在处理（无有效 lease）的记录，在事务中执行下面的守卫式 UPDATE。守卫在同一条语句里
      复核"仍是 force 记录、无有效 lease"，并且行的 `state`、`render_version`、`updated_at` **仍等于第 1 步读到的值**：
@@ -238,7 +255,8 @@ R5-1 的 deferred 释放与推进写同一个数据库：释放本身也失败�
 
 ## Links
 
-- 代码：`migrations/{sqlite,postgres}/0008_publish_stage_budget_and_item_article_index.*.sql`；
+- 代码：`migrations/{sqlite,postgres}/0008_publish_stage_budget_and_item_article_index.*.sql`、
+  `0010_publish_unverified_write_blob.*.sql`（R5-2）；`crates/publish/src/target.rs`（`remote_blob`、`find_remote_blob`）；
   `crates/storage/src/repo/publish_record_sql.rs`、`publish_item.rs`；`crates/runtime/src/flows/publish/freeze.rs`、
   `report_date.rs`；`crates/publish/src/github.rs`（`head_contains_blobs`、`git_blob_sha`）
 - 计划：[plan/04 §2、§4.2](../plan/04-publish.md)、[plan/08 §6.1](../plan/08-state-machines.md)、

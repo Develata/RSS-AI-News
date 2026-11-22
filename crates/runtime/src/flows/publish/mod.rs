@@ -276,6 +276,7 @@ impl PublishFlow {
                     owner,
                     &error,
                     remote::EARLIER_WRITE_UNVERIFIED,
+                    rss_ai_news_storage::UnverifiedWriteUpdate::Keep,
                     phase,
                     emitter,
                 )

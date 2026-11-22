@@ -90,6 +90,14 @@ const PINNED_UP_MIGRATIONS: &[(&str, &str)] = &[
         "migrations/postgres/0009_ai_share_state_and_article_origin_index.up.sql",
         "0016bedd1799839984d22584afe2b6d5ad667b1464302f4e6dca100d30d77605",
     ),
+    (
+        "migrations/sqlite/0010_publish_unverified_write_blob.up.sql",
+        "9db59f04aa63f71930a748f2179f2b99d113cbaed292bf4bebdefea4ab43c0dd",
+    ),
+    (
+        "migrations/postgres/0010_publish_unverified_write_blob.up.sql",
+        "9db59f04aa63f71930a748f2179f2b99d113cbaed292bf4bebdefea4ab43c0dd",
+    ),
 ];
 
 fn repo_root() -> std::path::PathBuf {

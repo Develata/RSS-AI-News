@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
-use rss_ai_news_domain::dto::publish::RenderedReport;
+use rss_ai_news_domain::dto::publish::{RemoteBlob, RenderedReport};
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_publish::{
     PublishError, PublishTarget, PublishedArtifact, REMOTE_WRITE_UNVERIFIED_KIND,
@@ -14,8 +14,8 @@ use rss_ai_news_publish::{
 use rss_ai_news_report::{RenderConfig, ReportError, load_frozen_items, render_markdown};
 use rss_ai_news_storage::{
     ClaimRequest, ClaimedPublishRecord, PublishAdvanceExtras, PublishItemRepository, PublishState,
-    PublishTimestampField, TerminalAdvanceOutcome, TerminalAdvanceStatus, build_owner_id,
-    lease_expires_at,
+    PublishTimestampField, TerminalAdvanceOutcome, TerminalAdvanceStatus, UnverifiedWriteUpdate,
+    build_owner_id, lease_expires_at,
 };
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
@@ -33,6 +33,8 @@ struct PreparedRemote {
     publish_record_id: i64,
     promote_article_ids: Vec<i64>,
     item_count: u32,
+    /// R5-2: what the batch write puts at the destination for this record.
+    blob: Option<RemoteBlob>,
 }
 
 // Start the shared preparation/remote budget before claiming so claim latency
@@ -102,21 +104,44 @@ fn has_unverified_write(claimed: &ClaimedPublishRecord) -> bool {
 }
 
 /// R4-1: read-only fixed-HEAD content check for a record whose earlier write
-/// is unverified, run before any write. `Ok(Some)` = the destination already
-/// holds the report (record this receipt, send nothing); `Ok(None)` = it is
-/// confirmed absent (write normally, charged normally); `Err` = the check
-/// failed, was rate limited or ran out of the remote deadline, so nothing is
-/// settled: [`PublishError::EarlierWriteUnverified`], released deferred.
+/// is unverified, run before any write. `Ok(Some((receipt, blob)))` = the
+/// destination already holds it (record this receipt — for `blob` — and send
+/// nothing); `Ok(None)` = it is confirmed absent (write normally, charged
+/// normally); `Err` = the check failed, was rate limited or ran out of the
+/// remote deadline, so nothing is settled:
+/// [`PublishError::EarlierWriteUnverified`], released deferred.
+///
+/// R5-2: with a `recorded` write the check looks for exactly that blob at
+/// exactly that path — where the earlier write went, whatever the configured
+/// prefix, path template or report templates say now. Without one (a target
+/// that records nothing, or a record marked before migration 0010) it looks
+/// for the report as rendered now.
 async fn check_earlier_write(
     target: &dyn PublishTarget,
     report: &RenderedReport,
+    recorded: Option<&RemoteBlob>,
     deadline: Instant,
-) -> Result<Option<PublishedArtifact>, PublishError> {
+) -> Result<Option<(PublishedArtifact, Option<RemoteBlob>)>, PublishError> {
     let unsettled = |verification: PublishError| PublishError::EarlierWriteUnverified {
         verification: Box::new(verification),
     };
     if Instant::now() >= deadline {
         return Err(unsettled(PublishError::RemoteTimeout));
+    }
+    if let Some(recorded) = recorded {
+        return match tokio::time::timeout_at(deadline, target.find_remote_blob(recorded)).await {
+            Ok(Ok(Some(artifact))) => {
+                tracing::info!(
+                    commit_sha = artifact.commit_sha.as_deref(),
+                    path = recorded.path.as_str(),
+                    "earlier unverified write found at HEAD; recording its receipt"
+                );
+                Ok(Some((artifact, Some(recorded.clone()))))
+            }
+            Ok(Ok(None)) => Ok(None),
+            Ok(Err(error)) => Err(unsettled(error)),
+            Err(_) => Err(unsettled(PublishError::RemoteTimeout)),
+        };
     }
     match tokio::time::timeout_at(
         deadline,
@@ -129,7 +154,10 @@ async fn check_earlier_write(
                 commit_sha = batch.commit_sha.as_deref(),
                 "earlier unverified write found at HEAD; recording its receipt"
             );
-            Ok(Some(batch.artifacts.remove(0)))
+            Ok(Some((
+                batch.artifacts.remove(0),
+                target.remote_blob(report),
+            )))
         }
         // A target breaking the one-artifact-per-report contract settles
         // nothing either.
@@ -143,6 +171,25 @@ async fn check_earlier_write(
         Ok(Ok(None)) => Ok(None),
         Ok(Err(error)) => Err(unsettled(error)),
         Err(_) => Err(unsettled(PublishError::RemoteTimeout)),
+    }
+}
+
+/// R5-2: what a deferred release of `error` does with the recorded write.
+/// `written` = the blob this attempt's write would put at the destination.
+/// - [`PublishError::RemoteWriteUnverified`]: this attempt's write may have
+///   landed — record it (replacing an earlier one, which the recovery check
+///   confirmed absent before this write was sent);
+/// - [`PublishError::EarlierWriteUnverified`]: nothing settled — keep the
+///   write the record inherited;
+/// - anything else deferred (rate limits): no write is unsettled — clear.
+fn unverified_write_update<'a>(
+    error: &PublishError,
+    written: Option<&'a RemoteBlob>,
+) -> UnverifiedWriteUpdate<'a> {
+    match error {
+        PublishError::RemoteWriteUnverified { .. } => UnverifiedWriteUpdate::Record(written),
+        PublishError::EarlierWriteUnverified { .. } => UnverifiedWriteUpdate::Keep,
+        _ => UnverifiedWriteUpdate::Record(None),
     }
 }
 
@@ -400,6 +447,7 @@ impl PublishFlow {
                 claimed.id,
                 &owner,
                 &error,
+                None,
                 "publish_remote",
                 &emitter,
             )
@@ -473,24 +521,32 @@ impl PublishFlow {
         let item_count = promote_article_ids.len() as u32;
 
         let lease_seconds = self.ctx.lease.publish_duration_seconds;
+        // R5-2: what a write of this report puts at the destination now.
+        let written = target.remote_blob(&report);
         // R4-1: settle an earlier unverified write read-only before writing.
         let result = if unverified_write {
-            match check_earlier_write(target.as_ref(), &report, deadline).await {
-                Ok(Some(artifact)) => Ok(artifact),
-                Ok(None) => send_report(target.as_ref(), &report, deadline, lease_seconds).await,
+            let recorded = claimed.unverified_write();
+            match check_earlier_write(target.as_ref(), &report, recorded.as_ref(), deadline).await {
+                Ok(Some(found)) => Ok(found),
+                Ok(None) => send_report(target.as_ref(), &report, deadline, lease_seconds)
+                    .await
+                    .map(|artifact| (artifact, written.clone())),
                 Err(error) => Err(error),
             }
         } else {
-            send_report(target.as_ref(), &report, deadline, lease_seconds).await
+            send_report(target.as_ref(), &report, deadline, lease_seconds)
+                .await
+                .map(|artifact| (artifact, written.clone()))
         };
         let now = OffsetDateTime::now_utc();
-        let artifact = match result {
-            Ok(artifact) => artifact,
+        let (artifact, receipt_blob) = match result {
+            Ok(found) => found,
             Err(error) => {
                 self.release_publish_error_for_record(
                     claimed.id,
                     &owner,
                     &error,
+                    written.as_ref(),
                     "publish_remote",
                     &emitter,
                 )
@@ -513,6 +569,7 @@ impl PublishFlow {
                 &owner,
                 promote_article_ids,
                 &artifact,
+                receipt_blob.as_ref(),
                 item_count,
                 "publish_remote",
                 "published remotely",
@@ -644,6 +701,7 @@ impl PublishFlow {
                     claimed.id,
                     &owner,
                     &error,
+                    None,
                     "publish_remote_batch",
                     &emitter,
                 )
@@ -726,14 +784,18 @@ impl PublishFlow {
             // write; check failed → deferred; confirmed absent → written with
             // the batch.
             if unverified_write {
-                match check_earlier_write(target.as_ref(), &report, deadline).await {
-                    Ok(Some(artifact)) => {
+                let recorded = claimed.unverified_write();
+                match check_earlier_write(target.as_ref(), &report, recorded.as_ref(), deadline)
+                    .await
+                {
+                    Ok(Some((artifact, receipt_blob))) => {
                         let status = self
                             .advance_published_remote(
                                 claimed.id,
                                 &owner,
                                 promote_article_ids,
                                 &artifact,
+                                receipt_blob.as_ref(),
                                 item_count,
                                 "publish_remote_batch",
                                 "earlier remote write recorded in batch",
@@ -756,6 +818,7 @@ impl PublishFlow {
                             claimed.id,
                             &owner,
                             &error,
+                            None,
                             "publish_remote_batch",
                             &emitter,
                         )
@@ -773,11 +836,13 @@ impl PublishFlow {
                     }
                 }
             }
+            let blob = target.remote_blob(&report);
             reports.push(report);
             prepared.push(PreparedRemote {
                 publish_record_id: claimed.id,
                 promote_article_ids,
                 item_count,
+                blob,
             });
         }
 
@@ -862,6 +927,7 @@ impl PublishFlow {
                     &owner,
                     item.promote_article_ids,
                     &artifact,
+                    item.blob.as_ref(),
                     item.item_count,
                     "publish_remote_batch",
                     "published remotely in batch",
@@ -917,7 +983,8 @@ impl PublishFlow {
 
     /// Terminal advance `stored_local → published_remote` with the receipt of
     /// `artifact`, promoting the snapshot's articles; emits
-    /// `publish_succeeded` (`message`) on success.
+    /// `publish_succeeded` (`message`) on success. `receipt_blob` = the blob
+    /// the receipt is for, recorded if the advance fails (R5-1 / R5-2).
     #[allow(clippy::too_many_arguments)]
     async fn advance_published_remote(
         &self,
@@ -925,6 +992,7 @@ impl PublishFlow {
         owner: &str,
         promote_article_ids: Vec<i64>,
         artifact: &PublishedArtifact,
+        receipt_blob: Option<&RemoteBlob>,
         item_count: u32,
         phase: &'static str,
         message: &str,
@@ -985,12 +1053,15 @@ impl PublishFlow {
             // report with a read-only check and records the receipt without a
             // write. This holds for non-retryable storage errors too: once the
             // destination holds the report, `failed` is never the right end.
+            // R5-2: the blob behind the receipt is recorded, so that check
+            // looks where this report is even if the paths change meanwhile.
             Err(error) => {
                 self.release_unverified_recovery(
                     publish_record_id,
                     owner,
                     &error,
                     RECEIPT_NOT_RECORDED,
+                    UnverifiedWriteUpdate::Record(receipt_blob),
                     phase,
                     emitter,
                 )
@@ -1011,12 +1082,18 @@ impl PublishFlow {
     ///   earlier write is unverified — nothing written, nothing settled;
     /// - [`RECEIPT_NOT_RECORDED`] (R5-1): the destination holds the report
     ///   but persisting its receipt failed (`cause`).
+    ///
+    /// `unverified_write` (R5-2): `Keep` for the former (the record keeps
+    /// checking the write it inherited), `Record` of the receipt's blob for
+    /// the latter.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn release_unverified_recovery(
         &self,
         publish_record_id: i64,
         owner: &str,
         cause: &dyn ClassifiedError,
         reason: &str,
+        unverified_write: UnverifiedWriteUpdate<'_>,
         phase: &'static str,
         emitter: &RunEventEmitter<'_>,
     ) {
@@ -1032,6 +1109,7 @@ impl PublishFlow {
                 &message,
                 REMOTE_WRITE_UNVERIFIED_KIND,
                 None,
+                unverified_write,
                 now,
             )
             .await;
@@ -1073,6 +1151,7 @@ impl PublishFlow {
                 item.publish_record_id,
                 owner,
                 error,
+                item.blob.as_ref(),
                 "publish_remote_batch",
                 emitter,
             )
@@ -1080,11 +1159,15 @@ impl PublishFlow {
         }
     }
 
+    /// `written` = the blob this attempt's write put (or would have put) at
+    /// the destination; a deferred release records or keeps the unverified
+    /// write per [`unverified_write_update`] (R5-2).
     async fn release_publish_error_for_record(
         &self,
         publish_record_id: i64,
         owner: &str,
         error: &PublishError,
+        written: Option<&RemoteBlob>,
         phase: &'static str,
         emitter: &RunEventEmitter<'_>,
     ) {
@@ -1104,6 +1187,7 @@ impl PublishFlow {
                     &message,
                     error.error_kind(),
                     retry_not_before,
+                    unverified_write_update(error, written),
                     now,
                 )
                 .await
@@ -1192,6 +1276,7 @@ impl PublishFlow {
                     owner,
                     error,
                     EARLIER_WRITE_UNVERIFIED,
+                    UnverifiedWriteUpdate::Keep,
                     "publish_remote.prepare",
                     emitter,
                 )
@@ -1215,6 +1300,7 @@ impl PublishFlow {
                     publish_record_id,
                     owner,
                     &error,
+                    None,
                     "publish_remote.prepare",
                     emitter,
                 )
@@ -1257,6 +1343,37 @@ mod tests {
         assert!(deadline >= before + budget);
         assert!(deadline <= after + budget);
         assert!(remote_deadline(0) <= Instant::now());
+    }
+
+    /// R5-2: a fresh unverified write is recorded, an unsettled recovery
+    /// keeps the write it inherited, and a rate limit (nothing unsettled)
+    /// clears it.
+    #[test]
+    fn deferred_releases_record_keep_or_clear_the_unverified_write() {
+        let written = RemoteBlob {
+            path: "reports/ai.md".to_string(),
+            blob_sha: "sha".to_string(),
+        };
+        let fresh = PublishError::RemoteWriteUnverified {
+            write: Box::new(PublishError::RemoteTimeout),
+            verification: Box::new(PublishError::RemoteTimeout),
+        };
+        assert!(matches!(
+            unverified_write_update(&fresh, Some(&written)),
+            UnverifiedWriteUpdate::Record(Some(blob)) if blob == &written
+        ));
+        let unsettled = PublishError::EarlierWriteUnverified {
+            verification: Box::new(PublishError::RemoteTimeout),
+        };
+        assert!(matches!(
+            unverified_write_update(&unsettled, Some(&written)),
+            UnverifiedWriteUpdate::Keep
+        ));
+        let rate_limited = PublishError::rate_limit(OffsetDateTime::now_utc());
+        assert!(matches!(
+            unverified_write_update(&rate_limited, Some(&written)),
+            UnverifiedWriteUpdate::Record(None)
+        ));
     }
 }
 
@@ -1337,6 +1454,8 @@ mod deadline_tests {
             attempt_count: 1,
             rendered_at: None,
             last_error_kind: None,
+            unverified_write_path: None,
+            unverified_write_blob_sha: None,
         };
         let config = RenderConfig {
             category_display_name: "AI".into(),

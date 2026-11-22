@@ -14,12 +14,13 @@ use super::{
     publish_record::{
         ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord,
         PublishRecordRepo, PublishRecordRepository, PublishState, PublishTimestampField,
-        TerminalAdvanceOutcome, TerminalAdvanceStatus,
+        TerminalAdvanceOutcome, TerminalAdvanceStatus, UnverifiedWriteUpdate,
     },
     publish_record_sql::{
         ADVANCE_LOCAL_SQL, ADVANCE_REMOTE_SQL, ADVANCE_RENDERED_SQL, ADVANCE_SNAPSHOT_SQL,
         CREATE_IF_NEW_SQL, PROMOTE_ARTICLE_PUBLISHED_SQL, PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL,
-        RECLAIM_PUBLISH_LEASES_SQL, RECLAIM_PUBLISH_LEASES_SQLITE_SQL, RELEASE_DEFERRED_RETRY_SQL,
+        RECLAIM_PUBLISH_LEASES_SQL, RECLAIM_PUBLISH_LEASES_SQLITE_SQL,
+        RELEASE_DEFERRED_RETRY_RECORDING_SQL, RELEASE_DEFERRED_RETRY_SQL,
         RELEASE_EMPTY_SNAPSHOT_SQL, RELEASE_FREEZE_CONFLICT_SQL, RELEASE_OWNERSHIP_CONFLICT_SQL,
         RELEASE_PERMANENT_FAILURE_SQL, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL,
         SELECT_PUBLISH_RECORD_BY_ID, SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY,
@@ -309,34 +310,58 @@ impl PublishRecordRepository for PublishRecordRepo {
         error: &str,
         kind: &str,
         retry_not_before: Option<OffsetDateTime>,
+        unverified_write: UnverifiedWriteUpdate<'_>,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError> {
+        // `Keep` leaves the recorded write untouched; `Record` binds $8 / $9.
+        let (sql, recorded) = match unverified_write {
+            UnverifiedWriteUpdate::Keep => (RELEASE_DEFERRED_RETRY_SQL, None),
+            UnverifiedWriteUpdate::Record(blob) => (
+                RELEASE_DEFERRED_RETRY_RECORDING_SQL,
+                Some((
+                    blob.map(|blob| blob.path.as_str()),
+                    blob.map(|blob| blob.blob_sha.as_str()),
+                )),
+            ),
+        };
         let affected = match self.storage_pool() {
-            StoragePool::Sqlite(p) => sqlx::query(RELEASE_DEFERRED_RETRY_SQL)
-                .bind(error)
-                .bind(kind)
-                .bind(now)
-                .bind(id)
-                .bind(owner)
-                .bind(state.as_str())
-                // Rounded up like every SQLite deadline: never claimable early.
-                .bind(retry_not_before.map(sqlite_stored_deadline))
-                .execute(p)
-                .await
-                .map_err(StorageError::from)?
-                .rows_affected(),
-            StoragePool::Postgres(p) => sqlx::query(RELEASE_DEFERRED_RETRY_SQL)
-                .bind(error)
-                .bind(kind)
-                .bind(now)
-                .bind(id)
-                .bind(owner)
-                .bind(state.as_str())
-                .bind(retry_not_before)
-                .execute(p)
-                .await
-                .map_err(StorageError::from)?
-                .rows_affected(),
+            StoragePool::Sqlite(p) => {
+                let mut query = sqlx::query(sql)
+                    .bind(error)
+                    .bind(kind)
+                    .bind(now)
+                    .bind(id)
+                    .bind(owner)
+                    .bind(state.as_str())
+                    // Rounded up like every SQLite deadline: never claimable early.
+                    .bind(retry_not_before.map(sqlite_stored_deadline));
+                if let Some((path, blob_sha)) = recorded {
+                    query = query.bind(path).bind(blob_sha);
+                }
+                query
+                    .execute(p)
+                    .await
+                    .map_err(StorageError::from)?
+                    .rows_affected()
+            }
+            StoragePool::Postgres(p) => {
+                let mut query = sqlx::query(sql)
+                    .bind(error)
+                    .bind(kind)
+                    .bind(now)
+                    .bind(id)
+                    .bind(owner)
+                    .bind(state.as_str())
+                    .bind(retry_not_before);
+                if let Some((path, blob_sha)) = recorded {
+                    query = query.bind(path).bind(blob_sha);
+                }
+                query
+                    .execute(p)
+                    .await
+                    .map_err(StorageError::from)?
+                    .rows_affected()
+            }
         };
         Ok(affected == 1)
     }
@@ -619,7 +644,7 @@ async fn sqlite_claim_by_ids(
     }
     builder
         .push(" RETURNING id, idempotency_key, category_key, report_date, target_timezone, ")
-        .push("render_version, selection_policy_version, state, remote_target, attempt_count, rendered_at, last_error_kind");
+        .push("render_version, selection_policy_version, state, remote_target, attempt_count, rendered_at, last_error_kind, unverified_write_path, unverified_write_blob_sha");
 
     builder
         .build_query_as::<ClaimedPublishRecord>()
@@ -855,7 +880,7 @@ async fn pg_claim_by_ids(
     builder
         .push(" ORDER BY id FOR UPDATE SKIP LOCKED)")
         .push(" RETURNING id, idempotency_key, category_key, report_date, target_timezone, ")
-        .push("render_version, selection_policy_version, state, remote_target, attempt_count, rendered_at, last_error_kind");
+        .push("render_version, selection_policy_version, state, remote_target, attempt_count, rendered_at, last_error_kind, unverified_write_path, unverified_write_blob_sha");
 
     builder
         .build_query_as::<ClaimedPublishRecord>()
