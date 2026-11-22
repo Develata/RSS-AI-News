@@ -71,6 +71,10 @@
 - `DATABASE_URL=<一次性 PG 16 容器> cargo acceptance run --lane postgres`：通过（8 步，含 storage `--ignored` PG 测试与 CLI migrate run/check）
 - `cargo acceptance run --lane docker`：通过（15 步，三镜像构建 + scheduler 真实执行带空格参数的 job）
 - 之后的提交只改本 handoff 与 `docs/map/architecture-code.lisp`
+- 第四轮合并后（`4416f6c`）：static / workspace / sqlite / release 通过（38 步），docker 通过（15 步）；postgres lane 的
+  7 个非 storage 步骤（含真实 PG 16 上的 CLI migrate run/check）通过；其 storage 步骤 3 次因本机端口冲突失败（每次不同的测试
+  二进制，均为 `expected to read 1414811696 bytes` / 非 PG 协议应答，127.0.0.1 上有 VS Code / Electron / node / claude 监听
+  55xxx–59xxx），直接运行 `cargo test -p rss-ai-news-storage --locked --no-fail-fast -- --ignored --test-threads=1`：95 passed，0 failed
 
 ### 手工验收
 
@@ -94,21 +98,23 @@
 
 ## 风险与后续事项
 
-最后一次审查（Codex，未修，未经本会话独立复现）：
-- BLOCKER：歧义写入核对失败后的下一次 remote 尝试，若首个 GET 又失败，按普通失败扣预算，末次预算下转 `failed`
-  并释放文章归属（远端内容可能已存在）。修复方向：claim 带回 `remote_write_unverified`，先只读核对 HEAD 再写。
-- BLOCKER：`release-registry.sh` 以 `imagetools inspect --raw` 的 stderr "not found" 判定 tag 缺失；tag 已解析、按 digest
-  取 manifest 的内部 404 也会命中，release 重跑可能重建并覆盖已有版本。修复方向：只以精确 tag 的 manifest HEAD 404 判缺失。
-- SHOULD_FIX：fresh 份额里待对账行排在新插入之前，破坏"先处理最早出窗者"；`Retry-After: 0` 的 429 仍扣预算；
-  ADR 0012 人工恢复 SQL 未匹配核对时的 `state` / `updated_at`；路径键对 `ß` / `ẞ` 的折叠不一致（相对基线回归）。
-- NICE：`attempt_refunded` 事件字段在零行更新时仍为 true；docker lane 截止时刻的 10 ms 边界。
+第四轮（R4，2026-11-22，用户要求"先修再落地"）修了上一轮审查的 2 BLOCKER + 4 SHOULD_FIX + 2 NICE（提交带 `[R4-N]`）。
+随后一次只出报告的 Codex 复核：3 项 CLOSED、5 项 PARTIAL，并在**新加的恢复路径**上报告（未修，未经本会话独立复现）：
+- BLOCKER：恢复时 HEAD 已命中、但回执落库遇可重试数据库错误，记录只返回 Failed、留下 lease；lease 到期后若阶段预算已满会被
+  清扫为 `failed` 并释放归属。修复方向：该分支走 owner 守卫的 deferred release，保留恢复标记。
+- BLOCKER：歧义写入后、恢复前修改了 `github_path_prefix`，恢复会核对新路径的 404 并再写一份。修复方向：记录歧义写入当时的
+  最终路径与 blob SHA，恢复按原值核对（目标身份目前不含 path_prefix，B4 已知限制）。
+- SHOULD_FIX：批内一条恢复记录被限流后，同批后续请求仍继续发；ADR 人工核对可能拿到被同路径覆盖的本地文件、且首次 SELECT 未
+  排除仍有有效 lease 的行；registry 适配器在无凭据时接受任意主机的匿名 404（工作流本身总传凭据）；fresh 游标用 0 表示"从头"，
+  显式 id=0 的导入数据可卡住 batch=1。
+- NICE：全批均经恢复命中时批级 `commit_sha` 为 None；docker lane 等于截止时刻仍判成功。
 
 既有：
 - 记录若反复以"未核实"或"限流等待"结束，永不进入 failed 并持有文章（ADR 0012 §3/§3a）
 - 限流等待上限 1 h、extract Retry-After 上限 1 天：超出的服务器期限会被提前重试
 - 旧端点的 200 响应在过期判定前仍可能写入 entries
 - 并发 batch=1 worker 的轮换是尽力而为；SQLite 亚毫秒窗口边界
-- release 脚本的"tag 缺失"判定仍基于 stderr 文本；首次真实 GHCR 运行需确认
+- release 脚本改为以认证的精确 manifest HEAD 判定 tag 缺失（R4-2）；首次真实 GHCR 运行仍需确认 token 交换
 - doctor deep scan 仍比较累计 attempt_count；doctor 不读 RSSHub 展开标记
 - 刻意未做：未声明编码页的 windows-1252 猜测、extract 排除集合改造、去除 aws-lc JWT、合并 html5ever、release LTO、arm64 镜像
 - 遗留在中间提交上的 bisect 风险：部分包的中间提交单独不能通过 clippy / static lane（各包报告已列出）
