@@ -425,7 +425,7 @@ async fn pg_claim_is_not_hidden_by_locked_source_or_article_rows() {
     ctx.cleanup().await;
 }
 
-/// C9：PG 的 publish 窗口份额 SQL——fresh 列表（反连接 + 来源时间升序）、
+/// C9：PG 的 publish 窗口份额 SQL——fresh 列表（新插入与对账同列，来源时间升序 + 游标，R4-3）、
 /// fresh claim（来源时间升序，`FOR UPDATE OF aar`）与两个 batch=1 轮换信号。
 #[tokio::test]
 #[ignore = "需要 docker daemon"]
