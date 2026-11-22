@@ -425,7 +425,7 @@ async fn pg_claim_is_not_hidden_by_locked_source_or_article_rows() {
     ctx.cleanup().await;
 }
 
-/// C9：PG 的 publish 窗口份额 SQL——fresh 列表（反连接 + 来源时间升序）、
+/// C9：PG 的 publish 窗口份额 SQL——fresh 列表（新插入与对账同列，来源时间升序 + 游标，R4-3）、
 /// fresh claim（来源时间升序，`FOR UPDATE OF aar`）与两个 batch=1 轮换信号。
 #[tokio::test]
 #[ignore = "需要 docker daemon"]
@@ -467,7 +467,7 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
         model_id: "gpt-4".to_string(),
     };
     let listed = articles
-        .list_fresh_for_ai_task_gen("ai", &identity, window, 10)
+        .list_fresh_for_ai_task_gen("ai", window, 10, 0)
         .await
         .expect("pg fresh list");
     assert_eq!(
@@ -504,17 +504,8 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
             .unwrap(),
         );
     }
-    // The anti-join drops articles that already have a task of the identity;
-    // the backlog list then reconciles them (in-window rows flagged).
-    assert!(
-        articles
-            .list_fresh_for_ai_task_gen("ai", &identity, window, 10)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    // R3E-B1: the in-window reconciliations belong to the fresh share's
-    // id-ordered list; the backlog keeps only out-of-window articles.
+    // R3E-B1: the backlog keeps only out-of-window articles, also once they
+    // have a task of the identity (reconciliation).
     let backlog = articles
         .list_backlog_for_ai_task_gen("ai", &identity, window, 10, 0)
         .await
@@ -526,8 +517,10 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
             .collect::<Vec<_>>(),
         [(ids[0], false), (ids[3], false)]
     );
+    // R4-3: in-window reconciliations stay on the fresh list, in the same
+    // source-time order as inserts; the cursor resolves the row's instant.
     let reconcile = articles
-        .list_fresh_reconcile_for_ai_task_gen("ai", &identity, window, 10, 0)
+        .list_fresh_for_ai_task_gen("ai", window, 10, 0)
         .await
         .unwrap();
     assert_eq!(
@@ -535,16 +528,16 @@ async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
             .iter()
             .map(|c| (c.article_id, c.in_window))
             .collect::<Vec<_>>(),
-        [(ids[1], true), (ids[2], true)]
+        [(ids[2], true), (ids[1], true)]
     );
     let after_first = articles
-        .list_fresh_reconcile_for_ai_task_gen("ai", &identity, window, 10, ids[1])
+        .list_fresh_for_ai_task_gen("ai", window, 10, ids[2])
         .await
         .unwrap();
     assert_eq!(
         after_first.iter().map(|c| c.article_id).collect::<Vec<_>>(),
-        [ids[2]],
-        "keyset cursor"
+        [ids[1]],
+        "keyset cursor over (source time, article id)"
     );
 
     let request = ClaimRequest {
@@ -894,5 +887,71 @@ async fn pg_fresh_claim_orders_by_source_time_then_article_id() {
         claimed.iter().map(|c| c.article_id).collect::<Vec<_>>(),
         [ids[1], ids[2], ids[0]]
     );
+    ctx.cleanup().await;
+}
+
+/// R4-3 on PG: the fresh task_gen list orders inserts and reconciliations
+/// together by (source time, article id), and paging it one row at a time
+/// with the keyset cursor visits each in-window article once although ids
+/// ascend while source times descend and two rows share one instant.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_fresh_task_gen_list_walks_source_order_with_the_cursor() {
+    use rss_ai_news_storage::{ArticleRepo, ArticleRepository};
+
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "walk").await;
+    let ai = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let articles = ArticleRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let window = rss_ai_news_storage::FreshWindow {
+        since: now - time::Duration::hours(48),
+        until: now,
+    };
+    let mut ids = Vec::new();
+    for (tag, hours) in [
+        ("w-a", 1),
+        ("w-b", 2),
+        ("w-c", 2),
+        ("w-d", 3),
+        ("w-old", 72),
+    ] {
+        let id = seed_article(&ctx, tag, "persisted").await;
+        sqlx::query(
+            "UPDATE feed_entries SET published_at = $1 \
+             WHERE id = (SELECT origin_feed_entry_id FROM articles WHERE id = $2)",
+        )
+        .bind(now - time::Duration::hours(hours))
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    // Mixed kinds: w-c already has a task of the identity (reconciliation).
+    ai.insert_pending(&NewAiResult {
+        article_id: ids[2],
+        prompt_version: prompt_id,
+        output_schema_version: schema_id,
+        model_id: "gpt-4".to_string(),
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    let mut walked = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let page = articles
+            .list_fresh_for_ai_task_gen("ai", window, 1, cursor)
+            .await
+            .unwrap();
+        let Some(row) = page.first() else { break };
+        cursor = row.article_id;
+        walked.push(row.article_id);
+        assert!(walked.len() <= 4, "the walk must end: {walked:?}");
+    }
+
+    assert_eq!(walked, [ids[3], ids[1], ids[2], ids[0]]);
     ctx.cleanup().await;
 }

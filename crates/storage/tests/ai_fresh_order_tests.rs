@@ -122,7 +122,7 @@ async fn equal_instants_in_different_offsets_tie_by_article_id() {
     let high = f.article("tie-high", &rfc3339(at)).await;
 
     let listed = ArticleRepo::new(f.pool.clone())
-        .list_fresh_for_ai_task_gen("ai", &f.identity(), window(now), 10)
+        .list_fresh_for_ai_task_gen("ai", window(now), 10, 0)
         .await
         .unwrap();
 
@@ -199,7 +199,7 @@ async fn a_sub_millisecond_instant_before_the_window_start_is_not_fresh() {
         .await;
 
     let listed = ArticleRepo::new(f.pool.clone())
-        .list_fresh_for_ai_task_gen("ai", &f.identity(), window, 10)
+        .list_fresh_for_ai_task_gen("ai", window, 10, 0)
         .await
         .unwrap();
 
@@ -207,11 +207,13 @@ async fn a_sub_millisecond_instant_before_the_window_start_is_not_fresh() {
     assert_eq!(ids, [inside]);
     assert!(!ids.contains(&before));
 }
-/// R3E-B1: the three task_gen lists partition `persisted` on SQLite — fresh
-/// insert (in-window, no identity row), fresh reconciliation (in-window,
-/// identity row, id order + cursor) and backlog (out-of-window only).
+
+/// R3E-B1 / R4-3: the two task_gen lists partition `persisted` on SQLite.
+/// The fresh list holds every in-window article, inserts and C3
+/// reconciliations alike, in one order (source instant, then article id);
+/// the backlog list keeps only out-of-window articles (id order + cursor).
 #[tokio::test]
-async fn task_gen_lists_partition_persisted_by_window_and_identity() {
+async fn task_gen_lists_partition_persisted_by_window() {
     let (_dir, f) = Fixture::new().await;
     let now = now();
     let pending = f
@@ -237,16 +239,12 @@ async fn task_gen_lists_partition_persisted_by_window_and_identity() {
             .collect::<Vec<_>>()
     };
 
-    let inserts = repo
-        .list_fresh_for_ai_task_gen("ai", &f.identity(), window(now), 10)
-        .await
-        .unwrap();
-    let reconcile = repo
-        .list_fresh_reconcile_for_ai_task_gen("ai", &f.identity(), window(now), 10, 0)
+    let fresh_list = repo
+        .list_fresh_for_ai_task_gen("ai", window(now), 10, 0)
         .await
         .unwrap();
     let after_cursor = repo
-        .list_fresh_reconcile_for_ai_task_gen("ai", &f.identity(), window(now), 10, pending)
+        .list_fresh_for_ai_task_gen("ai", window(now), 10, failed)
         .await
         .unwrap();
     let backlog = repo
@@ -254,8 +252,59 @@ async fn task_gen_lists_partition_persisted_by_window_and_identity() {
         .await
         .unwrap();
 
-    assert_eq!(ids(inserts), [(fresh, true)]);
-    assert_eq!(ids(reconcile), [(pending, true), (failed, true)]);
-    assert_eq!(ids(after_cursor), [(failed, true)]);
+    assert_eq!(
+        ids(fresh_list),
+        [(failed, true), (pending, true), (fresh, true)]
+    );
+    assert_eq!(ids(after_cursor), [(pending, true), (fresh, true)]);
     assert_eq!(ids(backlog), [(old, false), (old_with_task, false)]);
+}
+
+/// R4-3: paging the fresh list one row at a time with the keyset cursor
+/// visits every in-window article once, in (source instant, article id)
+/// order, although ids ascend while source times descend and three rows
+/// share one instant (one of them written in another offset).
+#[tokio::test]
+async fn fresh_list_cursor_walks_source_order_without_skip_or_repeat() {
+    let (_dir, f) = Fixture::new().await;
+    let now = now();
+    let tie = now - Duration::hours(2);
+    let early = f
+        .article("w-early", &rfc3339(now - Duration::hours(3)))
+        .await;
+    let tie_low = f.article("w-tie-low", &rfc3339(tie)).await;
+    let tie_mid = f
+        .article(
+            "w-tie-mid",
+            &rfc3339(tie.to_offset(UtcOffset::from_hms(2, 0, 0).unwrap())),
+        )
+        .await;
+    let tie_high = f.article("w-tie-high", &rfc3339(tie)).await;
+    // Created after the ties but older than all of them.
+    let earliest = f
+        .article("w-earliest", &rfc3339(now - Duration::hours(4)))
+        .await;
+    let late = f
+        .article("w-late", &rfc3339(now - Duration::hours(1)))
+        .await;
+    // Mixed kinds: some already have a task of the identity.
+    for id in [tie_mid, earliest] {
+        f.task(id).await;
+    }
+    let repo = ArticleRepo::new(f.pool.clone());
+
+    let mut walked = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let page = repo
+            .list_fresh_for_ai_task_gen("ai", window(now), 1, cursor)
+            .await
+            .unwrap();
+        let Some(row) = page.first() else { break };
+        cursor = row.article_id;
+        walked.push(row.article_id);
+        assert!(walked.len() <= 6, "the walk must end: {walked:?}");
+    }
+
+    assert_eq!(walked, [earliest, early, tie_low, tie_mid, tie_high, late]);
 }

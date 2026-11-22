@@ -61,8 +61,7 @@ pub enum EntryPersistOutcome {
 pub struct ArticleAiTaskCandidate {
     pub article_id: i64,
     /// The article is inside the publish window (C9 "fresh" membership).
-    /// Always true on the fresh list; on the backlog list only for rows that
-    /// already have a task of the identity (reconciliation, R2-B1).
+    /// Always true on the fresh list, false on the backlog list (R3E-B1).
     pub in_window: bool,
 }
 
@@ -120,9 +119,8 @@ pub trait ArticleRepository: Send + Sync {
 
     /// C9 task_gen backlog share（R2-B1, R3E-B1）：按 id 升序 + keyset 游标扫描
     /// publish 窗口**外**的 `state='persisted'` article（新插入或 C3 冲突对账）。
-    /// 与 [`Self::list_fresh_for_ai_task_gen`]、
-    /// [`Self::list_fresh_reconcile_for_ai_task_gen`] 两两不相交、并集为全部
-    /// `persisted`，故 backlog 名额只给窗口外的文章。
+    /// 与 [`Self::list_fresh_for_ai_task_gen`] 不相交、并集为全部 `persisted`，
+    /// 故 backlog 名额只给窗口外的文章。
     async fn list_backlog_for_ai_task_gen(
         &self,
         category_key: &str,
@@ -131,30 +129,22 @@ pub trait ArticleRepository: Send + Sync {
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
-    /// C9 task_gen fresh share 的 C3 对账通道（R3E-B1）：窗口**内**、已有本身份
-    /// 任务行、仍为 `persisted` 的 article，按 id 升序 + keyset 游标（推进不了的
-    /// 行如 `permanent_failed` 被游标越过）。计入 fresh 名额，不占 backlog 名额。
-    async fn list_fresh_reconcile_for_ai_task_gen(
-        &self,
-        category_key: &str,
-        identity: &crate::NewAiResult,
-        window: crate::FreshWindow,
-        batch_size: u32,
-        after_id: i64,
-    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
-    /// C9 task_gen fresh share: `persisted` articles of the category inside
-    /// the publish window (`window.since <= COALESCE(fe.published_at,
-    /// fe.discovered_at) <= window.until`, R2-S1) that have no AI row of `identity` yet, oldest source
-    /// time first (they leave the window first), ties by id. The anti-join
-    /// keeps rows whose task already exists (and may stay `persisted`, e.g.
-    /// `permanent_failed`) out of this list; the id-ordered list
-    /// ([`Self::list_fresh_reconcile_for_ai_task_gen`]) reconciles them.
+    /// C9 task_gen fresh share (R4-3): every `persisted` article of the
+    /// category inside the publish window (`window.since <=
+    /// COALESCE(fe.published_at, fe.discovered_at) <= window.until`, R2-S1),
+    /// whether it still needs a task of the identity (insert) or already has
+    /// one (C3 reconciliation). One order for both kinds: oldest source
+    /// instant first (it leaves the window first), ties by article id.
+    /// `after_id` is a keyset cursor over that order: the article id of the
+    /// last row the pass scanned (`0` = from the start). The cursor row's own
+    /// source instant is resolved in the query, so rows that cannot advance
+    /// (e.g. identity row `permanent_failed`) are passed, never re-read.
     async fn list_fresh_for_ai_task_gen(
         &self,
         category_key: &str,
-        identity: &crate::NewAiResult,
         window: crate::FreshWindow,
         batch_size: u32,
+        after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError>;
     async fn list_in_window_for_backfill(
         &self,
@@ -234,9 +224,10 @@ const SELECT_ARTICLE_ID_BY_CONTENT_HASH_SQL: &str =
 const SELECT_ARTICLES_OWNED_BY_ENTRY_SQL: &str = "SELECT id, extractor_strategy FROM articles WHERE origin_feed_entry_id = $1 ORDER BY id LIMIT 2";
 
 impl ArticleRepo {
-    /// One of the two id-ordered task_gen lists (R3E-B1): `in_window = false`
-    /// is the backlog (outside the window), `true` the fresh share's C3
-    /// reconciliation list (inside it, identity row present).
+    /// The id-ordered task_gen list (R3E-B1): `in_window = false` is the
+    /// backlog (outside the window). `true` selected the former in-window
+    /// reconciliation list; since R4-3 those rows are on the fresh list and
+    /// nothing passes `true` (the backlog SQL is left unchanged).
     async fn list_id_ordered_for_ai_task_gen(
         &self,
         category_key: &str,
@@ -307,8 +298,8 @@ WHERE id = $1
 /// articles of the category after the keyset cursor `$1`, in one of two
 /// regions chosen by `$9`: false = outside the window (the backlog list,
 /// insert or reconcile), true = inside it with an identity row already (the
-/// fresh share's C3 reconciliation list). With
-/// [`LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL`] the three lists partition
+/// former fresh reconciliation list, unused since R4-3). With
+/// [`LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL`] the backlog list partitions
 /// `persisted`. Window membership as in the fresh list (`$3` / `$8` the
 /// SQLite window bounds).
 const LIST_ID_ORDERED_FOR_AI_TASK_GEN_SQLITE_SQL: &str = r#"
@@ -359,47 +350,65 @@ ORDER BY article_id ASC
 LIMIT $7
 "#;
 
-/// C9 fresh task_gen list, SQLite: the source time is compared and ordered
+/// C9 fresh task_gen list, SQLite (R4-3): inserts and C3 reconciliations of
+/// in-window articles in one order. The source time is compared and ordered
 /// by `julianday()` instant, ties by article id (R2-S2: the raw text never
-/// orders — `10:00+02:00` and `08:00Z` are one instant); a text fallback
-/// decides membership of values `julianday()` cannot parse; `$2` / `$7` are the window
-/// bounds rounded inward to whole milliseconds (`sqlite_window_bounds`).
+/// orders: `10:00+02:00` and `08:00Z` are one instant); a text fallback
+/// decides membership of values `julianday()` cannot parse, which sort first
+/// (key `0`, where `NULL` sorted before). `$2` / `$3` are the window bounds
+/// rounded inward to whole milliseconds (`sqlite_window_bounds`). `$5` is the
+/// keyset cursor: the article id of the last scanned row, whose own key is
+/// re-derived by the same expression (`0` = from the start).
 const LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL: &str = r#"
-SELECT a.id AS article_id, 1 AS in_window
-FROM articles a
-JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
-JOIN feed_sources fs ON fs.id = fe.source_id
-WHERE a.state = 'persisted'
-  AND fs.category_key = $1
-  AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($2),
-               COALESCE(fe.published_at, fe.discovered_at) >= $2)
-  AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) <= julianday($7),
-               COALESCE(fe.published_at, fe.discovered_at) <= $7)
-  AND NOT EXISTS (
-      SELECT 1 FROM article_ai_results r
-      WHERE r.article_id = a.id AND r.prompt_version = $3
-        AND r.output_schema_version = $4 AND r.model_id = $5
-  )
-ORDER BY julianday(COALESCE(fe.published_at, fe.discovered_at)) ASC, a.id ASC
-LIMIT $6
+SELECT article_id, 1 AS in_window
+FROM (
+    SELECT a.id AS article_id,
+           COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)), 0) AS source_key
+    FROM articles a
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE a.state = 'persisted'
+      AND fs.category_key = $1
+      AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) >= julianday($2),
+                   COALESCE(fe.published_at, fe.discovered_at) >= $2)
+      AND COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)) <= julianday($3),
+                   COALESCE(fe.published_at, fe.discovered_at) <= $3)
+) candidates
+WHERE $5 = 0
+   OR (source_key, article_id) > (
+       SELECT COALESCE(julianday(COALESCE(fe.published_at, fe.discovered_at)), 0), a.id
+       FROM articles a
+       JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+       WHERE a.id = $5
+   )
+ORDER BY source_key ASC, article_id ASC
+LIMIT $4
 "#;
 
+/// C9 fresh task_gen list, PostgreSQL (R4-3): as the SQLite list, on the
+/// `TIMESTAMPTZ` source time (microseconds, exact).
 const LIST_FRESH_FOR_AI_TASK_GEN_PG_SQL: &str = r#"
-SELECT a.id AS article_id, TRUE AS in_window
-FROM articles a
-JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
-JOIN feed_sources fs ON fs.id = fe.source_id
-WHERE a.state = 'persisted'
-  AND fs.category_key = $1
-  AND COALESCE(fe.published_at, fe.discovered_at) >= $2
-  AND COALESCE(fe.published_at, fe.discovered_at) <= $7
-  AND NOT EXISTS (
-      SELECT 1 FROM article_ai_results r
-      WHERE r.article_id = a.id AND r.prompt_version = $3
-        AND r.output_schema_version = $4 AND r.model_id = $5
-  )
-ORDER BY COALESCE(fe.published_at, fe.discovered_at) ASC, a.id ASC
-LIMIT $6
+SELECT article_id, TRUE AS in_window
+FROM (
+    SELECT a.id AS article_id,
+           COALESCE(fe.published_at, fe.discovered_at) AS source_at
+    FROM articles a
+    JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+    JOIN feed_sources fs ON fs.id = fe.source_id
+    WHERE a.state = 'persisted'
+      AND fs.category_key = $1
+      AND COALESCE(fe.published_at, fe.discovered_at) >= $2
+      AND COALESCE(fe.published_at, fe.discovered_at) <= $3
+) candidates
+WHERE $5 = 0
+   OR (source_at, article_id) > (
+       SELECT COALESCE(fe.published_at, fe.discovered_at), a.id
+       FROM articles a
+       JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id
+       WHERE a.id = $5
+   )
+ORDER BY source_at ASC, article_id ASC
+LIMIT $4
 "#;
 
 const LIST_ARTICLES_IN_WINDOW_FOR_BACKFILL_SQL: &str = r#"
@@ -510,31 +519,12 @@ impl ArticleRepository for ArticleRepo {
         .await
     }
 
-    async fn list_fresh_reconcile_for_ai_task_gen(
-        &self,
-        category_key: &str,
-        identity: &crate::NewAiResult,
-        window: crate::FreshWindow,
-        batch_size: u32,
-        after_id: i64,
-    ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
-        self.list_id_ordered_for_ai_task_gen(
-            category_key,
-            identity,
-            window,
-            batch_size,
-            after_id,
-            true,
-        )
-        .await
-    }
-
     async fn list_fresh_for_ai_task_gen(
         &self,
         category_key: &str,
-        identity: &crate::NewAiResult,
         window: crate::FreshWindow,
         batch_size: u32,
+        after_id: i64,
     ) -> Result<Vec<ArticleAiTaskCandidate>, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(p) => {
@@ -542,11 +532,9 @@ impl ArticleRepository for ArticleRepo {
                 sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_FRESH_FOR_AI_TASK_GEN_SQLITE_SQL)
                     .bind(category_key)
                     .bind(since)
-                    .bind(identity.prompt_version)
-                    .bind(identity.output_schema_version)
-                    .bind(&identity.model_id)
-                    .bind(i64::from(batch_size))
                     .bind(until)
+                    .bind(i64::from(batch_size))
+                    .bind(after_id)
                     .fetch_all(p)
                     .await
                     .map_err(StorageError::from)
@@ -555,11 +543,9 @@ impl ArticleRepository for ArticleRepo {
                 sqlx::query_as::<_, ArticleAiTaskCandidate>(LIST_FRESH_FOR_AI_TASK_GEN_PG_SQL)
                     .bind(category_key)
                     .bind(window.since)
-                    .bind(identity.prompt_version)
-                    .bind(identity.output_schema_version)
-                    .bind(&identity.model_id)
-                    .bind(i64::from(batch_size))
                     .bind(window.until)
+                    .bind(i64::from(batch_size))
+                    .bind(after_id)
                     .fetch_all(p)
                     .await
                     .map_err(StorageError::from)

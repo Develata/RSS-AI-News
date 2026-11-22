@@ -63,6 +63,9 @@ AI-off 直通模式跳过整段。
 | `batch_size_two_task_gen_backlog_slot_is_not_taken_by_fresh_articles` | 同上 | R2-B1 task_gen 两侧不相交 |
 | `batch_size_two_in_window_reconciliation_does_not_take_the_backlog_slot` | 同上 | R3E-B1 窗口内对账计入 fresh 名额 |
 | `batch_size_one_in_window_reconciliation_is_a_fresh_turn` | 同上 | R3E-B1 batch=1 backlog 轮次给窗口外文章、记录侧正确 |
+| `batch_size_two_fresh_slot_goes_to_the_article_leaving_the_window_first` | 同上 | R4-3 fresh 名额给最先出窗者，不论对账或新插入 |
+| `equal_source_instants_order_fresh_kinds_by_article_id` | 同上 | R4-3 同时刻按 article id，不论种类 |
+| `stuck_rows_at_the_oldest_end_of_the_fresh_order_do_not_end_the_share` | 同上 | R4-3 游标越过不可推进行、只计实际推进 |
 | `batch_size_two_claim_backlog_slot_is_not_taken_by_fresh_tasks` | 同上 | R2-B1 claim 两侧不相交 |
 | `batch_size_one_claim_retries_count_as_served_turns` | 同上 | R2-B1 重试也算一轮 |
 | `future_dated_articles_are_not_fresh_for_task_gen` | `crates/runtime/tests/ai_run_tests.rs` | R2-S1 窗口上界 = now（task_gen） |
@@ -71,7 +74,9 @@ AI-off 直通模式跳过整段。
 | `fresh_claim_ties_by_article_id_not_task_id` | 同上 | R2-S2 claim 按 article id 打平 |
 | `claimed_rows_come_back_in_candidate_order` | 同上 | R2-S2 领取保序 |
 | `a_sub_millisecond_instant_before_the_window_start_is_not_fresh` | 同上 | R2-S1 毫秒边界向内取整 |
-| `task_gen_lists_partition_persisted_by_window_and_identity` | 同上 | R3E-B1 三个 task_gen 列表划分 `persisted`（SQLite） |
+| `task_gen_lists_partition_persisted_by_window` | 同上 | R3E-B1 / R4-3 两个 task_gen 列表划分 `persisted`，fresh 列表含对账行（SQLite） |
+| `fresh_list_cursor_walks_source_order_without_skip_or_repeat` | 同上 | R4-3 fresh 列表 keyset 游标按（来源时刻, article id）不漏不重（SQLite） |
+| `pg_fresh_task_gen_list_walks_source_order_with_the_cursor` | `crates/storage/tests/article_ai_result_pg_tests.rs` | R4-3 同上（PG） |
 | `pg_fresh_claim_orders_by_source_time_then_article_id` | `crates/storage/tests/article_ai_result_pg_tests.rs` | R2-S2 PG 排序与保序 |
 | `a_failed_second_claim_side_leaves_the_first_side_unclaimed` | `crates/runtime/tests/ai_run_tests.rs` | R2-B2 整批同事务回滚 |
 | `pg_fresh_share_lists_claims_and_signals_by_source_time` | `crates/storage/tests/article_ai_result_pg_tests.rs` | C9 PG SQL |

@@ -740,33 +740,15 @@ impl rss_ai_news_storage::ArticleRepository for FlakyArticleRepo {
             .list_backlog_for_ai_task_gen(category_key, identity, window, batch_size, after_id)
             .await
     }
-    async fn list_fresh_reconcile_for_ai_task_gen(
+    async fn list_fresh_for_ai_task_gen(
         &self,
         category_key: &str,
-        identity: &rss_ai_news_storage::NewAiResult,
         window: rss_ai_news_storage::FreshWindow,
         batch_size: u32,
         after_id: i64,
     ) -> Result<Vec<rss_ai_news_storage::ArticleAiTaskCandidate>, StorageError> {
         self.inner
-            .list_fresh_reconcile_for_ai_task_gen(
-                category_key,
-                identity,
-                window,
-                batch_size,
-                after_id,
-            )
-            .await
-    }
-    async fn list_fresh_for_ai_task_gen(
-        &self,
-        category_key: &str,
-        identity: &rss_ai_news_storage::NewAiResult,
-        window: rss_ai_news_storage::FreshWindow,
-        batch_size: u32,
-    ) -> Result<Vec<rss_ai_news_storage::ArticleAiTaskCandidate>, StorageError> {
-        self.inner
-            .list_fresh_for_ai_task_gen(category_key, identity, window, batch_size)
+            .list_fresh_for_ai_task_gen(category_key, window, batch_size, after_id)
             .await
     }
     async fn list_in_window_for_backfill(
@@ -1599,8 +1581,8 @@ async fn batch_size_two_in_window_reconciliation_does_not_take_the_backlog_slot(
 
     assert_eq!(article_state(&pool, third).await, "ai_pending");
     assert_eq!(summary.fresh_advanced, 1);
-    // Inside the fresh share, reconciliation goes first (each row advances at
-    // most once, so it cannot starve new fresh inserts).
+    // Inside the fresh share, both kinds share one source-time order (R4-3):
+    // #1 is older than #2 here, so its reconciliation is served first.
     assert_eq!(article_state(&pool, first).await, "ai_pending");
     assert_eq!(article_state(&pool, second).await, "persisted");
     assert_eq!((summary.reconciled, summary.inserted), (1, 1));
@@ -1648,6 +1630,94 @@ async fn batch_size_one_in_window_reconciliation_is_a_fresh_turn() {
                 state(["ai_pending", "ai_pending", "ai_pending"])
             ),
         ]
+    );
+}
+
+// === R4-3: both fresh candidate kinds share one source-time order ===
+
+/// A task_gen flow at a fixed `now`, for fixtures a minute off a window edge.
+fn flow_at(pool: &SqlitePool, now: OffsetDateTime) -> AiRunFlow {
+    clocked_flow(
+        pool.clone(),
+        Arc::new(MockAiClient::default()),
+        Arc::new(std::sync::Mutex::new(now)),
+    )
+}
+
+/// Reviewer's fixture: #1 (lowest id) entered the window a minute ago and
+/// has a pending row to reconcile, #2 leaves the window in a minute with no
+/// task, #3 is outside the window. The fresh slot goes to #2, which leaves
+/// the window first, not to the reconciliation of #1.
+#[tokio::test]
+async fn batch_size_two_fresh_slot_goes_to_the_article_leaving_the_window_first() {
+    let (_dir, pool) = make_test_pool().await;
+    let now = OffsetDateTime::now_utc().replace_nanosecond(0).unwrap();
+    let first = seed_aged(&pool, "r4-3-1", 1, now - Duration::minutes(1)).await[0];
+    let second = seed_aged(&pool, "r4-3-2", 1, now - Duration::minutes(48 * 60 - 1)).await[0];
+    let third = seed_aged(&pool, "r4-3-3", 1, now - Duration::days(10)).await[0];
+    seed_identity_row(&pool, first, "pending", None).await;
+    let mut opts = opts();
+    opts.task_gen_batch_size = 2;
+
+    let summary = flow_at(&pool, now).task_gen(&opts).await;
+
+    assert_eq!(
+        [
+            article_state(&pool, first).await,
+            article_state(&pool, second).await,
+            article_state(&pool, third).await,
+        ],
+        ["persisted", "ai_pending", "ai_pending"].map(str::to_string)
+    );
+    assert_eq!(summary.fresh_advanced, 1);
+    assert_eq!((summary.reconciled, summary.inserted), (0, 2));
+}
+
+/// Equal source instants: a reconciliation and an insert go in article id
+/// order, whichever kind each is.
+#[tokio::test]
+async fn equal_source_instants_order_fresh_kinds_by_article_id() {
+    let (_dir, pool) = make_test_pool().await;
+    let now = OffsetDateTime::now_utc().replace_nanosecond(0).unwrap();
+    let at = now - Duration::hours(1);
+    let low = seed_aged(&pool, "r4-3-tie-low", 1, at).await[0];
+    let high = seed_aged(&pool, "r4-3-tie-high", 1, at).await[0];
+    seed_identity_row(&pool, high, "pending", None).await;
+    let mut opts = opts();
+    opts.task_gen_batch_size = 1;
+
+    let summary = flow_at(&pool, now).task_gen(&opts).await;
+
+    assert_eq!(article_state(&pool, low).await, "ai_pending");
+    assert_eq!(article_state(&pool, high).await, "persisted");
+    assert_eq!((summary.reconciled, summary.inserted), (0, 1));
+}
+
+/// Non-advanceable rows at the oldest end of the fresh order are passed by
+/// the cursor without using the quota, page after page (batch 1 = one row a
+/// page), so the advanceable row behind them is served in the same pass.
+#[tokio::test]
+async fn stuck_rows_at_the_oldest_end_of_the_fresh_order_do_not_end_the_share() {
+    let (_dir, pool) = make_test_pool().await;
+    let now = OffsetDateTime::now_utc().replace_nanosecond(0).unwrap();
+    let stuck = seed_aged(&pool, "r4-3-stuck", 2, now - Duration::hours(40)).await;
+    let next = seed_aged(&pool, "r4-3-next", 1, now - Duration::hours(1)).await[0];
+    for id in &stuck {
+        seed_identity_row(&pool, *id, "permanent_failed", None).await;
+    }
+    let mut opts = opts();
+    opts.task_gen_batch_size = 1;
+
+    let summary = flow_at(&pool, now).task_gen(&opts).await;
+
+    assert_eq!(article_state(&pool, next).await, "ai_pending");
+    for id in &stuck {
+        assert_eq!(article_state(&pool, *id).await, "persisted");
+    }
+    assert_eq!((summary.scanned, summary.fresh_advanced), (3, 1));
+    assert_eq!(
+        share_state(&pool, "task_gen").await.as_deref(),
+        Some("fresh")
     );
 }
 
