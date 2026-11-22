@@ -246,11 +246,18 @@ impl PublishFlow {
     /// pre-0008 data can contain such a pair). On a conflict the lease is
     /// released at once, the claim refunded and the stage state kept; nothing
     /// is written. A lookup error is released by its classification.
+    ///
+    /// `unverified_write`: the record's previous remote attempt ended
+    /// `remote_write_unverified` (R4-1). Its earlier write may have landed,
+    /// so a retryable lookup error is released without charging the stage
+    /// and both exits keep that `last_error_kind`, so the next claim still
+    /// starts with the read-only HEAD check.
     async fn guard_snapshot_ownership(
         &self,
         publish_record_id: i64,
         owner: &str,
         state: PublishState,
+        unverified_write: bool,
         phase: &'static str,
         emitter: &RunEventEmitter<'_>,
     ) -> OwnershipGuard {
@@ -263,6 +270,13 @@ impl PublishFlow {
         {
             Ok(None) => return OwnershipGuard::Clear,
             Ok(Some(conflict)) => conflict,
+            Err(error) if unverified_write && error.is_retryable() => {
+                self.release_unverified_recovery(publish_record_id, owner, &error, phase, emitter)
+                    .await;
+                return OwnershipGuard::Failed {
+                    error_kind: rss_ai_news_publish::REMOTE_WRITE_UNVERIFIED_KIND.to_string(),
+                };
+            }
             Err(error) => {
                 self.release_classified_failure(
                     publish_record_id,
@@ -291,7 +305,11 @@ impl PublishFlow {
                 owner,
                 state,
                 &message,
-                OWNERSHIP_CONFLICT_KIND,
+                if unverified_write {
+                    rss_ai_news_publish::REMOTE_WRITE_UNVERIFIED_KIND
+                } else {
+                    OWNERSHIP_CONFLICT_KIND
+                },
                 now,
             )
             .await;
@@ -320,6 +338,7 @@ impl PublishFlow {
                     "article_id": conflict.article_id,
                     "owner_record_id": conflict.owner_record_id,
                     "released": matches!(released, Ok(true)),
+                    "earlier_write_unverified": unverified_write,
                 })),
             )
             .await;

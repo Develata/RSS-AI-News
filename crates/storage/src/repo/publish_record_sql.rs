@@ -113,7 +113,7 @@ WHERE id IN (
 )
 RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           render_version, selection_policy_version, state, remote_target,
-          attempt_count, rendered_at
+          attempt_count, rendered_at, last_error_kind
 "#;
 
 /// PG claim：§6.4 契约——子查询 `FOR UPDATE SKIP LOCKED`，让 publish flow
@@ -136,7 +136,7 @@ WHERE id IN (
 )
 RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           render_version, selection_policy_version, state, remote_target,
-          attempt_count, rendered_at
+          attempt_count, rendered_at, last_error_kind
 "#;
 
 /// Pending claim limited to one category (R1-P-S15): the freeze selects
@@ -162,7 +162,7 @@ WHERE id IN (
 )
 RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           render_version, selection_policy_version, state, remote_target,
-          attempt_count, rendered_at
+          attempt_count, rendered_at, last_error_kind
 "#;
 
 /// PG variant of [`CLAIM_PENDING_IN_CATEGORY_SQLITE_SQL`].
@@ -184,7 +184,7 @@ WHERE id IN (
 )
 RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           render_version, selection_policy_version, state, remote_target,
-          attempt_count, rendered_at
+          attempt_count, rendered_at, last_error_kind
 "#;
 
 pub(super) async fn claim_pending_in_category_sqlite(

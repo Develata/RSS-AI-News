@@ -57,7 +57,10 @@
   - **核对成功且 HEAD 已含全部内容** → 记成功回执（`published_remote`）；只有这一种情况下"已落地的写入"在最后一次预算里也会成功；
   - **核对成功但 HEAD 不含** → 按原写入错误释放（计预算，最后一次预算 → `failed`）；
   - **核对未完成**（核对请求失败 / 被限流 / 超时）→ `remote_write_unverified`：保持 `stored_local`、退还 claim、文章归属保留
-    （最后一次预算也不 `failed`），核对的限流期限写入 `next_attempt_at`；下一次尝试的写前 HEAD 比对幂等（R3F-B2）
+    （最后一次预算也不 `failed`），核对的限流期限写入 `next_attempt_at`（R3F-B2）
+  - **下一次 claim 先恢复**（R4-1）：`last_error_kind = remote_write_unverified` 的记录写前先对自己的报告做固定 HEAD 只读比对
+    （批量中逐条）：已含 → 记回执、不写；确认缺失 → 照常写、照常计预算；比对再失败 → 保态、退还、保留该 kind 与归属；
+    比对前的可重试失败（如准备超时）同样退还
 - promote target article 已被其它流转推进 → `ArticleConflict`
 - 存量重复归属（0008 前两份未失败快照共享文章）：store_local / remote 写前拦截，已发布者或低 id 者胜出；败方不写外部产物、
   释放 lease、退还 claim、保持阶段态 → `ArticleConflict`（`article_owned_by_active_snapshot`）
@@ -154,7 +157,12 @@
 | `publish_remote_unverified_write_honours_the_verifications_rate_limit` | 同上 | 核对被限流 → 其期限写入 `next_attempt_at`，期内 `NothingToClaim` |
 | `publish_remote_timeout_with_an_unfinished_check_keeps_the_record_on_the_last_attempt` | 同上 | 远端超时且核对也超时 → 末次预算不 `failed` |
 | `publish_remote_batch_timeout_with_an_unfinished_check_keeps_every_record` | 同上 | 批量同上：每条记录保持 `stored_local`、退还 claim |
-| `sqlite_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait` | `crates/storage/tests/publish_stage_recovery_tests.rs` | 不计预算的释放：保态、清 lease、退还两计数、写 / 清 `next_attempt_at`（PG 同名 `pg_…`） |
+| `sqlite_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait` | `crates/storage/tests/publish_stage_recovery_tests.rs` | 不计预算的释放：保态、清 lease、退还两计数、写 / 清 `next_attempt_at`；两类 claim 的投影带回 `last_error_kind`（R4-1；PG 同名 `pg_…`） |
+| `unverified_record_whose_recovery_check_fails_again_keeps_ownership_then_records_the_receipt` | `crates/runtime/tests/publish_remote_recovery_tests.rs` | 审查序列（R4-1）：`(stored_local, 0, remote_write_unverified)` → 下次所有 GET 503 → 保态、退还、kind 与归属保留、零写请求；HEAD 含报告后 → 以该 commit 记回执、零写请求 |
+| `unverified_record_confirmed_absent_is_written_and_charged_normally` | 同上 | 恢复比对确认缺失 → 照常 PUT；PUT 409 照常计预算（末次 → `failed`） |
+| `unverified_record_confirmed_absent_publishes_with_a_normal_write` | 同上 | 确认缺失 → 正常写入并发布 |
+| `batch_checks_each_unverified_record_on_its_own_before_writing` | 同上 | 批量逐条比对：已落地者记回执不入批、比对失败者 deferred、缺失者与普通记录一起写入 |
+| `unverified_record_whose_preparation_times_out_is_deferred` | 同上 | 比对前准备超时：末次预算仍不 `failed`、保留 kind、零写入 |
 | `git_blob_sha_matches_git_hash_object` | `crates/publish/src/github.rs` | blob sha 与 `git hash-object` 一致（含中文） |
 | `auth_failure_maps_to_github_auth_failed` | 同上 | 401 映射 |
 | `chinese_path_leaves_the_client_percent_encoded_on_get_and_put` | `crates/publish/tests/github_contents_path_tests.rs` | 中文路径请求行按段编码（原始字节） |

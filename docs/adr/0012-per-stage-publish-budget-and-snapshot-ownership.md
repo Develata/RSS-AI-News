@@ -85,13 +85,27 @@
 结果为 `RemoteWriteUnverified`（`error_kind = remote_write_unverified`，可重试）。runtime 以 `release_deferred_retry` 释放：
 **保持 `stored_local`**、清 lease、两个计数都退还（与空快照 / 归属冲突同一做法）、写 `last_error*`；核对遇到限流时把该限流的
 期限（同样钳制 1 h）写入 `next_attempt_at`，否则置 NULL。因此即使是本阶段最后一次预算，记录也不会转 `failed`、不会释放
-文章归属；下一次尝试的写前 HEAD 比对（多报告 §3 / 单报告 R1-P-S2）是幂等的：已落地 → 直接记回执，未落地 → 照常写。
+文章归属。
 发布客户端不做透明重试（R3F-B1），写请求只发一次，首次的歧义结果必然进入本核对。
-**代价（未解决）**：每次尝试都以"写入歧义 + 核对未完成"结束的记录（例如 GitHub 长期对写与读都不可达）不会耗尽预算、
-一直持有文章归属；它每次运行最多再发一次请求序列，且下一次尝试开头的只读请求失败会照常计预算。因此 `publish_max_attempts = 1` 或默认预算的最后一次尝试里"PATCH 已落地、响应丢失"也会记为
-`published_remote`，而不是 `failed` 并释放文章归属。限流（`GitHubRateLimit`）不核对，避免在限流窗口内追加请求。
-**残留限制**：进程在写请求之后、核对之前崩溃，且该阶段预算已耗尽时，过期清扫仍会把记录转 `failed`（未核对、归属释放）；
-预算未耗尽时，下一次运行的多报告幂等比对 / 单报告幂等（§3 下文）会补回执。
+**下一次 claim 先恢复（2026-11-22，R4-1）**：claim 的投影带回 `last_error_kind`。远端阶段领到
+`last_error_kind = remote_write_unverified` 的记录时，在**任何写请求之前**先做同一个只读固定 HEAD 比对
+（`find_published`，只针对这一份报告；批量中每条待恢复记录各自单独比对，不与其它记录合并，因为比对是全有或全无的）：
+- HEAD 已含该报告 → 以该 HEAD commit 记回执，不发写请求（批量中该记录不进入本批写入）；
+- 确认缺失 → 照常写入，**照常计预算**（此后的失败按普通分类释放，歧义写入照常进入本节核对）；
+- 比对再次出错 / 被限流 / 用完远端 deadline → `EarlierWriteUnverified`（`error_kind` 仍为 `remote_write_unverified`，
+  事件里的 `operation` / `http_status` / `request_id` 取自失败的比对请求）→ `release_deferred_retry`：保持 `stored_local`、
+  退还 claim、保留文章归属、保留该 `last_error_kind`（下一次 claim 继续先比对），比对遇限流时写入其期限。
+比对给出结论之前，本次尝试的其它可重试失败同样不计预算、保留该 kind：准备阶段超时（`EarlierWriteUnverified`）、
+快照读取或归属检查的可重试存储错误（`release_deferred_retry`，`last_error` 写明原因，事件带 `cause_kind`）；
+归属冲突的败方释放（本就退还 claim）也写 `remote_write_unverified` 而不是 `article_owned_by_active_snapshot`
+（事件 `error_kind` 仍为后者，并带 `earlier_write_unverified: true`）。
+**代价（未解决）**：每次尝试都以"写入歧义 + 核对未完成"结束、此后比对也一直不出结论的记录（例如 GitHub 长期对读写都不可达）
+不会耗尽预算、一直持有文章归属；它每次运行最多再发一次只读比对。因此 `publish_max_attempts = 1` 或默认预算的最后一次尝试里
+"PATCH 已落地、响应丢失"也会记为 `published_remote`，而不是 `failed` 并释放文章归属。限流（`GitHubRateLimit`）不核对，
+避免在限流窗口内追加请求。永久错误不在此列：比对之前的目标漂移（`remote_target_mismatch`）与永久的渲染错误仍直接 `failed`
+（运维改了配置或模板，需人工按 §Consequences 的人工核对步骤处理）。
+**残留限制**：进程在写请求之后、核对之前崩溃（或在恢复比对途中崩溃），且该阶段预算已耗尽时，过期清扫仍会把记录转 `failed`
+（未核对、归属释放）；预算未耗尽时，下一次运行的多报告幂等比对 / 单报告幂等（§3 下文）会补回执。
 
 ### 3a. 限流等待写入记录（2026-11-22，R1-P-S12，同属未发布的 migration 0008）
 

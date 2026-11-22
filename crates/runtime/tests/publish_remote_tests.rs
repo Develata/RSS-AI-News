@@ -1362,8 +1362,16 @@ async fn publish_remote_unverified_write_on_the_last_attempt_keeps_the_record_an
         "{events:?}"
     );
 
-    // A later run can claim it again and complete.
+    // A later run can claim it again and complete: it first checks HEAD
+    // read-only (R4-1), finds the report absent, then writes normally.
     server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "object": { "sha": "head-without-report" }
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path_regex("^/repos/owner/repo/contents/"))
         .respond_with(

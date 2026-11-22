@@ -36,6 +36,11 @@ impl GitHubRequestContext {
     }
 }
 
+/// `error_kind` of [`PublishError::RemoteWriteUnverified`] and
+/// [`PublishError::EarlierWriteUnverified`]. A record released with it is
+/// recovered by a read-only HEAD check on its next remote claim (R4-1).
+pub const REMOTE_WRITE_UNVERIFIED_KIND: &str = "remote_write_unverified";
+
 #[derive(Debug, Error)]
 pub enum PublishError {
     #[error("local IO failure: {0}")]
@@ -101,6 +106,16 @@ pub enum PublishError {
         write: Box<PublishError>,
         verification: Box<PublishError>,
     },
+    /// R4-1: the record's previous attempt ended [`Self::RemoteWriteUnverified`]
+    /// (its write may have landed), and this attempt could not settle that
+    /// before writing: the read-only fixed-HEAD content check failed, was
+    /// rate limited or ran out of time, or a step before it (preparation)
+    /// failed retryably (`verification`). No write was sent in this attempt.
+    /// Released like [`Self::RemoteWriteUnverified`] (same `error_kind`, so
+    /// the next claim recovers again); the request context and rate-limit
+    /// deadline are the failed check's.
+    #[error("github write of an earlier attempt still unverified: {verification}")]
+    EarlierWriteUnverified { verification: Box<PublishError> },
     /// The record was initialised for a different remote destination than the
     /// one configured now. Never retried: the operator decides (restore the
     /// config, or `--force` a new render version for the new target).
@@ -125,6 +140,8 @@ impl PublishError {
             | Self::GitHubRateLimit { context, .. } => Some(context),
             // Where the unknown write was sent.
             Self::RemoteWriteUnverified { write, .. } => write.github_context(),
+            // No write in this attempt: where the check failed.
+            Self::EarlierWriteUnverified { verification } => verification.github_context(),
             _ => None,
         }
     }
@@ -134,7 +151,8 @@ impl PublishError {
     pub fn rate_limit_reset(&self) -> Option<time::OffsetDateTime> {
         match self {
             Self::GitHubRateLimit { reset_at, .. } => Some(*reset_at),
-            Self::RemoteWriteUnverified { verification, .. } => verification.rate_limit_reset(),
+            Self::RemoteWriteUnverified { verification, .. }
+            | Self::EarlierWriteUnverified { verification } => verification.rate_limit_reset(),
             _ => None,
         }
     }
@@ -192,7 +210,8 @@ impl ClassifiedError for PublishError {
             Self::GitHubApiError { status, .. } => *status == 409 || *status >= 500,
             Self::GitHubRateLimit { .. }
             | Self::RemoteTimeout
-            | Self::RemoteWriteUnverified { .. } => true,
+            | Self::RemoteWriteUnverified { .. }
+            | Self::EarlierWriteUnverified { .. } => true,
         }
     }
 
@@ -204,7 +223,9 @@ impl ClassifiedError for PublishError {
             Self::GitHubApiError { .. } => "github_api_error",
             Self::GitHubRateLimit { .. } => "github_rate_limit",
             Self::RemoteTimeout => "remote_timeout",
-            Self::RemoteWriteUnverified { .. } => "remote_write_unverified",
+            Self::RemoteWriteUnverified { .. } | Self::EarlierWriteUnverified { .. } => {
+                REMOTE_WRITE_UNVERIFIED_KIND
+            }
             Self::ResponseTooLarge { .. } => "response_too_large",
             Self::RemoteTargetMismatch { .. } => "remote_target_mismatch",
         }

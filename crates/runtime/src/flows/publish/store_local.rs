@@ -94,7 +94,14 @@ impl PublishFlow {
         };
 
         match self
-            .guard_snapshot_ownership(claimed.id, &owner, PublishState::Rendered, PHASE, &emitter)
+            .guard_snapshot_ownership(
+                claimed.id,
+                &owner,
+                PublishState::Rendered,
+                false,
+                PHASE,
+                &emitter,
+            )
             .await
         {
             OwnershipGuard::Clear => {}
