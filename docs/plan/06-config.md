@@ -160,6 +160,24 @@ enabled = true
 校验侧：当 source URL 含任一占位符，必须设置 `RSSHUB_BASE_URL`，否则
 `run_general_checks` 报错（`validate.rs::tests::rsshub_placeholder_without_base_url_fails`）。
 
+结构校验（`run_structural_checks`，`load_skip_env_checks` 使用）对含占位符的 URL 只要求非空，**不**解析：替换是纯字符串
+拼接，同一模板是否合法取决于 base（`{RSSHUB}:notaport/feed.xml` 接在 `https://hub.example` 后是非法端口，接在
+`https://hub.example/prefix` 后是合法路径），任何固定探针 base 都会误拒用真实 base 合法的配置（R3G-B5，2026-11-22）。
+字面 URL（不含占位符）仍须能解析。用环境里的 `RSSHUB_BASE_URL` 展开后的 URL 必须是 HTTP 抓取器能请求的 URL——能解析、
+scheme 为 `http` / `https`、有 host——这属于 ingest 的前提（R3-5 / R3G-B5）：`config::load` / `validate-config` 在展开前检查
+（`collect_source_env_checks`），ingest preflight 在加载展开后检查（`collect_effective_feed_url_checks`；loader 在
+`SourceSecrets` 里记下哪些 source 由占位符展开，只对这些 source 要求 http(s) + host，字面 URL 的契约不变）。两者都只看
+`--category` 范围内的启用 source，报 `sources[i].feed_url` 并提示检查 `RSSHUB_BASE_URL`（不回显 URL）。因此已设置但
+不可用的 `RSSHUB_BASE_URL`（缺协议的 `feeds.internal`，或被解析成自定义 scheme `feeds.internal`、无 host 的
+`feeds.internal:1200`）只让 ingest 失败（exit 78），`run` 的 ai-run / publish 与不抓 feed 的命令（`migrate` 等）照常执行。
+锁定测试：`validate.rs::tests::structural_checks_ignore_invalid_rsshub_base_url_expansion`、
+`structural_checks_accept_a_template_whose_validity_depends_on_the_base`、
+`general_checks_accept_a_port_like_suffix_after_a_path_prefixed_base`、`general_checks_reject_a_port_like_suffix_after_a_bare_base`、
+`general_checks_reject_an_invalid_rsshub_base_url_expansion`、`general_checks_reject_an_expansion_without_an_http_scheme`、
+`ingest_command_checks_reject_a_feed_url_broken_by_expansion`、`ingest_command_checks_reject_an_expansion_without_an_http_scheme`、
+`loader.rs::tests::custom_scheme_rsshub_expansion_fails_validate_config_and_ingest_only`、
+`crates/cli/tests/run_cmd_tests.rs::run_with_invalid_rsshub_base_url_still_publishes_stored_articles`。
+
 设计原因：让 categories/*.toml 可入仓不携带部署信息，部署侧只需在 `.env` 注入一次。
 
 每 source 还可单独配置 `rsshub_access_key`，落到 `SourceSecrets`（`loader::SourceSecrets`），

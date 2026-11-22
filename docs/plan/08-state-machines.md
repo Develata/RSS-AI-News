@@ -195,8 +195,21 @@ retryable 失败**不**作为独立状态。语义上"暂时失败、稍后再�
 | Failed | `failed` | 失败终态 | 中途任一步永久失败 |
 
 **无候选不是失败**：freeze 选不到候选（`SnapshotEmpty`）时，记录释放回可再领取的 `pending`，
-清 lease、退还本次 claim 计入的 `attempt_count`，并记 `last_error_kind = 'snapshot_empty'`。
+清 lease、退还本次 claim 计入的 `attempt_count` 与 `stage_attempt_count`，并记 `last_error_kind = 'snapshot_empty'`。
 同一天后续运行在有新文章时仍能冻结发布；反复空跑不消耗重试预算。
+
+**重试预算按阶段计**（ADR 0012）：每个阶段态（pending / snapshot_frozen / rendered / stored_local）
+各自最多 `retry.publish_max_attempts` 次 claim（`stage_attempt_count`），阶段推进成功即清零；
+某阶段耗尽才转 `failed`。`attempt_count` 为跨阶段累计值，仅供审计。
+
+**退还 claim 的释放**（不是一次发布尝试，两个计数都退、清 lease、保持阶段态，2026-11-22）：远端写入歧义且只读核对未完成
+（`remote_write_unverified`，R3F-B2）与所有限流（`github_rate_limit`，R3F-S12 / R4-4，期限在未来时同时写 `next_attempt_at`）；空快照（`snapshot_empty`）；
+freeze 输掉归属竞争（`article_owned_by_active_snapshot` / `article_state_conflict`）；store_local / remote 写前发现存量
+重复归属的败方（`article_owned_by_active_snapshot`，R1-P-B1）。按 ID freeze 的分类不符（`category_mismatch`）自 R3F-S15 起根本不领取记录，因此无需退还。
+
+**限流等待**（R1-P-S12）：`next_attempt_at` 非空且未到时，任何阶段的 claim 都不领取该记录；远端限流的 release
+写入它（≤ 1 h；限流一律用 `release_deferred_retry`、不计预算，R3F-S12 / R4-4），核对未完成的歧义写入在核对被限流时也写入它
+（R3F-B2），其它 retryable release 与每次阶段推进清空它。见 ADR 0012 §3a。
 
 ### 6.2 不可变契约
 

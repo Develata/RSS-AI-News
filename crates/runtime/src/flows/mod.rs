@@ -8,6 +8,7 @@ pub mod publish;
 pub mod rebuild_report;
 pub mod recent_entries;
 pub mod reindex;
+pub mod replay;
 
 pub use ai_run::{
     AiProcessSummary, AiRunFlow, AiRunOptions, AiRunSummary, AiTaskOutcome, AiTaskStatus,
@@ -22,7 +23,8 @@ pub use decision_run::{
     DecisionRunSettings, DecisionRunSummary,
 };
 pub use extract::{
-    ExtractEntryOutcome, ExtractEntryStatus, ExtractFlow, ExtractOptions, ExtractSummary,
+    EXTRACT_WAVE_MARGIN_SECONDS, ExtractEntryOutcome, ExtractEntryStatus, ExtractFlow,
+    ExtractOptions, ExtractSummary, extract_lease_budget_seconds, fit_extract_batch_to_lease,
 };
 pub use ingest::{
     IngestFlow, IngestOptions, IngestSourceOutcome, IngestSourceStatus, IngestSummary,
@@ -42,4 +44,9 @@ pub use recent_entries::{
 };
 pub use reindex::{
     ReindexAbortOutcome, ReindexFlow, ReindexOptions, ReindexSummary, ReindexTarget,
+};
+pub use replay::{
+    REPLAY_FEED_SAMPLE_LIMIT, REPLAY_HTML_NO_STRATEGY, REPLAY_PLACEHOLDER_BASE_URI, ReplayBaseUri,
+    ReplayDiff, ReplayFlow, ReplayFlowDeps, ReplayKind, ReplayOptions, ReplayOutcome, ReplayParsed,
+    ReplaySelector,
 };

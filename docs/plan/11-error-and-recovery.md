@@ -75,10 +75,10 @@ trait ClassifiedError {
 | 失败发生位置 | 持久化字段 | 状态变化 |
 |---|---|---|
 | feed 抓取 | `feed_entries.last_error*` | `Fetching → PendingFetch`（retry）/ `Failed`（exhausted） |
-| 正文提取 | `feed_entries.last_error*` | 同上；fallback 命中时转 `FallbackPersisted` |
+| 正文提取 | `feed_entries.last_error*` | 同上；fallback 命中时转 `FallbackPersisted`；article 写入 / 摘要回读的存储错误按 `StorageError::is_retryable()` 同样分流（不再一律 `Failed`） |
 | AI 调用 | `article_ai_results.last_error*` | `Running → Pending`（retry）/ `PermanentFailed`（exhausted） |
 | 本地落盘 | `publish_records.last_error*` | retryable 回原态重试 / 耗尽或永久 → `Failed` |
-| GitHub 推送 | `publish_records.last_error*` | 422 → 重试一次后 `Failed`；其它直接 `Failed` |
+| GitHub 推送 | `publish_records.last_error*` | 按 `PublishError::is_retryable()`：409、5xx / 传输失败、远端超时 → 保持 `StoredLocal` 并计本阶段预算（耗尽 → `Failed`；歧义写入先只读核对 HEAD，核对未完成 → `RemoteWriteUnverified`：保态、退还 claim、不转 `Failed`）；限流（期限在未来时写入 `next_attempt_at`，已到 / 已过时不写）→ 保态、退还 claim、不计预算（R3F-S12，R4-4）；422 non-fast-forward 在同一次尝试内重试一次，第二次 422 及其它 4xx、认证失败、目标漂移、超大成功响应 → 直接 `Failed`。完整表见 [plan/04 §7](./04-publish.md) |
 | Reindex 批次 | `reindex_jobs.last_error*` | `Running → Pending`（retry）/ `Failed`（exhausted） |
 
 `articles` 表**不**承载 `last_error*` 列。错误归属规则见 [./08-state-machines.md §4.2](./08-state-machines.md)。
@@ -106,9 +106,25 @@ Reindex 无预算（claim 不过滤 attempt_count，失败 `mark_failed` 直转�
 - 失败时**不**改值（已在 claim 时递增）
 - reclaim（lease 过期）时**不**改值
 - 这样保证：worker 崩溃 / lease 过期不会刷预算，预算严格反映尝试次数
-- **唯一例外**：Publish freeze 选不到候选（`SnapshotEmpty`）时退还本次 claim 计入的 1 次
-  （`release_empty_snapshot`，记录回 `pending`）。空快照不是一次发布尝试，否则同日反复空跑会耗尽预算、
-  被 sweep 转 `failed`（见 [./08-state-machines.md](./08-state-machines.md) §6.1）
+- **例外（仅 Publish，均不是一次发布尝试，两个计数都退）**：freeze 选不到候选（`SnapshotEmpty`，`release_empty_snapshot`，
+  记录回 `pending`）——否则同日反复空跑会耗尽预算、被 sweep 转 `failed`；freeze 输掉文章归属竞争（`release_freeze_conflict`）；
+  store_local / remote 写前发现存量重复归属的败方（`release_ownership_conflict`，保持阶段态，R1-P-B1）；远端写入歧义且只读核对
+  未完成（`remote_write_unverified`，R3F-B2）与所有限流（R3F-S12，R4-4）——二者用 `release_deferred_retry`（保持阶段态，
+  同时写 / 清 `next_attempt_at`）。按 ID freeze 遇分类不符（`category_mismatch`）自 R3F-S15 起在 claim 的 SQL 中即被排除，
+  记录根本不被领取，无需退还。见 [./08-state-machines.md](./08-state-machines.md) §6.1
+
+**Publish 按阶段计预算（2026-11-21，migration 0008，[ADR 0012](../adr/0012-per-stage-publish-budget-and-snapshot-ownership.md)）**：
+publish_records 有两个计数。`attempt_count` 仍按上述契约累计（审计用，成功不清零）；
+`stage_attempt_count` 是当前阶段的预算：每次 claim 与 `attempt_count` 一起 +1，**每次阶段推进成功**
+（freeze / render / store_local / remote 的 advance）清零。claim 过滤、retryable release 折叠与耗尽 sweep
+都用 `stage_attempt_count` 对比 `retry.publish_max_attempts`。因此 `publish_max_attempts = N` 表示
+"每个阶段最多 N 次尝试"，`N = 1` 的无故障运行也能走完四个阶段；旧的"四阶段共享预算"不再成立。
+0008 之前的行迁移后 `stage_attempt_count = 0`（当前阶段重新拿到完整预算；终态行不受影响）。
+
+**限流等待（2026-11-22，R1-P-S12 / R3F-S12）**：远端 `GitHubRateLimit` 的 release 同时写 `next_attempt_at`
+（GitHub 给的适用期限中最晚的重试时刻，钳制到 1 小时内），claim 在此之前不领取该记录（不耗预算、不发请求）；
+限流尝试本身不计阶段预算（退还 claim、保持阶段态），期限已到 / 已过时不写等待（R4-4）；
+任一阶段推进或非限流的 retryable release 清空它。见 ADR 0012 §3a。
 
 ## 5. exit code 速查
 
@@ -129,7 +145,8 @@ CLI 退出码由 [`crates/cli/src/exit_code.rs`](../../crates/cli/src/exit_code.
 - `publish` / `publish-all`：每个阶段带 `verdict`。`ok`；`skipped`（`SnapshotEmpty`、`NothingToClaim`、
   `Conflicted`——无可发布内容，或记录被其他 worker 持有 / 已推进，下次调度接手）→ exit 0；
   `failed`（`Failed`、`ArticleConflict`、`MissingTarget`）→ exit 1。已知缺口：record 绑定 claim 时
-  `NothingToClaim` 也可能表示重试预算耗尽，由 sweep 转 `failed` 后下一次运行以 `PublishConflict` 报出。
+  `NothingToClaim` 也可能表示重试预算耗尽，由 sweep 转 `failed` 后下一次运行以 `PublishConflict` 报出；
+  或表示记录仍在限流等待期（`next_attempt_at` 未到），等待期过后的运行照常续跑。
 - `publish-all`：分类级 init 失败或已终态 `failed` 记录（`conflict` 阶段）只记入该分类 summary（exit 1），
   其他分类与已就绪的远端 batch 照常执行。单分类 `publish` 遇终态记录仍直接报 `PublishConflict`。
 - `ingest` / `ai-run`：自身存储失败（entry 插入、source 行、claim / 候选查询、pending 行插入）→ exit 1；
@@ -139,8 +156,17 @@ CLI 退出码由 [`crates/cli/src/exit_code.rs`](../../crates/cli/src/exit_code.
   JSON 模式正文放在 `summary.markdown`。
 - `doctor`：任一 check `Fail` 或 `--deep` 不变量违规 → exit 1。
 - `run`：子阶段的 `Err` 与子阶段 summary 的非零退出码都记入 `stage_failures`，取最严重者。启动时只做
-  结构校验，环境 / 凭证检查归各阶段，因此单个分类缺凭证不会阻断其他阶段。
-- `ingest` 的 source 状态写回（成功、304、失败记录）失败同样计为存储失败，该 source 不再报告成功。
+  结构校验，环境 / 凭证检查归各阶段，因此单个分类缺凭证不会阻断其他阶段。ingest 失败（preflight，例如
+  source 用了 RSSHub 占位符但缺 `RSSHUB_BASE_URL`，或 `RSSHUB_BASE_URL` 已设置但展开后不是合法 URL；或 ingest 本身返回 `Err`）只记为 ingest 阶段失败，
+  ai-run 与 publish 仍在已入库的数据上执行（例如此前已 `stored_local` 的报告照常推进），退出码仍反映 ingest
+  失败。只有阶段自身的前提不满足才跳过该阶段：数据库无法打开 / 迁移时（记在 `ingest` 阶段名下）所有阶段都跳过，
+  `ai_run_skip_reason = "database unavailable"`。
+- `ingest` 的 source 状态写回（成功、304、失败记录）失败同样计为存储失败，该 source 不再报告成功；写回命中 0 行
+  （`Ok(false)`）与 upsert 后回读不到行都按 `StorageError::Integrity`（`integrity`）计为该 source 的存储失败，不 panic。
+- `ingest` 的 extract 阶段：单篇条目路径上的自身存储失败（article 写入、摘要回读、release 本身报错）计入
+  `extract_storage_failed` → exit 1（即使该行已按 retryable 冷却回队）。owner guard 落空（lease 已被并发 run
+  reclaim）计入 `extract_lease_lost`，只报告不改变退出码；两者都不再报告为 `permanent_failed` / `retryable_failed`，
+  也不写 `entry_permanent_failed` 事件——只有已落库的转移才被报告（2026-11-21）。
 
 特殊行为：
 - `migrate run` / `validate-config` / 任何 `ConfigError` → exit 78（CI / Docker scheduler 据此区分"配置问题"vs"业务问题"）

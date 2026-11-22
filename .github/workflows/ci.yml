@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only token for every job: CI builds, tests and loads images locally,
+# it never writes to the repository or a registry.
+permissions:
+  contents: read
+
 # Cancel superseded runs on the same branch / PR — saves runner minutes when
 # the developer pushes again before CI finishes.
 concurrency:
@@ -15,8 +20,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Pin once. Bumping is a deliberate single-line change; keeps Dockerfile,
-  # every job here and release.yml in lockstep.
+  # rust-toolchain.toml's channel is the source of truth. The same version is
+  # also written here, in release.yml, audit.yml, maintenance.yml (x2) and
+  # docker/Dockerfile; a bump changes all of them, and the static acceptance
+  # lane (`toolchain-pins`) fails if any one drifts.
   RUST_TOOLCHAIN: "1.97.0"
 
 # Three independent jobs, grouped by what they compile: `test` runs the static
@@ -39,25 +46,27 @@ jobs:
   test:
     name: fmt + clippy + cargo test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: test
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # The swallowed-error gate needs ripgrep, which the current ubuntu
-      # runner image does not ship.
-      - run: command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
+      # The swallowed-error gate needs ripgrep (not shipped on the ubuntu runner
+      # image) and the release-adapter tests need jq; install whichever is missing.
+      - run: (command -v rg && command -v jq) >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep jq)
       # static first, so fmt / clippy findings lead the log: fmt, clippy
       # -D warnings, swallowed-error gate, dependency policy, tooling boundary,
       # acceptance-case status; then the locked workspace build and tests.
       - run: cargo acceptance run --lane static --lane workspace
 
-  # postgres: storage tests with --include-ignored plus CLI migrate run/check
+  # postgres: the ignored (PG / Docker) storage tests (--ignored; the normal
+  # ones run in the workspace lane) plus CLI migrate run/check
   # against the service below (the lane requires DATABASE_URL and the docker
   # CLI; storage fixtures use the runner's docker daemon). sqlite and release
   # reuse its release build: SQLite migrate run/check, recent-entries and the
@@ -67,6 +76,7 @@ jobs:
   test-pg:
     name: postgres + sqlite + release lanes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -83,11 +93,11 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (2026-11-15)
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: test-pg
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -99,11 +109,12 @@ jobs:
   docker-build:
     name: docker build smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: build runtime image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile
@@ -116,7 +127,7 @@ jobs:
           # unreachable from main and only consume the cache quota.
           cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=runtime' || '' }}
       - name: build debug image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile
@@ -127,7 +138,7 @@ jobs:
           cache-from: type=gha,scope=debug
           cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=debug' || '' }}
       - name: build scheduler image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile
@@ -142,22 +153,36 @@ jobs:
         run: docker run --rm rss-ai-news:runtime --help
       - name: smoke run --help (debug)
         run: docker run --rm rss-ai-news:debug --help
-      # scheduler 入口是 supercronic 长驻；smoke 用一个永不到期的 cron
-      # 表达式启动 5s 后强制停。能起即视为通过（验证 supercronic 安装 +
-      # entrypoint script 解析 + USER appuser 权限正常）。
-      - name: smoke scheduler boot
+      # scheduler: supercronic must actually run one job from the env-mode
+      # line. The 7-field schedule (seconds first) fires every 2 s. The job is
+      # side-effect free: clap rejects the extra positional before any config
+      # or database access. Its argument contains a space, so the logged
+      # "unexpected argument 'spaced arg'" proves the generated line kept it
+      # as one argv element (nested quoting used to split it into `spaced`).
+      # Polls for up to 75 s; fails early if the container exits.
+      - name: smoke scheduler runs a job
         run: |
-          docker run --rm -d --name scheduler-smoke \
-            -e RSS_CRON_SCHEDULE='0 0 1 1 *' \
-            -e RSS_CRON_COMMAND='--help' \
+          docker run -d --name scheduler-smoke \
+            -e RSS_CRON_SCHEDULE='*/2 * * * * * *' \
+            -e "RSS_CRON_COMMAND=validate-config 'spaced arg'" \
             rss-ai-news:scheduler
-          sleep 3
+          ran=""
+          for _ in $(seq 1 75); do
+            if docker logs scheduler-smoke 2>&1 | grep -qF "unexpected argument 'spaced arg'"; then
+              ran=1
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' scheduler-smoke)" != true ]; then
+              break
+            fi
+            sleep 1
+          done
           docker logs scheduler-smoke
-          if ! docker ps --filter name=scheduler-smoke --filter status=running -q | grep -q .; then
-            echo "::error::scheduler container exited unexpectedly"
+          docker rm -f scheduler-smoke >/dev/null
+          if [ -z "$ran" ]; then
+            echo "::error::scheduler did not run the job with its argv intact"
             exit 1
           fi
-          docker stop scheduler-smoke
       # validate-config 不需要外部凭据；只需要示例 config 触发 W3 fail-fast 校验。
       # 容器启动 + 配置加载 + 错误退出码 78 (ConfigError) 一并被 smoke 覆盖。
       - name: prepare smoke config

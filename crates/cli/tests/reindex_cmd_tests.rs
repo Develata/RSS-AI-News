@@ -227,3 +227,182 @@ enabled = true
     .unwrap();
     (temp, cli)
 }
+
+const FIXTURE_CATEGORY: &str = r#"
+schema_version = "1"
+[category]
+key = "test"
+display_name = "Test"
+priority = 10
+[[sources]]
+key = "fixture"
+display_name = "Fixture"
+feed_url = "https://example.test/feed.xml"
+feed_kind = "rss"
+priority = 10
+enabled = true
+"#;
+
+/// A `categories` job of rule `sha` that crashed mid-run (lease expired).
+async fn crashed_categories_job(pool: &sqlx::SqlitePool, sha: &str) -> i64 {
+    let rule: i64 = sqlx::query_scalar(
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status) \
+         VALUES ('reindex', 'reindex-categories-crashed', 'crashed', ?, 'pending') RETURNING id",
+    )
+    .bind(sha)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query_scalar(
+        "INSERT INTO reindex_jobs (target, rule_version_id, state, lease_owner, \
+            lease_expires_at, attempt_count, started_at) \
+         VALUES ('categories', ?, 'running', 'crashed', '2000-01-01T00:00:00Z', 1, \
+                 '2000-01-01T00:00:00Z') RETURNING id",
+    )
+    .bind(rule)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+fn categories_cli(temp: &TempDir) -> Cli {
+    let config_dir = temp.path().join("config");
+    Cli::try_parse_from([
+        "rss-ai-news",
+        "--config-dir",
+        config_dir.to_str().unwrap(),
+        "--db-path",
+        temp.path().join("rss.sqlite").to_str().unwrap(),
+        "reindex",
+        "--target",
+        "categories",
+    ])
+    .unwrap()
+}
+
+/// R2-S17: the CLI's rule identity follows the configuration. A job crashed
+/// under the same config resumes; one started under another config (or the
+/// old bare-target identity) is refused instead of finishing with mixed rules.
+#[tokio::test]
+async fn categories_reindex_resumes_only_under_the_same_rule_fingerprint() {
+    use rss_ai_news_cli::commands::reindex::reindex_rule_fingerprint;
+    use rss_ai_news_domain::state::ReindexTarget;
+
+    let same: rss_ai_news_config::CategoryConfig = toml::from_str(FIXTURE_CATEGORY).unwrap();
+    let mut moved = same.clone();
+    moved.sources[0].feed_url = "https://example.test/moved.xml".to_string();
+    for (sha, resumes) in [
+        (
+            reindex_rule_fingerprint(ReindexTarget::Categories, &[same]),
+            true,
+        ),
+        (
+            reindex_rule_fingerprint(ReindexTarget::Categories, &[moved]),
+            false,
+        ),
+    ] {
+        let (temp, _) = fixture();
+        let cli = categories_cli(&temp);
+        let pool = build_sqlite_pool(cli.db_path.as_ref().unwrap(), 1, 5_000)
+            .await
+            .unwrap();
+        run_migrations(&StoragePool::Sqlite(pool.clone()))
+            .await
+            .unwrap();
+        let crashed = crashed_categories_job(&pool, &sha).await;
+        let Command::Reindex(args) = &cli.command else {
+            unreachable!()
+        };
+
+        let result = reindex::run(&cli, args).await;
+
+        if resumes {
+            let summary = result.expect("same rule resumes");
+            assert_eq!(summary.per_target[0].reindex_job_id, crashed);
+        } else {
+            assert!(
+                result.is_err(),
+                "a changed config must not resume the old job"
+            );
+            let state: String = sqlx::query_scalar("SELECT state FROM reindex_jobs WHERE id = ?")
+                .bind(crashed)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                state, "pending",
+                "the old job is left for `reindex --abort`"
+            );
+        }
+        pool.close().await;
+    }
+}
+/// R3E-S17: `dedup.link_normalizer_version` selects nothing (one built-in
+/// normalizer), so changing only it must not change the `link_hash` rule
+/// identity: a job crashed under `"1"` resumes under `"2"`.
+#[tokio::test]
+async fn link_hash_reindex_resumes_when_only_the_reserved_normalizer_version_changes() {
+    use rss_ai_news_cli::commands::reindex::reindex_rule_fingerprint;
+    use rss_ai_news_domain::state::ReindexTarget;
+
+    let (temp, _) = fixture();
+    let config_dir = temp.path().join("config");
+    let app = fs::read_to_string(config_dir.join("app.toml")).unwrap();
+    assert!(app.contains("link_normalizer_version = \"1\""));
+    fs::write(
+        config_dir.join("app.toml"),
+        app.replace(
+            "link_normalizer_version = \"1\"",
+            "link_normalizer_version = \"2\"",
+        ),
+    )
+    .unwrap();
+    let cli = Cli::try_parse_from([
+        "rss-ai-news",
+        "--config-dir",
+        config_dir.to_str().unwrap(),
+        "--db-path",
+        temp.path().join("rss.sqlite").to_str().unwrap(),
+        "reindex",
+        "--target",
+        "link_hash",
+    ])
+    .unwrap();
+    let pool = build_sqlite_pool(cli.db_path.as_ref().unwrap(), 1, 5_000)
+        .await
+        .unwrap();
+    run_migrations(&StoragePool::Sqlite(pool.clone()))
+        .await
+        .unwrap();
+    // Crashed under `link_normalizer_version = "1"`: the identity carries the
+    // algorithm version only.
+    let sha = reindex_rule_fingerprint(ReindexTarget::LinkHash, &[]);
+    let rule: i64 = sqlx::query_scalar(
+        "INSERT INTO rule_versions (kind, version_tag, description, payload_sha256, status) \
+         VALUES ('reindex', 'reindex-link_hash-crashed', 'crashed', ?, 'pending') RETURNING id",
+    )
+    .bind(&sha)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let crashed: i64 = sqlx::query_scalar(
+        "INSERT INTO reindex_jobs (target, rule_version_id, state, lease_owner, \
+            lease_expires_at, attempt_count, started_at) \
+         VALUES ('link_hash', ?, 'running', 'crashed', '2000-01-01T00:00:00Z', 1, \
+                 '2000-01-01T00:00:00Z') RETURNING id",
+    )
+    .bind(rule)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let Command::Reindex(args) = &cli.command else {
+        unreachable!()
+    };
+
+    let summary = reindex::run(&cli, args)
+        .await
+        .expect("an unchanged algorithm resumes");
+
+    assert_eq!(summary.per_target[0].reindex_job_id, crashed);
+    pool.close().await;
+}

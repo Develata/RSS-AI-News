@@ -56,7 +56,7 @@ async fn advance_checkpoint_writes_progress_for_owning_worker() {
         .unwrap();
 
     let updated = repo
-        .advance_checkpoint(job_id, "worker-a", 1234, ts(10))
+        .advance_checkpoint(job_id, "worker-a", 1234, ts(10), ts(700))
         .await
         .expect("checkpoint ok");
 
@@ -65,6 +65,8 @@ async fn advance_checkpoint_writes_progress_for_owning_worker() {
     assert_eq!(row.last_processed_id, Some(1234));
     assert_eq!(row.state, "running");
     assert_eq!(row.lease_owner.as_deref(), Some("worker-a"));
+    // C4: every checkpoint renews the lease, so a long job does not expire.
+    assert_eq!(row.lease_expires_at, Some(ts(700)));
 }
 
 #[tokio::test]
@@ -82,7 +84,7 @@ async fn advance_checkpoint_rejects_wrong_owner() {
         .unwrap();
 
     let updated = repo
-        .advance_checkpoint(job_id, "worker-b", 999, ts(10))
+        .advance_checkpoint(job_id, "worker-b", 999, ts(10), ts(700))
         .await
         .expect("checkpoint query ok");
 
@@ -102,7 +104,7 @@ async fn advance_checkpoint_rejects_when_not_running() {
         .unwrap();
 
     let updated = repo
-        .advance_checkpoint(job_id, "worker-a", 1, ts(1))
+        .advance_checkpoint(job_id, "worker-a", 1, ts(1), ts(700))
         .await
         .expect("checkpoint query ok");
 
@@ -442,7 +444,7 @@ async fn reclaim_expired_leases_returns_running_to_pending_preserving_progress()
         .await
         .unwrap()
         .unwrap();
-    repo.advance_checkpoint(job_id, "worker-a", 4242, ts(10))
+    repo.advance_checkpoint(job_id, "worker-a", 4242, ts(10), ts(30))
         .await
         .unwrap();
 

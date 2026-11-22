@@ -22,7 +22,7 @@ pub async fn load_candidates(
             request.max_items,
         )
         .await
-        .map_err(|error| ReportError::RenderFailed(error.to_string()))?
+        .map_err(ReportError::from)?
     } else if request.include_unscored {
         repo.select_ai_off_passthrough_candidates(
             &request.category_key,
@@ -31,7 +31,7 @@ pub async fn load_candidates(
             request.max_items,
         )
         .await
-        .map_err(|error| ReportError::RenderFailed(error.to_string()))?
+        .map_err(ReportError::from)?
     } else {
         return Ok(Vec::new());
     };

@@ -53,6 +53,16 @@ pub struct ClaimedPublishRecord {
     pub state: String,
     pub remote_target: Option<String>,
     pub attempt_count: i64,
+    /// The timestamp fixed by the first render (rendered into
+    /// `{generated_at}`); later stages re-render with it so stored, remote and
+    /// rebuilt reports stay byte-identical. `None` before render.
+    pub rendered_at: Option<OffsetDateTime>,
+    /// The kind of the failure the record was last released with, as read
+    /// by the claim. The remote stage uses it to recognise a record whose
+    /// previous attempt ended `remote_write_unverified` (R4-1): that record's
+    /// write may have landed, so its next attempt starts with a read-only
+    /// HEAD check instead of a write.
+    pub last_error_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +129,13 @@ pub trait PublishRecordRepository: Send + Sync {
         &self,
         request: &ClaimRequest,
     ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
+    /// [`Self::claim_pending_for_freeze`] limited to records of
+    /// `category_key` (R1-P-S15).
+    async fn claim_pending_for_freeze_in_category(
+        &self,
+        request: &ClaimRequest,
+        category_key: &str,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
     async fn claim_frozen_for_render(
         &self,
         request: &ClaimRequest,
@@ -137,6 +154,15 @@ pub trait PublishRecordRepository: Send + Sync {
         state: PublishState,
         ids: &[i64],
     ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
+    /// R3F-S15: claims `pending` record `id` only if it belongs to
+    /// `category_key` — the category is part of the claim's `WHERE`, so a
+    /// mismatched call never claims (or charges) another category's record.
+    async fn claim_pending_for_freeze_by_id_in_category(
+        &self,
+        request: &ClaimRequest,
+        id: i64,
+        category_key: &str,
+    ) -> Result<Vec<ClaimedPublishRecord>, StorageError>;
     async fn claim_local_for_remote_publish_by_ids(
         &self,
         request: &ClaimRequest,
@@ -152,7 +178,7 @@ pub trait PublishRecordRepository: Send + Sync {
         now: OffsetDateTime,
         extras: PublishAdvanceExtras,
     ) -> Result<bool, StorageError>;
-    /// W15 §3 折叠：retryable 失败按 `attempt_count >= max_attempts` 在 SQL 内
+    /// W15 §3 折叠：retryable 失败按 `stage_attempt_count >= max_attempts` 在 SQL 内
     /// 决定维持原阶段态 / 转 `failed`。`last_error*` 写真实底层错误。
     async fn release_retryable_failure(
         &self,
@@ -162,6 +188,23 @@ pub trait PublishRecordRepository: Send + Sync {
         kind: &str,
         max_attempts: u32,
         now: OffsetDateTime,
+    ) -> Result<ReleaseFailureOutcome, StorageError> {
+        self.release_retryable_failure_until(id, owner, error, kind, max_attempts, None, now)
+            .await
+    }
+    /// [`Self::release_retryable_failure`] that also persists the earliest
+    /// time the record may be claimed again (`next_attempt_at`, R1-P-S12):
+    /// `Some` after a rate limit, `None` clears any earlier wait.
+    #[allow(clippy::too_many_arguments)]
+    async fn release_retryable_failure_until(
+        &self,
+        id: i64,
+        owner: &str,
+        error: &str,
+        kind: &str,
+        max_attempts: u32,
+        retry_not_before: Option<OffsetDateTime>,
+        now: OffsetDateTime,
     ) -> Result<ReleaseFailureOutcome, StorageError>;
     /// Releases a `pending` record whose freeze found no candidates back to
     /// claimable `pending`, refunding the claim's attempt. Returns `false` when
@@ -170,6 +213,45 @@ pub trait PublishRecordRepository: Send + Sync {
         &self,
         id: i64,
         owner: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+    /// Releases a `pending` record whose freeze lost an article (ownership or
+    /// state conflict) back to claimable `pending`, refunding the claim.
+    /// Returns `false` when the lease was lost.
+    async fn release_freeze_conflict(
+        &self,
+        id: i64,
+        owner: &str,
+        error: &str,
+        kind: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+    /// Releases a record claimed in `state` whose snapshot shares an article
+    /// with a winning snapshot (P-B1): lease cleared, claim refunded, state
+    /// kept, `last_error*` set. Returns `false` when the lease was lost.
+    async fn release_ownership_conflict(
+        &self,
+        id: i64,
+        owner: &str,
+        state: PublishState,
+        error: &str,
+        kind: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+    /// Releases a remote attempt without charging the stage (R3F-B2 / S12):
+    /// lease cleared, claim refunded on both counters, `state` kept,
+    /// `last_error*` set and `next_attempt_at = retry_not_before` (`None`
+    /// clears a wait; SQLite stores it rounded up to the millisecond like
+    /// every deadline). Returns `false` when the lease was lost.
+    #[allow(clippy::too_many_arguments)]
+    async fn release_deferred_retry(
+        &self,
+        id: i64,
+        owner: &str,
+        state: PublishState,
+        error: &str,
+        kind: &str,
+        retry_not_before: Option<OffsetDateTime>,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
     async fn release_permanent_failure(
@@ -182,8 +264,8 @@ pub trait PublishRecordRepository: Send + Sync {
     ) -> Result<bool, StorageError>;
     async fn reclaim_expired_leases(&self, now: OffsetDateTime) -> Result<u64, StorageError>;
     /// W15 §4 sweep：阶段态（pending/snapshot_frozen/rendered/stored_local）+
-    /// `attempt_count >= max_attempts` + lease 空/过期 → `failed`。预算四阶段
-    /// 共享。保留既有 `last_error*`。返回转终态的行数。
+    /// `stage_attempt_count >= max_attempts` + lease 空/过期 → `failed`。预算按
+    /// 阶段计（ADR 0012）。保留既有 `last_error*`。返回转终态的行数。
     async fn terminalize_exhausted(
         &self,
         max_attempts: u32,

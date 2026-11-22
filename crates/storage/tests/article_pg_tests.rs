@@ -12,7 +12,9 @@
 mod common;
 
 use common::pg::{PgTestContext, make_pg_test_pool};
-use rss_ai_news_storage::{ArticleRepo, ArticleRepository, NewArticle, UpdateContentHashOutcome};
+use rss_ai_news_storage::{
+    ArticleRepo, ArticleRepository, EntryPersistOutcome, NewArticle, UpdateContentHashOutcome,
+};
 use time::OffsetDateTime;
 
 async fn seed_feed_source(ctx: &PgTestContext) -> (i64, i64) {
@@ -190,6 +192,15 @@ async fn pg_update_content_hash_then_find_returns_new_hash() {
     assert_eq!(after.content_hash, "hash-new");
 }
 
+fn backlog_identity() -> rss_ai_news_storage::NewAiResult {
+    rss_ai_news_storage::NewAiResult {
+        article_id: 0,
+        prompt_version: 1,
+        output_schema_version: 1,
+        model_id: "model".to_string(),
+    }
+}
+
 #[tokio::test]
 #[ignore = "需要 docker daemon"]
 async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
@@ -215,7 +226,16 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
 
     // batch_size=2 + after_id=0 → 拿 ids[0..2]
     let page1 = repo
-        .list_persisted_for_ai_task_gen("ai", 2, 0)
+        .list_backlog_for_ai_task_gen(
+            "ai",
+            &backlog_identity(),
+            rss_ai_news_storage::FreshWindow {
+                since: OffsetDateTime::now_utc() + time::Duration::days(365),
+                until: OffsetDateTime::now_utc() + time::Duration::days(366),
+            },
+            2,
+            0,
+        )
         .await
         .expect("pg list page1");
     assert_eq!(page1.len(), 2);
@@ -224,7 +244,16 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
 
     // after_id=ids[1] → 拿 ids[2..]
     let page2 = repo
-        .list_persisted_for_ai_task_gen("ai", 2, ids[1])
+        .list_backlog_for_ai_task_gen(
+            "ai",
+            &backlog_identity(),
+            rss_ai_news_storage::FreshWindow {
+                since: OffsetDateTime::now_utc() + time::Duration::days(365),
+                until: OffsetDateTime::now_utc() + time::Duration::days(366),
+            },
+            2,
+            ids[1],
+        )
         .await
         .expect("pg list page2");
     assert_eq!(page2.len(), 1);
@@ -239,5 +268,95 @@ async fn pg_list_persisted_for_ai_task_gen_paginates_by_id() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+async fn claim_entry(ctx: &PgTestContext, source_id: i64, uid: &str) -> i64 {
+    let id = seed_feed_entry(ctx, source_id, uid).await;
+    sqlx::query("UPDATE feed_entries SET state = 'fetching', lease_owner = 'w' WHERE id = $1")
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    id
+}
+
+async fn entry_state(ctx: &PgTestContext, id: i64) -> (String, Option<i64>) {
+    sqlx::query_as("SELECT state, article_id FROM feed_entries WHERE id = $1")
+        .bind(id)
+        .fetch_one(ctx.pg_pool())
+        .await
+        .unwrap()
+}
+
+/// A12 (PG): insert-or-get + owner-guarded entry advance in one transaction:
+/// a lost lease rolls back the insert, the entry's own article counts as
+/// persisted, another entry's article is a dedup.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_persist_for_entry_is_atomic_and_recognises_own_article() {
+    let ctx = make_pg_test_pool().await;
+    let (_, source_id) = seed_feed_source(&ctx).await;
+    let extractor_id = seed_extractor_rule(&ctx, "ext-persist").await;
+    let repo = ArticleRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+
+    let lost = claim_entry(&ctx, source_id, "persist-lost").await;
+    let outcome = repo
+        .persist_for_entry(
+            &new_article("h-lost", lost, extractor_id),
+            "other",
+            false,
+            now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, EntryPersistOutcome::LeaseLost);
+    let orphans: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM articles WHERE content_hash = 'h-lost'")
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+    assert_eq!(orphans, 0);
+
+    let own = claim_entry(&ctx, source_id, "persist-own").await;
+    let earlier = repo
+        .insert_or_get_by_content_hash(&new_article("h-own", own, extractor_id))
+        .await
+        .unwrap();
+    let outcome = repo
+        .persist_for_entry(&new_article("h-own", own, extractor_id), "w", true, now)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        EntryPersistOutcome::Persisted {
+            article_id: earlier.article_id,
+            newly_created: false,
+            // R3E-S6: the outcome reports the stored state too.
+            fallback: false,
+        }
+    );
+    // R2-S6: the entry state follows the stored (readability) article, not
+    // this call's fallback flag.
+    assert_eq!(
+        entry_state(&ctx, own).await,
+        ("persisted".to_string(), Some(earlier.article_id))
+    );
+
+    let dup = claim_entry(&ctx, source_id, "persist-dup").await;
+    let outcome = repo
+        .persist_for_entry(&new_article("h-own", dup, extractor_id), "w", false, now)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        EntryPersistOutcome::DedupSkipped {
+            article_id: earlier.article_id
+        }
+    );
+    assert_eq!(
+        entry_state(&ctx, dup).await,
+        ("dedup_skipped".to_string(), Some(earlier.article_id))
     );
 }

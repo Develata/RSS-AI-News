@@ -49,6 +49,170 @@ async fn local_fs_target_rejects_path_with_parent_traversal() {
     assert!(matches!(error, PublishError::InvalidPath(path) if path == "../escape.md"));
 }
 
+/// R1-P-S8: the temp name does not embed the report's file name, so a
+/// report whose own name is near the volume's 255-byte limit still publishes.
+#[tokio::test]
+async fn local_fs_target_publishes_a_report_whose_name_is_near_the_name_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = LocalFsTarget::new(dir.path().to_path_buf());
+    let name = format!("{}.md", "a".repeat(240));
+    let report = report(&format!("archive/{name}"), "long");
+
+    target
+        .publish(&report)
+        .await
+        .expect("long file name publishes");
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("archive").join(&name)).unwrap(),
+        "long"
+    );
+    let leftovers = std::fs::read_dir(dir.path().join("archive"))
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().file_name() != name.as_str())
+        .count();
+    assert_eq!(leftovers, 0, "no temp file is left behind");
+}
+
+/// R1-P-S9: replacing an existing report keeps its permissions (a 0600
+/// report must not become world-readable through the atomic replace).
+#[cfg(unix)]
+#[tokio::test]
+async fn local_fs_target_keeps_the_permissions_of_the_report_it_replaces() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("archive/report.md");
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    for mode in [0o600, 0o640] {
+        std::fs::write(&dest, "old report").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode)).unwrap();
+
+        LocalFsTarget::new(dir.path().to_path_buf())
+            .publish(&report("archive/report.md", "new report"))
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new report");
+        let after = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(after, mode, "{mode:o} became {after:o}");
+    }
+}
+
+/// A new report still gets the default permissions a plain create gives
+/// (umask applied), as before the atomic write.
+#[cfg(unix)]
+#[tokio::test]
+async fn local_fs_target_new_report_gets_the_default_create_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let probe = dir.path().join("probe");
+    std::fs::File::create(&probe).unwrap();
+    let default_mode = std::fs::metadata(&probe).unwrap().permissions().mode() & 0o7777;
+
+    LocalFsTarget::new(dir.path().to_path_buf())
+        .publish(&report("archive/new.md", "new report"))
+        .await
+        .unwrap();
+
+    let mode = std::fs::metadata(dir.path().join("archive/new.md"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o7777;
+    assert_eq!(mode, default_mode);
+}
+
+/// Rename semantics: the new report replaces the directory entry instead of
+/// truncating the old file in place, so an interrupted write can never leave a
+/// half-written or empty report under the published name. A hard link to the
+/// old inode keeps the old bytes only if the old file was never truncated.
+#[cfg(unix)]
+#[tokio::test]
+async fn local_fs_target_replaces_existing_report_without_truncating_it_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("archive/ai/report.md");
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    std::fs::write(&dest, "old report").unwrap();
+    let old_inode = dir.path().join("old-inode");
+    std::fs::hard_link(&dest, &old_inode).unwrap();
+    let target = LocalFsTarget::new(dir.path().to_path_buf());
+
+    target
+        .publish(&report("archive/ai/report.md", "new report"))
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new report");
+    assert_eq!(std::fs::read_to_string(&old_inode).unwrap(), "old report");
+    let leftovers: Vec<_> = std::fs::read_dir(dest.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name != "report.md")
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temp files left behind: {leftovers:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_fs_target_rejects_parent_symlink_escaping_the_root() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("archive")).unwrap();
+    let target = LocalFsTarget::new(root.path().to_path_buf());
+
+    let error = target
+        .publish(&report("archive/ai/report.md", "body"))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, PublishError::InvalidPath(_)), "{error:?}");
+    assert!(
+        std::fs::read_dir(outside.path()).unwrap().next().is_none(),
+        "nothing may be created outside the output root"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_fs_target_rejects_destination_symlink_escaping_the_root() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.md");
+    std::fs::write(&victim, "untouched").unwrap();
+    std::os::unix::fs::symlink(&victim, root.path().join("report.md")).unwrap();
+    let target = LocalFsTarget::new(root.path().to_path_buf());
+
+    let error = target
+        .publish(&report("report.md", "body"))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, PublishError::InvalidPath(_)), "{error:?}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_fs_target_follows_symlinks_that_stay_inside_the_root() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("real")).unwrap();
+    std::os::unix::fs::symlink(root.path().join("real"), root.path().join("alias")).unwrap();
+    let target = LocalFsTarget::new(root.path().to_path_buf());
+
+    target
+        .publish(&report("alias/report.md", "body"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("real/report.md")).unwrap(),
+        "body"
+    );
+}
+
 fn report(relative_path: &str, markdown_content: &str) -> RenderedReport {
     RenderedReport {
         publish_record_id: 1,

@@ -1,12 +1,15 @@
 mod checks;
 mod warnings;
 
+pub use checks::{PathCollision, parse_target_timezone, report_path_collisions};
+
 pub use warnings::{
     ConfigWarning, config_warnings, inert_config_warnings, prompt_template_warnings,
 };
 
 use checks::{
-    collect_env_checks, collect_general_checks, collect_publish_checks, collect_source_env_checks,
+    collect_effective_feed_url_checks, collect_env_checks, collect_general_checks,
+    collect_publish_checks, collect_source_env_checks,
 };
 
 use crate::{AppConfig, CategoryConfig, ConfigError, DiagnosticReport, EnvConfig, LoadedConfig};
@@ -36,21 +39,25 @@ pub fn run_general_checks(
     category_filter: Option<&str>,
 ) -> Result<(), ConfigError> {
     let mut report = DiagnosticReport::new(Vec::new());
-    collect_general_checks(&mut report, app, categories, env);
+    collect_general_checks(&mut report, app, categories);
     collect_env_checks(&mut report, app, categories, env, category_filter);
     fail_if_needed(report)
 }
 
 /// Structural checks only: schema_version, category/source uniqueness, URL
-/// well-formedness, app value ranges. Skips env-credential presence checks
-/// so infrastructure commands (migrate) can run without OPENAI_* / RSSHUB_BASE_URL.
+/// well-formedness (literal URLs; RSSHub placeholder URLs only need to be
+/// non-empty, R3G-B5), app value ranges.
+/// Independent of the environment, so infrastructure commands (migrate) and
+/// `run` load without OPENAI_* / RSSHUB_BASE_URL, and a set-but-invalid
+/// RSSHUB_BASE_URL fails only the ingest preflight (R3-5). `_env` is kept so
+/// the signature stays stable for existing callers; it is not read.
 pub fn run_structural_checks(
     app: &AppConfig,
     categories: &[CategoryConfig],
-    env: &EnvConfig,
+    _env: &EnvConfig,
 ) -> Result<(), ConfigError> {
     let mut report = DiagnosticReport::new(Vec::new());
-    collect_general_checks(&mut report, app, categories, env);
+    collect_general_checks(&mut report, app, categories);
     fail_if_needed(report)
 }
 
@@ -73,11 +80,18 @@ pub fn run_command_checks(
     match command {
         CommandKind::Ingest => {
             let mut report = DiagnosticReport::new(Vec::new());
+            let category_filter = config.cli_overrides.category_filter.as_deref();
             collect_source_env_checks(
                 &mut report,
                 &config.categories,
                 &config.env,
-                config.cli_overrides.category_filter.as_deref(),
+                category_filter,
+            );
+            collect_effective_feed_url_checks(
+                &mut report,
+                &config.categories,
+                &config.source_secrets,
+                category_filter,
             );
             fail_if_needed(report)
         }
@@ -102,7 +116,7 @@ pub fn run_command_checks(
             // 视为错误。ai.enabled=false 是合法状态，是否允许 ai-run 由 AiRun
             // 分支在调用时单独判断，不应让 doctor 整体失败。
             let mut report = DiagnosticReport::new(Vec::new());
-            collect_general_checks(&mut report, &config.app, &config.categories, &config.env);
+            collect_general_checks(&mut report, &config.app, &config.categories);
             collect_env_checks(
                 &mut report,
                 &config.app,
@@ -508,6 +522,148 @@ mod tests {
             &EnvConfig::default(),
         )
         .expect("structural checks ignore missing RSSHUB_BASE_URL placeholder");
+    }
+
+    fn env_with_rsshub(base_url: &str) -> EnvConfig {
+        let mut env = EnvConfig::default();
+        env.rsshub_base_url = Some(base_url.to_string());
+        env
+    }
+
+    /// R3-5: an RSSHub base URL that is set but invalid is an environment
+    /// problem of ingest, not a structural config error, so `run` (which only
+    /// runs structural checks at load) still reaches ai-run and publish.
+    #[test]
+    fn structural_checks_ignore_invalid_rsshub_base_url_expansion() {
+        run_structural_checks(
+            &app(false),
+            &[category("ai", "{RSSHUB}/feed.xml")],
+            &env_with_rsshub("feeds.internal"),
+        )
+        .expect("structural checks validate the template, not the env expansion");
+    }
+
+    /// R3G-B5: whether a template is a valid URL depends on the base it is
+    /// expanded with (`:notaport` is a port after a bare host but a path
+    /// segment after `https://hub.example/prefix`), so the structural layer,
+    /// which has no base, does not judge it.
+    #[test]
+    fn structural_checks_accept_a_template_whose_validity_depends_on_the_base() {
+        run_structural_checks(
+            &app(false),
+            &[category("ai", "{RSSHUB}:notaport/feed.xml")],
+            &EnvConfig::default(),
+        )
+        .expect("a template is only checked against the real base URL");
+    }
+
+    #[test]
+    fn structural_checks_still_reject_an_empty_feed_url() {
+        let err = run_structural_checks(&app(false), &[category("ai", " ")], &EnvConfig::default())
+            .expect_err("an empty feed_url fails whatever the base");
+        assert!(err.to_string().contains("sources[0].feed_url"), "{err}");
+    }
+
+    #[test]
+    fn general_checks_accept_a_port_like_suffix_after_a_path_prefixed_base() {
+        run_general_checks(
+            &app(false),
+            &[category("ai", "{RSSHUB}:notaport/feed.xml")],
+            &env_with_rsshub("https://hub.example/prefix"),
+            None,
+        )
+        .expect("https://hub.example/prefix:notaport/feed.xml is a valid URL");
+    }
+
+    #[test]
+    fn general_checks_reject_a_port_like_suffix_after_a_bare_base() {
+        let err = run_general_checks(
+            &app(false),
+            &[category("ai", "{RSSHUB}:notaport/feed.xml")],
+            &env_with_rsshub("https://hub.example"),
+            None,
+        )
+        .expect_err("https://hub.example:notaport/feed.xml has an invalid port");
+        let text = err.to_string();
+        assert!(text.contains("sources[0].feed_url"), "{text}");
+        assert!(text.contains("RSSHUB_BASE_URL"), "{text}");
+    }
+
+    /// R3G-B5: `feeds.internal:1200/feed.xml` parses as a URL with the custom
+    /// scheme `feeds.internal` and no host, which the HTTP fetcher cannot
+    /// request.
+    #[test]
+    fn general_checks_reject_an_expansion_without_an_http_scheme() {
+        let categories = [category("ai", "{RSSHUB}/feed.xml")];
+        let env = env_with_rsshub("feeds.internal:1200");
+        run_structural_checks(&app(false), &categories, &env)
+            .expect("structural checks do not depend on the base URL");
+        let err = run_general_checks(&app(false), &categories, &env, None)
+            .expect_err("the expansion is not an http(s) URL");
+        let text = err.to_string();
+        assert!(text.contains("sources[0].feed_url"), "{text}");
+        assert!(text.contains("RSSHUB_BASE_URL"), "{text}");
+        assert!(!text.contains("feeds.internal"), "URL echoed: {text}");
+    }
+
+    #[test]
+    fn general_checks_reject_an_invalid_rsshub_base_url_expansion() {
+        let err = run_general_checks(
+            &app(false),
+            &[category("ai", "{RSSHUB}/feed.xml")],
+            &env_with_rsshub("feeds.internal"),
+            None,
+        )
+        .expect_err("the expanded URL is invalid");
+        let text = err.to_string();
+        assert!(text.contains("sources[0].feed_url"), "{text}");
+        assert!(text.contains("RSSHUB_BASE_URL"), "{text}");
+    }
+
+    /// After loading, placeholders are already expanded (with whatever
+    /// RSSHUB_BASE_URL held), so the ingest preflight checks the effective
+    /// URL of every enabled source.
+    #[test]
+    fn ingest_command_checks_reject_a_feed_url_broken_by_expansion() {
+        let config = loaded(
+            app(false),
+            vec![category("ai", "feeds.internal/feed.xml")],
+            env_with_rsshub("feeds.internal"),
+        );
+        let err = run_command_checks(&config, CommandKind::Ingest, &CommandFlags::default())
+            .expect_err("ingest preflight rejects the effective URL");
+        let text = err.to_string();
+        assert!(text.contains("sources[0].feed_url"), "{text}");
+        assert!(text.contains("RSSHUB_BASE_URL"), "{text}");
+    }
+
+    /// After loading, only the loader knows which URLs came from a
+    /// placeholder; those must be http(s) URLs with a host.
+    #[test]
+    fn ingest_command_checks_reject_an_expansion_without_an_http_scheme() {
+        let mut config = loaded(
+            app(false),
+            vec![category("ai", "feeds.internal:1200/feed.xml")],
+            env_with_rsshub("feeds.internal:1200"),
+        );
+        config.source_secrets.mark_rsshub_expanded("ai", "source");
+        let err = run_command_checks(&config, CommandKind::Ingest, &CommandFlags::default())
+            .expect_err("ingest preflight rejects a custom-scheme expansion");
+        let text = err.to_string();
+        assert!(text.contains("sources[0].feed_url"), "{text}");
+        assert!(text.contains("RSSHUB_BASE_URL"), "{text}");
+    }
+
+    #[test]
+    fn ingest_command_checks_accept_a_valid_effective_feed_url() {
+        let mut config = loaded(
+            app(false),
+            vec![category("ai", "https://rsshub.example.test/feed.xml")],
+            env_with_rsshub("https://rsshub.example.test"),
+        );
+        config.source_secrets.mark_rsshub_expanded("ai", "source");
+        run_command_checks(&config, CommandKind::Ingest, &CommandFlags::default())
+            .expect("valid effective URL passes");
     }
 
     #[test]

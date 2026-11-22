@@ -31,6 +31,10 @@
 - 重复分类 key → exit 78
 - 非法 `feed_url` → exit 78
 - `{RSSHUB}` / 别名 + 缺 `RSSHUB_BASE_URL` → exit 78
+- `{RSSHUB}` / 别名 + `RSSHUB_BASE_URL` 已设置但展开后不是 http(s) + host 的 URL（如缺协议的 `feeds.internal`、被解析成
+  自定义 scheme 的 `feeds.internal:1200`）→ exit 78（`sources[i].feed_url`，不回显 URL）；结构阶段对占位符模板只查非空，
+  不用固定探针 base 解析（合法性取决于真实 base，如 `{RSSHUB}:notaport/feed.xml` 配带路径前缀的 base 合法），因此
+  `run` / `migrate` 不被阻断，由 ingest preflight 报（R3G-B5，见 plan/06 §7）
 - `path_template` 含 `..` / 反斜杠 / 无日期 token → exit 78
 - `report_template` 缺 `{items}` / 未知 placeholder / 大括号不匹配 → exit 78
 - 跨分类 path 冲突 → exit 78

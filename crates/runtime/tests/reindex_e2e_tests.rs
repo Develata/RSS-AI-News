@@ -137,7 +137,7 @@ async fn reindex_lease_reclaim_preserves_checkpoint_and_started_at_for_resume() 
         .await
         .unwrap()
         .unwrap();
-    repo.advance_checkpoint(job_id, "worker-a", 100, started)
+    repo.advance_checkpoint(job_id, "worker-a", 100, started, lease_expires)
         .await
         .unwrap();
 
@@ -431,6 +431,152 @@ async fn reindex_dry_run_then_real_run_promotes_without_polluting_rule_versions_
     assert_eq!(
         total, 1,
         "dry-run + 1 次 real run 后 rule_versions 应仅有 1 行（real run 的 active）"
+    );
+}
+
+// === C4: plain rerun resumes from the checkpoint (05-storage §8.1) ===
+
+/// Four entries with stale link hashes and a link_hash job for rule sha
+/// "sha" that crashed after checkpointing the second entry. The lease
+/// expires `lease_secs` after an hour ago.
+async fn crashed_link_hash_job(pool: &SqlitePool, lease_secs: i64) -> (i64, Vec<i64>) {
+    let source = common::insert_source(
+        pool,
+        common::insert_config_rule(pool).await,
+        "resume",
+        "https://example.com/feed.xml",
+    )
+    .await;
+    let mut entries = Vec::new();
+    for uid in ["r1", "r2", "r3", "r4"] {
+        entries.push(
+            common::seed_pending_fetch_entry(pool, source, uid, &format!("stale-{uid}"), None)
+                .await,
+        );
+    }
+    let repo = rss_ai_news_storage::ReindexJobRepo::new(pool.clone());
+    let started = OffsetDateTime::now_utc() - Duration::hours(1);
+    let lease = started + Duration::seconds(lease_secs);
+    let job = repo
+        .start_reindex_tx(
+            "reindex",
+            "reindex-link_hash-1",
+            "d",
+            "sha",
+            "link_hash",
+            started,
+        )
+        .await
+        .unwrap();
+    repo.claim_by_id(job.job_id, "crashed-worker", started, lease)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        repo.advance_checkpoint(job.job_id, "crashed-worker", entries[1], started, lease)
+            .await
+            .unwrap()
+    );
+    (job.job_id, entries)
+}
+
+async fn link_hash(pool: &SqlitePool, id: i64) -> String {
+    sqlx::query_scalar("SELECT link_hash FROM feed_entries WHERE id = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn plain_rerun_resumes_crashed_job_past_its_checkpoint() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let (job_id, entries) = crashed_link_hash_job(&pool, 60).await;
+
+    // Same rule sha, a fresh auto-generated tag — exactly what the CLI passes.
+    let summary = reindex(&pool)
+        .run(reindex_opts(ReindexTarget::LinkHash, 1))
+        .await
+        .expect("rerun should resume instead of conflicting");
+
+    assert_eq!(summary.reindex_job_id, job_id);
+    assert_eq!(summary.scanned, 2, "only rows after the checkpoint");
+    assert_eq!(summary.updated, 2);
+    assert_eq!(link_hash(&pool, entries[0]).await, "stale-r1");
+    assert_eq!(link_hash(&pool, entries[1]).await, "stale-r2");
+    assert_ne!(link_hash(&pool, entries[2]).await, "stale-r3");
+    assert_ne!(link_hash(&pool, entries[3]).await, "stale-r4");
+    let (state, last, attempts, rule_status): (String, Option<i64>, i64, String) = sqlx::query_as(
+        "SELECT j.state, j.last_processed_id, j.attempt_count, rv.status \
+             FROM reindex_jobs j JOIN rule_versions rv ON rv.id = j.rule_version_id \
+             WHERE j.id = ?",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "completed");
+    assert_eq!(last, Some(entries[3]));
+    assert_eq!(attempts, 2);
+    assert_eq!(rule_status, "active");
+    assert_eq!(summary.new_rule_version_id, {
+        let id: i64 = sqlx::query_scalar("SELECT rule_version_id FROM reindex_jobs WHERE id = ?")
+            .bind(job_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        id
+    });
+}
+
+#[tokio::test]
+async fn rerun_with_another_rule_conflicts_and_names_the_abort() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let (job_id, entries) = crashed_link_hash_job(&pool, 60).await;
+    let mut opts = reindex_opts(ReindexTarget::LinkHash, 1);
+    opts.new_rule_version_sha256 = "another-rule".to_string();
+
+    let error = reindex(&pool).run(opts).await.expect_err("must conflict");
+
+    match error {
+        rss_ai_news_runtime::RuntimeError::Storage(
+            rss_ai_news_storage::StorageError::Conflict { table, key },
+        ) => {
+            assert_eq!(table, "reindex_jobs");
+            assert!(key.contains(&format!("reindex --abort {job_id}")), "{key}");
+            assert!(key.contains("another-rule"), "{key}");
+        }
+        other => panic!("expected a reindex_jobs conflict, got {other:?}"),
+    }
+    // Nothing was touched: rows, checkpoint, attempts.
+    assert_eq!(link_hash(&pool, entries[2]).await, "stale-r3");
+    let (last, attempts): (Option<i64>, i64) =
+        sqlx::query_as("SELECT last_processed_id, attempt_count FROM reindex_jobs WHERE id = ?")
+            .bind(job_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((last, attempts), (Some(entries[1]), 1));
+}
+
+#[tokio::test]
+async fn rerun_while_a_live_worker_holds_the_lease_conflicts() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let (job_id, _) = crashed_link_hash_job(&pool, 7 * 3600).await;
+
+    let error = reindex(&pool)
+        .run(reindex_opts(ReindexTarget::LinkHash, 1))
+        .await
+        .expect_err("must not take over a live lease");
+
+    assert!(
+        matches!(
+            &error,
+            rss_ai_news_runtime::RuntimeError::Storage(
+                rss_ai_news_storage::StorageError::Conflict { key, .. }
+            ) if key.contains("live lease") && key.contains(&format!("--abort {job_id}"))
+        ),
+        "{error:?}"
     );
 }
 

@@ -17,12 +17,12 @@ pub fn parse_feed(bytes: &[u8], feed_kind: FeedKind) -> Result<Vec<FeedEntryMeta
 
     let mut entries = Vec::with_capacity(feed.entries.len());
     for entry in feed.entries {
-        let Some(first_link) = entry.links.first() else {
+        let Some(article_link) = article_link(&entry.links) else {
             tracing::debug!(feed_entry_uid = %entry.id, "skip feed entry without link");
             continue;
         };
 
-        let link_raw = first_link.href.clone();
+        let link_raw = article_link.href.clone();
         let title_raw = entry
             .title
             .map(|title| title.content)
@@ -49,6 +49,52 @@ pub fn parse_feed(bytes: &[u8], feed_kind: FeedKind) -> Result<Vec<FeedEntryMeta
     }
 
     Ok(entries)
+}
+
+/// The entry's article URL among its links. Atom entries may list `self`,
+/// `enclosure`, `related`… before the article: prefer `rel="alternate"` (a
+/// missing `rel` means alternate, and the IANA IRI form is the same relation,
+/// RFC 4287 §4.2.7.2), among those an HTML
+/// one; without any alternate, the first HTML link; else the first link.
+/// RSS and JSON Feed entries carry a single rel-less link, so they are
+/// unaffected.
+fn article_link(links: &[feed_rs::model::Link]) -> Option<&feed_rs::model::Link> {
+    let is_alternate =
+        |link: &&feed_rs::model::Link| link.rel.as_deref().is_none_or(is_alternate_rel);
+    let is_html = |link: &&feed_rs::model::Link| {
+        link.media_type.as_deref().is_some_and(|media_type| {
+            let essence = media_type
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            essence == "text/html" || essence == "application/xhtml+xml"
+        })
+    };
+    links
+        .iter()
+        .filter(is_alternate)
+        .find(is_html)
+        .or_else(|| links.iter().find(is_alternate))
+        .or_else(|| links.iter().find(is_html))
+        .or_else(|| links.first())
+}
+
+/// `rel` names the `alternate` relation (R2-S13): the registered name
+/// (case-insensitive) or its RFC 4287 §4.2.7.2 IRI
+/// `http://www.iana.org/assignments/relation/alternate` (scheme and host
+/// case-insensitive, path exact, RFC 3986 §6.2.2.1).
+fn is_alternate_rel(rel: &str) -> bool {
+    const IANA: &str = "http://www.iana.org/";
+    let rel = rel.trim();
+    if rel.eq_ignore_ascii_case("alternate") {
+        return true;
+    }
+    rel.len() > IANA.len()
+        && rel.is_char_boundary(IANA.len())
+        && rel[..IANA.len()].eq_ignore_ascii_case(IANA)
+        && &rel[IANA.len()..] == "assignments/relation/alternate"
 }
 
 /// 仅当 atom `<content>` 是文本/HTML/XML 类型时返回其 body 作为摘要回退。
@@ -113,6 +159,47 @@ mod tests {
         assert_eq!(entries[0].feed_entry_uid, "json-1");
         assert_eq!(entries[0].title_raw, "JSON item 1");
         assert_eq!(entries[0].link_raw, "https://example.com/json/1");
+    }
+
+    #[test]
+    fn atom_alternate_rel_iri_counts_as_alternate() {
+        // R2-S13: RFC 4287 §4.2.7.2 — a registered name equals the IANA IRI
+        // `http://www.iana.org/assignments/relation/<name>`. An HTML `self`
+        // link listed first must not win over the IRI-form alternate.
+        let atom = br#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>IRI</title>
+  <entry>
+    <id>iri-1</id>
+    <title>x</title>
+    <link rel="self" type="text/html" href="https://example.com/self"/>
+    <link rel="http://www.iana.org/assignments/relation/alternate" type="text/html" href="https://example.com/article"/>
+  </entry>
+</feed>"#;
+
+        let entries = parse_feed(atom, FeedKind::Atom).expect("atom should parse");
+
+        assert_eq!(entries[0].link_raw, "https://example.com/article");
+    }
+
+    #[test]
+    fn rel_alternate_forms() {
+        for rel in [
+            "alternate",
+            " Alternate ",
+            "http://www.iana.org/assignments/relation/alternate",
+            "HTTP://WWW.IANA.ORG/assignments/relation/alternate",
+        ] {
+            assert!(is_alternate_rel(rel), "{rel}");
+        }
+        for rel in [
+            "self",
+            "http://www.iana.org/assignments/relation/self",
+            "http://www.iana.org/assignments/relation/Alternate",
+            "https://example.com/alternate",
+        ] {
+            assert!(!is_alternate_rel(rel), "{rel}");
+        }
     }
 
     #[test]
@@ -187,6 +274,60 @@ mod tests {
         assert_eq!(
             entries[0].summary_raw, None,
             "non-textual <content> must not populate summary_raw"
+        );
+    }
+
+    /// A9: the article link is the `alternate` link (a missing `rel` means
+    /// alternate, RFC 4287 §4.2.7.2), not whichever `<link>` comes first.
+    #[test]
+    fn atom_prefers_alternate_link_over_self_and_enclosure() {
+        let atom = br#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Links</title>
+  <entry>
+    <id>links-1</id>
+    <title>explicit alternate</title>
+    <link rel="self" type="application/atom+xml" href="https://example.com/entries/1.atom"/>
+    <link rel="enclosure" type="audio/mpeg" href="https://cdn.example.com/1.mp3"/>
+    <link rel="alternate" type="text/html" href="https://example.com/posts/1"/>
+  </entry>
+  <entry>
+    <id>links-2</id>
+    <title>implicit alternate</title>
+    <link rel="self" href="https://example.com/entries/2.atom"/>
+    <link href="https://example.com/posts/2"/>
+  </entry>
+  <entry>
+    <id>links-3</id>
+    <title>html alternate wins over other alternates</title>
+    <link rel="alternate" type="application/pdf" href="https://example.com/posts/3.pdf"/>
+    <link rel="alternate" type="text/html" href="https://example.com/posts/3"/>
+  </entry>
+  <entry>
+    <id>links-4</id>
+    <title>no alternate: html, else first</title>
+    <link rel="self" href="https://example.com/entries/4.atom"/>
+    <link rel="related" type="text/html" href="https://example.com/posts/4"/>
+  </entry>
+  <entry>
+    <id>links-5</id>
+    <title>only self</title>
+    <link rel="self" href="https://example.com/entries/5.atom"/>
+  </entry>
+</feed>"#;
+
+        let entries = parse_feed(atom, FeedKind::Atom).expect("atom should parse");
+        let links: Vec<&str> = entries.iter().map(|e| e.link_raw.as_str()).collect();
+
+        assert_eq!(
+            links,
+            [
+                "https://example.com/posts/1",
+                "https://example.com/posts/2",
+                "https://example.com/posts/3",
+                "https://example.com/posts/4",
+                "https://example.com/entries/5.atom",
+            ]
         );
     }
 

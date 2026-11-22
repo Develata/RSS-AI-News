@@ -9,10 +9,11 @@ use rss_ai_news_storage::{
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 
-use super::PublishFlow;
 use super::dto::{PublishStoreLocalOptions, PublishStoreLocalOutcome, PublishStoreLocalStatus};
-use super::render_templates_from_ctx;
+use super::{OwnershipGuard, PublishFlow, render_templates_from_ctx, rendered_timestamp};
 use crate::events::RunEventEmitter;
+
+const PHASE: &str = "store_local";
 
 impl PublishFlow {
     pub async fn store_local(&self, opts: PublishStoreLocalOptions) -> PublishStoreLocalOutcome {
@@ -92,10 +93,40 @@ impl PublishFlow {
             }
         };
 
+        match self
+            .guard_snapshot_ownership(
+                claimed.id,
+                &owner,
+                PublishState::Rendered,
+                false,
+                PHASE,
+                &emitter,
+            )
+            .await
+        {
+            OwnershipGuard::Clear => {}
+            OwnershipGuard::Conflict { article_id } => {
+                return PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::ArticleConflict { article_id },
+                    local_path: None,
+                    item_count: 0,
+                };
+            }
+            OwnershipGuard::Failed { error_kind } => {
+                return PublishStoreLocalOutcome {
+                    publish_record_id: claimed.id,
+                    status: PublishStoreLocalStatus::Failed { error_kind },
+                    local_path: None,
+                    item_count: 0,
+                };
+            }
+        }
+
         let render_config = RenderConfig {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
-            generated_at: opts.generated_at,
+            generated_at: rendered_timestamp(claimed.rendered_at, opts.generated_at),
             templates: render_templates_from_ctx(&self.ctx, opts.path_template.as_deref()),
         };
         let report = match rss_ai_news_report::rebuild_markdown(
@@ -108,7 +139,7 @@ impl PublishFlow {
         {
             Ok(report) => report,
             Err(error) => {
-                self.fail_claimed(claimed.id, &owner, &error, now, &emitter)
+                self.fail_claimed(claimed.id, &owner, &error, PHASE, now, &emitter)
                     .await;
                 return PublishStoreLocalOutcome {
                     publish_record_id: claimed.id,
@@ -129,25 +160,15 @@ impl PublishFlow {
         {
             Ok(items) => items,
             Err(error) => {
-                if let Err(persist_err) = self
-                    .ctx
-                    .publish_record_repo
-                    .release_permanent_failure(
-                        claimed.id,
-                        &owner,
-                        &error.to_string(),
-                        error.error_kind(),
-                        now,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        publish_record_id = claimed.id,
-                        phase = "store_local.list_items",
-                        ?persist_err,
-                        "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
-                    );
-                }
+                self.release_classified_failure(
+                    claimed.id,
+                    &owner,
+                    &error,
+                    "store_local.list_items",
+                    now,
+                    &emitter,
+                )
+                .await;
                 return PublishStoreLocalOutcome {
                     publish_record_id: claimed.id,
                     status: PublishStoreLocalStatus::Failed {

@@ -24,7 +24,7 @@ use rss_ai_news_runtime::{
 use rss_ai_news_storage::{
     ClaimedDecision, DecisionArticle, DecisionExecution, DecisionFailure, DecisionIdentity,
     DecisionResultRepo, DecisionResultRepository, DecisionResultState, DecisionSuccess,
-    RunEventRepo, StorageError, StoragePool,
+    GeneratedPage, RunEventRepo, StorageError, StoragePool,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -177,6 +177,7 @@ fn plan(category: &str, questions: Vec<QuestionSpec>) -> CategoryPlan {
 fn settings() -> DecisionRunSettings {
     DecisionRunSettings {
         concurrency: 2,
+        max_state_chars: 6000,
         lease_seconds: 120,
         max_attempts: 3,
         request_timeout: Duration::from_secs(10),
@@ -193,6 +194,12 @@ struct Faults {
     article_error: bool,
     article_timeout: bool,
     article_hang: bool,
+    /// Records the `after_id` of every generation page.
+    generation_cursors: Option<Arc<Mutex<Vec<i64>>>>,
+    /// Records the `max_body_chars` of every article read.
+    body_limits: Option<Arc<Mutex<Vec<u32>>>>,
+    /// `purge_expired_raw` reports a full batch without deleting anything.
+    purge_reports_full: bool,
 }
 
 struct FaultyRepo {
@@ -221,11 +228,15 @@ impl DecisionResultRepository for FaultyRepo {
         identity: &DecisionIdentity,
         execution: &DecisionExecution,
         cutoff: OffsetDateTime,
+        after_id: i64,
         limit: u32,
         now: OffsetDateTime,
-    ) -> Result<u64, StorageError> {
+    ) -> Result<GeneratedPage, StorageError> {
+        if let Some(cursors) = &self.faults.generation_cursors {
+            cursors.lock().unwrap().push(after_id);
+        }
         self.inner
-            .generate_pending(identity, execution, cutoff, limit, now)
+            .generate_pending(identity, execution, cutoff, after_id, limit, now)
             .await
     }
     async fn claim(
@@ -293,9 +304,22 @@ impl DecisionResultRepository for FaultyRepo {
         now: OffsetDateTime,
         limit: u32,
     ) -> Result<u64, StorageError> {
+        if self.faults.purge_reports_full {
+            return Ok(u64::from(limit));
+        }
         self.inner.purge_expired_raw(now, limit).await
     }
-    async fn load_article(&self, article_id: i64) -> Result<Option<DecisionArticle>, StorageError> {
+    async fn expired_raw_remains(&self, now: OffsetDateTime) -> Result<bool, StorageError> {
+        self.inner.expired_raw_remains(now).await
+    }
+    async fn load_article(
+        &self,
+        article_id: i64,
+        max_body_chars: u32,
+    ) -> Result<Option<DecisionArticle>, StorageError> {
+        if let Some(limits) = &self.faults.body_limits {
+            limits.lock().unwrap().push(max_body_chars);
+        }
         if self.faults.article_error {
             return Err(injected());
         }
@@ -305,7 +329,7 @@ impl DecisionResultRepository for FaultyRepo {
         if self.faults.article_hang {
             tokio::time::sleep(Duration::from_secs(600)).await;
         }
-        self.inner.load_article(article_id).await
+        self.inner.load_article(article_id, max_body_chars).await
     }
     async fn count_other_identity_pending(
         &self,
@@ -499,6 +523,113 @@ async fn the_request_budget_caps_calls() {
     assert!(summary.budget_exhausted);
     // Generation follows the windows: no backlog of pending rows.
     assert_eq!(states(&pool).await.len(), 3);
+}
+
+/// C7 (ADR 0011 §5): within one run, every generation page continues after
+/// the previous page instead of rescanning from the first article, and no
+/// candidate is skipped.
+#[tokio::test]
+async fn generation_continues_from_the_cursor_within_a_run() {
+    let (_dir, pool) = make_test_pool().await;
+    seed(&pool, "ai", 5).await;
+    let cursors = Arc::new(Mutex::new(Vec::new()));
+    let mut settings = settings();
+    settings.concurrency = 2;
+    let summary = run_with(
+        &pool,
+        ScriptedClient::new([]),
+        settings,
+        vec![plan("ai", questions())],
+        10,
+        Faults {
+            generation_cursors: Some(Arc::clone(&cursors)),
+            ..Faults::default()
+        },
+    )
+    .await;
+    assert_eq!(summary.categories[0].succeeded, 5);
+    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM articles ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    // Pages of two: 0 → ids[1] → ids[3] → ids[4] (empty, the end).
+    assert_eq!(*cursors.lock().unwrap(), vec![0, ids[1], ids[3], ids[4]]);
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM decision_results")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 5);
+}
+
+/// C8: the article body is read only up to `max_state_chars + 1` characters.
+#[tokio::test]
+async fn the_body_is_read_only_up_to_one_char_past_the_state_limit() {
+    let (_dir, pool) = make_test_pool().await;
+    seed(&pool, "ai", 1).await;
+    let limits = Arc::new(Mutex::new(Vec::new()));
+    let summary = run_with(
+        &pool,
+        ScriptedClient::new([]),
+        settings(),
+        vec![plan("ai", questions())],
+        10,
+        Faults {
+            body_limits: Some(Arc::clone(&limits)),
+            ..Faults::default()
+        },
+    )
+    .await;
+    assert_eq!(summary.categories[0].succeeded, 1);
+    assert_eq!(*limits.lock().unwrap(), vec![6001]);
+}
+
+/// C8 (ADR 0011 §8): `raw_gc_backlog` only when the cap was reached and an
+/// expired body still remains.
+#[tokio::test]
+async fn raw_gc_backlog_needs_a_remaining_expired_body() {
+    for remains in [false, true] {
+        let (_dir, pool) = make_test_pool().await;
+        seed(&pool, "ai", 1).await;
+        if remains {
+            let article: i64 = sqlx::query_scalar("SELECT id FROM articles LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO decision_policies (policy_version, canonical_json) VALUES (?, '{}')",
+            )
+            .bind("e".repeat(64))
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO decision_results (article_id, category_key, policy_version, \
+                 execution_key, provider, requested_model, laya_max_len, state, \
+                 raw_response, raw_response_expires_at) \
+                 VALUES (?, 'ai', ?, 'old', 'laya', 'm', 2048, 'failed', '{}', ?)",
+            )
+            .bind(article)
+            .bind("e".repeat(64))
+            .bind(OffsetDateTime::now_utc() - time::Duration::days(1))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let summary = run_with(
+            &pool,
+            ScriptedClient::new([]),
+            settings(),
+            vec![plan("ai", questions())],
+            10,
+            Faults {
+                purge_reports_full: true,
+                ..Faults::default()
+            },
+        )
+        .await;
+        assert_eq!(summary.raw_purged, 1000, "the cap was reached");
+        assert_eq!(summary.raw_gc_backlog, remains);
+    }
 }
 
 #[tokio::test]

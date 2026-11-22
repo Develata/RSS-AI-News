@@ -74,6 +74,7 @@ fallback 把一次 attempt 从 1 次 HTTP 变成最多 `1+len(fallback)` 次；�
 - **运行前**（组装完实际 `batch_size`〔CLI `--batch-size`〕、并发〔`app.http.concurrent_fetches`〕、
   chain 长度后）fail-fast 校验：
   `ceil(batch_size / concurrent) × request_timeout_seconds × (1 + len(fallback)) ≤ lease.ai_duration_seconds`。
+  （extract 的同类校验见 [02-extract §5.2](./02-extract.md)。）
   （不能只做配置期静态校验——batch_size 是运行时 CLI 参数。）
 - 每次 fallback 前校验 lease 仍持有（`assert_lease_held`），防 lease 过期被 reclaim 后另一 worker
   重复 claim 导致重复扣费 / release 冲突。

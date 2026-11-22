@@ -76,6 +76,25 @@ fn ai_run_summary_with_claim_error_exits_nonzero() {
 }
 
 #[test]
+fn ai_run_summary_with_release_failures_exits_nonzero() {
+    let mut summary = ai_summary();
+    summary.process_release_failed = 2;
+
+    assert_eq!(summary.exit_code(), ExitCode::RuntimeError);
+    assert_eq!(success_envelope("ai-run", &summary)["status"], "fail");
+    assert_pretty_contains(&summary, "2 AI result releases failed");
+}
+
+#[test]
+fn ai_run_summary_with_lost_leases_still_succeeds() {
+    let mut summary = ai_summary();
+    summary.process_lease_lost = 1;
+
+    assert_eq!(summary.exit_code(), ExitCode::Success);
+    assert_pretty_contains(&summary, "Lease lost:            1");
+}
+
+#[test]
 fn publish_summary_serializes_stages() {
     let value = serde_json::to_value(publish_summary()).unwrap();
     assert_eq!(value["stages"][0]["stage"], "init");
@@ -418,6 +437,9 @@ fn ai_summary() -> AiRunCommandSummary {
         process_retryable_failed: 0,
         process_permanent_failed: 0,
         process_tasks_panicked: 0,
+        process_lease_lost: 0,
+        process_release_failed: 0,
+        process_storage_failed: 0,
         task_gen_insert_failed: 0,
         task_gen_error: None,
         process_claim_error: None,
@@ -579,6 +601,9 @@ fn run_summary() -> RunCommandSummary {
             tasks_panicked: 0,
             extract_claim_error: None,
             sources_storage_failed: 0,
+            extract_storage_failed: 0,
+            extract_lease_lost: 0,
+            extract_lease_too_short: false,
             duration_seconds: 1.0,
         }),
         ai_run: Some(ai_summary()),

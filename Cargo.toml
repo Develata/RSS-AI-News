@@ -62,6 +62,10 @@ toml = "0.8"
 
 # Time
 time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+# IANA time zones for the default report date and `target_timezone` validation.
+# The bundled tzdb keeps zone lookups working without system zoneinfo
+# (Windows, minimal images); the system database is used when present.
+jiff = { version = "0.2.38", features = ["tzdb-bundle-always"] }
 
 # Logging & observability
 tracing = "0.1"

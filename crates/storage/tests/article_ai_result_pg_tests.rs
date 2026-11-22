@@ -15,7 +15,7 @@ mod common;
 use common::pg::{PgTestContext, make_pg_test_pool};
 use rss_ai_news_storage::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
-    ClaimRequest, NewAiResult,
+    ClaimRequest, NewAiResult, ShareSide, ShareStage,
 };
 use time::OffsetDateTime;
 
@@ -284,6 +284,7 @@ async fn pg_insert_pending_and_advance_rolls_back_when_article_not_persisted() {
                 output_schema_version: schema_id,
                 model_id: "gpt-4".to_string(),
             },
+            30,
             now,
         )
         .await
@@ -343,6 +344,7 @@ async fn pg_insert_pending_and_advance_article_atomically() {
                 output_schema_version: schema_id,
                 model_id: "gpt-4".to_string(),
             },
+            30,
             now,
         )
         .await
@@ -358,6 +360,348 @@ async fn pg_insert_pending_and_advance_article_atomically() {
         .await
         .unwrap();
     assert_eq!(state, "ai_pending");
+
+    ctx.cleanup().await;
+}
+
+/// C6：claim 只锁 `article_ai_results` 行（`FOR UPDATE OF aar`）。另一事务锁住
+/// 所属 feed_sources / articles 行时，可领取的 AI 行仍须被领取，而不是被
+/// SKIP LOCKED 当作已锁跳过（worker 会把空批次当成队列耗尽提前结束）。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_claim_is_not_hidden_by_locked_source_or_article_rows() {
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "lock-of").await;
+    let article_id = seed_article(&ctx, "lock-of", "ai_pending").await;
+    let repo = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .insert_pending(&NewAiResult {
+            article_id,
+            prompt_version: prompt_id,
+            output_schema_version: schema_id,
+            model_id: "gpt-4".to_string(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Connection 1 holds row locks on the article and its source (as an
+    // ingest / publish transaction would) and keeps its transaction open.
+    let mut locker = ctx.pg_pool().begin().await.unwrap();
+    sqlx::query(
+        "SELECT a.id FROM articles a \
+         JOIN feed_entries fe ON fe.id = a.origin_feed_entry_id \
+         JOIN feed_sources fs ON fs.id = fe.source_id \
+         WHERE a.id = $1 FOR UPDATE OF a, fs",
+    )
+    .bind(article_id)
+    .fetch_one(&mut *locker)
+    .await
+    .unwrap();
+
+    // Connection 2 claims.
+    let now = OffsetDateTime::now_utc();
+    let claimed = repo
+        .claim_pending(
+            &ClaimRequest {
+                owner: "worker-B".to_string(),
+                now,
+                lease_expires_at: lease_expires(now),
+                batch_size: 4,
+                max_attempts: 3,
+            },
+            "ai",
+        )
+        .await
+        .expect("pg claim_pending");
+    locker.rollback().await.unwrap();
+
+    assert_eq!(
+        claimed.len(),
+        1,
+        "locked parent rows must not hide the AI row"
+    );
+    assert_eq!(claimed[0].id, id);
+    ctx.cleanup().await;
+}
+
+/// C9：PG 的 publish 窗口份额 SQL——fresh 列表（新插入与对账同列，来源时间升序 + 游标，R4-3）、
+/// fresh claim（来源时间升序，`FOR UPDATE OF aar`）与两个 batch=1 轮换信号。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_fresh_share_lists_claims_and_signals_by_source_time() {
+    use rss_ai_news_storage::{ArticleRepo, ArticleRepository};
+
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "fresh").await;
+    let ai = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let articles = ArticleRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let since = now - time::Duration::hours(48);
+    let window = rss_ai_news_storage::FreshWindow { since, until: now };
+    let mut ids = Vec::new();
+    // (tag, source time): old backlog, late fresh, early fresh, future (R2-S1:
+    // after the window's end, so backlog).
+    for (tag, at) in [
+        ("f-old", now - time::Duration::days(10)),
+        ("f-late", now - time::Duration::hours(1)),
+        ("f-early", now - time::Duration::hours(40)),
+        ("f-future", now + time::Duration::hours(2)),
+    ] {
+        let id = seed_article(&ctx, tag, "persisted").await;
+        sqlx::query(
+            "UPDATE feed_entries SET published_at = $1 \
+             WHERE id = (SELECT origin_feed_entry_id FROM articles WHERE id = $2)",
+        )
+        .bind(at)
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    let identity = NewAiResult {
+        article_id: 0,
+        prompt_version: prompt_id,
+        output_schema_version: schema_id,
+        model_id: "gpt-4".to_string(),
+    };
+    let listed = articles
+        .list_fresh_for_ai_task_gen("ai", window, 10, 0)
+        .await
+        .expect("pg fresh list");
+    assert_eq!(
+        listed.iter().map(|c| c.article_id).collect::<Vec<_>>(),
+        [ids[2], ids[1]],
+        "in-window only, earliest source time first"
+    );
+    // R2-B1: the backlog list is the complement (old and future articles).
+    let backlog = articles
+        .list_backlog_for_ai_task_gen("ai", &identity, window, 10, 0)
+        .await
+        .expect("pg backlog list");
+    assert_eq!(
+        backlog
+            .iter()
+            .map(|c| (c.article_id, c.in_window))
+            .collect::<Vec<_>>(),
+        [(ids[0], false), (ids[3], false)]
+    );
+    assert_eq!(
+        ai.last_served_side("ai", ShareStage::Claim).await.unwrap(),
+        None
+    );
+
+    let mut tasks = Vec::new();
+    for id in &ids {
+        tasks.push(
+            ai.insert_pending(&NewAiResult {
+                article_id: *id,
+                ..identity.clone()
+            })
+            .await
+            .unwrap()
+            .unwrap(),
+        );
+    }
+    // R3E-B1: the backlog keeps only out-of-window articles, also once they
+    // have a task of the identity (reconciliation).
+    let backlog = articles
+        .list_backlog_for_ai_task_gen("ai", &identity, window, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        backlog
+            .iter()
+            .map(|c| (c.article_id, c.in_window))
+            .collect::<Vec<_>>(),
+        [(ids[0], false), (ids[3], false)]
+    );
+    // R4-3: in-window reconciliations stay on the fresh list, in the same
+    // source-time order as inserts; the cursor resolves the row's instant.
+    let reconcile = articles
+        .list_fresh_for_ai_task_gen("ai", window, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        reconcile
+            .iter()
+            .map(|c| (c.article_id, c.in_window))
+            .collect::<Vec<_>>(),
+        [(ids[2], true), (ids[1], true)]
+    );
+    let after_first = articles
+        .list_fresh_for_ai_task_gen("ai", window, 10, ids[2])
+        .await
+        .unwrap();
+    assert_eq!(
+        after_first.iter().map(|c| c.article_id).collect::<Vec<_>>(),
+        [ids[1]],
+        "keyset cursor over (source time, article id)"
+    );
+
+    let request = ClaimRequest {
+        owner: "w".to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 1,
+        max_attempts: 3,
+    };
+    // Batch size 1: no state → fresh first; the served side is recorded.
+    let fresh = ai
+        .claim_pending_shared(&request, "ai", since)
+        .await
+        .unwrap();
+    assert_eq!(fresh.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[2]]);
+    assert_eq!(
+        ai.last_served_side("ai", ShareStage::Claim).await.unwrap(),
+        Some(ShareSide::Fresh)
+    );
+    // Next batch leads with the backlog: the out-of-window task.
+    let oldest = ai
+        .claim_pending_shared(&request, "ai", since)
+        .await
+        .unwrap();
+    assert_eq!(oldest.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[0]]);
+    assert_eq!(
+        ai.last_served_side("ai", ShareStage::Claim).await.unwrap(),
+        Some(ShareSide::Backlog)
+    );
+    let fresh = ai
+        .claim_pending_shared(&request, "ai", since)
+        .await
+        .unwrap();
+    assert_eq!(fresh.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[1]]);
+    // The future-dated task is backlog, not fresh (R2-S1).
+    let future = ai
+        .claim_pending_shared(&request, "ai", since)
+        .await
+        .unwrap();
+    assert_eq!(future.iter().map(|c| c.id).collect::<Vec<_>>(), [tasks[3]]);
+    ctx.cleanup().await;
+}
+
+/// C3：身份冲突时按已有行对账仍为 persisted 的 article（PG 加 FOR UPDATE 路径）。
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_insert_conflict_reconciles_persisted_article_with_existing_row() {
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "reconcile").await;
+    let repo = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    for (tag, row_state, keep, score, expected) in [
+        ("rc-pending", "pending", None, None, "ai_pending"),
+        (
+            "rc-high",
+            "succeeded",
+            Some(1),
+            Some(80),
+            "ready_for_publish",
+        ),
+        ("rc-low", "succeeded", Some(1), Some(10), "ai_done"),
+        ("rc-filtered", "filtered", Some(0), None, "publish_skipped"),
+        ("rc-failed", "permanent_failed", None, None, "persisted"),
+    ] {
+        let article_id = seed_article(&ctx, tag, "persisted").await;
+        sqlx::query(
+            "INSERT INTO article_ai_results (article_id, prompt_version, output_schema_version, \
+             model_id, state, keep_decision, importance_score) VALUES ($1, $2, $3, 'gpt-4', $4, $5, $6)",
+        )
+        .bind(article_id)
+        .bind(prompt_id)
+        .bind(schema_id)
+        .bind(row_state)
+        .bind(keep)
+        .bind(score)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+        let item = NewAiResult {
+            article_id,
+            prompt_version: prompt_id,
+            output_schema_version: schema_id,
+            model_id: "gpt-4".to_string(),
+        };
+        let outcome = repo
+            .insert_pending_and_advance_article(&item, 30, now)
+            .await
+            .expect("pg insert conflict");
+        assert!(outcome.ai_result_id.is_none(), "{tag}");
+        assert_eq!(outcome.reconciled, expected != "persisted", "{tag}");
+        let state: String = sqlx::query_scalar("SELECT state FROM articles WHERE id = $1")
+            .bind(article_id)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+        assert_eq!(state, expected, "{tag}");
+    }
+
+    // R2-S3: this identity filtered, another identity kept it with score 90.
+    let two = seed_article(&ctx, "rc-two-ids", "persisted").await;
+    for (model, row_state, keep, score) in [
+        ("gpt-4", "filtered", 0, 0),
+        ("other-model", "succeeded", 1, 90),
+    ] {
+        sqlx::query(
+            "INSERT INTO article_ai_results (article_id, prompt_version, output_schema_version, \
+             model_id, state, keep_decision, importance_score) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(two)
+        .bind(prompt_id)
+        .bind(schema_id)
+        .bind(model)
+        .bind(row_state)
+        .bind(keep)
+        .bind(score)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    }
+    let outcome = repo
+        .insert_pending_and_advance_article(
+            &NewAiResult {
+                article_id: two,
+                prompt_version: prompt_id,
+                output_schema_version: schema_id,
+                model_id: "gpt-4".to_string(),
+            },
+            30,
+            now,
+        )
+        .await
+        .expect("pg reconcile with another success");
+    assert!(outcome.reconciled);
+    let state: String = sqlx::query_scalar("SELECT state FROM articles WHERE id = $1")
+        .bind(two)
+        .fetch_one(ctx.pg_pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "ready_for_publish");
+
+    // backfill：新插入推进 persisted，已发布 article 保持不变且插入保留。
+    let persisted = seed_article(&ctx, "bf-persisted", "persisted").await;
+    let published = seed_article(&ctx, "bf-published", "published").await;
+    for (article_id, expected) in [(persisted, "ai_pending"), (published, "published")] {
+        let outcome = repo
+            .insert_backfill_pending(
+                &NewAiResult {
+                    article_id,
+                    prompt_version: prompt_id,
+                    output_schema_version: schema_id,
+                    model_id: "gpt-4".to_string(),
+                },
+                now,
+            )
+            .await
+            .expect("pg backfill insert");
+        assert!(outcome.ai_result_id.is_some());
+        let state: String = sqlx::query_scalar("SELECT state FROM articles WHERE id = $1")
+            .bind(article_id)
+            .fetch_one(ctx.pg_pool())
+            .await
+            .unwrap();
+        assert_eq!(state, expected);
+    }
 
     ctx.cleanup().await;
 }
@@ -378,7 +722,7 @@ async fn pg_release_success_and_advance_keep_ready_for_publish() {
         model_id: "gpt-4".to_string(),
     };
     let advance_outcome = repo
-        .insert_pending_and_advance_article(&item, now)
+        .insert_pending_and_advance_article(&item, 30, now)
         .await
         .unwrap();
     let ai_result_id = advance_outcome.ai_result_id.unwrap();
@@ -445,7 +789,7 @@ async fn pg_release_success_and_advance_filtered_publish_skipped() {
         model_id: "gpt-4".to_string(),
     };
     let advance_outcome = repo
-        .insert_pending_and_advance_article(&item, now)
+        .insert_pending_and_advance_article(&item, 30, now)
         .await
         .unwrap();
     let ai_result_id = advance_outcome.ai_result_id.unwrap();
@@ -489,5 +833,125 @@ async fn pg_release_success_and_advance_filtered_publish_skipped() {
         .unwrap();
     assert_eq!(state, "publish_skipped");
 
+    ctx.cleanup().await;
+}
+/// R2-S2 on PG: fresh claims order by source time, ties by **article** id
+/// (not task id), and the batch comes back in that order.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_fresh_claim_orders_by_source_time_then_article_id() {
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "order").await;
+    let ai = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let mut ids = Vec::new();
+    for (tag, hours) in [("o-a", 1), ("o-b", 2), ("o-c", 2)] {
+        let id = seed_article(&ctx, tag, "ai_pending").await;
+        sqlx::query(
+            "UPDATE feed_entries SET published_at = $1 \
+             WHERE id = (SELECT origin_feed_entry_id FROM articles WHERE id = $2)",
+        )
+        .bind(now - time::Duration::hours(hours))
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    // Tasks created in reverse: article C owns the lowest task id.
+    for id in ids.iter().rev() {
+        ai.insert_pending(&NewAiResult {
+            article_id: *id,
+            prompt_version: prompt_id,
+            output_schema_version: schema_id,
+            model_id: "gpt-4".to_string(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    }
+    let request = ClaimRequest {
+        owner: "w".to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 3,
+        max_attempts: 3,
+    };
+
+    let claimed = ai
+        .claim_pending_shared(&request, "ai", now - time::Duration::hours(48))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        claimed.iter().map(|c| c.article_id).collect::<Vec<_>>(),
+        [ids[1], ids[2], ids[0]]
+    );
+    ctx.cleanup().await;
+}
+
+/// R4-3 on PG: the fresh task_gen list orders inserts and reconciliations
+/// together by (source time, article id), and paging it one row at a time
+/// with the keyset cursor visits each in-window article once although ids
+/// ascend while source times descend and two rows share one instant.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_fresh_task_gen_list_walks_source_order_with_the_cursor() {
+    use rss_ai_news_storage::{ArticleRepo, ArticleRepository};
+
+    let ctx = make_pg_test_pool().await;
+    let (prompt_id, schema_id) = seed_prompt_rule(&ctx, "walk").await;
+    let ai = ArticleAiResultRepo::new_with_storage(ctx.storage_pool().clone());
+    let articles = ArticleRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let window = rss_ai_news_storage::FreshWindow {
+        since: now - time::Duration::hours(48),
+        until: now,
+    };
+    let mut ids = Vec::new();
+    for (tag, hours) in [
+        ("w-a", 1),
+        ("w-b", 2),
+        ("w-c", 2),
+        ("w-d", 3),
+        ("w-old", 72),
+    ] {
+        let id = seed_article(&ctx, tag, "persisted").await;
+        sqlx::query(
+            "UPDATE feed_entries SET published_at = $1 \
+             WHERE id = (SELECT origin_feed_entry_id FROM articles WHERE id = $2)",
+        )
+        .bind(now - time::Duration::hours(hours))
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    // Mixed kinds: w-c already has a task of the identity (reconciliation).
+    ai.insert_pending(&NewAiResult {
+        article_id: ids[2],
+        prompt_version: prompt_id,
+        output_schema_version: schema_id,
+        model_id: "gpt-4".to_string(),
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    let mut walked = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let page = articles
+            .list_fresh_for_ai_task_gen("ai", window, 1, cursor)
+            .await
+            .unwrap();
+        let Some(row) = page.first() else { break };
+        cursor = row.article_id;
+        walked.push(row.article_id);
+        assert!(walked.len() <= 4, "the walk must end: {walked:?}");
+    }
+
+    assert_eq!(walked, [ids[3], ids[1], ids[2], ids[0]]);
     ctx.cleanup().await;
 }

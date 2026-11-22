@@ -5,9 +5,9 @@ use std::time::Duration as StdDuration;
 use rss_ai_news_domain::dto::extract::{ArticleFetchTask, ExtractedArticle, FallbackArticle};
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_domain::state::{ContentQuality, ExtractorStrategy};
-use rss_ai_news_extractor::{ExtractorError, RawHtmlFetch, summary_fallback};
+use rss_ai_news_extractor::{ExtractorError, RawHtmlFetch, decode_html, summary_fallback};
 use rss_ai_news_storage::{
-    ArticleInsertOutcome, ClaimRequest, ClaimedFeedEntry, NewArticle, build_owner_id,
+    ClaimRequest, ClaimedFeedEntry, EntryPersistOutcome, NewArticle, StorageError, build_owner_id,
     lease_expires_at,
 };
 use serde_json::json;
@@ -27,6 +27,10 @@ pub struct ExtractOptions {
     /// 由 CLI 从 `app.runtime.max_batches_per_run` 传入（F6-3）。
     /// 详见 docs-backup/design/config-schema.md §4.4。
     pub max_batches: u32,
+    /// Only claim entries of this category's sources (`ingest --category`,
+    /// plan/09 §2); `None` = every category. Entries of non-active sources are
+    /// never claimed.
+    pub category_key: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -37,6 +41,16 @@ pub struct ExtractSummary {
     pub dedup_skipped: u32,
     pub retryable_failed: u32,
     pub permanent_failed: u32,
+    /// Releases whose owner guard matched no row: another run reclaimed the
+    /// expired lease, so this run changed nothing (the row is that run's).
+    pub lease_lost: u32,
+    /// Releases that failed with a storage error; the row keeps its lease
+    /// until expiry reclaim returns it to `pending_fetch`.
+    pub release_failed: u32,
+    /// Entries whose outcome involved our own storage failing (article write,
+    /// summary read or the release itself), whatever the final status. The
+    /// CLI reports them as run failures, like `sources_storage_failed`.
+    pub storage_failed: u32,
     /// Tasks that panicked or were cancelled; leases recover on expiry.
     pub tasks_panicked: u32,
     /// 实际执行的批次数（F6-3）。命中 `max_batches` 上限时等于上限值；
@@ -47,9 +61,9 @@ pub struct ExtractSummary {
     /// 配合一条 INFO 日志（cli-semantics §4.4 line 198）让运维知晓本次 run
     /// 是否需要后续调度兜底。
     pub max_batches_reached: bool,
-    /// `true` 表示本 run 至少有一行 retryable 失败；本 run 不再尝试这些行，重试
-    /// 推迟到之后的 run。通常该行已带 cooldown 回到 `pending_fetch`；若 release
-    /// 落空（lease 已被并发 run reclaim），该行不带 cooldown，由其他 run 处理。
+    /// `true` 表示本 run 至少有一行 retryable 失败且其 release 已落库（带 cooldown
+    /// 回到 `pending_fetch`）；本 run 不再尝试这些行，重试推迟到之后的 run。
+    /// release 落空计入 `lease_lost`，不计入此处。
     /// 它不终止循环，因此可与 `max_batches_reached` 同时为 `true`。
     pub retryable_deferred: bool,
     /// `error_kind` when claiming a batch failed; the loop stopped there.
@@ -63,8 +77,54 @@ pub struct ExtractEntryOutcome {
     pub status: ExtractEntryStatus,
     pub article_id: Option<i64>,
     pub error_kind: Option<String>,
+    /// Our own storage failed on this entry's path (see
+    /// [`ExtractSummary::storage_failed`]).
+    pub storage_failed: bool,
 }
 
+impl ExtractEntryOutcome {
+    fn new(
+        feed_entry_id: i64,
+        status: ExtractEntryStatus,
+        article_id: Option<i64>,
+        error_kind: Option<String>,
+    ) -> Self {
+        Self {
+            feed_entry_id,
+            status,
+            article_id,
+            error_kind,
+            storage_failed: false,
+        }
+    }
+
+    /// The owner-guarded release matched no row.
+    fn lease_lost(feed_entry_id: i64, article_id: Option<i64>) -> Self {
+        Self::new(
+            feed_entry_id,
+            ExtractEntryStatus::LeaseLost,
+            article_id,
+            Some("lease_conflict".to_string()),
+        )
+    }
+
+    /// The release itself failed; nothing is known to have landed.
+    fn release_failed(feed_entry_id: i64, article_id: Option<i64>, error: &StorageError) -> Self {
+        Self {
+            storage_failed: true,
+            ..Self::new(
+                feed_entry_id,
+                ExtractEntryStatus::ReleaseFailed,
+                article_id,
+                Some(error.error_kind().to_string()),
+            )
+        }
+    }
+}
+
+/// Outcome of one claimed entry. Every status except `LeaseLost` and
+/// `ReleaseFailed` is reported only after its owner-guarded release returned
+/// `Ok(true)`, i.e. the transition it names has landed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtractEntryStatus {
     Persisted,
@@ -72,6 +132,10 @@ pub enum ExtractEntryStatus {
     DedupSkipped,
     RetryableFailed,
     PermanentFailed,
+    /// Release matched no row: the lease was reclaimed by another run.
+    LeaseLost,
+    /// Release failed with a storage error; the lease expires and is reclaimed.
+    ReleaseFailed,
 }
 
 pub struct ExtractFlow {
@@ -164,7 +228,11 @@ impl ExtractFlow {
             let claimed = match self
                 .ctx
                 .feed_entry_repo
-                .claim_pending_fetch(&request, &excluded.iter().copied().collect::<Vec<_>>())
+                .claim_pending_fetch_in_scope(
+                    &request,
+                    &excluded.iter().copied().collect::<Vec<_>>(),
+                    opts.category_key.as_deref(),
+                )
                 .await
             {
                 Ok(claimed) => claimed,
@@ -240,6 +308,9 @@ impl ExtractFlow {
                     "dedup_skipped": summary.dedup_skipped,
                     "retryable_failed": summary.retryable_failed,
                     "permanent_failed": summary.permanent_failed,
+                    "lease_lost": summary.lease_lost,
+                    "release_failed": summary.release_failed,
+                    "storage_failed": summary.storage_failed,
                     "tasks_panicked": summary.tasks_panicked,
                     "batches_executed": summary.batches_executed,
                     "max_batches_reached": summary.max_batches_reached,
@@ -263,9 +334,15 @@ impl ExtractFlow {
             stage: "extract",
             repo: ctx.event_repo.as_ref(),
         };
-        let retry = RetrySchedule {
-            max_attempts,
-            attempt_count: claimed.attempt_count,
+        let entry = EntryRelease {
+            ctx: &ctx,
+            emitter: &emitter,
+            owner: &owner,
+            feed_entry_id: claimed.id,
+            retry: RetrySchedule {
+                max_attempts,
+                attempt_count: claimed.attempt_count,
+            },
         };
         let fetch_task = ArticleFetchTask {
             feed_entry_id: claimed.id,
@@ -283,23 +360,26 @@ impl ExtractFlow {
                 // 且 feed 摘要可用时降级成文，与下方解析链失败分支对称。
                 // 可重试错误（超时/5xx）不消费摘要——重试仍有机会拿到全文，
                 // W15 预算路径维持不变。
-                if !error.is_retryable()
-                    && let Some(fallback) = load_summary_fallback(&ctx, &fetch_task).await
-                {
-                    tracing::info!(
-                        feed_entry_id = claimed.id,
-                        error_kind = error.error_kind(),
-                        "permanent fetch failure; falling back to feed summary"
-                    );
-                    return persist_fallback(
-                        &ctx, &emitter, &owner, claimed.id, fallback, None, now,
-                    )
-                    .await;
+                if !error.is_retryable() {
+                    match load_summary_fallback(&ctx, &fetch_task).await {
+                        Ok(Some(fallback)) => {
+                            tracing::info!(
+                                feed_entry_id = claimed.id,
+                                error_kind = error.error_kind(),
+                                "permanent fetch failure; falling back to feed summary"
+                            );
+                            return entry.persist_fallback(fallback, None, now).await;
+                        }
+                        Ok(None) => {}
+                        // Reading the summary failed: our storage, not the page,
+                        // decides the release (a transient error is retried).
+                        Err(storage_error) => {
+                            return entry.release_storage_failure(&storage_error, now).await;
+                        }
+                    }
                 }
-                return release_extract_error(
-                    &ctx, &emitter, claimed.id, &owner, error, retry, now,
-                )
-                .await;
+                let retry_at = error.retry_at().and_then(offset_from_system_time);
+                return entry.release_failure_after(&error, retry_at, now).await;
             }
         };
 
@@ -320,70 +400,51 @@ impl ExtractFlow {
         }
         match chain {
             ChainResult::Extracted(article) => {
-                persist_extracted(
-                    &ctx,
-                    &emitter,
-                    &owner,
-                    claimed.id,
-                    article,
-                    html_artifact_id,
-                    now,
-                )
-                .await
-            }
-            ChainResult::Retryable(error) => {
-                release_extract_error(&ctx, &emitter, claimed.id, &owner, error, retry, now).await
-            }
-            ChainResult::Failed(errors) => {
-                if let Some(fallback) = load_summary_fallback(&ctx, &fetch_task).await {
-                    persist_fallback(
-                        &ctx,
-                        &emitter,
-                        &owner,
-                        claimed.id,
-                        fallback,
-                        html_artifact_id,
-                        now,
-                    )
+                entry
+                    .persist_extracted(article, html_artifact_id, now)
                     .await
-                } else {
+            }
+            ChainResult::Retryable(error) => entry.release_failure(&error, now).await,
+            ChainResult::Failed(errors) => match load_summary_fallback(&ctx, &fetch_task).await {
+                Ok(Some(fallback)) => {
+                    entry
+                        .persist_fallback(fallback, html_artifact_id, now)
+                        .await
+                }
+                Ok(None) => {
                     let message = errors
                         .last()
                         .map(ClassifiedError::display_user)
                         .unwrap_or_else(|| "no extractor strategy succeeded".to_string());
-                    release_permanent_failure(
-                        &ctx,
-                        &emitter,
-                        claimed.id,
-                        &owner,
-                        &message,
-                        "html_parse",
-                        now,
-                    )
-                    .await
+                    entry.release_permanent(&message, "html_parse", now).await
                 }
-            }
+                Err(storage_error) => entry.release_storage_failure(&storage_error, now).await,
+            },
         }
     }
 }
 
+/// Reads `summary_raw` lazily (only after a permanent fetch or parse failure).
+/// `Ok(None)`: the entry has no usable summary. `Err`: the read itself failed;
+/// the caller classifies it like any other storage error instead of treating
+/// it as "no summary" (which would terminalize the entry on a transient blip).
 async fn load_summary_fallback(
     ctx: &ExtractDeps,
     task: &ArticleFetchTask,
-) -> Option<FallbackArticle> {
+) -> Result<Option<FallbackArticle>, StorageError> {
     match ctx.feed_entry_repo.find_by_id(task.feed_entry_id).await {
         Ok(Some(entry)) => {
             let mut fallback_task = task.clone();
             fallback_task.summary_raw = entry.summary_raw;
-            summary_fallback(&fallback_task)
+            Ok(summary_fallback(&fallback_task))
         }
-        Ok(None) => None,
+        Ok(None) => Ok(None),
         Err(error) => {
             tracing::warn!(
                 feed_entry_id = task.feed_entry_id,
                 "failed to load fallback summary: {error}"
             );
-            None
+            Err(error)
         }
     }
 }
@@ -399,9 +460,16 @@ fn run_strategy_chain(
     task: &ArticleFetchTask,
     raw: &RawHtmlFetch,
 ) -> ChainResult {
+    // Strategies receive UTF-8: the charset comes from the BOM, the response
+    // Content-Type or the page's <meta> (plan/02 §2.2). The html artifact keeps
+    // the original bytes. An undecodable page is a permanent parse failure.
+    let html = match decode_html(&raw.body_bytes, raw.content_type.as_deref()) {
+        Ok(html) => html,
+        Err(error) => return ChainResult::Failed(vec![error]),
+    };
     let mut errors = Vec::new();
     for strategy in &ctx.strategies {
-        match strategy.extract(task, &raw.body_bytes, &raw.final_url) {
+        match strategy.extract(task, html.as_bytes(), &raw.final_url) {
             Ok(article) if article.body_text.chars().count() >= ctx.min_body_chars as usize => {
                 return ChainResult::Extracted(article);
             }
@@ -430,218 +498,188 @@ async fn write_html_artifact(
     }
 }
 
-async fn persist_extracted(
-    ctx: &ExtractDeps,
-    emitter: &RunEventEmitter<'_>,
-    owner: &str,
+/// Everything one claimed entry's release needs. Borrowed for the duration
+/// of `process_entry`; one shared lifetime suffices because the emitter and
+/// the owner string both outlive every call made through this struct.
+struct EntryRelease<'a> {
+    ctx: &'a ExtractDeps,
+    emitter: &'a RunEventEmitter<'a>,
+    owner: &'a str,
     feed_entry_id: i64,
-    article: ExtractedArticle,
-    html_artifact_id: Option<i64>,
-    now: OffsetDateTime,
-) -> ExtractEntryOutcome {
-    let new_article = NewArticle {
-        content_hash: article.content_hash,
-        canonical_link: article.canonical_link,
-        title: article.title,
-        body_text: article.body_text,
-        body_html_artifact_id: html_artifact_id,
-        extractor_strategy: strategy_to_str(article.extractor_strategy).to_string(),
-        extractor_version: 1,
-        content_quality: quality_to_str(article.content_quality).to_string(),
-        word_count: i64::from(article.word_count),
-        origin_feed_entry_id: feed_entry_id,
-    };
-    persist_article(ctx, emitter, owner, feed_entry_id, new_article, false, now).await
-}
-
-async fn persist_fallback(
-    ctx: &ExtractDeps,
-    emitter: &RunEventEmitter<'_>,
-    owner: &str,
-    feed_entry_id: i64,
-    fallback: FallbackArticle,
-    html_artifact_id: Option<i64>,
-    now: OffsetDateTime,
-) -> ExtractEntryOutcome {
-    let new_article = NewArticle {
-        content_hash: fallback.content_hash,
-        canonical_link: fallback.canonical_link,
-        title: fallback.title,
-        body_text: fallback.body_text,
-        body_html_artifact_id: html_artifact_id,
-        extractor_strategy: strategy_to_str(ExtractorStrategy::SummaryFallback).to_string(),
-        extractor_version: 1,
-        content_quality: quality_to_str(ContentQuality::Fallback).to_string(),
-        word_count: i64::from(fallback.word_count),
-        origin_feed_entry_id: feed_entry_id,
-    };
-    persist_article(ctx, emitter, owner, feed_entry_id, new_article, true, now).await
-}
-
-async fn persist_article(
-    ctx: &ExtractDeps,
-    emitter: &RunEventEmitter<'_>,
-    owner: &str,
-    feed_entry_id: i64,
-    article: NewArticle,
-    fallback_path: bool,
-    now: OffsetDateTime,
-) -> ExtractEntryOutcome {
-    let insert = match ctx
-        .article_repo
-        .insert_or_get_by_content_hash(&article)
-        .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            tracing::error!(feed_entry_id, "failed to persist article: {error}");
-            return release_permanent_failure(
-                ctx,
-                emitter,
-                feed_entry_id,
-                owner,
-                &error.display_user(),
-                error.error_kind(),
-                now,
-            )
-            .await;
-        }
-    };
-
-    if !insert.newly_created {
-        return release_dedup_skipped(ctx, emitter, owner, feed_entry_id, insert, now).await;
-    }
-
-    let released = if fallback_path {
-        ctx.feed_entry_repo
-            .release_fallback_persisted(feed_entry_id, owner, insert.article_id, now)
-            .await
-    } else {
-        ctx.feed_entry_repo
-            .release_success(feed_entry_id, owner, insert.article_id, now)
-            .await
-    };
-
-    match released {
-        Ok(true) if fallback_path => {
-            tracing::info!(
-                target = "feed_entry.transition",
-                id = feed_entry_id,
-                from = "fetching",
-                to = "fallback_persisted",
-                reason = "summary_fallback"
-            );
-            ExtractEntryOutcome {
-                feed_entry_id,
-                status: ExtractEntryStatus::FallbackPersisted,
-                article_id: Some(insert.article_id),
-                error_kind: None,
-            }
-        }
-        Ok(true) => {
-            tracing::info!(
-                target = "feed_entry.transition",
-                id = feed_entry_id,
-                from = "fetching",
-                to = "persisted",
-                reason = "extract_success"
-            );
-            ExtractEntryOutcome {
-                feed_entry_id,
-                status: ExtractEntryStatus::Persisted,
-                article_id: Some(insert.article_id),
-                error_kind: None,
-            }
-        }
-        Ok(false) => {
-            tracing::warn!(feed_entry_id, "feed entry release conflicted");
-            ExtractEntryOutcome {
-                feed_entry_id,
-                status: ExtractEntryStatus::PermanentFailed,
-                article_id: Some(insert.article_id),
-                error_kind: Some("lease_conflict".to_string()),
-            }
-        }
-        Err(error) => {
-            tracing::error!(feed_entry_id, "feed entry release failed: {error}");
-            ExtractEntryOutcome {
-                feed_entry_id,
-                status: ExtractEntryStatus::PermanentFailed,
-                article_id: Some(insert.article_id),
-                error_kind: Some(error.error_kind().to_string()),
-            }
-        }
-    }
-}
-
-async fn release_dedup_skipped(
-    ctx: &ExtractDeps,
-    emitter: &RunEventEmitter<'_>,
-    owner: &str,
-    feed_entry_id: i64,
-    insert: ArticleInsertOutcome,
-    now: OffsetDateTime,
-) -> ExtractEntryOutcome {
-    let released = ctx
-        .feed_entry_repo
-        .release_dedup_skipped(feed_entry_id, owner, insert.article_id, "hash_dup", now)
-        .await;
-    match released {
-        Ok(true) => {
-            emitter
-                .emit(
-                    "entry_dedup_skipped",
-                    "info",
-                    Some("feed_entry"),
-                    Some(feed_entry_id),
-                    "feed entry skipped by content hash dedup",
-                    Some(json!({
-                        "existing_article_id": insert.article_id,
-                        "decision": "hash_dup",
-                    })),
-                )
-                .await;
-            tracing::info!(
-                target = "feed_entry.transition",
-                id = feed_entry_id,
-                from = "fetching",
-                to = "dedup_skipped",
-                reason = "hash_dup"
-            );
-            ExtractEntryOutcome {
-                feed_entry_id,
-                status: ExtractEntryStatus::DedupSkipped,
-                article_id: Some(insert.article_id),
-                error_kind: None,
-            }
-        }
-        Ok(false) => ExtractEntryOutcome {
-            feed_entry_id,
-            status: ExtractEntryStatus::PermanentFailed,
-            article_id: Some(insert.article_id),
-            error_kind: Some("lease_conflict".to_string()),
-        },
-        Err(error) => ExtractEntryOutcome {
-            feed_entry_id,
-            status: ExtractEntryStatus::PermanentFailed,
-            article_id: Some(insert.article_id),
-            error_kind: Some(error.error_kind().to_string()),
-        },
-    }
-}
-
-async fn release_extract_error(
-    ctx: &ExtractDeps,
-    emitter: &RunEventEmitter<'_>,
-    feed_entry_id: i64,
-    owner: &str,
-    error: ExtractorError,
     retry: RetrySchedule,
-    now: OffsetDateTime,
-) -> ExtractEntryOutcome {
-    let message = error.display_user();
-    let kind = error.error_kind().to_string();
-    if error.is_retryable() {
+}
+
+impl EntryRelease<'_> {
+    async fn persist_extracted(
+        &self,
+        article: ExtractedArticle,
+        html_artifact_id: Option<i64>,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        let new_article = NewArticle {
+            content_hash: article.content_hash,
+            canonical_link: article.canonical_link,
+            title: article.title,
+            body_text: article.body_text,
+            body_html_artifact_id: html_artifact_id,
+            extractor_strategy: strategy_to_str(article.extractor_strategy).to_string(),
+            extractor_version: self.ctx.extractor_version,
+            content_quality: quality_to_str(article.content_quality).to_string(),
+            word_count: i64::from(article.word_count),
+            origin_feed_entry_id: self.feed_entry_id,
+        };
+        self.persist_article(new_article, false, now).await
+    }
+
+    async fn persist_fallback(
+        &self,
+        fallback: FallbackArticle,
+        html_artifact_id: Option<i64>,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        let new_article = NewArticle {
+            content_hash: fallback.content_hash,
+            canonical_link: fallback.canonical_link,
+            title: fallback.title,
+            body_text: fallback.body_text,
+            body_html_artifact_id: html_artifact_id,
+            extractor_strategy: strategy_to_str(ExtractorStrategy::SummaryFallback).to_string(),
+            extractor_version: self.ctx.extractor_version,
+            content_quality: quality_to_str(ContentQuality::Fallback).to_string(),
+            word_count: i64::from(fallback.word_count),
+            origin_feed_entry_id: self.feed_entry_id,
+        };
+        self.persist_article(new_article, true, now).await
+    }
+
+    /// Article insert-or-get and the entry advance commit in one repository
+    /// transaction (A12): a crash can no longer leave an article whose entry
+    /// is still claimable, and a retry that finds its own article is persisted.
+    async fn persist_article(
+        &self,
+        article: NewArticle,
+        fallback_path: bool,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        let feed_entry_id = self.feed_entry_id;
+        let outcome = match self
+            .ctx
+            .article_repo
+            .persist_for_entry(&article, self.owner, fallback_path, now)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::error!(feed_entry_id, "failed to persist article: {error}");
+                // plan/11 §3：retryable storage errors take the budgeted
+                // cooldown release, keeping the real error kind.
+                return self.release_storage_failure(&error, now).await;
+            }
+        };
+
+        match outcome {
+            EntryPersistOutcome::Persisted {
+                article_id,
+                newly_created,
+                fallback,
+            } => {
+                // R3E-S6: report the state actually stored; a recovered
+                // article keeps its own path whatever this attempt produced.
+                let (to, status) = if fallback {
+                    ("fallback_persisted", ExtractEntryStatus::FallbackPersisted)
+                } else {
+                    ("persisted", ExtractEntryStatus::Persisted)
+                };
+                let reason = match (fallback, newly_created) {
+                    (_, false) => "own_article_recovered",
+                    (true, true) => "summary_fallback",
+                    (false, true) => "extract_success",
+                };
+                tracing::info!(
+                    target = "feed_entry.transition",
+                    id = feed_entry_id,
+                    from = "fetching",
+                    to,
+                    reason
+                );
+                ExtractEntryOutcome::new(feed_entry_id, status, Some(article_id), None)
+            }
+            EntryPersistOutcome::DedupSkipped { article_id } => {
+                self.emitter
+                    .emit(
+                        "entry_dedup_skipped",
+                        "info",
+                        Some("feed_entry"),
+                        Some(feed_entry_id),
+                        "feed entry skipped by content hash dedup",
+                        Some(json!({
+                            "existing_article_id": article_id,
+                            "decision": "hash_dup",
+                        })),
+                    )
+                    .await;
+                tracing::info!(
+                    target = "feed_entry.transition",
+                    id = feed_entry_id,
+                    from = "fetching",
+                    to = "dedup_skipped",
+                    reason = "hash_dup"
+                );
+                ExtractEntryOutcome::new(
+                    feed_entry_id,
+                    ExtractEntryStatus::DedupSkipped,
+                    Some(article_id),
+                    None,
+                )
+            }
+            EntryPersistOutcome::LeaseLost => {
+                // Rolled back: no article was created for this attempt.
+                tracing::warn!(feed_entry_id, "feed entry release conflicted");
+                ExtractEntryOutcome::lease_lost(feed_entry_id, None)
+            }
+        }
+    }
+    /// [`Self::release_failure`] for a failure of our own storage: the outcome
+    /// is flagged `storage_failed` whatever release it ends in.
+    async fn release_storage_failure(
+        &self,
+        error: &StorageError,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        ExtractEntryOutcome {
+            storage_failed: true,
+            ..self.release_failure(error, now).await
+        }
+    }
+
+    /// Classified release: retryable errors (network, 5xx, transient storage)
+    /// return the row to `pending_fetch` with a cooldown inside the retry
+    /// budget (W15 folds the last attempt into `failed`); others are permanent.
+    /// `last_error*` always carry the real error.
+    async fn release_failure(
+        &self,
+        error: &(dyn ClassifiedError + Sync),
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        self.release_failure_after(error, None, now).await
+    }
+
+    /// [`Self::release_failure`] with the server's earliest retry instant (a
+    /// 429's `Retry-After`, fixed at receipt, R2-S10 / R3E-S10): the cooldown
+    /// ends at the later of `released_at` + local backoff and `retry_at`.
+    async fn release_failure_after(
+        &self,
+        error: &(dyn ClassifiedError + Sync),
+        retry_at: Option<OffsetDateTime>,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        let message = error.display_user();
+        let kind = error.error_kind().to_string();
+        if !error.is_retryable() {
+            return self.release_permanent(&message, &kind, now).await;
+        }
+        let ctx = self.ctx;
+        let feed_entry_id = self.feed_entry_id;
         // One instant for the row's `updated_at` and the cooldown: `now` may
         // predate artifact writes and the strategy chain, which would shorten
         // the cooldown and misdate the release.
@@ -651,31 +689,27 @@ async fn release_extract_error(
             .feed_entry_repo
             .release_retryable_failure(
                 feed_entry_id,
-                owner,
+                self.owner,
                 &message,
                 &kind,
-                retry.max_attempts,
-                retry.next_attempt_at(released_at),
+                self.retry.max_attempts,
+                self.retry.next_attempt_at(released_at, retry_at),
                 released_at,
             )
             .await
         {
-            Ok(outcome) => {
-                if !outcome.released {
-                    tracing::warn!(feed_entry_id, "retryable release conflicted");
-                }
-                outcome
-            }
+            Ok(outcome) => outcome,
             Err(error) => {
                 tracing::error!(feed_entry_id, "retryable release failed: {error}");
-                rss_ai_news_storage::ReleaseFailureOutcome {
-                    released: false,
-                    exhausted: false,
-                }
+                return ExtractEntryOutcome::release_failed(feed_entry_id, None, &error);
             }
         };
+        if !outcome.released {
+            tracing::warn!(feed_entry_id, "retryable release conflicted");
+            return ExtractEntryOutcome::lease_lost(feed_entry_id, None);
+        }
         if outcome.exhausted {
-            emitter
+            self.emitter
                 .emit(
                     "entry_permanent_failed",
                     "error",
@@ -693,70 +727,134 @@ async fn release_extract_error(
                 reason = %kind,
                 budget_exhausted = true
             );
-            return ExtractEntryOutcome {
+            return ExtractEntryOutcome::new(
                 feed_entry_id,
-                status: ExtractEntryStatus::PermanentFailed,
-                article_id: None,
-                error_kind: Some(kind),
-            };
+                ExtractEntryStatus::PermanentFailed,
+                None,
+                Some(kind),
+            );
         }
         tracing::warn!(
             feed_entry_id,
             error_kind = %kind,
             "extract retryable failure"
         );
-        ExtractEntryOutcome {
+        ExtractEntryOutcome::new(
             feed_entry_id,
-            status: ExtractEntryStatus::RetryableFailed,
-            article_id: None,
-            error_kind: Some(kind),
+            ExtractEntryStatus::RetryableFailed,
+            None,
+            Some(kind),
+        )
+    }
+
+    /// Permanent release. The `entry_permanent_failed` event and transition
+    /// log are written only when the release landed.
+    async fn release_permanent(
+        &self,
+        message: &str,
+        kind: &str,
+        now: OffsetDateTime,
+    ) -> ExtractEntryOutcome {
+        let feed_entry_id = self.feed_entry_id;
+        match self
+            .ctx
+            .feed_entry_repo
+            .release_permanent_failure(feed_entry_id, self.owner, message, kind, now)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(feed_entry_id, "permanent release conflicted");
+                return ExtractEntryOutcome::lease_lost(feed_entry_id, None);
+            }
+            Err(error) => {
+                tracing::error!(feed_entry_id, "permanent release failed: {error}");
+                return ExtractEntryOutcome::release_failed(feed_entry_id, None, &error);
+            }
         }
-    } else {
-        release_permanent_failure(ctx, emitter, feed_entry_id, owner, &message, &kind, now).await
+        self.emitter
+            .emit(
+                "entry_permanent_failed",
+                "error",
+                Some("feed_entry"),
+                Some(feed_entry_id),
+                message,
+                Some(json!({ "error_kind": kind })),
+            )
+            .await;
+        tracing::error!(
+            target = "feed_entry.transition",
+            id = feed_entry_id,
+            from = "fetching",
+            to = "failed",
+            reason = kind
+        );
+        ExtractEntryOutcome::new(
+            feed_entry_id,
+            ExtractEntryStatus::PermanentFailed,
+            None,
+            Some(kind.to_string()),
+        )
     }
 }
+/// Parse + database time allowed per concurrency wave on top of the HTTP
+/// timeout in [`extract_lease_budget_seconds`]: Readability on a page at the
+/// `max_body_bytes` limit, the artifact write and the article/entry writes.
+/// Deliberately generous (measured parse times are well under a second).
+pub const EXTRACT_WAVE_MARGIN_SECONDS: u64 = 5;
 
-async fn release_permanent_failure(
-    ctx: &ExtractDeps,
-    emitter: &RunEventEmitter<'_>,
-    feed_entry_id: i64,
-    owner: &str,
-    message: &str,
-    kind: &str,
-    now: OffsetDateTime,
-) -> ExtractEntryOutcome {
-    match ctx
-        .feed_entry_repo
-        .release_permanent_failure(feed_entry_id, owner, message, kind, now)
-        .await
-    {
-        Ok(false) => tracing::warn!(feed_entry_id, "permanent release conflicted"),
-        Err(error) => tracing::error!(feed_entry_id, "permanent release failed: {error}"),
-        Ok(true) => {}
+/// Worst-case seconds one claimed batch holds its lease: the batch is claimed
+/// with one `lease.fetch_duration_seconds` and processed in
+/// `ceil(batch / concurrent_fetches)` waves, each bounded by the HTTP timeout
+/// plus [`EXTRACT_WAVE_MARGIN_SECONDS`]. Callers check it against the lease
+/// before running (mirrors [`crate::ai_lease_budget_seconds`]); a batch that
+/// outlives its lease is reclaimed and fetched twice.
+pub fn extract_lease_budget_seconds(
+    batch_size: u32,
+    concurrent_fetches: u32,
+    http_timeout_seconds: u64,
+) -> u64 {
+    let waves = u64::from(batch_size.max(1).div_ceil(concurrent_fetches.max(1)));
+    waves.saturating_mul(http_timeout_seconds.saturating_add(EXTRACT_WAVE_MARGIN_SECONDS))
+}
+
+/// Largest batch size `<= requested` whose [`extract_lease_budget_seconds`]
+/// fits `lease_seconds`, in whole waves of `concurrent_fetches`.
+///
+/// `ingest` shrinks an over-budget batch instead of refusing to start, so a
+/// config that ran before the budget existed (e.g. the old 300 s lease with
+/// the default batch of 50) keeps running and the batch's *estimated* budget
+/// fits its lease (R3E-S9: parsing or storage slower than the per-wave margin
+/// can still make a real batch outlive it; the guarantee is the estimate's).
+/// `None` when not even one wave fits (R2-S9): even one wave's estimate
+/// exceeds the lease, so the caller skips extract for the run and reports it.
+///
+/// Postcondition: `Some(n)` ⇒ `1 <= n <= max(requested, 1)` and
+/// `extract_lease_budget_seconds(n, …) <= lease_seconds`.
+pub fn fit_extract_batch_to_lease(
+    requested: u32,
+    concurrent_fetches: u32,
+    http_timeout_seconds: u64,
+    lease_seconds: u64,
+) -> Option<u32> {
+    let requested = requested.max(1);
+    let concurrent = concurrent_fetches.max(1);
+    if extract_lease_budget_seconds(requested, concurrent, http_timeout_seconds) <= lease_seconds {
+        return Some(requested);
     }
-    emitter
-        .emit(
-            "entry_permanent_failed",
-            "error",
-            Some("feed_entry"),
-            Some(feed_entry_id),
-            message,
-            Some(json!({ "error_kind": kind })),
-        )
-        .await;
-    tracing::error!(
-        target = "feed_entry.transition",
-        id = feed_entry_id,
-        from = "fetching",
-        to = "failed",
-        reason = kind
-    );
-    ExtractEntryOutcome {
-        feed_entry_id,
-        status: ExtractEntryStatus::PermanentFailed,
-        article_id: None,
-        error_kind: Some(kind.to_string()),
+    let per_wave = http_timeout_seconds
+        .saturating_add(EXTRACT_WAVE_MARGIN_SECONDS)
+        .max(1);
+    let waves = lease_seconds / per_wave;
+    if waves == 0 {
+        return None;
     }
+    Some(
+        u32::try_from(waves)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(concurrent)
+            .min(requested),
+    )
 }
 
 /// Shortest retry cooldown, applied after the first failed attempt.
@@ -773,10 +871,29 @@ struct RetrySchedule {
 }
 
 impl RetrySchedule {
-    /// When a retryable failure released at `now` becomes claimable again.
-    /// The releasing run itself never retries the entry (it stays excluded).
-    fn next_attempt_at(&self, now: OffsetDateTime) -> OffsetDateTime {
-        now + retry_backoff(self.attempt_count)
+    /// When a retryable failure released at `now` becomes claimable again:
+    /// the later of `now` + local backoff and the server's absolute
+    /// `retry_at` (R2-S10, R3E-S10: fixed at receipt, so the release time does
+    /// not move it). The releasing run itself never retries the entry (it
+    /// stays excluded).
+    fn next_attempt_at(
+        &self,
+        now: OffsetDateTime,
+        retry_at: Option<OffsetDateTime>,
+    ) -> OffsetDateTime {
+        let backoff = now + retry_backoff(self.attempt_count);
+        retry_at.map_or(backoff, |server| server.max(backoff))
+    }
+}
+
+/// `SystemTime` → `OffsetDateTime` without panicking on values outside the
+/// `time` range (`None` then: the local backoff alone applies).
+fn offset_from_system_time(at: std::time::SystemTime) -> Option<OffsetDateTime> {
+    match at.duration_since(std::time::UNIX_EPOCH) {
+        Ok(after) => OffsetDateTime::UNIX_EPOCH.checked_add(Duration::try_from(after).ok()?),
+        Err(before) => {
+            OffsetDateTime::UNIX_EPOCH.checked_sub(Duration::try_from(before.duration()).ok()?)
+        }
     }
 }
 
@@ -808,7 +925,7 @@ fn quality_to_str(quality: ContentQuality) -> &'static str {
 impl ExtractEntryStatus {
     /// `true` only when the row's terminal release landed: these statuses are
     /// produced exclusively after `release_*` returned `Ok(true)`. Conflicts and
-    /// release errors are reported as `RetryableFailed` / `PermanentFailed`.
+    /// release errors are reported as `LeaseLost` / `ReleaseFailed`.
     fn is_terminal_success(&self) -> bool {
         matches!(
             self,
@@ -829,12 +946,13 @@ impl ExtractSummary {
                 self.retryable_deferred = true;
             }
             ExtractEntryStatus::PermanentFailed => self.permanent_failed += 1,
+            ExtractEntryStatus::LeaseLost => self.lease_lost += 1,
+            ExtractEntryStatus::ReleaseFailed => self.release_failed += 1,
         }
-        if matches!(
-            outcome.status,
-            ExtractEntryStatus::RetryableFailed | ExtractEntryStatus::PermanentFailed
-        ) && self.failure_samples.len() < 32
-        {
+        if outcome.storage_failed {
+            self.storage_failed += 1;
+        }
+        if !outcome.status.is_terminal_success() && self.failure_samples.len() < 32 {
             self.failure_samples.push(outcome);
         }
     }
@@ -843,6 +961,45 @@ impl ExtractSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lease_budget_counts_waves_times_timeout_plus_margin() {
+        // Defaults: batch 50, 5 concurrent, 30 s → 10 waves × 35 s.
+        assert_eq!(extract_lease_budget_seconds(50, 5, 30), 350);
+        assert_eq!(extract_lease_budget_seconds(51, 5, 30), 385);
+        assert_eq!(extract_lease_budget_seconds(3, 5, 30), 35);
+        // Zero concurrency / batch are clamped like the flow does.
+        assert_eq!(extract_lease_budget_seconds(0, 0, 10), 15);
+        assert_eq!(
+            extract_lease_budget_seconds(u32::MAX, 1, u64::MAX),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn over_budget_batches_shrink_to_whole_waves_that_fit_the_lease() {
+        // Fits: unchanged.
+        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 600), Some(50));
+        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 350), Some(50));
+        // Old default lease 300 s with the default batch: 8 waves × 35 s = 280 s.
+        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 300), Some(40));
+        assert!(extract_lease_budget_seconds(40, 5, 30) <= 300);
+        // One concurrent fetch, 5 s timeout, 400 s lease: 40 waves of 10 s.
+        assert_eq!(fit_extract_batch_to_lease(50, 1, 5, 400), Some(40));
+        // Not even one wave fits: one wave, never zero.
+        // R2-S9: not even one wave fits → no batch at all.
+        assert_eq!(fit_extract_batch_to_lease(50, 5, 30, 20), None);
+        assert_eq!(fit_extract_batch_to_lease(3, 5, 30, 10), None);
+        assert_eq!(fit_extract_batch_to_lease(3, 5, 30, 35), Some(3));
+        // Zero inputs are clamped like the flow does.
+        assert_eq!(fit_extract_batch_to_lease(0, 0, 10, 0), None);
+        assert_eq!(fit_extract_batch_to_lease(0, 0, 10, 15), Some(1));
+        for lease in 0..200 {
+            if let Some(n) = fit_extract_batch_to_lease(50, 3, 7, lease) {
+                assert!(extract_lease_budget_seconds(n, 3, 7) <= lease);
+            }
+        }
+    }
 
     #[test]
     fn retry_backoff_doubles_and_is_bounded() {
@@ -864,8 +1021,25 @@ mod tests {
             max_attempts: 5,
             attempt_count,
         };
-        assert_eq!(retry(1).next_attempt_at(now), now + Duration::minutes(10));
-        assert_eq!(retry(3).next_attempt_at(now), now + Duration::minutes(40));
+        assert_eq!(
+            retry(1).next_attempt_at(now, None),
+            now + Duration::minutes(10)
+        );
+        assert_eq!(
+            retry(3).next_attempt_at(now, None),
+            now + Duration::minutes(40)
+        );
+        // R2-S10 / R3E-S10: the later of backoff and the server's retry instant.
+        let hour = now + Duration::hours(1);
+        assert_eq!(
+            retry(1).next_attempt_at(now, Some(hour)),
+            now + Duration::hours(1)
+        );
+        let minute = now + Duration::minutes(1);
+        assert_eq!(
+            retry(1).next_attempt_at(now, Some(minute)),
+            now + Duration::minutes(10)
+        );
     }
 
     #[test]
@@ -874,9 +1048,10 @@ mod tests {
         assert!(Persisted.is_terminal_success());
         assert!(FallbackPersisted.is_terminal_success());
         assert!(DedupSkipped.is_terminal_success());
-        // Includes lease conflicts and failed releases, which also map here.
         assert!(!RetryableFailed.is_terminal_success());
         assert!(!PermanentFailed.is_terminal_success());
+        assert!(!LeaseLost.is_terminal_success());
+        assert!(!ReleaseFailed.is_terminal_success());
     }
 
     #[test]
@@ -891,12 +1066,14 @@ mod tests {
                 article_id: None,
                 status: ExtractEntryStatus::Persisted,
                 error_kind: None,
+                storage_failed: false,
             });
             summary.record(ExtractEntryOutcome {
                 feed_entry_id: 1,
                 article_id: None,
                 status: ExtractEntryStatus::PermanentFailed,
                 error_kind: Some("failure".into()),
+                storage_failed: true,
             });
         }
         summary.record(ExtractEntryOutcome {
@@ -904,8 +1081,12 @@ mod tests {
             article_id: None,
             status: ExtractEntryStatus::RetryableFailed,
             error_kind: None,
+            storage_failed: false,
         });
+        summary.record(ExtractEntryOutcome::lease_lost(2, None));
         assert_eq!(summary.persisted, 10_000);
+        assert_eq!(summary.storage_failed, 10_000);
+        assert_eq!(summary.lease_lost, 1);
         assert_eq!(summary.permanent_failed, 10_000);
         assert_eq!(summary.retryable_failed, 1);
         assert_eq!(summary.failure_samples.len(), 32);

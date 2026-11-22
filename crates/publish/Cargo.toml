@@ -11,11 +11,16 @@ base64 = "0.22"
 bytes = "1"
 http = "1"
 http-body-util = "0.1"
+# Retry-After HTTP-dates in all three RFC 9110 forms (R3F-S11); same version
+# already in the lockfile (hyper, extractor).
+httpdate = "1"
 octocrab.workspace = true
 # octocrab 0.54 `personal_token` accepts `impl Into<secrecy::SecretString>`;
 # we materialise its argument at the boundary from our own SecretString so
 # the raw token is never held as a plain `String` outside of that call site.
 secrecy = "0.10"
+# Git blob ids (SHA-1) for the idempotent batch retry; same version already in the lockfile.
+sha1 = { version = "0.11", default-features = false }
 serde_json.workspace = true
 time.workspace = true
 thiserror.workspace = true
@@ -24,7 +29,7 @@ tokio = { workspace = true, features = ["fs", "io-util"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 wiremock = "0.6"
 
 [lints]

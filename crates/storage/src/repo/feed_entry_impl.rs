@@ -40,31 +40,12 @@ struct RetryableRelease<'a> {
     now: OffsetDateTime,
 }
 
-/// Retry deadline as stored: UTC, rounded up to a whole millisecond.
-///
-/// UTC keeps every value parseable by SQLite's date functions (`julianday()`
-/// returns NULL for some valid RFC3339 offsets such as `+15:00`). Rounding up,
-/// together with [`cooldown_cutoff`] rounding down, makes the claim's cooldown
-/// comparison exact on both backends: a row is never claimed before
-/// `retry_at`, and at most ~2 ms after it.
-///
-/// The SQLite claim stores `lease_expires_at` the same way, so the lease-expiry
-/// comparisons (strict `<`, against [`cooldown_cutoff`]) are exact too: a
-/// lease is never treated as expired before its instant.
-fn stored_deadline(at: OffsetDateTime) -> OffsetDateTime {
-    let at = at.to_offset(UtcOffset::UTC);
-    match at.nanosecond() % 1_000_000 {
-        0 => at,
-        sub_ms => at + Duration::nanoseconds(i64::from(1_000_000 - sub_ms)),
-    }
-}
-
-/// Claim-time cooldown cutoff: UTC, rounded down to a whole millisecond.
-/// Also the `now` that SQLite lease-expiry predicates compare against.
-fn cooldown_cutoff(now: OffsetDateTime) -> OffsetDateTime {
-    let now = now.to_offset(UtcOffset::UTC);
-    now - Duration::nanoseconds(i64::from(now.nanosecond() % 1_000_000))
-}
+// Deadlines as stored (UTC, rounded up to a whole millisecond) and the `now`
+// they are compared with (UTC, rounded down): the shared SQLite instant rule
+// in `repo::sqlite_stored_deadline` / `repo::sqlite_instant_cutoff`
+// (plan/02 §5.3). UTC keeps every value parseable by `julianday()`; the
+// rounding makes cooldown and lease comparisons exact on both backends.
+use super::{sqlite_instant_cutoff as cooldown_cutoff, sqlite_stored_deadline as stored_deadline};
 
 /// `[1,2,3]` for SQLite `json_each`; ids are integers, so no escaping is needed.
 fn json_id_array(ids: &[i64]) -> String {
@@ -120,14 +101,19 @@ impl FeedEntryRepository for FeedEntryRepo {
         RecentFeedEntryRepository::list_recent(self, filter).await
     }
 
-    async fn claim_pending_fetch(
+    async fn claim_pending_fetch_in_scope(
         &self,
         request: &ClaimRequest,
         exclude_ids: &[i64],
+        category_key: Option<&str>,
     ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
         match &self.pool {
-            StoragePool::Sqlite(p) => sqlite_claim_pending_fetch(p, request, exclude_ids).await,
-            StoragePool::Postgres(p) => pg_claim_pending_fetch(p, request, exclude_ids).await,
+            StoragePool::Sqlite(p) => {
+                sqlite_claim_pending_fetch(p, request, exclude_ids, category_key).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_claim_pending_fetch(p, request, exclude_ids, category_key).await
+            }
         }
     }
 
@@ -352,6 +338,7 @@ async fn sqlite_claim_pending_fetch(
     pool: &SqlitePool,
     request: &ClaimRequest,
     exclude_ids: &[i64],
+    category_key: Option<&str>,
 ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
     let cutoff = cooldown_cutoff(request.now);
     sqlx::query_as::<_, ClaimedFeedEntry>(CLAIM_PENDING_FETCH_SQLITE_SQL)
@@ -363,6 +350,7 @@ async fn sqlite_claim_pending_fetch(
         .bind(i64::from(request.batch_size))
         .bind(json_id_array(exclude_ids))
         .bind(cutoff)
+        .bind(category_key)
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)
@@ -563,7 +551,7 @@ async fn sqlite_update_link_hash(
     Ok(outcome)
 }
 
-async fn reconcile_link_hash_move_sqlite(
+pub(super) async fn reconcile_link_hash_move_sqlite(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: i64,
     old_link_hash: &str,
@@ -674,6 +662,7 @@ async fn pg_claim_pending_fetch(
     pool: &PgPool,
     request: &ClaimRequest,
     exclude_ids: &[i64],
+    category_key: Option<&str>,
 ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
     sqlx::query_as::<_, ClaimedFeedEntry>(CLAIM_PENDING_FETCH_PG_SQL)
         .bind(&request.owner)
@@ -684,6 +673,7 @@ async fn pg_claim_pending_fetch(
         .bind(i64::from(request.batch_size))
         .bind(exclude_ids)
         .bind(cooldown_cutoff(request.now))
+        .bind(category_key)
         .fetch_all(pool)
         .await
         .map_err(StorageError::from)
@@ -875,31 +865,46 @@ async fn pg_update_link_hash(
         return Ok(UpdateLinkHashOutcome::Missing);
     };
 
+    let outcome =
+        reconcile_link_hash_move_pg(&mut tx, id, &old_link_hash, new_link_hash, now).await?;
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(outcome)
+}
+
+/// The link-hash move of [`pg_update_link_hash`] inside a caller's
+/// transaction (which already holds `LOCK_FEED_ENTRIES_FOR_REINDEX_PG_SQL`).
+/// Shared with the reindex batch writer.
+pub(super) async fn reconcile_link_hash_move_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: i64,
+    old_link_hash: &str,
+    new_link_hash: &str,
+    now: OffsetDateTime,
+) -> Result<UpdateLinkHashOutcome, StorageError> {
     sqlx::query(DEMOTE_LINK_HASH_GROUPS_SQL)
         .bind(now)
-        .bind(&old_link_hash)
+        .bind(old_link_hash)
         .bind(new_link_hash)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(StorageError::from)?;
     sqlx::query(UPDATE_LINK_HASH_SQL)
         .bind(new_link_hash)
         .bind(now)
         .bind(id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(StorageError::from)?;
-    promote_link_hash_canonical_pg(&mut tx, &old_link_hash, now).await?;
+    promote_link_hash_canonical_pg(tx, old_link_hash, now).await?;
     if new_link_hash != old_link_hash {
-        promote_link_hash_canonical_pg(&mut tx, new_link_hash, now).await?;
+        promote_link_hash_canonical_pg(tx, new_link_hash, now).await?;
     }
 
     let shadow = sqlx::query_scalar::<_, bool>(SELECT_LINK_HASH_SHADOW_BY_ID_SQL)
         .bind(id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(StorageError::from)?;
-    tx.commit().await.map_err(StorageError::from)?;
     Ok(if shadow {
         UpdateLinkHashOutcome::ConflictShadowed
     } else {

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -40,6 +40,14 @@ impl LoadedConfig {
 #[derive(Clone, Debug, Default)]
 pub struct SourceSecrets {
     rsshub_access_keys: BTreeMap<(String, String), SecretString>,
+    /// `(category key, source key)` of every source whose `feed_url` the
+    /// loader expanded from an RSSHub base placeholder. After loading the
+    /// expanded URL is indistinguishable from a literal one, so the ingest
+    /// preflight reads this to apply the expansion check (R3G-B5). Kept here,
+    /// not on `LoadedConfig`, because it is the same per-source runtime
+    /// expansion record as the access keys and `SourceSecrets` is always
+    /// built through `Default`.
+    rsshub_expanded: BTreeSet<(String, String)>,
 }
 
 impl SourceSecrets {
@@ -56,6 +64,20 @@ impl SourceSecrets {
     pub fn rsshub_access_key(&self, category_key: &str, source_key: &str) -> Option<&SecretString> {
         self.rsshub_access_keys
             .get(&(category_key.to_string(), source_key.to_string()))
+    }
+
+    pub(crate) fn mark_rsshub_expanded(
+        &mut self,
+        category_key: impl Into<String>,
+        source_key: impl Into<String>,
+    ) {
+        self.rsshub_expanded
+            .insert((category_key.into(), source_key.into()));
+    }
+
+    pub(crate) fn is_rsshub_expanded(&self, category_key: &str, source_key: &str) -> bool {
+        self.rsshub_expanded
+            .contains(&(category_key.to_string(), source_key.to_string()))
     }
 }
 
@@ -187,8 +209,12 @@ fn expand_env_placeholders(categories: &mut [CategoryConfig], env: &EnvConfig) -
 
     for category in categories {
         for source in &mut category.sources {
-            if let Some(base_url) = rsshub_base_url.as_deref() {
+            if let Some(base_url) = rsshub_base_url.as_deref()
+                && rsshub::has_base_placeholder(&source.feed_url)
+            {
                 source.feed_url = rsshub::expand_base_placeholders(&source.feed_url, base_url);
+                source_secrets
+                    .mark_rsshub_expanded(category.category.key.clone(), source.key.clone());
             }
             if source.feed_kind == FeedKind::RssHub {
                 let inline_access_key = strip_query_param(&mut source.feed_url, "key");
@@ -570,6 +596,35 @@ enabled = true
                 .map(SecretString::expose_secret),
             Some("inline-key")
         );
+    }
+
+    /// R3G-B5 end to end: a base URL that expands to a custom-scheme URL
+    /// (`feeds.internal:1200/example`) loads structurally (so `run`'s other
+    /// stages and `migrate` proceed) but fails `validate-config` and the
+    /// ingest preflight.
+    #[test]
+    fn custom_scheme_rsshub_expansion_fails_validate_config_and_ingest_only() {
+        let ws = Workspace::new("rsshub-custom-scheme");
+        ws.write_app(APP_TOML_AI_ENABLED_RSSHUB_PLACEHOLDER);
+        ws.write_category("ai", CATEGORY_TOML_RSSHUB_PLACEHOLDER);
+        let env_file = ws.env_file(
+            "OPENAI_API_KEY=sk-test\nOPENAI_BASE_URL=https://api.example.test/v1\nRSSHUB_BASE_URL=feeds.internal:1200\n",
+        );
+
+        let err = load(&ws.config_dir(), Some(&env_file), CliOverrides::default())
+            .expect_err("validate-config's full load rejects the expansion");
+        assert!(err.to_string().contains("RSSHUB_BASE_URL"), "{err}");
+
+        let loaded =
+            load_skip_env_checks(&ws.config_dir(), Some(&env_file), CliOverrides::default())
+                .expect("the structural load does not depend on the base URL");
+        let err = crate::validate::run_command_checks(
+            &loaded,
+            crate::validate::CommandKind::Ingest,
+            &crate::validate::CommandFlags::default(),
+        )
+        .expect_err("the ingest preflight rejects the expansion");
+        assert!(err.to_string().contains("sources[0].feed_url"), "{err}");
     }
 
     #[test]

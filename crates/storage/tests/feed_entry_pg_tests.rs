@@ -855,3 +855,56 @@ async fn pg_release_deadline_is_never_early() {
 
     ctx.cleanup().await;
 }
+
+/// A10 (PG): the claim takes only active sources, optionally one category,
+/// and `FOR UPDATE SKIP LOCKED` still locks only `feed_entries` rows.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_claim_is_scoped_to_category_and_active_sources() {
+    let ctx = make_pg_test_pool().await;
+    let a = seed_feed_source(&ctx, "scope-a").await;
+    let b = seed_feed_source(&ctx, "scope-b").await;
+    let paused = seed_feed_source(&ctx, "scope-paused").await;
+    sqlx::query("UPDATE feed_sources SET category_key = 'B' WHERE id = $1")
+        .bind(b)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE feed_sources SET status = 'paused' WHERE id = $1")
+        .bind(paused)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    let repo = FeedEntryRepo::new_with_storage(ctx.storage_pool().clone());
+    let mut ids = Vec::new();
+    for (source_id, uid) in [(a, "scope-a-1"), (b, "scope-b-1"), (paused, "scope-p-1")] {
+        ids.push(
+            repo.insert_if_new(&new_feed_entry(source_id, uid))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let now = OffsetDateTime::now_utc();
+    let request = ClaimRequest {
+        owner: "worker".to_string(),
+        now,
+        lease_expires_at: lease_expires(now),
+        batch_size: 10,
+        max_attempts: 5,
+    };
+
+    let scoped = repo
+        .claim_pending_fetch_in_scope(&request, &[], Some("ai"))
+        .await
+        .unwrap();
+    assert_eq!(scoped.iter().map(|e| e.id).collect::<Vec<_>>(), [ids[0]]);
+    let unscoped = repo.claim_pending_fetch(&request, &[]).await.unwrap();
+    assert_eq!(unscoped.iter().map(|e| e.id).collect::<Vec<_>>(), [ids[1]]);
+    assert!(
+        repo.claim_pending_fetch(&request, &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

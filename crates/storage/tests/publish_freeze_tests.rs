@@ -9,6 +9,7 @@ use sqlx::SqlitePool;
 use time::{Duration, OffsetDateTime};
 
 use common::{insert_rule, make_test_pool};
+use std::num::NonZeroU32;
 
 #[tokio::test]
 async fn freeze_snapshot_inserts_items_advances_record_to_snapshot_frozen() {
@@ -139,7 +140,7 @@ async fn freeze_snapshot_returns_publish_record_conflict_when_state_not_pending(
 async fn freeze_snapshot_returns_article_state_conflict_when_promote_target_already_advanced() {
     let (_dir, pool) = make_test_pool().await;
     let (record_id, owner) = claimed_publish_record(&pool).await;
-    let article_id = seed_article(&pool, "article-conflict", "ready_for_publish").await;
+    let article_id = seed_article(&pool, "article-conflict", "published").await;
     let repo = PublishItemRepo::new(pool.clone());
 
     let outcome = repo
@@ -361,4 +362,174 @@ fn now() -> OffsetDateTime {
 
 fn unique() -> i128 {
     OffsetDateTime::now_utc().unix_timestamp_nanos()
+}
+
+// === B2 (ADR 0012): cross-snapshot article ownership ===
+
+fn window() -> (OffsetDateTime, OffsetDateTime) {
+    (now() - Duration::days(1), now() + Duration::days(1))
+}
+
+async fn ai_candidates(repo: &PublishItemRepo) -> Vec<i64> {
+    let (since, until) = window();
+    repo.select_ai_path_candidates("ai", 0, since, until, NonZeroU32::new(10).unwrap())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.article_id)
+        .collect()
+}
+
+async fn ai_off_candidates(repo: &PublishItemRepo) -> Vec<i64> {
+    let (since, until) = window();
+    repo.select_ai_off_passthrough_candidates("ai", since, until, NonZeroU32::new(10).unwrap())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.article_id)
+        .collect()
+}
+
+async fn set_record_state(pool: &SqlitePool, id: i64, state: &str) {
+    sqlx::query("UPDATE publish_records SET state = ? WHERE id = ?")
+        .bind(state)
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn selection_excludes_articles_owned_by_an_active_snapshot_until_it_fails() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = PublishItemRepo::new(pool.clone());
+    let ai_article = seed_article(&pool, "owned-ai", "ready_for_publish").await;
+    let ai_id = seed_ai_row(&pool, ai_article).await;
+    let direct_article = seed_article(&pool, "owned-direct", "persisted").await;
+    let (owner_record, owner) = claimed_publish_record(&pool).await;
+    let frozen = repo
+        .freeze_snapshot(
+            owner_record,
+            &owner,
+            vec![ai_item(ai_article, ai_id), direct_item(direct_article)],
+            vec![direct_article],
+            now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(frozen.status, FreezeSnapshotStatus::Frozen);
+
+    // Stuck after freeze (e.g. at stored_local): its articles stay owned.
+    set_record_state(&pool, owner_record, "stored_local").await;
+    assert!(ai_candidates(&repo).await.is_empty());
+    assert!(ai_off_candidates(&repo).await.is_empty());
+
+    // A failed record releases ownership.
+    set_record_state(&pool, owner_record, "failed").await;
+    assert_eq!(ai_candidates(&repo).await, vec![ai_article]);
+    assert_eq!(ai_off_candidates(&repo).await, vec![direct_article]);
+}
+
+#[tokio::test]
+async fn freeze_snapshot_rejects_article_owned_by_another_active_snapshot() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = PublishItemRepo::new(pool.clone());
+    let article_id = seed_article(&pool, "contested", "ready_for_publish").await;
+    let ai_id = seed_ai_row(&pool, article_id).await;
+    let (first, first_owner) = claimed_publish_record(&pool).await;
+    let (second, second_owner) = claimed_publish_record(&pool).await;
+    // Both selected the article before either froze.
+    let won = repo
+        .freeze_snapshot(
+            first,
+            &first_owner,
+            vec![ai_item(article_id, ai_id)],
+            Vec::new(),
+            now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(won.status, FreezeSnapshotStatus::Frozen);
+
+    let lost = repo
+        .freeze_snapshot(
+            second,
+            &second_owner,
+            vec![ai_item(article_id, ai_id)],
+            Vec::new(),
+            now(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        lost.status,
+        FreezeSnapshotStatus::ArticleOwnershipConflict {
+            article_id,
+            owner_record_id: first,
+        }
+    );
+    let (state, items): (String, i64) = sqlx::query_as(
+        "SELECT state, (SELECT COUNT(*) FROM publish_items WHERE publish_record_id = r.id) \
+         FROM publish_records r WHERE id = ?",
+    )
+    .bind(second)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((state.as_str(), items), ("pending", 0));
+}
+
+/// S9 / B2b: an AI-off `ready_for_publish` leftover (its earlier snapshot
+/// failed) is selectable and frozen as is, alongside promoted `persisted`
+/// articles, instead of rolling back the whole batch.
+#[tokio::test]
+async fn freeze_snapshot_keeps_unowned_ready_article_and_promotes_persisted_one() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = PublishItemRepo::new(pool.clone());
+    let leftover = seed_article(&pool, "leftover", "ready_for_publish").await;
+    let fresh = seed_article(&pool, "fresh", "persisted").await;
+    let (failed_record, failed_owner) = claimed_publish_record(&pool).await;
+    repo.freeze_snapshot(
+        failed_record,
+        &failed_owner,
+        vec![direct_item(leftover)],
+        Vec::new(),
+        now(),
+    )
+    .await
+    .unwrap();
+    set_record_state(&pool, failed_record, "failed").await;
+    let mut selected = ai_off_candidates(&repo).await;
+    selected.sort_unstable();
+    let mut expected = vec![leftover, fresh];
+    expected.sort_unstable();
+    assert_eq!(selected, expected);
+    let (record, owner) = claimed_publish_record(&pool).await;
+
+    let mut leftover_item = direct_item(leftover);
+    leftover_item.position = 1;
+    let mut fresh_item = direct_item(fresh);
+    fresh_item.position = 2;
+    let outcome = repo
+        .freeze_snapshot(
+            record,
+            &owner,
+            vec![leftover_item, fresh_item],
+            vec![leftover, fresh],
+            now(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, FreezeSnapshotStatus::Frozen);
+    assert_eq!(outcome.item_ids.len(), 2);
+    for article in [leftover, fresh] {
+        let state: String = sqlx::query_scalar("SELECT state FROM articles WHERE id = ?")
+            .bind(article)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "ready_for_publish");
+    }
 }

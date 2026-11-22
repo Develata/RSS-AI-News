@@ -38,7 +38,27 @@ pub struct FreezeSnapshotItem {
 pub enum FreezeSnapshotStatus {
     Frozen,
     PublishRecordConflict,
-    ArticleStateConflict { article_id: i64 },
+    /// The article is neither `persisted` (to promote) nor `ready_for_publish`
+    /// any more; nothing was written.
+    ArticleStateConflict {
+        article_id: i64,
+    },
+    /// The article was frozen into another, not-failed publish record after
+    /// selection (lost a concurrent freeze); nothing was written.
+    ArticleOwnershipConflict {
+        article_id: i64,
+        owner_record_id: i64,
+    },
+}
+
+/// An article of a record's snapshot that another, winning snapshot also
+/// holds (ADR 0012 §2, P-B1). Only data written before migration 0008 can
+/// contain such a pair: every later freeze re-checks ownership inside its
+/// transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotOwnershipConflict {
+    pub article_id: i64,
+    pub owner_record_id: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +99,17 @@ pub trait PublishItemRepository: Send + Sync {
         &self,
         publish_record_id: i64,
     ) -> Result<Vec<PublishItem>, StorageError>;
+
+    /// First article of `publish_record_id`'s snapshot that another
+    /// not-`failed` record also holds and keeps: an owner already
+    /// `published_*` (its articles are `published`) always wins, otherwise the
+    /// lower record id wins. store_local and remote call this before writing
+    /// externally, so of two legacy snapshots sharing an article only the
+    /// winner reaches a file or GitHub.
+    async fn find_snapshot_ownership_conflict(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Option<SnapshotOwnershipConflict>, StorageError>;
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +164,15 @@ WHERE a.state = 'ready_for_publish'
   AND fs.category_key = $2
   AND COALESCE(fe.published_at, fe.discovered_at) >= $3
   AND COALESCE(fe.published_at, fe.discovered_at) <= $4
+  AND NOT EXISTS (
+      -- Snapshot ownership (ADR 0012): an article frozen into another
+      -- publish record that has not failed belongs to that snapshot.
+      SELECT 1
+      FROM publish_items owned
+      JOIN publish_records owner_record ON owner_record.id = owned.publish_record_id
+      WHERE owned.article_id = a.id
+        AND owner_record.state <> 'failed'
+  )
 ORDER BY aar.importance_score DESC, a.created_at DESC, a.id ASC
 LIMIT $5
 "#;
@@ -162,6 +202,15 @@ WHERE fs.category_key = $1
   AND NOT EXISTS (
       SELECT 1 FROM article_ai_results aar WHERE aar.article_id = a.id
   )
+  AND NOT EXISTS (
+      -- Snapshot ownership (ADR 0012): an article frozen into another
+      -- publish record that has not failed belongs to that snapshot.
+      SELECT 1
+      FROM publish_items owned
+      JOIN publish_records owner_record ON owner_record.id = owned.publish_record_id
+      WHERE owned.article_id = a.id
+        AND owner_record.state <> 'failed'
+  )
 ORDER BY a.created_at DESC, a.id ASC
 LIMIT $4
 "#;
@@ -187,6 +236,15 @@ WHERE fs.category_key = $1
   AND NOT EXISTS (
       SELECT 1 FROM article_ai_results aar WHERE aar.article_id = a.id
   )
+  AND NOT EXISTS (
+      -- Snapshot ownership (ADR 0012): an article frozen into another
+      -- publish record that has not failed belongs to that snapshot.
+      SELECT 1
+      FROM publish_items owned
+      JOIN publish_records owner_record ON owner_record.id = owned.publish_record_id
+      WHERE owned.article_id = a.id
+        AND owner_record.state <> 'failed'
+  )
 ORDER BY a.created_at DESC, a.id ASC
 LIMIT $4
 "#;
@@ -196,6 +254,28 @@ UPDATE articles
 SET state = 'ready_for_publish', updated_at = $1
 WHERE id = $2 AND state = 'persisted'
 "#;
+
+const SELECT_ARTICLE_STATE_SQL: &str = "SELECT state FROM articles WHERE id = $1";
+
+/// Another not-failed publish record that already owns the article.
+const SELECT_ACTIVE_SNAPSHOT_OWNER_SQL: &str = r#"
+SELECT owner_record.id
+FROM publish_items owned
+JOIN publish_records owner_record ON owner_record.id = owned.publish_record_id
+WHERE owned.article_id = $1
+  AND owner_record.id <> $2
+  AND owner_record.state <> 'failed'
+ORDER BY owner_record.id
+LIMIT 1
+"#;
+
+/// PostgreSQL: lock the snapshot's articles in id order before the ownership
+/// check, so two concurrent freezes of the same article serialise (the second
+/// blocks, then sees the first's committed items) without deadlocking.
+const SET_READ_COMMITTED_PG_SQL: &str = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED";
+
+const LOCK_ARTICLES_FOR_FREEZE_PG_SQL: &str =
+    "SELECT id FROM articles WHERE id = ANY($1) ORDER BY id FOR UPDATE";
 
 const INSERT_PUBLISH_ITEM_SQL: &str = r#"
 INSERT INTO publish_items (
@@ -213,10 +293,38 @@ SET state = 'snapshot_frozen',
     snapshot_frozen_at = $1,
     lease_owner = NULL,
     lease_expires_at = NULL,
+    stage_attempt_count = 0,
+    next_attempt_at = NULL,
     last_error = NULL,
     last_error_kind = NULL,
     updated_at = $2
 WHERE id = $3 AND lease_owner = $4 AND state = 'pending'
+"#;
+
+/// Same text on both dialects. One ranking of the non-failed records holding
+/// an article (R3F-P-B1, ADR 0012 §2): published records first, then the
+/// lowest record id. Record `$1` loses an article to every holder ranked above
+/// it, and the reported owner is the top-ranked one, so every loser names the
+/// same winner (a published holder even when a lower unpublished one exists).
+const SELECT_SNAPSHOT_OWNERSHIP_CONFLICT_SQL: &str = r#"
+SELECT mine.article_id AS article_id, owner_record.id AS owner_record_id
+FROM publish_items mine
+JOIN publish_records mine_record ON mine_record.id = mine.publish_record_id
+JOIN publish_items theirs
+  ON theirs.article_id = mine.article_id
+ AND theirs.publish_record_id <> mine.publish_record_id
+JOIN publish_records owner_record ON owner_record.id = theirs.publish_record_id
+WHERE mine.publish_record_id = $1
+  AND owner_record.state <> 'failed'
+  AND (CASE WHEN owner_record.state IN ('published_local', 'published_remote') THEN 0 ELSE 1 END
+         < CASE WHEN mine_record.state IN ('published_local', 'published_remote') THEN 0 ELSE 1 END
+       OR (CASE WHEN owner_record.state IN ('published_local', 'published_remote') THEN 0 ELSE 1 END
+             = CASE WHEN mine_record.state IN ('published_local', 'published_remote') THEN 0 ELSE 1 END
+           AND owner_record.id < mine_record.id))
+ORDER BY mine.position ASC, mine.article_id ASC,
+         CASE WHEN owner_record.state IN ('published_local', 'published_remote') THEN 0 ELSE 1 END ASC,
+         owner_record.id ASC
+LIMIT 1
 "#;
 
 const LIST_PUBLISH_ITEMS_BY_RECORD_SQL: &str = r#"
@@ -340,6 +448,40 @@ impl PublishItemRepository for PublishItemRepo {
             StoragePool::Postgres(p) => pg_list_by_publish_record(p, publish_record_id).await,
         }
     }
+
+    async fn find_snapshot_ownership_conflict(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Option<SnapshotOwnershipConflict>, StorageError> {
+        let row = match &self.pool {
+            StoragePool::Sqlite(p) => {
+                sqlx::query_as::<_, (i64, i64)>(SELECT_SNAPSHOT_OWNERSHIP_CONFLICT_SQL)
+                    .bind(publish_record_id)
+                    .fetch_optional(p)
+                    .await
+            }
+            StoragePool::Postgres(p) => {
+                sqlx::query_as::<_, (i64, i64)>(SELECT_SNAPSHOT_OWNERSHIP_CONFLICT_SQL)
+                    .bind(publish_record_id)
+                    .fetch_optional(p)
+                    .await
+            }
+        }
+        .map_err(StorageError::from)?;
+        Ok(
+            row.map(|(article_id, owner_record_id)| SnapshotOwnershipConflict {
+                article_id,
+                owner_record_id,
+            }),
+        )
+    }
+}
+
+fn conflict(status: FreezeSnapshotStatus) -> FreezeSnapshotOutcome {
+    FreezeSnapshotOutcome {
+        status,
+        item_ids: Vec::new(),
+    }
 }
 
 // ── SQLite helper ──────────────────────────────────────────────
@@ -390,19 +532,63 @@ async fn sqlite_freeze_snapshot(
 ) -> Result<FreezeSnapshotOutcome, StorageError> {
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
 
+    // SQLite: the owner-guarded record UPDATE is the transaction's first
+    // statement, so the write lock is held before any read below (no
+    // read-then-upgrade busy failure) and freezes are serialised.
+
+    let result = sqlx::query(FREEZE_PUBLISH_RECORD_SQL)
+        .bind(now)
+        .bind(now)
+        .bind(publish_record_id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    if result.rows_affected() == 0 {
+        tx.rollback().await.map_err(StorageError::from)?;
+        return Ok(conflict(FreezeSnapshotStatus::PublishRecordConflict));
+    }
+
+    // Ownership re-check inside the transaction: selection ran outside it.
+    for item in &items {
+        let owner_record_id = sqlx::query_scalar::<_, i64>(SELECT_ACTIVE_SNAPSHOT_OWNER_SQL)
+            .bind(item.article_id)
+            .bind(publish_record_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+        if let Some(owner_record_id) = owner_record_id {
+            tx.rollback().await.map_err(StorageError::from)?;
+            return Ok(conflict(FreezeSnapshotStatus::ArticleOwnershipConflict {
+                article_id: item.article_id,
+                owner_record_id,
+            }));
+        }
+    }
+
+    // AI-off: promote `persisted` articles; an article already
+    // `ready_for_publish` (a leftover of a failed snapshot, unowned per the
+    // check above) is kept as is. The state is read inside the transaction.
     for article_id in ai_off_promote_article_ids {
-        let result = sqlx::query(PROMOTE_ARTICLE_READY_FOR_PUBLISH_SQL)
+        let promoted = sqlx::query(PROMOTE_ARTICLE_READY_FOR_PUBLISH_SQL)
             .bind(now)
             .bind(article_id)
             .execute(&mut *tx)
             .await
-            .map_err(StorageError::from)?;
-        if result.rows_affected() == 0 {
-            tx.rollback().await.map_err(StorageError::from)?;
-            return Ok(FreezeSnapshotOutcome {
-                status: FreezeSnapshotStatus::ArticleStateConflict { article_id },
-                item_ids: Vec::new(),
-            });
+            .map_err(StorageError::from)?
+            .rows_affected();
+        if promoted == 0 {
+            let state = sqlx::query_scalar::<_, String>(SELECT_ARTICLE_STATE_SQL)
+                .bind(article_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StorageError::from)?;
+            if state.as_deref() != Some("ready_for_publish") {
+                tx.rollback().await.map_err(StorageError::from)?;
+                return Ok(conflict(FreezeSnapshotStatus::ArticleStateConflict {
+                    article_id,
+                }));
+            }
         }
     }
 
@@ -423,22 +609,6 @@ async fn sqlite_freeze_snapshot(
             .await
             .map_err(StorageError::from)?;
         item_ids.push(id);
-    }
-
-    let result = sqlx::query(FREEZE_PUBLISH_RECORD_SQL)
-        .bind(now)
-        .bind(now)
-        .bind(publish_record_id)
-        .bind(owner)
-        .execute(&mut *tx)
-        .await
-        .map_err(StorageError::from)?;
-    if result.rows_affected() == 0 {
-        tx.rollback().await.map_err(StorageError::from)?;
-        return Ok(FreezeSnapshotOutcome {
-            status: FreezeSnapshotStatus::PublishRecordConflict,
-            item_ids: Vec::new(),
-        });
     }
 
     tx.commit().await.map_err(StorageError::from)?;
@@ -507,20 +677,76 @@ async fn pg_freeze_snapshot(
     now: OffsetDateTime,
 ) -> Result<FreezeSnapshotOutcome, StorageError> {
     let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    // The ownership re-check below must see the rival's items committed while
+    // this transaction waited on the article lock: READ COMMITTED takes a new
+    // snapshot per statement, REPEATABLE READ (a possible database / role
+    // default) would keep the one from before the wait and let both freezes
+    // commit (R1-P-S4). Must be the transaction's first statement.
+    sqlx::query(SET_READ_COMMITTED_PG_SQL)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
 
+    let result = sqlx::query(FREEZE_PUBLISH_RECORD_SQL)
+        .bind(now)
+        .bind(now)
+        .bind(publish_record_id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    if result.rows_affected() == 0 {
+        tx.rollback().await.map_err(StorageError::from)?;
+        return Ok(conflict(FreezeSnapshotStatus::PublishRecordConflict));
+    }
+
+    let article_ids = items.iter().map(|item| item.article_id).collect::<Vec<_>>();
+    sqlx::query(LOCK_ARTICLES_FOR_FREEZE_PG_SQL)
+        .bind(&article_ids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+
+    // Ownership re-check inside the transaction: selection ran outside it.
+    for item in &items {
+        let owner_record_id = sqlx::query_scalar::<_, i64>(SELECT_ACTIVE_SNAPSHOT_OWNER_SQL)
+            .bind(item.article_id)
+            .bind(publish_record_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+        if let Some(owner_record_id) = owner_record_id {
+            tx.rollback().await.map_err(StorageError::from)?;
+            return Ok(conflict(FreezeSnapshotStatus::ArticleOwnershipConflict {
+                article_id: item.article_id,
+                owner_record_id,
+            }));
+        }
+    }
+
+    // AI-off: promote `persisted` articles; an article already
+    // `ready_for_publish` (a leftover of a failed snapshot, unowned per the
+    // check above) is kept as is. The state is read inside the transaction.
     for article_id in ai_off_promote_article_ids {
-        let result = sqlx::query(PROMOTE_ARTICLE_READY_FOR_PUBLISH_SQL)
+        let promoted = sqlx::query(PROMOTE_ARTICLE_READY_FOR_PUBLISH_SQL)
             .bind(now)
             .bind(article_id)
             .execute(&mut *tx)
             .await
-            .map_err(StorageError::from)?;
-        if result.rows_affected() == 0 {
-            tx.rollback().await.map_err(StorageError::from)?;
-            return Ok(FreezeSnapshotOutcome {
-                status: FreezeSnapshotStatus::ArticleStateConflict { article_id },
-                item_ids: Vec::new(),
-            });
+            .map_err(StorageError::from)?
+            .rows_affected();
+        if promoted == 0 {
+            let state = sqlx::query_scalar::<_, String>(SELECT_ARTICLE_STATE_SQL)
+                .bind(article_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StorageError::from)?;
+            if state.as_deref() != Some("ready_for_publish") {
+                tx.rollback().await.map_err(StorageError::from)?;
+                return Ok(conflict(FreezeSnapshotStatus::ArticleStateConflict {
+                    article_id,
+                }));
+            }
         }
     }
 
@@ -541,22 +767,6 @@ async fn pg_freeze_snapshot(
             .await
             .map_err(StorageError::from)?;
         item_ids.push(id);
-    }
-
-    let result = sqlx::query(FREEZE_PUBLISH_RECORD_SQL)
-        .bind(now)
-        .bind(now)
-        .bind(publish_record_id)
-        .bind(owner)
-        .execute(&mut *tx)
-        .await
-        .map_err(StorageError::from)?;
-    if result.rows_affected() == 0 {
-        tx.rollback().await.map_err(StorageError::from)?;
-        return Ok(FreezeSnapshotOutcome {
-            status: FreezeSnapshotStatus::PublishRecordConflict,
-            item_ids: Vec::new(),
-        });
     }
 
     tx.commit().await.map_err(StorageError::from)?;

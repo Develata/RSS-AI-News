@@ -26,6 +26,8 @@ const RSS_BODY: &[u8] = include_bytes!("../../feed/tests/fixtures/rss_2.0_minima
 
 struct MockFeedFetcher {
     responses: Mutex<HashMap<i64, MockResponse>>,
+    /// `(If-None-Match, If-Modified-Since)` inputs of every request.
+    validators_sent: Mutex<Vec<(Option<String>, Option<String>)>>,
 }
 
 struct MockResponse {
@@ -36,6 +38,10 @@ struct MockResponse {
 #[async_trait]
 impl FeedFetcher for MockFeedFetcher {
     async fn fetch_raw(&self, req: &FeedFetchRequest) -> Result<RawFeedFetch, FeedError> {
+        self.validators_sent
+            .lock()
+            .await
+            .push((req.etag.clone(), req.last_modified.clone()));
         let response = {
             let mut guard = self.responses.lock().await;
             guard.remove(&req.source_id)
@@ -161,6 +167,61 @@ async fn single_source_304_marks_not_modified_no_entries() {
     assert!(last_success_at.is_some());
 }
 
+/// A7: a 304 without `ETag` / `Last-Modified` keeps the stored validators, so
+/// the next request is still conditional.
+#[tokio::test]
+async fn not_modified_without_validators_keeps_them_for_the_next_request() {
+    let (_dir, pool) = make_test_pool().await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
+    sqlx::query("UPDATE feed_sources SET etag = '\"e1\"', last_modified = 'lm-1' WHERE id = ?")
+        .bind(source_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let bare_304 = || MockResponse {
+        delay: Duration::ZERO,
+        result: Ok(RawFeedFetch {
+            source_id,
+            http_status: 304,
+            etag: None,
+            last_modified: None,
+            not_modified: true,
+            raw_payload_bytes: None,
+        }),
+    };
+    let fetcher = Arc::new(MockFeedFetcher {
+        responses: Mutex::new(responses([(source_id, bare_304())])),
+        validators_sent: Mutex::default(),
+    });
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let ctx = Arc::new(ingest_deps(pool.clone(), app, fetcher.clone()));
+    let flow = IngestFlow::new(ctx, vec![category_with_sources(&["s1"])]);
+
+    assert_eq!(
+        flow.run(IngestOptions::default())
+            .await
+            .sources_not_modified,
+        1
+    );
+    let stored: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT etag, last_modified FROM feed_sources WHERE id = ?")
+            .bind(source_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored,
+        (Some("\"e1\"".to_string()), Some("lm-1".to_string()))
+    );
+
+    fetcher.responses.lock().await.insert(source_id, bare_304());
+    flow.run(IngestOptions::default()).await;
+    let sent = fetcher.validators_sent.lock().await.clone();
+    let expected = (Some("\"e1\"".to_string()), Some("lm-1".to_string()));
+    assert_eq!(sent, vec![expected.clone(), expected]);
+}
+
 #[tokio::test]
 async fn source_state_write_failure_after_304_is_a_storage_failure() {
     let (_dir, pool) = make_test_pool().await;
@@ -218,6 +279,112 @@ async fn source_state_write_failure_after_200_is_a_storage_failure() {
     assert_eq!(summary.sources_succeeded, 0);
     assert_eq!(summary.sources_failed, 1);
     assert_eq!(summary.sources_storage_failed, 1);
+}
+
+/// A6: a source write-back that matches zero rows (`Ok(false)`) did not record
+/// the source state; it must not be reported as a success.
+#[tokio::test]
+async fn source_success_writeback_matching_no_row_is_a_storage_failure() {
+    for response in [not_modified as fn(i64) -> MockResponse, |id| {
+        ok_payload(id, RSS_BODY)
+    }] {
+        let (_dir, pool) = make_test_pool().await;
+        let config_id = insert_config_rule(&pool).await;
+        let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
+        // RAISE(IGNORE) skips the row silently: the UPDATE reports 0 rows.
+        sqlx::query(
+            "CREATE TRIGGER skip_success_writeback BEFORE UPDATE ON feed_sources \
+             WHEN NEW.last_success_at IS NOT NULL \
+             BEGIN SELECT RAISE(IGNORE); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let flow = flow(
+            pool.clone(),
+            RetentionPolicy::Always,
+            2,
+            category_with_sources(&["s1"]),
+            responses([(source_id, response(source_id))]),
+        );
+
+        let summary = flow.run(IngestOptions::default()).await;
+
+        assert_eq!(summary.sources_succeeded + summary.sources_not_modified, 0);
+        assert_eq!(summary.sources_failed, 1);
+        assert_eq!(summary.sources_storage_failed, 1);
+        assert_eq!(
+            summary.failure_samples[0].error_kind.as_deref(),
+            Some("integrity")
+        );
+    }
+}
+
+#[tokio::test]
+async fn source_failure_writeback_matching_no_row_is_a_storage_failure() {
+    let (_dir, pool) = make_test_pool().await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
+    sqlx::query(
+        "CREATE TRIGGER skip_failure_writeback BEFORE UPDATE ON feed_sources \
+         WHEN NEW.consecutive_failures > OLD.consecutive_failures \
+         BEGIN SELECT RAISE(IGNORE); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let flow = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&["s1"]),
+        responses([(
+            source_id,
+            MockResponse {
+                delay: Duration::ZERO,
+                result: Err(FeedError::HttpStatus { code: 503 }),
+            },
+        )]),
+    );
+
+    let summary = flow.run(IngestOptions::default()).await;
+
+    assert_eq!(summary.sources_failed, 1);
+    assert_eq!(summary.sources_storage_failed, 1);
+}
+
+/// A6: a source row that cannot be read back after its upsert is a storage
+/// integrity failure of that source, not a panic of the whole ingest.
+#[tokio::test]
+async fn unreadable_upserted_source_fails_that_source_without_panicking() {
+    let (_dir, pool) = make_test_pool().await;
+    insert_config_rule(&pool).await;
+    // RETURNING reports the inserted id; the AFTER trigger then removes the row.
+    sqlx::query(
+        "CREATE TRIGGER vanish_after_insert AFTER INSERT ON feed_sources \
+         WHEN NEW.source_key = 'ghost' \
+         BEGIN DELETE FROM feed_sources WHERE id = NEW.id; END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let flow = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&["ghost"]),
+        responses([]),
+    );
+
+    let summary = flow.run(IngestOptions::default()).await;
+
+    assert_eq!(summary.sources_attempted, 1);
+    assert_eq!(summary.sources_failed, 1);
+    assert_eq!(summary.sources_storage_failed, 1);
+    assert_eq!(
+        summary.failure_samples[0].error_kind.as_deref(),
+        Some("integrity")
+    );
 }
 
 #[tokio::test]
@@ -612,6 +779,7 @@ fn flow_with_source_secrets(
     let app = Arc::new(app_config(retention_policy, concurrent_feeds));
     let fetcher = Arc::new(MockFeedFetcher {
         responses: Mutex::new(responses),
+        validators_sent: Mutex::default(),
     });
     let ctx = Arc::new(ingest_deps(pool, app, fetcher));
     IngestFlow::with_source_secrets(ctx, vec![category], source_secrets)
@@ -703,4 +871,111 @@ async fn ingest_summary_retains_only_bounded_failure_samples() {
     assert_eq!(summary.sources_failed, 80);
     assert_eq!(summary.tasks_panicked, 0);
     assert_eq!(summary.failure_samples.len(), 32);
+}
+
+/// R2-S12: config moves the source to endpoint B while the request to A is
+/// in flight; A's 304 is a stale response — B does not get A's ETag, and the
+/// source is reported failed (`endpoint_changed`), not as a storage failure.
+#[tokio::test]
+async fn a_response_for_a_moved_endpoint_is_stale_not_recorded() {
+    let (_dir, pool) = make_test_pool().await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
+    let flow = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&["s1"]),
+        responses([(
+            source_id,
+            MockResponse {
+                delay: Duration::from_millis(300),
+                ..not_modified(source_id)
+            },
+        )]),
+    );
+    let mover = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            sqlx::query(
+                "UPDATE feed_sources SET feed_url = 'https://example.com/b.xml', etag = NULL \
+                 WHERE id = ?",
+            )
+            .bind(source_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        })
+    };
+
+    let summary = flow.run(IngestOptions::default()).await;
+    mover.await.unwrap();
+
+    assert_eq!(summary.sources_not_modified, 0);
+    assert_eq!(summary.sources_failed, 1);
+    assert_eq!(summary.sources_storage_failed, 0);
+    assert_eq!(
+        summary.failure_samples[0].error_kind.as_deref(),
+        Some("endpoint_changed")
+    );
+    let etag: Option<String> = sqlx::query_scalar("SELECT etag FROM feed_sources WHERE id = ?")
+        .bind(source_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(etag, None);
+}
+
+/// R3E-S12: the same move, but A answers 500. The failure write-back misses
+/// (endpoint guard) and is reported as `endpoint_changed`, like the 200 / 304
+/// branches — not as `http_5xx` — and B's row keeps no failure of A's.
+#[tokio::test]
+async fn a_failure_for_a_moved_endpoint_is_stale_not_recorded() {
+    let (_dir, pool) = make_test_pool().await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_id = insert_source(&pool, config_id, "s1", "https://example.com/s1.xml").await;
+    let flow = flow(
+        pool.clone(),
+        RetentionPolicy::Always,
+        2,
+        category_with_sources(&["s1"]),
+        responses([(
+            source_id,
+            MockResponse {
+                delay: Duration::from_millis(300),
+                result: Err(FeedError::HttpStatus { code: 500 }),
+            },
+        )]),
+    );
+    let mover = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            sqlx::query(
+                "UPDATE feed_sources SET feed_url = 'https://example.com/b.xml' WHERE id = ?",
+            )
+            .bind(source_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        })
+    };
+
+    let summary = flow.run(IngestOptions::default()).await;
+    mover.await.unwrap();
+
+    assert_eq!(summary.sources_failed, 1);
+    assert_eq!(summary.sources_storage_failed, 0);
+    assert_eq!(
+        summary.failure_samples[0].error_kind.as_deref(),
+        Some("endpoint_changed")
+    );
+    let last_error_kind: Option<String> =
+        sqlx::query_scalar("SELECT last_error_kind FROM feed_sources WHERE id = ?")
+            .bind(source_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(last_error_kind, None);
 }

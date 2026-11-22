@@ -8,7 +8,16 @@
 # dependency build into an ordinary layer keyed by a manifest-only recipe
 # (Cargo.lock + manifests, workspace member versions masked), so a source edit
 # rebuilds only the workspace crates instead of every dependency.
-FROM rust:1.97.0-slim-bookworm AS chef
+#
+# Base images are pinned by multi-platform index digest (resolved with
+# `docker buildx imagetools inspect`), so a rebuild of the same commit uses the
+# same bytes on amd64 (CI / GHCR) and arm64 (local). Dependabot's docker
+# ecosystem proposes digest refreshes of the Debian runtime image; the Rust
+# builder's version is the toolchain pin owned by rust-toolchain.toml (static
+# lane `toolchain-pins`), and its retired patch tag gets no upstream rebuilds,
+# so it is refreshed together with the toolchain (.github/dependabot.yml).
+# Debian 12 (bookworm) is in LTS until 2028-06-30, so the distro stays.
+FROM rust:1.97.0-slim-bookworm@sha256:6d220bf85c74e842a79da63997af8d2e74455c0b8847d8bb3a5888572334991d AS chef
 
 ARG CARGO_CHEF_VERSION=0.1.78
 # SHA-256 verified against the release's .sha256 assets for v0.1.78.
@@ -56,7 +65,7 @@ RUN cargo build --release --locked --bin rss-ai-news && \
 ############################
 # Production runtime
 ############################
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 
 ENV TZ=Asia/Shanghai \
     RUST_LOG=info
@@ -113,8 +122,8 @@ CMD ["--help"]
 # 在外层套一个 supercronic（github.com/aptible/supercronic）按 crontab
 # 表达式周期触发 `rss-ai-news <subcommand>`。supercronic 相比 cron 的优势：
 #   - 非 root 友好（继承 appuser），不需要 setuid
-#   - cron job 的 stdout/stderr 直接透传到 supercronic 自身的 stdout，
-#     `docker logs` 可见，无需 syslog
+#   - cron job 的 stdout/stderr 被包装成 supercronic 自身的日志行
+#     （0.2.49 默认不 passthrough），`docker logs` 可见，无需 syslog
 #   - 单 binary 部署，零运行时依赖
 FROM runtime AS scheduler
 

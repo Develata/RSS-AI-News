@@ -3,9 +3,7 @@
 
 use rss_ai_news_ai::AiError;
 use rss_ai_news_domain::error::ClassifiedError;
-use rss_ai_news_storage::{
-    AiCompleteArticleAdvance, ClaimedAiResult, ReleaseFailureOutcome, ReleaseSuccessOutcome,
-};
+use rss_ai_news_storage::{ClaimedAiResult, ReleaseSuccessOutcome};
 use serde_json::json;
 use time::OffsetDateTime;
 
@@ -63,7 +61,7 @@ pub(super) async fn finish_ai_success(
             actual_model,
             claimed.article_id,
             i32::from(opts.min_importance_score.get()),
-            OffsetDateTime::now_utc(),
+            (ctx.clock)(),
         )
         .await;
 
@@ -96,6 +94,7 @@ pub(super) async fn finish_ai_success(
                 )
                 .await;
             AiTaskOutcome {
+                storage_failed: false,
                 article_ai_result_id: claimed.id,
                 article_id: claimed.article_id,
                 status,
@@ -105,29 +104,74 @@ pub(super) async fn finish_ai_success(
         }
         Ok(ReleaseSuccessOutcome {
             released: false, ..
-        }) => {
-            tracing::warn!(ai_result_id = claimed.id, "AI success release conflicted");
-            AiTaskOutcome {
-                article_ai_result_id: claimed.id,
-                article_id: claimed.article_id,
-                status: AiTaskStatus::PermanentFailed,
-                article_advance: Some(AiCompleteArticleAdvance::NoChange),
-                error_kind: Some("lease_conflict".to_string()),
-            }
-        }
+        }) => release_not_applied(emitter, claimed, "success", NotApplied::LeaseLost).await,
         Err(error) => {
+            release_not_applied(emitter, claimed, "success", NotApplied::Storage(&error)).await
+        }
+    }
+}
+
+/// Why a release changed nothing.
+enum NotApplied<'a> {
+    /// Owner guard matched no row: another owner holds the lease now.
+    LeaseLost,
+    /// The release statement failed; the row keeps this run's lease until it
+    /// expires and is reclaimed.
+    Storage(&'a rss_ai_news_storage::StorageError),
+}
+
+/// Outcome of a release that did not land: no `ai_completed` / `ai_failed`
+/// event and no state counted, only `ai_release_not_applied` with the reason.
+async fn release_not_applied(
+    emitter: &RunEventEmitter<'_>,
+    claimed: &ClaimedAiResult,
+    attempted: &str,
+    reason: NotApplied<'_>,
+) -> AiTaskOutcome {
+    let (status, severity, error_kind) = match reason {
+        NotApplied::LeaseLost => {
+            tracing::warn!(
+                ai_result_id = claimed.id,
+                attempted,
+                "AI release matched no row (lease lost)"
+            );
+            (AiTaskStatus::LeaseLost, "warn", "lease_lost".to_string())
+        }
+        NotApplied::Storage(error) => {
             tracing::error!(
                 ai_result_id = claimed.id,
-                "AI success release failed: {error}"
+                attempted,
+                "AI release failed: {error}"
             );
-            AiTaskOutcome {
-                article_ai_result_id: claimed.id,
-                article_id: claimed.article_id,
-                status: AiTaskStatus::PermanentFailed,
-                article_advance: Some(AiCompleteArticleAdvance::NoChange),
-                error_kind: Some(error.error_kind().to_string()),
-            }
+            (
+                AiTaskStatus::ReleaseFailed,
+                "error",
+                error.error_kind().to_string(),
+            )
         }
+    };
+    emitter
+        .emit(
+            "ai_release_not_applied",
+            severity,
+            Some("article_ai_result"),
+            Some(claimed.id),
+            "AI result release did not apply",
+            Some(json!({
+                "article_id": claimed.article_id,
+                "article_ai_result_id": claimed.id,
+                "attempted": attempted,
+                "error_kind": error_kind,
+            })),
+        )
+        .await;
+    AiTaskOutcome {
+        storage_failed: false,
+        article_ai_result_id: claimed.id,
+        article_id: claimed.article_id,
+        status,
+        article_advance: None,
+        error_kind: Some(error_kind),
     }
 }
 
@@ -144,7 +188,7 @@ pub(super) async fn finish_ai_failure(
     max_attempts: u32,
     attempts: &[serde_json::Value],
 ) -> AiTaskOutcome {
-    let now = OffsetDateTime::now_utc();
+    let now = (ctx.clock)();
     if attempts.len() > 1 {
         emitter
             .emit(
@@ -163,46 +207,50 @@ pub(super) async fn finish_ai_failure(
             .await;
     }
 
+    let message = error.display_user();
+    let kind = error.error_kind().to_string();
     if error.is_retryable() {
-        release_retryable_ai_failure(ctx, emitter, owner, claimed, error, max_attempts, now).await
+        release_retryable_ai_failure(
+            ctx,
+            emitter,
+            owner,
+            claimed,
+            &message,
+            &kind,
+            max_attempts,
+            now,
+        )
+        .await
     } else {
-        let message = error.display_user();
-        let kind = error.error_kind().to_string();
         release_permanent_ai_failure(ctx, emitter, owner, claimed, &message, &kind, now).await
     }
 }
 
-async fn release_retryable_ai_failure(
+/// Retryable release with the W15 budget fold; shared by AI errors and
+/// transient storage errors reading the article.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn release_retryable_ai_failure(
     ctx: &AiDeps,
     emitter: &RunEventEmitter<'_>,
     owner: &str,
     claimed: &ClaimedAiResult,
-    error: AiError,
+    message: &str,
+    kind: &str,
     max_attempts: u32,
     now: OffsetDateTime,
 ) -> AiTaskOutcome {
-    let message = error.display_user();
-    let kind = error.error_kind().to_string();
     let outcome = match ctx
         .ai_result_repo
-        .release_retryable_failure(claimed.id, owner, &message, &kind, max_attempts, now)
+        .release_retryable_failure(claimed.id, owner, message, kind, max_attempts, now)
         .await
     {
-        Ok(outcome) => {
-            if !outcome.released {
-                tracing::warn!(ai_result_id = claimed.id, "AI retryable release conflicted");
-            }
-            outcome
+        Ok(outcome) if outcome.released => outcome,
+        Ok(_) => {
+            return release_not_applied(emitter, claimed, "retryable", NotApplied::LeaseLost).await;
         }
         Err(error) => {
-            tracing::error!(
-                ai_result_id = claimed.id,
-                "AI retryable release failed: {error}"
-            );
-            ReleaseFailureOutcome {
-                released: false,
-                exhausted: false,
-            }
+            return release_not_applied(emitter, claimed, "retryable", NotApplied::Storage(&error))
+                .await;
         }
     };
     // W15 §3：预算耗尽时 release SQL 已折叠进 permanent_failed——事件升 error
@@ -214,7 +262,7 @@ async fn release_retryable_ai_failure(
             if exhausted { "error" } else { "warn" },
             Some("article_ai_result"),
             Some(claimed.id),
-            &message,
+            message,
             Some(json!({
                 "article_id": claimed.article_id,
                 "article_ai_result_id": claimed.id,
@@ -225,6 +273,7 @@ async fn release_retryable_ai_failure(
         )
         .await;
     AiTaskOutcome {
+        storage_failed: false,
         article_ai_result_id: claimed.id,
         article_id: claimed.article_id,
         status: if exhausted {
@@ -233,7 +282,7 @@ async fn release_retryable_ai_failure(
             AiTaskStatus::RetryableFailed
         },
         article_advance: None,
-        error_kind: Some(kind),
+        error_kind: Some(kind.to_string()),
     }
 }
 
@@ -251,12 +300,14 @@ pub(super) async fn release_permanent_ai_failure(
         .release_permanent_failure(claimed.id, owner, message, kind, now)
         .await
     {
-        Ok(false) => tracing::warn!(ai_result_id = claimed.id, "AI permanent release conflicted"),
-        Err(error) => tracing::error!(
-            ai_result_id = claimed.id,
-            "AI permanent release failed: {error}"
-        ),
         Ok(true) => {}
+        Ok(false) => {
+            return release_not_applied(emitter, claimed, "permanent", NotApplied::LeaseLost).await;
+        }
+        Err(error) => {
+            return release_not_applied(emitter, claimed, "permanent", NotApplied::Storage(&error))
+                .await;
+        }
     }
     emitter
         .emit(
@@ -274,6 +325,7 @@ pub(super) async fn release_permanent_ai_failure(
         )
         .await;
     AiTaskOutcome {
+        storage_failed: false,
         article_ai_result_id: claimed.id,
         article_id: claimed.article_id,
         status: AiTaskStatus::PermanentFailed,
@@ -288,5 +340,7 @@ fn ai_task_status_str(status: &AiTaskStatus) -> &'static str {
         AiTaskStatus::Filtered => "filtered",
         AiTaskStatus::RetryableFailed => "retryable_failed",
         AiTaskStatus::PermanentFailed => "permanent_failed",
+        AiTaskStatus::LeaseLost => "lease_lost",
+        AiTaskStatus::ReleaseFailed => "release_failed",
     }
 }

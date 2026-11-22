@@ -46,6 +46,8 @@ enabled = true
 占位符约束：
 - 配置 schema **不**接受裸 URL 中的密钥（避免持久化泄露）
 - 占位符展开仅在运行时进行，**不**写回 `feed_sources.feed_url`
+- feed HTTP client 关闭 `Referer`（`reqwest` 默认在重定向时把带 `?key=` 的上一跳 URL 作为 Referer 发给新主机）；
+  测试 `cross_host_redirect_does_not_leak_rsshub_key_via_referer`（2026-11-21）
 - 详见 [../adr/0007-rsshub-secret-runtime-expansion.md](../adr/0007-rsshub-secret-runtime-expansion.md)
 
 ## 3. HTTP 抓取
@@ -59,7 +61,18 @@ enabled = true
 - `If-None-Match: <etag>`
 - `If-Modified-Since: <last_modified>`
 
-返回 304 = 跳过本次抓取，状态机 transition 数为 0。
+返回 304 = 跳过本次抓取，状态机 transition 数为 0。304 写回走 `update_after_not_modified`：304 未带的
+`ETag` / `Last-Modified` 保留库中旧值（`COALESCE`；RFC 9110 §15.4.5 规定：若同一请求的 200 会带 `ETag`，304 也必须带；
+其余验证器可省略，故省略时沿用旧值），带了则更新；200 写回仍是替换语义（以新表示的验证器为准）。
+
+端点保护（R2-S12）：200 / 304 / 失败三种写回都带上**请求发出时**的端点 `(feed_url, feed_kind)` 作为条件
+（`FeedEndpoint`）。请求在途时配置把同一 source 改到另一端点（并清空验证器），旧响应的写回命中 0 行，不会把 A 的 ETag
+交给 B，也不会把 B 记为抓取成功；ingest 再读一次该行，端点确实已变则记为过期响应（`error_kind = endpoint_changed`，
+source 计 failed，不计存储故障）；行不存在或端点未变却未命中仍按存储完整性故障上报。三种抓取侧失败（请求出错、
+非 304 无正文、解析失败）的失败写回同样按此归为 `endpoint_changed`，不报原错误类别（R3E-S12）；条目写库失败的分支
+仍按存储故障上报（那是本库的错误）。**已知限制（R3E-S12，未修）**：端点核对发生在条目写入**之后**——旧端点 A 的 200
+响应被判为过期前，其 entries 已按同一 `source_id` 入库，开启留档时也已覆盖同键的 `feed_payload`；B 的验证器不受影响，
+但 B 之后同 UID 的条目可能被当成重复。要让“过期响应完全不落库”成立，需把端点核对与条目、留档、来源状态的提交放进同一事务。
 
 ### 3.2 超时与重试
 
@@ -68,8 +81,11 @@ enabled = true
 - TCP keep-alive：开
 - 失败分类：见 [./11-error-and-recovery.md](./11-error-and-recovery.md) `FeedError`
 
-retryable 错误：超时、5xx、连接失败 → 状态保持，下轮重试
-非 retryable：4xx（除 408 / 429）、过大、解析失败 → 直接转 `Failed`
+retryable 错误：超时、5xx、429（限流，`error_kind = http_429`）、连接失败 → 状态保持，下轮重试
+非 retryable：其余 4xx（含 408）、过大、解析失败 → 本次跳过（见 §8；source 不转 paused）
+
+（2026-11-21：此前本节写"除 408 / 429"而 §8 与代码把全部 4xx 判为不可重试，二者矛盾；现统一为
+仅 429 可重试，408 维持不可重试。）
 
 ### 3.3 代理与 TLS
 
@@ -89,6 +105,14 @@ retryable 错误：超时、5xx、连接失败 → 状态保持，下轮重试
 | `Atom` | `atom_syndication` | Atom 1.0 |
 | `JsonFeed` | 自实现 `serde_json` parser | jsonfeed.org 1.1 |
 | `RssHub` | 走 RSS 分支 | RSSHub 输出始终是 RSS 2.0 |
+
+（实现现为 `feed-rs` 统一解析；上表为历史设计，漂移未改。）
+
+文章链接选取（2026-11-21）：Atom entry 可在文章链接前列出 `self` / `enclosure` / `related`。
+`parse_feed` 优先 `rel="alternate"`（缺省 `rel` 即 alternate；等价的注册关系 IRI
+`http://www.iana.org/assignments/relation/alternate` 同样算 alternate，scheme / host 不分大小写，R2-S13；RFC 4287 §4.2.7.2），其中优先
+`text/html` / `application/xhtml+xml`；无 alternate 时取第一个 HTML 链接，再退回第一个链接。
+测试 `atom_prefers_alternate_link_over_self_and_enclosure`、`atom_alternate_rel_iri_counts_as_alternate`。
 
 ### 4.2 FeedEntryMeta 规范化
 
@@ -178,7 +202,8 @@ INSERT 直接写入 `feed_entries`：数据库以 `(source_id, feed_entry_uid)` 
 | 失败点 | 错误变体 | retryable | 处理 |
 |---|---|---|---|
 | HTTP 超时 | `FeedError::HttpTimeout` | true | source 跳过，下次再试 |
-| 4xx | `FeedError::HttpStatus { 4xx }` | false | source 仍 active，但本次跳过 |
+| 429 | `FeedError::HttpStatus { 429 }`（`http_429`） | true | 同超时。**已知限制（R2-S10，延后）**：feed 侧不保存 `Retry-After`，下一轮 run 可能在服务器要求的等待期内再次请求；跨 run 生效需要 `feed_sources` 新列，留作后续迁移。extract 侧已按 Retry-After 冷却（[02-extract](./02-extract.md)） |
+| 其余 4xx | `FeedError::HttpStatus { 4xx }` | false | source 仍 active，但本次跳过 |
 | 5xx | `FeedError::HttpStatus { 5xx }` | true | 同超时 |
 | 过大 (`> max_payload_bytes`) | `FeedError::TooLarge` | false | source 跳过 |
 | 解析失败 | `FeedError::ParseFailed` | false | source 跳过 |

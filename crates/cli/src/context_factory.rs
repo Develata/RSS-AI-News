@@ -2,7 +2,10 @@ use crate::{db_url::resolve_storage_url, error::CliError};
 use reqwest::Client;
 use rss_ai_news_ai::{AiClientConfig, OpenAiCompatClient};
 use rss_ai_news_config::{self as config, AiCredentials, LoadedConfig};
-use rss_ai_news_extractor::{ContentStrategy, ReadabilityStrategy, ReqwestHtmlFetcher};
+use rss_ai_news_extractor::{
+    ContentStrategy, EXTRACTOR_RULE_DESCRIPTION, EXTRACTOR_RULE_KIND, EXTRACTOR_RULE_TAG,
+    ReadabilityStrategy, ReqwestHtmlFetcher,
+};
 use rss_ai_news_feed::ReqwestFeedFetcher;
 use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, LocalFsTarget, PublishTarget};
 use rss_ai_news_runtime::{
@@ -12,8 +15,9 @@ use rss_ai_news_runtime::{
 use rss_ai_news_storage::{
     ArticleAiResultRepo, ArticleRepo, ConfigRotation, DecisionExecution, DecisionResultRepo,
     FeedEntryRepo, FeedSourceRepo, PublishItemRepo, PublishRecordRepo, RawArtifactRepo,
-    ReindexJobRepo, RuleVersionRepo, RunEventRepo, StoragePool, applied_migration_versions,
-    ensure_migration_state_exact, pending_migration_versions, run_migrations,
+    ReindexJobRepo, RuleVersionRepo, RuleVersionRepository, RunEventRepo, StoragePool,
+    applied_migration_versions, ensure_migration_state_exact, pending_migration_versions,
+    run_migrations,
 };
 use std::{sync::Arc, time::Duration};
 use time::OffsetDateTime;
@@ -57,6 +61,7 @@ pub fn build_decision_run_deps(
         run: RunMeta::default(),
         settings: DecisionRunSettings {
             concurrency: settings.concurrency,
+            max_state_chars: settings.max_state_chars,
             lease_seconds: settings.lease_seconds,
             max_attempts: settings.max_attempts,
             request_timeout: settings.request_timeout,
@@ -95,19 +100,50 @@ pub fn build_ingest_deps(
     }))
 }
 
-pub fn build_extract_deps(
+/// Resolves (registering on first use) the active `kind='extractor'` rule
+/// version, the same `active_rule_or_register` entry ingest uses for
+/// `kind='config'`. Articles persisted before this existed keep their
+/// historical `extractor_version` (the literal `1`); they are not rewritten.
+pub async fn resolve_extractor_version(pool: &StoragePool) -> Result<i64, CliError> {
+    let tag_sha = hex_sha256(EXTRACTOR_RULE_TAG.as_bytes());
+    Ok(RuleVersionRepo::new_with_storage(pool.clone())
+        .active_rule_or_register(
+            EXTRACTOR_RULE_KIND,
+            EXTRACTOR_RULE_TAG,
+            EXTRACTOR_RULE_DESCRIPTION,
+            &tag_sha,
+        )
+        .await?)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// The HTML extraction strategies `extractor.strategy_order` enables, in that
+/// order. `summary_fallback` is not an HTML strategy (the extract flow applies
+/// it after the chain fails), so it adds none. Shared by live extraction and
+/// `replay --kind html` so both run the same chain (R3-6).
+pub fn configured_html_strategies(
+    extractor: &config::ExtractorConfig,
+) -> Vec<Arc<dyn ContentStrategy>> {
+    extractor
+        .strategy_order
+        .iter()
+        .filter(|name| name.as_str() == "readability")
+        .map(|_| Arc::new(ReadabilityStrategy) as Arc<dyn ContentStrategy>)
+        .collect()
+}
+
+pub async fn build_extract_deps(
     loaded: &LoadedConfig,
     pool: &StoragePool,
     run: RunMeta,
 ) -> Result<Arc<ExtractDeps>, CliError> {
     let app = &loaded.app;
-    let strategies: Vec<Arc<dyn ContentStrategy>> = app
-        .extractor
-        .strategy_order
-        .iter()
-        .filter(|name| name.as_str() == "readability")
-        .map(|_| Arc::new(ReadabilityStrategy) as Arc<dyn ContentStrategy>)
-        .collect();
+    let extractor_version = resolve_extractor_version(pool).await?;
+    let strategies = configured_html_strategies(&app.extractor);
     Ok(Arc::new(ExtractDeps {
         run,
         http: app.http.clone(),
@@ -115,6 +151,7 @@ pub fn build_extract_deps(
         retry: app.retry.clone(),
         artifact: app.artifact.clone(),
         min_body_chars: app.extractor.min_body_chars,
+        extractor_version,
         html_fetcher: Arc::new(ReqwestHtmlFetcher::new(app.extractor.max_body_bytes)?),
         strategies,
         feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool.clone())),
@@ -145,6 +182,7 @@ pub fn build_ai_deps(
         ai_result_repo: Arc::new(ArticleAiResultRepo::new_with_storage(pool.clone())),
         artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
         event_repo: Arc::new(RunEventRepo::new_with_storage(pool.clone())),
+        clock: system_clock(),
     }))
 }
 
@@ -265,17 +303,15 @@ pub async fn build_recent_entries_flow(
     ))
 }
 
+/// What `replay` needs: one read-only repository on a read-only pool, and the
+/// configured HTML strategies (R3-20: no writer repository is built).
 pub struct ReplayDeps {
-    /// W11-P4-C2：StoragePool 替代 SqlitePool；replay.rs 内部按 backend match。
-    pub pool: StoragePool,
-    pub artifact_repo: Arc<dyn rss_ai_news_storage::RawArtifactRepository>,
-    pub article_repo: Arc<dyn rss_ai_news_storage::ArticleRepository>,
-    pub feed_entry_repo: Arc<dyn rss_ai_news_storage::FeedEntryRepository>,
+    pub projection_repo: Arc<dyn rss_ai_news_storage::ReplayProjectionRepository>,
+    /// [`configured_html_strategies`] of the loaded config.
+    pub html_strategies: Vec<Arc<dyn ContentStrategy>>,
 }
 
 pub async fn build_replay_deps(cli: &crate::args::Cli) -> Result<ReplayDeps, CliError> {
-    // W11-P4-C2：原 require_sqlite_driver 拦截已移除。replay 的 artifact /
-    // article / feed_entry repo 在 P3-C/E 全部双轨化；html_diff SQL 已升 $1。
     let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
     let app = &loaded.app;
     let url = resolve_storage_url(&loaded)?;
@@ -284,10 +320,10 @@ pub async fn build_replay_deps(cli: &crate::args::Cli) -> Result<ReplayDeps, Cli
     ensure_migration_state_exact(&pool).await?;
 
     Ok(ReplayDeps {
-        pool: pool.clone(),
-        artifact_repo: Arc::new(RawArtifactRepo::new_with_storage(pool.clone())),
-        article_repo: Arc::new(ArticleRepo::new_with_storage(pool.clone())),
-        feed_entry_repo: Arc::new(FeedEntryRepo::new_with_storage(pool)),
+        projection_repo: Arc::new(rss_ai_news_storage::ReplayProjectionRepo::new_with_storage(
+            pool,
+        )),
+        html_strategies: configured_html_strategies(&app.extractor),
     })
 }
 

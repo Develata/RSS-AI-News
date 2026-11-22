@@ -18,12 +18,17 @@
 - partial unique index 保证同 target 只能存在一个 pending/running 任务
 - claim → state=`running`，lease 写入；checkpoint 按批 commit `last_processed_id`
 - lease 过期 reclaim → 保留 checkpoint + started_at，可 resume
+- 普通重跑（CLI 自动生成新 tag、同一规则 sha256）领取未完成的同 target job，从 checkpoint 之后继续并完成它
+- 每批 checkpoint 续租 lease；批写入 + owner 校验 + checkpoint 同一事务，失去 lease 的 worker 整批回滚
 - 完成时事务内：rule_versions pending→active、旧 active→superseded、reindex_jobs→completed
 - `link_hash`：扫描所有 entry；每次 move 原子重选 old/new groups 的最小 id canonical，任一非空 final group 恰一 canonical
 - collision candidate 若非组内最小 id → 记 `conflict_skipped`；后续 canonical 移出时原 shadow 同事务 promote
 - `content_hash`：扫描所有 article 重算；命中 unique conflict 时计入 conflict 计数（不写入）
 - `categories`：扫描 sources 增量插入新行、归档已不在 config 的旧行；幂等（第二次执行归档=0）
 - categories reindex 把 active `config` kind rule_version_id 写入新插入 feed_sources 的 `config_rule_version_id`
+- categories reindex 对已存在的 source 只写配置列（display_name / feed_url / feed_kind / status / priority /
+  config_version）；etag / last_modified / consecutive_failures / last_error* 仅在 feed_url 或 feed_kind 变化时清空
+  （与 ingest 配置同步规则一致），last_fetched_at / last_success_at 始终保留（2026-11-21）
 - 无并发写入的静态数据库中，`--dry-run` 与 real run 计数一致；dry-run 的 **reindex 流程自身**不写任何业务表。
   2026-09-10 起 CLI 启动也严格只读：不创建数据库、不迁移、不轮换 config、不写 run_events。
   全局或子命令 --dry-run 均生效，abort 与 dry-run 的组合在访问配置/数据库前拒绝。
@@ -35,6 +40,7 @@
 ### 失败条件（failure path）
 
 - target 已有 active job → `start_tx` 回滚（partial unique）
+- 重跑时活动 job 的规则 sha256 不同，或另一 worker 持有存活 lease → 显式 Conflict（提示 `reindex --abort <id>`），不改任何行
 - rule_version_tag 冲突 → `start_tx` 回滚
 - claim 时 lease 已被其它 worker 持有 → 不抢占
 - mark_failed 时保留 pending 新 rule_version + 不降级旧 active（避免读路径丢 active）
@@ -63,12 +69,21 @@
 | `reindex_link_hash_invalid_url_counted_errors` | 同上 | 非法 URL 错误计数 |
 | `reindex_content_hash_updates_when_body_text_diff` | 同上 | content_hash 重算 |
 | `reindex_content_hash_skips_unique_conflict` | 同上 | unique conflict 跳过 |
-| `reindex_content_hash_unchanged_when_hash_matches` | 同上 | 未变不写 |
+| `categories_reindex_resumes_only_under_the_same_rule_fingerprint` | `crates/cli/tests/reindex_cmd_tests.rs` | R2-S17 同配置续跑、配置变化拒绝续跑 |
+| `rule_fingerprint_follows_algorithm_inputs_only` | `crates/cli/src/commands/reindex.rs` | R2-S17 指纹输入 |
+| `link_hash_reindex_resumes_when_only_the_reserved_normalizer_version_changes` | `crates/cli/tests/reindex_cmd_tests.rs` | R3E-S17 只改保留字段 `link_normalizer_version` 仍续跑 |
+| `pg_content_hash_race_after_the_precheck_is_a_row_conflict` | `crates/storage/tests/reindex_job_pg_tests.rs` | R2-S16 预检后并发提交 → 行级 conflict |
+| `pg_content_hash_batch_propagates_a_non_target_unique_violation` | 同上 | R3E-S16 非目标约束的 23505 使整批失败 |
+| `reindex_content_hash_unchanged_when_hash_matches` | `crates/runtime/tests/reindex_tests.rs` | 未变不写 |
 | `reindex_categories_inserts_new_sources` | 同上 | 增量插入 |
 | `reindex_categories_archives_obsolete_sources` | 同上 | 归档旧 source |
 | `reindex_categories_second_run_archives_nothing` | 同上 | 幂等 |
 | `reindex_categories_writes_config_kind_id_into_feed_sources_config_version` | 同上 | config rule_version 绑定 |
 | `reindex_link_hash_finalizes_reindex_jobs_row` | 同上 | jobs 终态 |
+| `reindex_categories_keeps_fetch_runtime_state_of_unchanged_sources` | `crates/runtime/tests/reindex_tests.rs` | 不覆盖抓取运行态 |
+| `config_upsert_keeps_runtime_state_unless_the_endpoint_changes` | `crates/storage/tests/feed_source_lease_guard_tests.rs` | 仅配置列；endpoint 变化才清运行态（SQLite） |
+| `config_upsert_without_lease_writes_nothing` | 同上 | lease 失去不写 |
+| `pg_config_upsert_keeps_runtime_state_unless_the_endpoint_changes` | `crates/storage/tests/feed_source_pg_tests.rs` | 同上（PG，需 docker） |
 | `reindex_categories_finalizes_reindex_jobs_row_without_checkpoint` | 同上 | 无 checkpoint 终态 |
 | `reindex_promotes_rule_version_to_active_on_completion` | 同上 | active 切换 |
 | `reindex_demotes_previous_active_rule_version_on_second_run` | 同上 | 旧 active 降级 |
@@ -82,6 +97,14 @@
 | `dry_run_content_hash_distinguishes_unchanged_updated_conflict` | 同上 | dry-run 三态 |
 | `dry_run_categories_counts_would_archive_without_writing` | 同上 | dry-run 不写 |
 | `reindex_lease_reclaim_preserves_checkpoint_and_started_at_for_resume` | 同上 | reclaim 续跑 |
+| `plain_rerun_resumes_crashed_job_past_its_checkpoint` | `crates/runtime/tests/reindex_e2e_tests.rs` | 普通重跑越过 checkpoint |
+| `rerun_with_another_rule_conflicts_and_names_the_abort` | 同上 | 规则不一致 → 冲突 |
+| `rerun_while_a_live_worker_holds_the_lease_conflicts` | 同上 | 存活 lease 不被接管 |
+| `resumes_expired_job_of_the_same_rule_with_its_checkpoint` | `crates/storage/tests/reindex_job_resume_tests.rs` | 续跑领取（running 过期） |
+| `a_different_rule_is_a_mismatch_and_changes_nothing` | 同上 | 规则不一致不改行 |
+| `link_hash_batch_of_a_worker_that_lost_the_lease_changes_nothing` | 同上 | 失去 lease 整批回滚 |
+| `content_hash_batch_classifies_rows_and_rolls_back_without_lease` | 同上 | content_hash 批事务 |
+| `pg_resume_claims_same_rule_and_batch_rolls_back_without_lease` | `crates/storage/tests/reindex_job_pg_tests.rs` | PG 续跑 + 批回滚 |
 | `reindex_link_hash_batch_size_one_processes_all_rows_and_checkpoints_last_id` | 同上 | checkpoint 推进 |
 | `reindex_second_start_for_same_target_rejected_by_partial_unique` | 同上 | partial unique 端到端 |
 | `reindex_mark_failed_keeps_old_active_and_pending_new_rule_version` | 同上 | 失败保旧 active |

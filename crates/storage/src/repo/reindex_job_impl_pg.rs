@@ -5,22 +5,45 @@
 //! claim 路径用 `FOR UPDATE SKIP LOCKED`（§6.4）。SQL const 见
 //! [`super::reindex_job_sql`]。
 
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 use time::OffsetDateTime;
 
 use crate::{StorageError, classify_db_error};
 
+use super::article::{
+    SELECT_ARTICLE_CONTENT_HASH_COLLISION_SQL, SELECT_ARTICLE_CONTENT_HASH_SQL,
+    UPDATE_ARTICLE_CONTENT_HASH_SQL,
+};
+use super::feed_entry_impl::reconcile_link_hash_move_pg;
+use super::feed_entry_sql::{LOCK_FEED_ENTRIES_FOR_REINDEX_PG_SQL, SELECT_LINK_HASH_BY_ID_SQL};
 use super::reindex_job::{
-    ClaimedReindexJob, FinishReindexTxOutcome, ReindexJob, StartReindexTxOutcome,
+    ClaimedReindexJob, FinishReindexTxOutcome, ReindexBatchCheckpoint, ReindexJob,
+    ResumeReindexOutcome, StartReindexTxOutcome,
 };
 use super::reindex_job_sql::{
     ABORT_SQL, ADVANCE_CHECKPOINT_SQL, ADVANCE_TO_COMPLETED_SQL, ASSERT_LEASE_HELD_SQL,
-    CLAIM_BY_ID_PG_SQL, CLAIM_PENDING_PG_SQL, COMPLETE_WITHOUT_CLAIM_SQL,
-    FIND_ACTIVE_REINDEX_JOB_BY_TARGET_SQL, FIND_REINDEX_JOB_BY_ID_SQL,
+    CLAIM_BY_ID_PG_SQL, CLAIM_PENDING_PG_SQL, CLAIM_RESUMABLE_SQL, COMPLETE_WITHOUT_CLAIM_SQL,
+    FIND_ACTIVE_JOB_RULE_PG_SQL, FIND_ACTIVE_REINDEX_JOB_BY_TARGET_SQL, FIND_REINDEX_JOB_BY_ID_SQL,
     FINISH_REINDEX_DEMOTE_ACTIVE_SQL, FINISH_REINDEX_PROMOTE_PENDING_SQL,
     FINISH_REINDEX_UPDATE_JOB_SQL, INSERT_REINDEX_JOB_PENDING_SQL, INSERT_RULE_VERSION_PENDING_SQL,
     LIST_RUNNING_REINDEX_JOBS_SQL, MARK_FAILED_SQL, RECLAIM_EXPIRED_LEASES_SQL,
 };
+use crate::{UpdateContentHashOutcome, UpdateLinkHashOutcome};
+
+/// The articles `UNIQUE (content_hash)` constraint (migrations/postgres
+/// 0001, PostgreSQL's default name for it).
+const ARTICLES_CONTENT_HASH_CONSTRAINT: &str = "articles_content_hash_key";
+
+/// `23505` on [`ARTICLES_CONTENT_HASH_CONSTRAINT`] (R3E-S16).
+fn is_content_hash_unique_violation(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(db_error) => {
+            db_error.code().as_deref() == Some("23505")
+                && db_error.constraint() == Some(ARTICLES_CONTENT_HASH_CONSTRAINT)
+        }
+        _ => false,
+    }
+}
 
 pub(super) async fn pg_start_reindex_tx(
     pool: &PgPool,
@@ -200,17 +223,24 @@ pub(super) async fn pg_claim_by_id(
 
 pub(super) async fn pg_advance_checkpoint(
     pool: &PgPool,
-    id: i64,
-    owner: &str,
-    last_processed_id: i64,
-    now: OffsetDateTime,
+    checkpoint: ReindexBatchCheckpoint<'_>,
+) -> Result<bool, StorageError> {
+    let mut conn = pool.acquire().await.map_err(StorageError::from)?;
+    pg_checkpoint_on(&mut conn, checkpoint).await
+}
+
+/// [`ADVANCE_CHECKPOINT_SQL`] on any connection or open transaction.
+async fn pg_checkpoint_on(
+    conn: &mut sqlx::PgConnection,
+    checkpoint: ReindexBatchCheckpoint<'_>,
 ) -> Result<bool, StorageError> {
     let result = sqlx::query(ADVANCE_CHECKPOINT_SQL)
-        .bind(last_processed_id)
-        .bind(now)
-        .bind(id)
-        .bind(owner)
-        .execute(pool)
+        .bind(checkpoint.last_processed_id)
+        .bind(checkpoint.now)
+        .bind(checkpoint.job_id)
+        .bind(checkpoint.owner)
+        .bind(checkpoint.lease_expires_at)
+        .execute(conn)
         .await
         .map_err(StorageError::from)?;
     Ok(result.rows_affected() == 1)
@@ -325,4 +355,164 @@ pub(super) async fn pg_find_active_by_target(
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)
+}
+
+/// `(job id, state, rule kind, version_tag, payload_sha256)`.
+type ActiveJobRule = (i64, String, String, String, String);
+
+pub(super) async fn pg_claim_resumable_by_target(
+    pool: &PgPool,
+    target: &str,
+    rule_kind: &str,
+    rule_payload_sha256: &str,
+    owner: &str,
+    now: OffsetDateTime,
+    lease_expires_at: OffsetDateTime,
+) -> Result<ResumeReindexOutcome, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    let active = sqlx::query_as::<_, ActiveJobRule>(FIND_ACTIVE_JOB_RULE_PG_SQL)
+        .bind(target)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    let outcome = match active {
+        None => ResumeReindexOutcome::NoActiveJob,
+        Some((job_id, state, kind, version_tag, payload_sha256))
+            if kind != rule_kind || payload_sha256 != rule_payload_sha256 =>
+        {
+            ResumeReindexOutcome::RuleMismatch {
+                job_id,
+                state,
+                version_tag,
+                payload_sha256,
+            }
+        }
+        Some((job_id, state, ..)) => {
+            let claimed = sqlx::query_as::<_, ClaimedReindexJob>(CLAIM_RESUMABLE_SQL)
+                .bind(owner)
+                .bind(lease_expires_at)
+                .bind(now)
+                .bind(job_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StorageError::from)?;
+            match claimed {
+                Some(claimed) => ResumeReindexOutcome::Resumed(claimed),
+                None => ResumeReindexOutcome::Busy { job_id, state },
+            }
+        }
+    };
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(outcome)
+}
+
+pub(super) async fn pg_apply_link_hash_batch(
+    pool: &PgPool,
+    checkpoint: ReindexBatchCheckpoint<'_>,
+    updates: &[(i64, String)],
+) -> Result<Option<Vec<UpdateLinkHashOutcome>>, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    if !pg_checkpoint_on(&mut tx, checkpoint).await? {
+        tx.rollback().await.map_err(StorageError::from)?;
+        return Ok(None);
+    }
+    sqlx::query(LOCK_FEED_ENTRIES_FOR_REINDEX_PG_SQL)
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    let mut outcomes = Vec::with_capacity(updates.len());
+    for (id, new_link_hash) in updates {
+        let old_link_hash = sqlx::query_scalar::<_, String>(SELECT_LINK_HASH_BY_ID_SQL)
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+        let Some(old_link_hash) = old_link_hash else {
+            outcomes.push(UpdateLinkHashOutcome::Missing);
+            continue;
+        };
+        outcomes.push(
+            reconcile_link_hash_move_pg(
+                &mut tx,
+                *id,
+                &old_link_hash,
+                new_link_hash,
+                checkpoint.now,
+            )
+            .await?,
+        );
+    }
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(Some(outcomes))
+}
+
+pub(super) async fn pg_apply_content_hash_batch(
+    pool: &PgPool,
+    checkpoint: ReindexBatchCheckpoint<'_>,
+    updates: &[(i64, String)],
+) -> Result<Option<Vec<UpdateContentHashOutcome>>, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    if !pg_checkpoint_on(&mut tx, checkpoint).await? {
+        tx.rollback().await.map_err(StorageError::from)?;
+        return Ok(None);
+    }
+    let mut outcomes = Vec::with_capacity(updates.len());
+    for (id, new_content_hash) in updates {
+        // Pre-checks first (the common case needs no savepoint); the UPDATE's
+        // own unique violation is still caught below.
+        let current = sqlx::query_scalar::<_, String>(SELECT_ARTICLE_CONTENT_HASH_SQL)
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+        let outcome = match current {
+            None => UpdateContentHashOutcome::Conflict,
+            Some(current) if current == *new_content_hash => UpdateContentHashOutcome::Unchanged,
+            Some(_) => {
+                let taken = sqlx::query_scalar::<_, i32>(SELECT_ARTICLE_CONTENT_HASH_COLLISION_SQL)
+                    .bind(new_content_hash)
+                    .bind(id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(StorageError::from)?
+                    != 0;
+                if taken {
+                    UpdateContentHashOutcome::Conflict
+                } else {
+                    // R2-S16: READ COMMITTED — another transaction may commit
+                    // this hash between the pre-check and the UPDATE. The
+                    // UPDATE runs in a savepoint so its unique violation only
+                    // rolls back this row (a failed statement would abort the
+                    // whole transaction, checkpoint included).
+                    let mut savepoint = tx.begin().await.map_err(StorageError::from)?;
+                    let updated = sqlx::query(UPDATE_ARTICLE_CONTENT_HASH_SQL)
+                        .bind(new_content_hash)
+                        .bind(checkpoint.now)
+                        .bind(id)
+                        .execute(&mut *savepoint)
+                        .await;
+                    match updated {
+                        Ok(_) => {
+                            savepoint.commit().await.map_err(StorageError::from)?;
+                            UpdateContentHashOutcome::Updated
+                        }
+                        // R3E-S16: only the articles content_hash unique
+                        // violation is this row's conflict; any other error
+                        // (another unique constraint included) fails the
+                        // batch and rolls back the outer transaction.
+                        Err(error) if is_content_hash_unique_violation(&error) => {
+                            savepoint.rollback().await.map_err(StorageError::from)?;
+                            UpdateContentHashOutcome::Conflict
+                        }
+                        Err(error) => {
+                            return Err(classify_db_error(error, "articles", new_content_hash));
+                        }
+                    }
+                }
+            }
+        };
+        outcomes.push(outcome);
+    }
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(Some(outcomes))
 }

@@ -356,13 +356,42 @@ pub mod timezone_check {
         }
 
         async fn run(&self) -> CheckOutcome {
-            let trimmed = self.timezone.trim();
-            if trimmed.is_empty() {
-                CheckOutcome::Fail("empty timezone".to_string())
-            } else if trimmed.contains('/') || trimmed.eq_ignore_ascii_case("UTC") {
-                CheckOutcome::Ok(trimmed.to_string())
-            } else {
-                CheckOutcome::Warn(format!("{trimmed} (basic validation only)"))
+            // The parser validate-config and the default report date use: same
+            // lookup, same (absent) trimming, `Etc/Unknown` refused (R1-P-S14).
+            match rss_ai_news_config::validate::parse_target_timezone(&self.timezone) {
+                Ok(_) => CheckOutcome::Ok(self.timezone.clone()),
+                Err(reason) => CheckOutcome::Fail(reason),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn real_zone_passes_and_made_up_zone_fails() {
+            assert!(matches!(
+                TimezoneCheck::new("Asia/Shanghai".into()).run().await,
+                CheckOutcome::Ok(_)
+            ));
+            assert!(matches!(
+                TimezoneCheck::new("Mars/Olympus_Mons".into()).run().await,
+                CheckOutcome::Fail(_)
+            ));
+        }
+
+        /// R1-P-S14: doctor agrees with validate-config and the runtime.
+        #[tokio::test]
+        async fn etc_unknown_and_padded_names_fail_like_in_validate() {
+            for zone in ["Etc/Unknown", "ETC/UNKNOWN", " Asia/Shanghai", ""] {
+                assert!(
+                    matches!(
+                        TimezoneCheck::new(zone.into()).run().await,
+                        CheckOutcome::Fail(_)
+                    ),
+                    "{zone:?}"
+                );
             }
         }
     }

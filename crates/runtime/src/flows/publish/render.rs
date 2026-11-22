@@ -10,8 +10,10 @@ use time::{Duration, OffsetDateTime};
 
 use super::PublishFlow;
 use super::dto::{PublishRenderOptions, PublishRenderOutcome, PublishRenderStatus};
-use super::render_templates_from_ctx;
+use super::{render_templates_from_ctx, report_timestamp};
 use crate::events::RunEventEmitter;
+
+const PHASE: &str = "render";
 
 impl PublishFlow {
     pub async fn render(&self, opts: PublishRenderOptions) -> PublishRenderOutcome {
@@ -43,7 +45,9 @@ impl PublishFlow {
         // （codex W15-P4 复审）。幂等且 count=0 静默，与 freeze 重复无害。
         self.run_publish_maintenance(&emitter).await;
 
-        let now = OffsetDateTime::now_utc();
+        // One timestamp for the claim, the rendered `{generated_at}` and the
+        // persisted `rendered_at` (normalised so it survives the DB round trip).
+        let now = report_timestamp(OffsetDateTime::now_utc());
         let owner = build_owner_id();
         let claim = ClaimRequest {
             owner: owner.clone(),
@@ -91,7 +95,7 @@ impl PublishFlow {
         let render_config = RenderConfig {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
-            generated_at: opts.generated_at,
+            generated_at: now,
             templates: render_templates_from_ctx(&self.ctx, opts.path_template.as_deref()),
         };
         if let Err(error) = rss_ai_news_report::rebuild_markdown(
@@ -102,7 +106,7 @@ impl PublishFlow {
         )
         .await
         {
-            self.fail_claimed(claimed.id, &owner, &error, now, &emitter)
+            self.fail_claimed(claimed.id, &owner, &error, PHASE, now, &emitter)
                 .await;
             return PublishRenderOutcome {
                 publish_record_id: claimed.id,

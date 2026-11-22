@@ -26,6 +26,12 @@ use rss_ai_news_storage::{
 };
 use time::OffsetDateTime;
 
+/// The endpoint the seeded sources are created with (R2-S12 guard).
+const SEEDED: rss_ai_news_storage::FeedEndpoint<'static> = rss_ai_news_storage::FeedEndpoint {
+    feed_url: "https://example.com/feed.xml",
+    feed_kind: rss_ai_news_domain::state::FeedKind::Rss,
+};
+
 fn sample_feed_source(category: &str, source: &str, config_version: i64) -> FeedSource {
     let now = OffsetDateTime::now_utc();
     FeedSource {
@@ -167,7 +173,13 @@ async fn pg_upsert_with_lease_guard_without_lease_returns_lease_lost() {
 
     let src = sample_feed_source("ai", "no-lease", rule_id);
     let outcome = repo
-        .upsert_with_lease_guard(&src, 9999, "owner-x", OffsetDateTime::now_utc())
+        .upsert_with_lease_guard(
+            &src,
+            9999,
+            "owner-x",
+            OffsetDateTime::now_utc(),
+            OffsetDateTime::now_utc() + time::Duration::hours(1),
+        )
         .await
         .expect("pg upsert_with_lease_guard");
     assert_eq!(outcome, LeaseGuardedWriteOutcome::LeaseLost);
@@ -191,7 +203,13 @@ async fn pg_upsert_with_lease_guard_applied_writes_row_in_same_tx() {
 
     let src = sample_feed_source("ai", "lease-ok", rule_id);
     let outcome = repo
-        .upsert_with_lease_guard(&src, job_id, owner, OffsetDateTime::now_utc())
+        .upsert_with_lease_guard(
+            &src,
+            job_id,
+            owner,
+            OffsetDateTime::now_utc(),
+            OffsetDateTime::now_utc() + time::Duration::hours(1),
+        )
         .await
         .expect("pg upsert_with_lease_guard");
     assert_eq!(outcome, LeaseGuardedWriteOutcome::Applied);
@@ -243,7 +261,7 @@ async fn pg_upsert_with_lease_guard_rolls_back_after_concurrent_abort() {
     // → 整段事务回滚 → feed_sources 行不被写入。
     let src = sample_feed_source("ai", "cross-tx-rollback", rule_id);
     let outcome = fs_repo
-        .upsert_with_lease_guard(&src, job_id, owner, now)
+        .upsert_with_lease_guard(&src, job_id, owner, now, now + time::Duration::hours(1))
         .await
         .expect("pg upsert_with_lease_guard");
     assert_eq!(
@@ -269,7 +287,7 @@ async fn pg_upsert_with_lease_guard_rolls_back_after_concurrent_abort() {
     let active = sample_feed_source("ai", "guard-mark", rule_id);
     let id = fs_repo.upsert(&active).await.unwrap();
     let outcome2 = fs_repo
-        .mark_archived_with_lease_guard(id, job_id, owner, now)
+        .mark_archived_with_lease_guard(id, job_id, owner, now, now + time::Duration::hours(1))
         .await
         .expect("pg mark_archived_with_lease_guard");
     assert_eq!(outcome2, LeaseGuardedWriteOutcome::LeaseLost);
@@ -295,13 +313,13 @@ async fn pg_mark_archived_with_lease_guard_second_call_is_noop() {
 
     let now = OffsetDateTime::now_utc();
     let first = repo
-        .mark_archived_with_lease_guard(id, job_id, owner, now)
+        .mark_archived_with_lease_guard(id, job_id, owner, now, now + time::Duration::hours(1))
         .await
         .expect("first lease-guarded archive");
     assert_eq!(first, LeaseGuardedWriteOutcome::Applied);
 
     let second = repo
-        .mark_archived_with_lease_guard(id, job_id, owner, now)
+        .mark_archived_with_lease_guard(id, job_id, owner, now, now + time::Duration::hours(1))
         .await
         .expect("second lease-guarded archive (target already archived)");
     assert_eq!(
@@ -309,4 +327,91 @@ async fn pg_mark_archived_with_lease_guard_second_call_is_noop() {
         LeaseGuardedWriteOutcome::NoOp,
         "second archive is no-op (status <> 'archived' filters out)"
     );
+}
+
+/// A7 (PG): a 304 without validators keeps the stored etag / last_modified.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_not_modified_update_keeps_validators_the_304_omits() {
+    let ctx = make_pg_test_pool().await;
+    let rule_id = seed_rule_version(&ctx, "v1").await;
+    let repo = FeedSourceRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .upsert(&sample_feed_source("ai", "validators", rule_id))
+        .await
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    repo.update_after_fetch_success(id, SEEDED, Some("e1"), Some("lm1"), now, now)
+        .await
+        .unwrap();
+
+    assert!(
+        repo.update_after_not_modified(id, SEEDED, None, None, now, now)
+            .await
+            .unwrap()
+    );
+    let row = repo.find_by_id(id).await.unwrap().unwrap();
+    assert_eq!(row.etag.as_deref(), Some("e1"));
+    assert_eq!(row.last_modified.as_deref(), Some("lm1"));
+
+    repo.update_after_not_modified(id, SEEDED, None, Some("lm2"), now, now)
+        .await
+        .unwrap();
+    let row = repo.find_by_id(id).await.unwrap().unwrap();
+    assert_eq!(row.etag.as_deref(), Some("e1"));
+    assert_eq!(row.last_modified.as_deref(), Some("lm2"));
+}
+
+/// A14 (PG): config-only upsert keeps fetch runtime state on the same
+/// endpoint and resets it when feed_url changes.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_config_upsert_keeps_runtime_state_unless_the_endpoint_changes() {
+    let ctx = make_pg_test_pool().await;
+    let rule_id = seed_rule_version(&ctx, "v1").await;
+    let owner = "owner-pg-a14";
+    let job_id = seed_running_reindex_job(&ctx, rule_id, owner).await;
+    let repo = FeedSourceRepo::new_with_storage(ctx.storage_pool().clone());
+    let now = OffsetDateTime::now_utc();
+    let src = sample_feed_source("ai", "a14", rule_id);
+    repo.upsert_config_with_lease_guard(&src, job_id, owner, now, now + time::Duration::hours(1))
+        .await
+        .unwrap();
+    let id = repo.find_by_keys("ai", "a14").await.unwrap().unwrap().id;
+    repo.update_after_fetch_success(id, SEEDED, Some("e1"), Some("lm1"), now, now)
+        .await
+        .unwrap();
+    repo.update_after_fetch_failure(id, SEEDED, now, "boom", "http_5xx")
+        .await
+        .unwrap();
+
+    let mut renamed = src.clone();
+    renamed.display_name = "Renamed".to_string();
+    assert_eq!(
+        repo.upsert_config_with_lease_guard(
+            &renamed,
+            job_id,
+            owner,
+            now,
+            now + time::Duration::hours(1)
+        )
+        .await
+        .unwrap(),
+        LeaseGuardedWriteOutcome::Applied
+    );
+    let row = repo.find_by_id(id).await.unwrap().unwrap();
+    assert_eq!(row.display_name, "Renamed");
+    assert_eq!(row.etag.as_deref(), Some("e1"));
+    assert_eq!(row.consecutive_failures, 1);
+    assert!(row.last_success_at.is_some());
+
+    let mut moved = renamed.clone();
+    moved.feed_url = "https://example.com/moved.xml".to_string();
+    repo.upsert_config_with_lease_guard(&moved, job_id, owner, now, now + time::Duration::hours(1))
+        .await
+        .unwrap();
+    let row = repo.find_by_id(id).await.unwrap().unwrap();
+    assert_eq!((row.etag, row.last_modified), (None, None));
+    assert_eq!(row.consecutive_failures, 0);
+    assert_eq!(row.last_error_kind, None);
 }

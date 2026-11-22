@@ -17,7 +17,7 @@
 | `-o, --output-format <pretty\|json>` | `pretty` | 子命令 summary 输出格式 |
 | `-n, --dry-run` | `false` | `reindex` 实装预演；只读命令（validate-config / recent-entries / replay / 无 `--output` 的 rebuild-report）不写业务数据、不调用 feed / AI / GitHub（仍会读取配置的数据库，包括远端 PostgreSQL），视为无操作；其余命令（含会发真实探测请求的 doctor、会以可写连接打开库的 migrate check）以参数错误拒绝（exit 2），且在创建日志文件、启动 metrics 之前拒绝。被接受时，显式给出的 `--log-file` / `--metrics-bind` 照常生效 |
 | `-C, --category <KEY>` | `None` | 仅处理该分类（多分类场景隔离） |
-| `--timezone <IANA>` | `app.toml [publish].target_timezone` | 覆盖发布时区 |
+| `--timezone <IANA>` | `app.toml [publish].target_timezone` | 覆盖发布时区（须为 IANA 时区库中存在的名称；决定 publish / publish-all 的默认报告日期） |
 
 > **`--max-batches`** 不是全局 flag。仅 `ingest` / `ai-run` / `run` 三个子命令本地暴露
 > （F7-1 修复，详见 args.rs 注释）。
@@ -66,7 +66,7 @@
 - 不支持 `--dry-run`；退出码：配置 / 凭据类中止 78，其它运行级中止 1，仅单篇失败或限流 0
 
 ### `publish` / `publish-all`
-- `--date <YYYY-MM-DD>`：指定 report 日期
+- `--date <YYYY-MM-DD>`：指定 report 日期；省略时取本次运行时刻在有效目标时区（`--timezone`，否则 `[publish].target_timezone`）下的当天日期，而非 UTC 日期（例：`Asia/Shanghai` 下 2026-11-21 00:30 运行 → `2026-11-21`）
 - `--local-only`：跳过远端 publish
 - `--force`：强制重做（即使已有 publish_record）
 
@@ -101,6 +101,9 @@
 - 依次执行 ingest → ai-run（全部分类；`ai.enabled=false` 时跳过）→ publish-all；整次运行只加载一次配置、
   只打开一次数据库连接池，各阶段看到同一份配置。启动时只做结构校验；环境 / 凭证检查归各阶段：某分类缺
   AI 凭证只记为 ai-run 阶段失败（exit 78），ingest 与 publish 照常执行
+- ingest 失败（preflight 失败，如缺 `RSSHUB_BASE_URL`，或 ingest 返回错误）不阻断后续阶段：ai-run 与 publish
+  仍处理库中已有的数据，`stage_failures` 记录 ingest 失败，退出码取最严重者（缺环境变量为 78）
+- 数据库无法打开 / 迁移时所有阶段跳过（失败记在 `ingest` 阶段名下，`ai_run_skip_reason` 为 `database unavailable`）
 - `--ingest-batch-size <N>` / `--ai-batch-size <N>`
 - `--publish-date <YYYY-MM-DD>`
 - `--max-batches <N>`

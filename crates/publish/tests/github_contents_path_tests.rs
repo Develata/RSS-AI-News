@@ -1,0 +1,558 @@
+//! B15 (incident 2026-11-21): single-report Contents API requests must carry
+//! the repository path percent-encoded per segment (UTF-8, RFC 3986) and the
+//! branch as an encoded `ref` query parameter, on both the GET (existing sha)
+//! and the PUT. Failures keep the operation, status, sanitized message and the
+//! `x-github-request-id`.
+//!
+//! The assertions read the request targets wiremock actually received.
+
+use rss_ai_news_domain::dto::publish::RenderedReport;
+use rss_ai_news_domain::error::ClassifiedError;
+use rss_ai_news_publish::{GitHubTarget, GitHubTargetConfig, PublishError, PublishTarget};
+use serde_json::{Value, json};
+use wiremock::matchers::method;
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+const TOKEN: &str = "contents-path-test-token";
+/// Harmless stand-in for report text a server could echo back.
+const BODY_MARKER: &str = "REPORT-BODY-MARKER-7f3a";
+
+fn target(server: &MockServer, branch: &str) -> GitHubTarget {
+    GitHubTarget::with_base_uri(
+        GitHubTargetConfig {
+            token: rss_ai_news_domain::SecretString::from(TOKEN),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            branch: branch.to_string(),
+            path_prefix: "archive".to_string(),
+            commit_message_prefix: "auto: publish".to_string(),
+        },
+        &server.uri(),
+    )
+    .unwrap()
+}
+
+fn report(relative_path: &str) -> RenderedReport {
+    RenderedReport {
+        publish_record_id: 1,
+        category_key: "tech".to_string(),
+        report_date: "2026-11-21".to_string(),
+        markdown_content: "# 科技新闻\n".to_string(),
+        relative_path: relative_path.to_string(),
+    }
+}
+
+async fn mount_put_ok(server: &MockServer) {
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "content": { "sha": "new-file-sha" },
+            "commit": { "sha": "commit-sha" }
+        })))
+        .mount(server)
+        .await;
+}
+
+async fn received(server: &MockServer) -> Vec<Request> {
+    server.received_requests().await.expect("recording enabled")
+}
+
+fn only(requests: &[Request], verb: &str) -> Request {
+    let matching: Vec<_> = requests
+        .iter()
+        .filter(|request| request.method.as_str() == verb)
+        .cloned()
+        .collect();
+    assert_eq!(matching.len(), 1, "{verb} requests: {matching:?}");
+    matching.into_iter().next().unwrap()
+}
+
+const CHINESE_PATH: &str =
+    "/repos/owner/repo/contents/archive/%E7%A7%91%E6%8A%80%E6%96%B0%E9%97%BB/2026/20261121.md";
+
+#[tokio::test]
+async fn create_chinese_path_sends_encoded_get_then_put_without_sha() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+        .mount(&server)
+        .await;
+    mount_put_ok(&server).await;
+
+    let artifact = target(&server, "release/2026")
+        .publish(&report("科技新闻/2026/20261121.md"))
+        .await
+        .expect("create succeeds");
+
+    let requests = received(&server).await;
+    let get = only(&requests, "GET");
+    assert_eq!(get.url.path(), CHINESE_PATH);
+    assert_eq!(get.url.query(), Some("ref=release%2F2026"));
+    let put = only(&requests, "PUT");
+    assert_eq!(put.url.path(), CHINESE_PATH);
+    assert_eq!(put.url.query(), None);
+    let body: Value = serde_json::from_slice(&put.body).unwrap();
+    assert!(body.get("sha").is_none(), "create must not send a sha");
+    assert_eq!(body["branch"], "release/2026");
+    // The logical repository path (not the encoded one) is what is recorded.
+    assert_eq!(
+        artifact.remote_target.as_deref(),
+        Some("github://owner/repo/release/2026/archive/科技新闻/2026/20261121.md")
+    );
+}
+
+#[tokio::test]
+async fn update_chinese_path_sends_encoded_get_then_put_with_existing_sha() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"sha": "old-file-sha"})))
+        .mount(&server)
+        .await;
+    mount_put_ok(&server).await;
+
+    target(&server, "main")
+        .publish(&report("科技新闻/2026/20261121.md"))
+        .await
+        .expect("update succeeds");
+
+    let requests = received(&server).await;
+    let get = only(&requests, "GET");
+    assert_eq!(get.url.path(), CHINESE_PATH);
+    assert_eq!(get.url.query(), Some("ref=main"));
+    let put = only(&requests, "PUT");
+    assert_eq!(put.url.path(), CHINESE_PATH);
+    let body: Value = serde_json::from_slice(&put.body).unwrap();
+    assert_eq!(body["sha"], "old-file-sha");
+}
+
+/// A space and the reserved `%`, `#`, `?` are encoded once inside their
+/// segment; unencoded, `#`/`?` would cut the path into a fragment/query.
+#[tokio::test]
+async fn space_and_reserved_characters_are_encoded_exactly_once_per_segment() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+        .mount(&server)
+        .await;
+    mount_put_ok(&server).await;
+
+    target(&server, "main")
+        .publish(&report("tech news/50%#1?.md"))
+        .await
+        .expect("create succeeds");
+
+    let requests = received(&server).await;
+    let expected = "/repos/owner/repo/contents/archive/tech%20news/50%25%231%3F.md";
+    let get = only(&requests, "GET");
+    assert_eq!(get.url.path(), expected);
+    assert_eq!(get.url.query(), Some("ref=main"));
+    assert_eq!(get.url.fragment(), None);
+    assert_eq!(only(&requests, "PUT").url.path(), expected);
+}
+
+#[tokio::test]
+async fn ascii_path_request_target_is_unchanged() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+        .mount(&server)
+        .await;
+    mount_put_ok(&server).await;
+
+    target(&server, "main")
+        .publish(&report("TECH/2026/20261121.md"))
+        .await
+        .expect("create succeeds");
+
+    let requests = received(&server).await;
+    let expected = "/repos/owner/repo/contents/archive/TECH/2026/20261121.md";
+    let get = only(&requests, "GET");
+    assert_eq!(get.url.path(), expected);
+    assert_eq!(get.url.query(), Some("ref=main"));
+    assert_eq!(only(&requests, "PUT").url.path(), expected);
+}
+
+#[tokio::test]
+async fn contents_get_failure_keeps_operation_status_message_and_request_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .insert_header("x-github-request-id", "C0DE:1234:ABCD:5678:9ABCDEF0")
+                // The server echoes request text: token, report marker, path.
+                .set_body_json(json!({
+                    "message": format!("Bad request for {TOKEN}: {BODY_MARKER} 科技新闻")
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    let error = target(&server, "main")
+        .publish(&report("科技新闻/2026/20261121.md"))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, PublishError::GitHubApiError { status: 400, .. }),
+        "{error:?}"
+    );
+    let shown = error.display_user();
+    assert!(shown.contains("400"), "{shown}");
+    assert!(shown.contains("GET contents"), "{shown}");
+    // R1-P-B6: only the fixed-vocabulary reason survives, never server text.
+    assert!(shown.contains("bad request"), "{shown}");
+    assert!(!shown.contains("Bad request for"), "{shown}");
+    assert!(
+        shown.contains("x-github-request-id: C0DE:1234:ABCD:5678:9ABCDEF0"),
+        "{shown}"
+    );
+    assert!(!shown.contains(TOKEN), "{shown}");
+    assert!(
+        !shown.contains(BODY_MARKER),
+        "echoed text must not leak: {shown}"
+    );
+    assert!(!shown.contains("科技新闻"), "{shown}");
+    assert!(
+        received(&server)
+            .await
+            .iter()
+            .all(|r| r.method.as_str() == "GET")
+    );
+}
+
+#[tokio::test]
+async fn contents_put_failure_keeps_operation_and_request_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(
+            ResponseTemplate::new(422)
+                .insert_header("x-github-request-id", "B0D7:5678:9A0B1C2:D3E4F56:6B01CE60")
+                .set_body_json(json!({"message": "Invalid request."})),
+        )
+        .mount(&server)
+        .await;
+
+    let error = target(&server, "main")
+        .publish(&report("科技新闻/2026/20261121.md"))
+        .await
+        .unwrap_err();
+
+    let shown = error.display_user();
+    assert!(matches!(
+        error,
+        PublishError::GitHubApiError { status: 422, .. }
+    ));
+    assert!(shown.contains("PUT contents"), "{shown}");
+    assert!(shown.contains("invalid request"), "{shown}");
+    assert!(
+        shown.contains("x-github-request-id: B0D7:5678:9A0B1C2:D3E4F56:6B01CE60"),
+        "{shown}"
+    );
+}
+
+/// R1-P-B6: a request id that does not have GitHub's shape, or carries the
+/// token, is dropped instead of being filtered into shape.
+#[tokio::test]
+async fn malformed_or_token_bearing_request_id_is_dropped() {
+    for request_id in [
+        TOKEN.to_string(),
+        "not:an:id".to_string(),
+        format!("ABCD:{BODY_MARKER}"),
+        // R3F-B6: hex but not GitHub's five-group shape.
+        "12:34".to_string(),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .insert_header("x-github-request-id", request_id.as_str())
+                    .set_body_json(json!({"message": "Bad request"})),
+            )
+            .mount(&server)
+            .await;
+
+        let shown = target(&server, "main")
+            .publish(&report("tech/2026/20261121.md"))
+            .await
+            .unwrap_err()
+            .display_user();
+
+        assert!(!shown.contains("x-github-request-id"), "{shown}");
+        assert!(!shown.contains(TOKEN), "{shown}");
+        assert!(!shown.contains(BODY_MARKER), "{shown}");
+    }
+}
+
+/// The added request context must not change auth / rate-limit classification
+/// (B5): a quota-exhausted 403 is still a retryable rate limit.
+#[tokio::test]
+async fn contents_rate_limited_403_is_still_retryable_with_request_context() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .insert_header("x-github-request-id", "RATE:1")
+                .insert_header("x-ratelimit-remaining", "0")
+                .set_body_json(json!({"message": "Forbidden"})),
+        )
+        .mount(&server)
+        .await;
+
+    let error = target(&server, "main")
+        .publish(&report("科技新闻/2026/20261121.md"))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, PublishError::GitHubRateLimit { .. }),
+        "{error:?}"
+    );
+    assert!(error.is_retryable());
+}
+
+/// Raw request lines as they left the client. wiremock parses targets into a
+/// `Url` (which normalizes non-ASCII), so this listener reads the bytes.
+async fn raw_request_lines(
+    responses: Vec<&'static str>,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let uri = format!("http://{}", listener.local_addr().unwrap());
+    let handle = tokio::spawn(async move {
+        let mut lines = Vec::new();
+        for response in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                if socket.read(&mut byte).await.unwrap() == 0 {
+                    break;
+                }
+                head.push(byte[0]);
+            }
+            let head_text = String::from_utf8_lossy(&head).into_owned();
+            lines.push(head_text.lines().next().unwrap_or_default().to_string());
+            let length = head_text
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            let mut body = vec![0_u8; length];
+            socket.read_exact(&mut body).await.unwrap();
+            let reply = format!(
+                "HTTP/1.1 {response}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body_for(response).len(),
+                body_for(response)
+            );
+            socket.write_all(reply.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        }
+        lines
+    });
+    (uri, handle)
+}
+
+fn body_for(status_line: &str) -> &'static str {
+    if status_line.starts_with("404") {
+        r#"{"message":"Not Found"}"#
+    } else {
+        r#"{"content":{"sha":"f"},"commit":{"sha":"c"}}"#
+    }
+}
+
+#[tokio::test]
+async fn chinese_path_leaves_the_client_percent_encoded_on_get_and_put() {
+    let (uri, server) = raw_request_lines(vec!["404 Not Found", "201 Created"]).await;
+    let target = GitHubTarget::with_base_uri(
+        GitHubTargetConfig {
+            token: rss_ai_news_domain::SecretString::from(TOKEN),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            branch: "release/2026".to_string(),
+            path_prefix: "archive".to_string(),
+            commit_message_prefix: "auto: publish".to_string(),
+        },
+        &uri,
+    )
+    .unwrap();
+
+    target
+        .publish(&report("科技新闻/2026/20261121.md"))
+        .await
+        .expect("create succeeds");
+
+    let lines = server.await.unwrap();
+    assert_eq!(
+        lines,
+        vec![
+            format!("GET {CHINESE_PATH}?ref=release%2F2026 HTTP/1.1"),
+            format!("PUT {CHINESE_PATH} HTTP/1.1"),
+        ]
+    );
+    assert!(lines.iter().all(|line| line.is_ascii()));
+}
+
+// === R1-P-S1: every GitHub failure carries operation, status, request id ===
+
+const REQUEST_ID: &str = "828A:4A44E:40DA1B1:CEE6757:6B01CE59";
+
+async fn get_failure(template: ResponseTemplate) -> PublishError {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(template.insert_header("x-github-request-id", REQUEST_ID))
+        .mount(&server)
+        .await;
+    target(&server, "main")
+        .publish(&report("tech/2026/20261121.md"))
+        .await
+        .unwrap_err()
+}
+
+fn assert_context(error: &PublishError, operation: &str, http_status: u16) {
+    let context = error.github_context().expect("GitHub failure has context");
+    assert_eq!(context.operation, Some(operation), "{error:?}");
+    assert_eq!(context.http_status, Some(http_status), "{error:?}");
+    assert_eq!(context.request_id.as_deref(), Some(REQUEST_ID), "{error:?}");
+    let shown = error.display_user();
+    assert!(shown.contains(operation), "{shown}");
+    assert!(shown.contains(REQUEST_ID), "{shown}");
+}
+
+#[tokio::test]
+async fn auth_failures_keep_the_actual_status_and_request_id() {
+    for status in [401, 403] {
+        let error = get_failure(
+            ResponseTemplate::new(status).set_body_json(json!({"message": "Bad credentials"})),
+        )
+        .await;
+        assert!(
+            matches!(error, PublishError::GitHubAuthFailed { .. }),
+            "{error:?}"
+        );
+        assert_context(&error, "GET contents", status);
+        assert!(error.display_user().contains(&format!("status {status}")));
+    }
+}
+
+#[tokio::test]
+async fn rate_limits_keep_operation_status_and_request_id() {
+    for (status, header, value) in [
+        (403, "x-ratelimit-remaining", "0"),
+        (403, "retry-after", "30"),
+        (429, "x-ratelimit-reset", "1800"),
+    ] {
+        let error = get_failure(
+            ResponseTemplate::new(status)
+                .insert_header(header, value)
+                .set_body_json(json!({"message": "Forbidden"})),
+        )
+        .await;
+        assert!(
+            matches!(error, PublishError::GitHubRateLimit { .. }),
+            "{status} {header}: {error:?}"
+        );
+        assert_context(&error, "GET contents", status);
+    }
+}
+
+/// R1-P-S11: the only `rate limit` phrase sits past the old 8 KiB
+/// diagnostic cap; the signal is taken from the full text first.
+#[tokio::test]
+async fn rate_limit_phrase_past_the_diagnostic_cap_is_still_a_rate_limit() {
+    let message = format!("{} secondary rate limit", "x".repeat(20_000));
+    let error =
+        get_failure(ResponseTemplate::new(403).set_body_json(json!({ "message": message }))).await;
+    assert!(
+        matches!(error, PublishError::GitHubRateLimit { .. }),
+        "{error:?}"
+    );
+}
+
+/// R1-P-S11: an HTTP-date `retry-after` on a plain 403 is a rate limit.
+#[tokio::test]
+async fn http_date_retry_after_on_a_403_is_a_rate_limit() {
+    let error = get_failure(
+        ResponseTemplate::new(403)
+            .insert_header("retry-after", "Sun, 22 Nov 2026 08:30:00 GMT")
+            .set_body_json(json!({ "message": "Forbidden" })),
+    )
+    .await;
+    assert!(
+        matches!(error, PublishError::GitHubRateLimit { .. }),
+        "{error:?}"
+    );
+    assert_context(&error, "GET contents", 403);
+}
+
+#[tokio::test]
+async fn oversized_success_keeps_its_request_context() {
+    let error =
+        get_failure(ResponseTemplate::new(200).set_body_string(" ".repeat(16 * 1024 * 1024 + 1)))
+            .await;
+    assert!(
+        matches!(error, PublishError::ResponseTooLarge { .. }),
+        "{error:?}"
+    );
+    assert_context(&error, "GET contents", 200);
+}
+
+/// A 2xx lacking a required field is a protocol error that still names the
+/// call, its real status and GitHub's request id.
+#[tokio::test]
+async fn success_missing_a_required_field_keeps_its_request_context() {
+    let server = MockServer::start().await;
+    // The 502 protocol error is an ambiguous write: the read-only HEAD check
+    // runs and finds the report absent, so the write error stands (a failing
+    // check would make it `RemoteWriteUnverified`, R3F-B2).
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path(
+            "/repos/owner/repo/git/ref/heads/main",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"object": {"sha": "head"}})))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .insert_header("x-github-request-id", REQUEST_ID)
+                .set_body_json(json!({"content": {"sha": "f"}})),
+        )
+        .mount(&server)
+        .await;
+
+    let error = target(&server, "main")
+        .publish(&report("tech/2026/20261121.md"))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, PublishError::GitHubApiError { status: 502, message, .. }
+            if message.contains("commit.sha")),
+        "{error:?}"
+    );
+    assert_context(&error, "PUT contents", 201);
+    assert!(error.display_user().contains("(http 201)"));
+}
+
+/// A 200 contents answer without a `sha` (e.g. a directory) is a protocol
+/// error, not "the file does not exist yet".
+#[tokio::test]
+async fn contents_200_without_sha_is_a_protocol_error() {
+    let error = get_failure(ResponseTemplate::new(200).set_body_json(json!([]))).await;
+    assert!(
+        matches!(error, PublishError::GitHubApiError { status: 502, .. }),
+        "{error:?}"
+    );
+    assert_context(&error, "GET contents", 200);
+}

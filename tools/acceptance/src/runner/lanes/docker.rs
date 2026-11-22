@@ -1,7 +1,13 @@
-use std::{thread, time::Duration};
+use std::{
+    io,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
 use super::super::{
     executor::LaneExecutor,
+    process::{Finished, run_bounded},
     resources::{DockerCleanup, prepare_smoke_workspace},
     util::{program_exists, strings},
 };
@@ -75,17 +81,18 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
             "--name",
             &container,
             "-e",
-            "RSS_CRON_SCHEDULE=0 0 1 1 *",
+            SCHEDULER_SMOKE_SCHEDULE,
             "-e",
-            "RSS_CRON_COMMAND=--help",
+            SCHEDULER_SMOKE_COMMAND,
             &scheduler_tag,
         ]),
         &[],
         0,
     );
-    if !executor.dry_run() && executor.can_continue() {
-        thread::sleep(Duration::from_secs(3));
-    }
+    // `None` in a dry run or after an earlier failure: the job-contract
+    // check below is then recorded as planned or skipped by the executor.
+    let job_seen = (!executor.dry_run() && executor.can_continue())
+        .then(|| wait_for_scheduler_job(&container, executor.step_timeout()));
     let inspect = executor.command(
         "docker-scheduler-running",
         "docker",
@@ -102,12 +109,15 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
                 .ok_or_else(|| format!("docker inspect returned {:?}", output.stdout.trim())),
         );
     }
-    executor.command(
-        "docker-scheduler-logs",
-        "docker",
-        &strings(["logs", &container]),
-        &[],
-        0,
+    // The verdict is whether the marker was seen before the 75 s deadline
+    // (R3G-S15); a later log read only adds bounded diagnostics to a failure.
+    let step_timeout = executor.step_timeout();
+    executor.check(
+        "docker-scheduler-job-contract",
+        "scheduler ran one job with its spaced argument intact",
+        scheduler_job_verdict(job_seen.unwrap_or(true), || {
+            scheduler_log_tail(&container, step_timeout)
+        }),
     );
     let Some(smoke) = prepare_smoke_workspace(
         executor,
@@ -138,4 +148,252 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
     );
 
     cleanup.finish(executor);
+}
+
+/// Seven fields (seconds first): fire every 2 s, so one job runs promptly.
+const SCHEDULER_SMOKE_SCHEDULE: &str = "RSS_CRON_SCHEDULE=*/2 * * * * * *";
+/// Side-effect free (clap rejects the extra positional before any config or
+/// database access); the space proves the generated crontab line keeps a
+/// quoted argument as one argv element.
+const SCHEDULER_SMOKE_COMMAND: &str = "RSS_CRON_COMMAND=validate-config 'spaced arg'";
+const SCHEDULER_SMOKE_MARKER: &str = "unexpected argument 'spaced arg'";
+const SCHEDULER_SMOKE_TIMEOUT: Duration = Duration::from_secs(75);
+
+/// Log lines read per poll; the smoke job's error is among the first lines.
+const SCHEDULER_SMOKE_LOG_TAIL: &str = "200";
+/// Log lines and time spent on the diagnostic read after a failed wait.
+const SCHEDULER_DIAGNOSTIC_LOG_TAIL: &str = "50";
+const SCHEDULER_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The job contract from the wait's result alone: `seen` is whether the
+/// marker appeared before the deadline. `diagnostic_logs` is read only on
+/// failure and only for the error text, so logs read after the deadline can
+/// never turn a missed deadline into a pass (R3G-S15).
+fn scheduler_job_verdict(
+    seen: bool,
+    diagnostic_logs: impl FnOnce() -> String,
+) -> Result<(), String> {
+    if seen {
+        return Ok(());
+    }
+    Err(format!(
+        "scheduler logs lack {SCHEDULER_SMOKE_MARKER:?} within {}s; last log lines: {}",
+        SCHEDULER_SMOKE_TIMEOUT.as_secs(),
+        diagnostic_logs()
+    ))
+}
+
+/// The container's last log lines for a failure message, bounded in lines
+/// and time; a failed read is described, not propagated.
+fn scheduler_log_tail(container: &str, step_timeout: Duration) -> String {
+    let mut command = Command::new("docker");
+    command.args(["logs", "--tail", SCHEDULER_DIAGNOSTIC_LOG_TAIL, container]);
+    match run_bounded(command, SCHEDULER_DIAGNOSTIC_TIMEOUT.min(step_timeout)) {
+        // supercronic logs to stderr.
+        Ok(finished) => format!("{}{}", finished.stdout.text, finished.stderr.text),
+        Err(error) => format!("(docker logs failed: {error})"),
+    }
+}
+
+/// Polls the container's logs until the smoke job has run or the timeout
+/// passes; returns whether the marker was seen in time.
+fn wait_for_scheduler_job(container: &str, step_timeout: Duration) -> bool {
+    wait_for_marker(
+        || {
+            let mut command = Command::new("docker");
+            command.args(["logs", "--tail", SCHEDULER_SMOKE_LOG_TAIL, container]);
+            command
+        },
+        SCHEDULER_SMOKE_MARKER,
+        SCHEDULER_SMOKE_TIMEOUT,
+        step_timeout,
+    )
+}
+
+/// Runs `poll` until its output contains `marker` or `total` has passed.
+/// Every poll goes through [`run_bounded`] (capped output, killed process
+/// tree) with the smaller of the remaining time and `step_timeout`, so one
+/// hanging poll cannot outlive the deadline (R3-15). Returns whether the
+/// marker was seen by a poll that completed before the deadline
+/// ([`poll_saw_marker`], R4-8).
+fn wait_for_marker(
+    poll: impl Fn() -> Command,
+    marker: &str,
+    total: Duration,
+    step_timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + total;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let polled = run_bounded(poll(), remaining.min(step_timeout));
+        if poll_saw_marker(&polled, marker, Instant::now(), deadline) {
+            return true;
+        }
+        thread::sleep(
+            Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
+/// Whether one poll saw the marker in time: it must have run to completion
+/// (not killed at its timeout) and returned by `deadline`. `run_bounded`
+/// checks for exit before its timeout every 50 ms, so a child that prints the
+/// marker and exits just past the deadline still returns `timed_out: false`;
+/// the return instant rules that out (R4-8). Conservative: a marker printed
+/// before the deadline by a poll that returns after it does not count.
+fn poll_saw_marker(
+    polled: &io::Result<Finished>,
+    marker: &str,
+    returned_at: Instant,
+    deadline: Instant,
+) -> bool {
+    returned_at <= deadline
+        && polled.as_ref().is_ok_and(|finished| {
+            !finished.timed_out
+                && (finished.stdout.text.contains(marker) || finished.stderr.text.contains(marker))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io,
+        process::Command,
+        time::{Duration, Instant},
+    };
+
+    use super::{
+        super::super::process::{Captured, Finished},
+        SCHEDULER_SMOKE_MARKER, poll_saw_marker, scheduler_job_verdict, wait_for_marker,
+    };
+
+    fn sh(script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[test]
+    fn marker_in_either_stream_ends_the_wait() {
+        assert!(wait_for_marker(
+            || sh("echo ran: marker >&2"),
+            "marker",
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        ));
+    }
+
+    /// A marker that only shows up after the deadline is a missed deadline.
+    #[test]
+    fn a_marker_after_the_deadline_is_not_seen() {
+        let dir =
+            std::env::temp_dir().join(format!("acceptance-late-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let log = dir.join("log");
+        let writer = {
+            let log = log.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(3));
+                std::fs::write(&log, "late marker\n").expect("write late marker");
+            })
+        };
+        let script = format!("cat {} 2>/dev/null || true", log.display());
+        assert!(!wait_for_marker(
+            || sh(&script),
+            "marker",
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+        ));
+        writer.join().expect("writer thread");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The verdict comes from the wait alone: logs that contain the marker
+    /// after the deadline do not pass, and a pass reads no logs.
+    #[test]
+    fn job_verdict_ignores_logs_read_after_the_deadline() {
+        let err = scheduler_job_verdict(false, || format!("ran: {SCHEDULER_SMOKE_MARKER}"))
+            .expect_err("a missed deadline fails");
+        assert!(err.contains("within 75s"), "{err}");
+        scheduler_job_verdict(true, || panic!("logs are not read on success"))
+            .expect("the marker was seen in time");
+    }
+
+    /// A poll that never returns is killed at the overall deadline.
+    #[test]
+    fn a_hanging_poll_does_not_outlive_the_deadline() {
+        let started = Instant::now();
+        assert!(!wait_for_marker(
+            || sh("sleep 30"),
+            "marker",
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A poll killed at the deadline does not count, even when it printed
+    /// the marker before it was killed (R4-8).
+    #[test]
+    fn a_timed_out_poll_with_the_marker_is_not_seen() {
+        assert!(!wait_for_marker(
+            || sh("echo marker; sleep 30"),
+            "marker",
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+        ));
+    }
+
+    fn finished(timed_out: bool, stdout: &str) -> io::Result<Finished> {
+        Ok(Finished {
+            exit_code: Some(0),
+            timed_out,
+            pipes_held: false,
+            stdout: Captured {
+                text: stdout.to_owned(),
+                truncated: false,
+            },
+            stderr: Captured::default(),
+        })
+    }
+
+    /// `run_bounded` checks for exit before its timeout every 50 ms, so a
+    /// poll that prints the marker and exits just past the deadline returns
+    /// with `timed_out: false`; it is accepted only when it returned by the
+    /// deadline (R4-8).
+    #[test]
+    fn a_poll_returning_after_the_deadline_is_not_seen() {
+        let deadline = Instant::now();
+        let late = deadline + Duration::from_millis(20);
+        let early = deadline - Duration::from_millis(20);
+        let in_time = finished(false, "ran: marker");
+        assert!(!poll_saw_marker(&in_time, "marker", late, deadline));
+        assert!(poll_saw_marker(&in_time, "marker", early, deadline));
+        assert!(poll_saw_marker(&in_time, "marker", deadline, deadline));
+        assert!(!poll_saw_marker(
+            &finished(true, "ran: marker"),
+            "marker",
+            early,
+            deadline
+        ));
+        assert!(!poll_saw_marker(
+            &finished(false, "no job yet"),
+            "marker",
+            early,
+            deadline
+        ));
+        assert!(!poll_saw_marker(
+            &Err(io::Error::other("spawn failed")),
+            "marker",
+            early,
+            deadline
+        ));
+    }
 }

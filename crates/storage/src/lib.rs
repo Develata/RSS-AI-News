@@ -18,6 +18,8 @@ pub use pool::{
     PG_HOSTADDR_UNSUPPORTED, StoragePool, build_pg_pool, build_sqlite_pool,
     build_sqlite_read_only_pool, pg_hostaddr_in_use, pghostaddr_set,
 };
+pub use repo::EntryPersistOutcome;
+pub use repo::SnapshotOwnershipConflict;
 pub use repo::{
     AiCompleteArticleAdvance, AiSuccessOutcome, ArticleAiResultRepo, ArticleAiResultRepository,
     ArticleAiTaskCandidate, ArticleContentHash, ArticleInsertOutcome, ArticleRepo,
@@ -28,14 +30,19 @@ pub use repo::{
     DecisionResultRepository, DecisionResultState, DecisionSuccess, FeedEntry,
     FeedEntryInsertOutcome, FeedEntryRepo, FeedEntryRepository, FeedSourceRepo,
     FeedSourceRepository, FinishReindexTxOutcome, FreezeSnapshotItem, FreezeSnapshotOutcome,
-    FreezeSnapshotStatus, InsertPendingOutcome, LeaseGuardedWriteOutcome, LinkHashReindexCandidate,
-    NewAiResult, NewArticle, NewFeedEntry, NewPublishRecord, NewRawArtifact, NewRunEvent,
-    PublishAdvanceExtras, PublishCandidateRow, PublishItemRepo, PublishItemRepository,
-    PublishRecord, PublishRecordRepo, PublishRecordRepository, PublishState, PublishTimestampField,
-    RawArtifactRepo, RawArtifactRepository, RecentFeedEntry, RecentFeedEntryFilter,
-    RecentFeedEntryRepository, RecentFeedSourceHealth, RecentFeedSourceHealthRepository,
-    ReindexJob, ReindexJobRepo, ReindexJobRepository, ReleaseSuccessOutcome, ResetFailedFilter,
-    ResetFailedOutcome, RuleVersion, RuleVersionRepo, RuleVersionRepository, RunEventRepo,
+    FreezeSnapshotStatus, GeneratedPage, InsertPendingOutcome, LeaseGuardedWriteOutcome,
+    LinkHashReindexCandidate, NewAiResult, NewArticle, NewFeedEntry, NewPublishRecord,
+    NewRawArtifact, NewRunEvent, PublishAdvanceExtras, PublishCandidateRow, PublishItemRepo,
+    PublishItemRepository, PublishRecord, PublishRecordRepo, PublishRecordRepository, PublishState,
+    PublishTimestampField, RawArtifactRepo, RawArtifactRepository, RecentFeedEntry,
+    RecentFeedEntryFilter, RecentFeedEntryRepository, RecentFeedSourceHealth,
+    RecentFeedSourceHealthRepository, ReindexBatchCheckpoint, ReindexJob, ReindexJobRepo,
+    ReindexJobRepository, ReleaseSuccessOutcome, ResetFailedFilter, ResetFailedOutcome,
+    ResumeReindexOutcome, RuleVersion, RuleVersionRepo, RuleVersionRepository, RunEventRepo,
     RunEventRepository, StartReindexTxOutcome, TerminalAdvanceOutcome, TerminalAdvanceStatus,
     UpdateContentHashOutcome, UpdateLinkHashOutcome,
+};
+pub use repo::{FeedEndpoint, FreshWindow, ShareMark, ShareSide, ShareStage};
+pub use repo::{
+    HtmlReplaySource, ReplayArticleDigest, ReplayProjectionRepo, ReplayProjectionRepository,
 };

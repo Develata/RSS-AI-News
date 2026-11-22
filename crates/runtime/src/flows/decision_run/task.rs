@@ -188,7 +188,10 @@ pub(super) async fn process(input: TaskInput) -> TaskOutcome {
 
     let article = match bounded(
         input.row_deadline,
-        deps.decision_repo.load_article(row.article_id),
+        deps.decision_repo.load_article(
+            row.article_id,
+            deps.settings.max_state_chars.saturating_add(1),
+        ),
     )
     .await
     {

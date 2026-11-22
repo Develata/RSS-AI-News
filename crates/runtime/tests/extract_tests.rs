@@ -78,6 +78,7 @@ async fn extract_persists_new_article_on_success() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<i64>) =
@@ -133,6 +134,7 @@ async fn extract_dedup_skipped_when_content_hash_matches_existing_article() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<i64>, Option<String>) =
@@ -176,6 +178,7 @@ async fn extract_falls_back_to_summary_when_strategy_chain_fails() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<i64>) =
@@ -212,6 +215,7 @@ async fn extract_marks_failed_when_strategy_and_fallback_both_fail() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let state: String = sqlx::query_scalar("SELECT state FROM feed_entries WHERE id = ?")
@@ -256,6 +260,7 @@ async fn extract_fetch_403_with_summary_persists_fallback() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<i64>) =
@@ -299,6 +304,7 @@ async fn extract_fetch_403_without_summary_fails_permanent() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<String>) =
@@ -315,6 +321,87 @@ async fn extract_fetch_403_without_summary_fails_permanent() {
 
 /// W18：可重试错误（5xx）即使摘要可用也不提前降级——重试仍有机会拿全文，
 /// W15 预算路径不变。
+/// A8：429 是限流，可重试：带冷却回队，不消费摘要（与 5xx 同构）。
+#[tokio::test]
+async fn extract_fetch_429_with_summary_stays_retryable() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry_id = seed_pending_fetch_entry(
+        &pool,
+        source_id,
+        "uid-429-summary",
+        "hash-429-summary",
+        Some("<p>summary exists but must not be consumed yet</p>"),
+    )
+    .await;
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Err(ExtractorError::HttpStatus { code: 429 }))]),
+        vec![success_strategy("unused")],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+    let row: (String, Option<String>, Option<time::OffsetDateTime>) = sqlx::query_as(
+        "SELECT state, last_error_kind, next_attempt_at FROM feed_entries WHERE id = ?",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .expect("entry should be readable");
+
+    assert_eq!(summary.retryable_failed, 1);
+    assert_eq!(summary.fallback_persisted, 0);
+    assert_eq!(row.0, "pending_fetch");
+    assert_eq!(row.1.as_deref(), Some("http_429"));
+    assert!(row.2.is_some(), "cooldown honoured");
+}
+
+/// R2-S10: the cooldown is the later of the local backoff and the server's
+/// retry instant (now + 3600 s here > the 10 min first backoff; 60 s < it).
+#[tokio::test]
+async fn extract_429_cooldown_honours_retry_after() {
+    for (retry_after, expect_at_least) in [(3600_u64, 3600_i64), (60, 600)] {
+        let (_dir, pool) = make_test_pool().await;
+        let (_rule_id, source_id) = setup_base(&pool).await;
+        let entry_id = seed_pending_fetch_entry(
+            &pool,
+            source_id,
+            &format!("uid-429-ra-{retry_after}"),
+            &format!("hash-429-ra-{retry_after}"),
+            None,
+        )
+        .await;
+        let sent = std::time::SystemTime::now();
+        let flow = flow(
+            pool.clone(),
+            responses([(
+                entry_id,
+                Err(ExtractorError::RateLimited {
+                    retry_at: Some(sent + std::time::Duration::from_secs(retry_after)),
+                }),
+            )]),
+            vec![success_strategy("unused")],
+        );
+        let before = time::OffsetDateTime::from(sent);
+
+        flow.run(opts(1, 0)).await;
+
+        let (kind, next): (Option<String>, time::OffsetDateTime) = sqlx::query_as(
+            "SELECT last_error_kind, next_attempt_at FROM feed_entries WHERE id = ?",
+        )
+        .bind(entry_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(kind.as_deref(), Some("http_429"));
+        let wait = (next - before).whole_seconds();
+        assert!(
+            wait >= expect_at_least && wait <= expect_at_least + 5,
+            "retry_after={retry_after}: waits {wait}s"
+        );
+    }
+}
+
 #[tokio::test]
 async fn extract_fetch_5xx_with_summary_stays_retryable() {
     let (_dir, pool) = make_test_pool().await;
@@ -338,6 +425,7 @@ async fn extract_fetch_5xx_with_summary_stays_retryable() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<String>) =
@@ -369,6 +457,7 @@ async fn extract_releases_retryable_on_5xx() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, i64, Option<String>) = sqlx::query_as(
@@ -414,6 +503,7 @@ async fn extract_retryable_on_final_attempt_folds_to_failed() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, i64, Option<String>) = sqlx::query_as(
@@ -458,6 +548,7 @@ async fn extract_marks_failed_on_4xx() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let row: (String, Option<String>) =
@@ -489,6 +580,7 @@ async fn extract_writes_html_artifact_before_strategy() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let artifact_count: i64 = sqlx::query_scalar(
@@ -527,6 +619,7 @@ async fn on_failure_retention_keeps_html_only_when_extraction_fails() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
         let artifact_count: i64 =
@@ -562,6 +655,7 @@ async fn on_failure_retention_links_html_to_the_summary_fallback_article() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let artifact_id: i64 = sqlx::query_scalar(
@@ -607,6 +701,7 @@ async fn on_failure_retention_keeps_html_when_a_strategy_is_retryable() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let artifact_count: i64 =
@@ -655,6 +750,7 @@ async fn always_retention_keeps_html_even_when_a_strategy_panics() {
             batch_size: 1,
             max_attempts: 5,
             max_batches: 0,
+            category_key: None,
         })
         .await;
     let artifact_count: i64 =
@@ -665,6 +761,125 @@ async fn always_retention_keeps_html_even_when_a_strategy_panics() {
 
     assert_eq!(summary.tasks_panicked, 1);
     assert_eq!(artifact_count, 1);
+}
+
+/// A2：GBK 页面仅由 Content-Type 声明字符集 → flow 先解码再交给 Readability；
+/// html artifact 保留原始字节。
+#[tokio::test]
+async fn gbk_page_declared_by_header_is_decoded_before_readability() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry_id = seed_pending_fetch_entry(&pool, source_id, "uid-gbk", "hash-gbk", None).await;
+    // "中文" in GBK is D6 D0 CE C4; 300 repetitions = 600 Han characters.
+    let mut body = b"<html><head><title>GBK</title></head><body><article><p>".to_vec();
+    for _ in 0..300 {
+        body.extend_from_slice(&[0xD6, 0xD0, 0xCE, 0xC4]);
+    }
+    body.extend_from_slice(b"</p></article></body></html>");
+    let mut fetched = raw(entry_id, &body);
+    fetched.content_type = Some("text/html; charset=gbk".to_string());
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Ok(fetched))]),
+        vec![Arc::new(rss_ai_news_extractor::ReadabilityStrategy)],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+    let (state, text): (String, String) = sqlx::query_as(
+        "SELECT fe.state, a.body_text FROM feed_entries fe \
+         JOIN articles a ON a.id = fe.article_id WHERE fe.id = ?",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .expect("entry should be persisted with an article");
+    let artifact: Vec<u8> = sqlx::query_scalar(
+        "SELECT inline_body FROM raw_artifacts WHERE kind = 'html_payload' AND artifact_key = ?",
+    )
+    .bind(entry_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("artifact should be readable");
+
+    assert_eq!(summary.persisted, 1, "{summary:?}");
+    assert_eq!(state, "persisted");
+    assert!(text.starts_with("中文中文"), "decoded text: {text}");
+    assert_eq!(artifact, body, "artifact keeps the original bytes");
+}
+
+/// An article an earlier attempt committed for `entry_id` (R2-S6 recovery),
+/// stored with `strategy`.
+async fn seed_owned_article(pool: &SqlitePool, rule_id: i64, entry_id: i64, strategy: &str) {
+    sqlx::query(
+        "INSERT INTO articles (content_hash, canonical_link, title, body_text, \
+         extractor_strategy, extractor_version, content_quality, word_count, \
+         origin_feed_entry_id) VALUES (?, 'https://example.com/a', 't', 'earlier body', ?, ?, \
+         'high', 2, ?)",
+    )
+    .bind(format!("earlier-{entry_id}"))
+    .bind(strategy)
+    .bind(rule_id)
+    .bind(entry_id)
+    .execute(pool)
+    .await
+    .expect("owned article should insert");
+}
+
+async fn entry_state(pool: &SqlitePool, entry_id: i64) -> String {
+    sqlx::query_scalar("SELECT state FROM feed_entries WHERE id = ?")
+        .bind(entry_id)
+        .fetch_one(pool)
+        .await
+        .expect("entry should be readable")
+}
+
+/// R3E-S6: the recovered article was a summary fallback, this attempt
+/// extracted the full text. The stored state is `fallback_persisted`, and
+/// the run summary reports what was stored, not this attempt's path.
+#[tokio::test]
+async fn recovered_fallback_article_is_reported_as_fallback_persisted() {
+    let (_dir, pool) = make_test_pool().await;
+    let (rule_id, source_id) = setup_base(&pool).await;
+    let entry_id =
+        seed_pending_fetch_entry(&pool, source_id, "uid-s6-fb", "hash-s6-fb", None).await;
+    seed_owned_article(&pool, rule_id, entry_id, "summary_fallback").await;
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Ok(raw(entry_id, b"<html>full</html>")))]),
+        vec![success_strategy("s6-full-hash")],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+
+    assert_eq!(entry_state(&pool, entry_id).await, "fallback_persisted");
+    assert_eq!((summary.persisted, summary.fallback_persisted), (0, 1));
+}
+
+/// R3E-S6, the other direction: the recovered article was a full extract,
+/// this attempt fell back to the summary.
+#[tokio::test]
+async fn recovered_full_article_is_reported_as_persisted() {
+    let (_dir, pool) = make_test_pool().await;
+    let (rule_id, source_id) = setup_base(&pool).await;
+    let entry_id = seed_pending_fetch_entry(
+        &pool,
+        source_id,
+        "uid-s6-full",
+        "hash-s6-full",
+        Some("<p>feed summary that would be the fallback body</p>"),
+    )
+    .await;
+    seed_owned_article(&pool, rule_id, entry_id, "readability").await;
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Err(ExtractorError::HttpStatus { code: 403 }))]),
+        vec![success_strategy("unused")],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+
+    assert_eq!(entry_state(&pool, entry_id).await, "persisted");
+    assert_eq!((summary.persisted, summary.fallback_persisted), (1, 0));
 }
 
 async fn setup_base(pool: &SqlitePool) -> (i64, i64) {
@@ -717,6 +932,7 @@ fn raw(feed_entry_id: i64, body: &[u8]) -> RawHtmlFetch {
         feed_entry_id,
         final_url: format!("https://example.com/final/{feed_entry_id}"),
         http_status: 200,
+        content_type: None,
         body_bytes: body.to_vec(),
     }
 }
@@ -779,6 +995,7 @@ async fn max_batches_caps_loop_and_reports_reached_flag() {
             batch_size: 1,
             max_attempts: 1,
             max_batches: 2,
+            category_key: None,
         })
         .await;
 
@@ -821,6 +1038,7 @@ async fn max_batches_zero_means_unlimited_until_queue_drained() {
             batch_size: 1,
             max_attempts: 1,
             max_batches: 0,
+            category_key: None,
         })
         .await;
 
@@ -894,6 +1112,7 @@ async fn extract_live_tasks_are_bounded_by_concurrency() {
             batch_size: 20,
             max_attempts: 3,
             max_batches: 1,
+            category_key: None,
         })
         .await;
     assert_eq!(summary.claimed, 20);
@@ -1072,6 +1291,7 @@ fn opts(batch_size: u32, max_batches: u32) -> ExtractOptions {
         batch_size,
         max_attempts: 5,
         max_batches,
+        category_key: None,
     }
 }
 
@@ -1137,11 +1357,43 @@ async fn entry_whose_lease_was_reclaimed_is_not_claimed_again_in_the_same_run() 
 
     assert_eq!(*fetcher.calls.lock().await, [slow, healthy]);
     assert_eq!((summary.claimed, summary.persisted), (2, 1));
+    // A5: the missed release is reported as such, not as a retryable failure.
+    assert_eq!((summary.lease_lost, summary.retryable_failed), (1, 0));
+    assert!(!summary.retryable_deferred);
     assert_eq!(
         entry_row(&pool, slow).await,
         ("pending_fetch".to_string(), 1, None)
     );
     assert_eq!(entry_row(&pool, healthy).await.0, "persisted");
+}
+
+/// R3E-S10: the server's retry deadline is fixed when the 429 arrives (t0 +
+/// 1 h); a release 30 min later neither shifts it nor waits less than the
+/// local backoff after the release.
+#[tokio::test]
+async fn extract_429_deadline_does_not_move_with_a_delayed_release() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let limited = seed_at(&pool, source_id, "uid-429-delay", 0).await;
+    let clock = TestClock::at(t0());
+    let (flow, _fetcher) = recording_flow(
+        &pool,
+        &clock,
+        responses([(
+            limited,
+            Err(ExtractorError::RateLimited {
+                retry_at: Some(std::time::SystemTime::from(t0() + 60 * MIN)),
+            }),
+        )]),
+        vec![(limited, OnFetch::Advance(30 * MIN))],
+    );
+
+    flow.run(opts(1, 0)).await;
+
+    assert_eq!(
+        entry_row(&pool, limited).await,
+        ("pending_fetch".to_string(), 1, Some(t0() + 60 * MIN))
+    );
 }
 
 #[tokio::test]
@@ -1326,4 +1578,206 @@ async fn oldest_first_backlog_still_starves_fresh_entries_under_cap() {
     assert!(summary.max_batches_reached);
     assert!(!fetcher.calls.lock().await.contains(&fresh));
     assert_eq!(entry_row(&pool, fresh).await.0, "pending_fetch");
+}
+
+/// A5：永久失败的 release 落空（lease 被并发 run reclaim）→ 报 `LeaseLost`，
+/// 不写 `entry_permanent_failed` 事件，也不计入 `permanent_failed`。
+#[tokio::test]
+async fn permanent_release_that_misses_reports_lease_lost_without_event() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry = seed_at(&pool, source_id, "uid-lost", 0).await;
+    let clock = TestClock::at(t0());
+    let (flow, _fetcher) = recording_flow_with(
+        &pool,
+        &clock,
+        responses([(entry, Ok(raw(entry, b"<html>x</html>")))]),
+        vec![(entry, OnFetch::ReclaimLease(entry))],
+        vec![parse_failed_strategy()],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+    let events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM run_events WHERE event_kind = 'entry_permanent_failed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("event count");
+
+    assert_eq!(summary.permanent_failed, 0, "{summary:?}");
+    assert_eq!(summary.lease_lost, 1);
+    assert_eq!(summary.storage_failed, 0);
+    assert_eq!(events, 0, "no event for a transition that did not land");
+    assert_eq!(entry_row(&pool, entry).await.0, "pending_fetch");
+}
+
+/// A5：成功路径的 release 落空同样报 `LeaseLost`，不报 `Persisted`。
+#[tokio::test]
+async fn success_release_that_misses_reports_lease_lost() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_id) = setup_base(&pool).await;
+    let entry = seed_at(&pool, source_id, "uid-lost-ok", 0).await;
+    let clock = TestClock::at(t0());
+    let (flow, _fetcher) = recording_flow(
+        &pool,
+        &clock,
+        responses([(entry, Ok(raw(entry, b"<html>ok</html>")))]),
+        vec![(entry, OnFetch::ReclaimLease(entry))],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+    let articles: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM articles")
+        .fetch_one(&pool)
+        .await
+        .expect("article count");
+
+    assert_eq!(
+        (summary.persisted, summary.lease_lost),
+        (0, 1),
+        "{summary:?}"
+    );
+    assert_eq!(entry_row(&pool, entry).await.0, "pending_fetch");
+    // A12: the insert rolled back with the missed release (no orphan article).
+    assert_eq!(articles, 0);
+}
+
+/// A10：`ingest -C ai` 的 extract 只领取 `ai` 分类的条目；其他分类的积压
+/// 不被抓取、不被修改（plan/09 §2）。
+#[tokio::test]
+async fn category_scoped_extract_leaves_other_category_backlog_untouched() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_rule_id, source_a) = setup_base(&pool).await;
+    let config_id = insert_config_rule(&pool).await;
+    let source_b = common::insert_source_with_category(
+        &pool,
+        config_id,
+        "other",
+        "other-source",
+        "https://example.com/other.xml",
+    )
+    .await;
+    let in_a = seed_pending_fetch_entry(&pool, source_a, "uid-a", "hash-a", None).await;
+    let in_b = seed_pending_fetch_entry(&pool, source_b, "uid-b", "hash-b", None).await;
+    let flow = flow(
+        pool.clone(),
+        responses([
+            (in_a, Ok(raw(in_a, b"<html>a</html>"))),
+            (in_b, Ok(raw(in_b, b"<html>b</html>"))),
+        ]),
+        vec![per_entry_success_strategy()],
+    );
+
+    let summary = flow
+        .run(ExtractOptions {
+            category_key: Some("ai".to_string()),
+            ..opts(10, 0)
+        })
+        .await;
+    let row_b: (String, i64) =
+        sqlx::query_as("SELECT state, attempt_count FROM feed_entries WHERE id = ?")
+            .bind(in_b)
+            .fetch_one(&pool)
+            .await
+            .expect("entry b");
+
+    assert_eq!((summary.claimed, summary.persisted), (1, 1), "{summary:?}");
+    assert_eq!(
+        row_b,
+        ("pending_fetch".to_string(), 0),
+        "category B untouched"
+    );
+}
+
+/// A12：上一次尝试已提交 article（release 前崩溃）后，重试命中的是本条目自己
+/// 的 article → 记为 persisted，而不是 dedup_skipped 指向自己。
+#[tokio::test]
+async fn retry_that_finds_its_own_article_is_persisted_not_dedup() {
+    let (_dir, pool) = make_test_pool().await;
+    let (rule_id, source_id) = setup_base(&pool).await;
+    let entry_id = seed_pending_fetch_entry(&pool, source_id, "uid-self", "hash-self", None).await;
+    let own = ArticleRepo::new(pool.clone())
+        .insert_or_get_by_content_hash(&new_article("content-hash-self", entry_id, rule_id))
+        .await
+        .expect("earlier attempt's article")
+        .article_id;
+    let flow = flow(
+        pool.clone(),
+        responses([(entry_id, Ok(raw(entry_id, b"<html>self</html>")))]),
+        vec![success_strategy("content-hash-self")],
+    );
+
+    let summary = flow.run(opts(1, 0)).await;
+    let row: (String, Option<i64>, Option<String>) =
+        sqlx::query_as("SELECT state, article_id, dedup_decision FROM feed_entries WHERE id = ?")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .expect("entry should be readable");
+    let dedup_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM run_events WHERE event_kind = 'entry_dedup_skipped'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("event count");
+
+    assert_eq!(
+        (summary.persisted, summary.dedup_skipped),
+        (1, 0),
+        "{summary:?}"
+    );
+    assert_eq!(
+        row,
+        (
+            "persisted".to_string(),
+            Some(own),
+            Some("fresh".to_string())
+        )
+    );
+    assert_eq!(dedup_events, 0);
+}
+
+/// A13：两条写入路径（Readability 与摘要兜底）都把 `ExtractDeps::extractor_version`
+/// 写入 `articles.extractor_version`，不再写字面量 1。
+#[tokio::test]
+async fn both_write_paths_stamp_the_assembled_extractor_version() {
+    let (_dir, pool) = make_test_pool().await;
+    let (_first_rule, source_id) = setup_base(&pool).await;
+    let assembled = seed_extractor_rule_version(&pool).await;
+    assert_ne!(assembled, 1);
+    let extracted = seed_pending_fetch_entry(&pool, source_id, "uid-v-ok", "hash-v-ok", None).await;
+    let fallback = seed_pending_fetch_entry(
+        &pool,
+        source_id,
+        "uid-v-fb",
+        "hash-v-fb",
+        Some("<p>summary body for the fallback article</p>"),
+    )
+    .await;
+    let app = Arc::new(app_config(RetentionPolicy::Off, 1));
+    let mut deps = common::extract_deps(
+        pool.clone(),
+        app,
+        Arc::new(MockHtmlFetcher {
+            responses: Mutex::new(responses([
+                (extracted, Ok(raw(extracted, b"<html>ok</html>"))),
+                (fallback, Err(ExtractorError::HttpStatus { code: 404 })),
+            ])),
+        }),
+        vec![per_entry_success_strategy()],
+    );
+    deps.extractor_version = assembled;
+
+    let summary = ExtractFlow::new(Arc::new(deps)).run(opts(10, 0)).await;
+    let versions: Vec<i64> =
+        sqlx::query_scalar("SELECT extractor_version FROM articles ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("articles");
+
+    assert_eq!(
+        (summary.persisted, summary.fallback_persisted),
+        (1, 1),
+        "{summary:?}"
+    );
+    assert_eq!(versions, vec![assembled, assembled]);
 }

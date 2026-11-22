@@ -1,7 +1,7 @@
 //! HTTP-only HTML fetcher.
 
 use async_trait::async_trait;
-use reqwest::header::{ACCEPT, USER_AGENT};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
 use reqwest::{Client, Url};
 use rss_ai_news_domain::dto::extract::ArticleFetchTask;
 
@@ -15,6 +15,10 @@ pub struct RawHtmlFetch {
     pub feed_entry_id: i64,
     pub final_url: String,
     pub http_status: u16,
+    /// Response `Content-Type` header, if present and visible ASCII; its
+    /// `charset` parameter feeds [`crate::decode_html`].
+    pub content_type: Option<String>,
+    /// Original response bytes (persisted as the html artifact unchanged).
     pub body_bytes: Vec<u8>,
 }
 
@@ -36,6 +40,10 @@ impl ReqwestHtmlFetcher {
         let client = Client::builder()
             .user_agent(USER_AGENT_VALUE)
             .redirect(reqwest::redirect::Policy::limited(5))
+            // R2-S11: no automatic `Referer` on redirects — it would carry
+            // the article URL (query included, e.g. signed links) to another
+            // host. Same rule as the feed client.
+            .referer(false)
             .build()
             .map_err(ExtractorError::from)?;
         Ok(Self {
@@ -44,6 +52,8 @@ impl ReqwestHtmlFetcher {
         })
     }
 
+    /// Uses a caller-built client as is; build it with `.referer(false)`
+    /// like [`Self::new`] (R2-S11).
     pub fn with_client(client: Client, max_body_bytes: u64) -> Self {
         Self {
             client,
@@ -71,6 +81,22 @@ impl HtmlFetcher for ReqwestHtmlFetcher {
 
         let status = response.status();
         let final_url = response.url().to_string();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        if status.as_u16() == 429 {
+            // R3E-S10: the deadline is fixed now, at receipt, so a later
+            // release cannot shift it.
+            let received_at = std::time::SystemTime::now();
+            let retry_at = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| crate::error::parse_retry_at(value, received_at));
+            return Err(ExtractorError::RateLimited { retry_at });
+        }
         if !status.is_success() {
             return Err(ExtractorError::HttpStatus {
                 code: status.as_u16(),
@@ -83,6 +109,7 @@ impl HtmlFetcher for ReqwestHtmlFetcher {
             feed_entry_id: task.feed_entry_id,
             final_url,
             http_status: status.as_u16(),
+            content_type,
             body_bytes: body,
         })
     }

@@ -8,7 +8,9 @@ use std::time::Duration as StdDuration;
 
 use rss_ai_news_domain::dto::publish::RenderedReport;
 use rss_ai_news_domain::error::ClassifiedError;
-use rss_ai_news_publish::PublishError;
+use rss_ai_news_publish::{
+    PublishError, PublishTarget, PublishedArtifact, REMOTE_WRITE_UNVERIFIED_KIND,
+};
 use rss_ai_news_report::{RenderConfig, ReportError, load_frozen_items, render_markdown};
 use rss_ai_news_storage::{
     ClaimRequest, ClaimedPublishRecord, PublishAdvanceExtras, PublishItemRepository, PublishState,
@@ -19,12 +21,12 @@ use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use tokio::time::Instant;
 
-use super::PublishFlow;
 use super::dto::{
     PublishRemoteBatchOptions, PublishRemoteBatchOutcome, PublishRemoteOptions,
     PublishRemoteOutcome, PublishRemoteStatus,
 };
-use super::render_templates_from_ctx;
+use super::{OwnershipGuard, PublishFlow};
+use super::{render_templates_from_ctx, rendered_timestamp};
 use crate::events::RunEventEmitter;
 
 struct PreparedRemote {
@@ -41,18 +43,173 @@ fn remote_deadline(lease_seconds: u64) -> Instant {
     Instant::now() + (lease - lease / 5)
 }
 
+/// P-B2: a remote call cut off by [`remote_deadline`] may already have
+/// written. Half of the reserved 20% of the lease is given to a read-only
+/// HEAD check; the other half stays for the database release. The
+/// owner-guarded advance still refuses a record whose lease was lost.
+fn verify_deadline(deadline: Instant, lease_seconds: u64) -> Instant {
+    deadline + StdDuration::from_secs(lease_seconds) / 10
+}
+
+/// Read-only receipt lookup after a remote timeout. `Ok` = the destination
+/// holds every report; `RemoteTimeout` = it does not (the timeout stands);
+/// `RemoteWriteUnverified` = the check failed or ran out of time, so whether
+/// the cut-off call wrote is unknown (R3F-B2).
+async fn verify_after_timeout(
+    target: &dyn PublishTarget,
+    reports: &[RenderedReport],
+    until: Instant,
+) -> Result<rss_ai_news_publish::PublishedBatchArtifact, PublishError> {
+    let unverified = |verification: PublishError| PublishError::RemoteWriteUnverified {
+        write: Box::new(PublishError::RemoteTimeout),
+        verification: Box::new(verification),
+    };
+    if Instant::now() >= until {
+        return Err(unverified(PublishError::RemoteTimeout));
+    }
+    match tokio::time::timeout_at(until, target.find_published(reports)).await {
+        Ok(Ok(Some(batch))) if batch.artifacts.len() == reports.len() => {
+            tracing::info!(
+                reports = reports.len(),
+                commit_sha = batch.commit_sha.as_deref(),
+                "remote publish timed out but the destination already holds every report"
+            );
+            Ok(batch)
+        }
+        Ok(Ok(_)) => Err(PublishError::RemoteTimeout),
+        Ok(Err(error)) => {
+            tracing::warn!(?error, "post-timeout HEAD check failed; outcome unverified");
+            Err(unverified(error))
+        }
+        Err(_) => {
+            tracing::warn!("post-timeout HEAD check ran out of time; outcome unverified");
+            Err(unverified(PublishError::RemoteTimeout))
+        }
+    }
+}
+
+/// R4-1: the record's previous remote attempt ended
+/// `remote_write_unverified` — its write may have landed.
+fn has_unverified_write(claimed: &ClaimedPublishRecord) -> bool {
+    claimed.last_error_kind.as_deref() == Some(REMOTE_WRITE_UNVERIFIED_KIND)
+}
+
+/// R4-1: read-only fixed-HEAD content check for a record whose earlier write
+/// is unverified, run before any write. `Ok(Some)` = the destination already
+/// holds the report (record this receipt, send nothing); `Ok(None)` = it is
+/// confirmed absent (write normally, charged normally); `Err` = the check
+/// failed, was rate limited or ran out of the remote deadline, so nothing is
+/// settled: [`PublishError::EarlierWriteUnverified`], released deferred.
+async fn check_earlier_write(
+    target: &dyn PublishTarget,
+    report: &RenderedReport,
+    deadline: Instant,
+) -> Result<Option<PublishedArtifact>, PublishError> {
+    let unsettled = |verification: PublishError| PublishError::EarlierWriteUnverified {
+        verification: Box::new(verification),
+    };
+    if Instant::now() >= deadline {
+        return Err(unsettled(PublishError::RemoteTimeout));
+    }
+    match tokio::time::timeout_at(
+        deadline,
+        target.find_published(std::slice::from_ref(report)),
+    )
+    .await
+    {
+        Ok(Ok(Some(mut batch))) if batch.artifacts.len() == 1 => {
+            tracing::info!(
+                commit_sha = batch.commit_sha.as_deref(),
+                "earlier unverified write found at HEAD; recording its receipt"
+            );
+            Ok(Some(batch.artifacts.remove(0)))
+        }
+        // A target breaking the one-artifact-per-report contract settles
+        // nothing either.
+        Ok(Ok(Some(batch))) => Err(unsettled(PublishError::api(
+            502,
+            format!(
+                "find_published returned {} artifacts for 1 report",
+                batch.artifacts.len()
+            ),
+        ))),
+        Ok(Ok(None)) => Ok(None),
+        Ok(Err(error)) => Err(unsettled(error)),
+        Err(_) => Err(unsettled(PublishError::RemoteTimeout)),
+    }
+}
+
+/// The single-report write within `deadline`; a call cut off by it is
+/// verified read-only before it is reported (P-B2).
+async fn send_report(
+    target: &dyn PublishTarget,
+    report: &RenderedReport,
+    deadline: Instant,
+    lease_seconds: u64,
+) -> Result<PublishedArtifact, PublishError> {
+    if Instant::now() >= deadline {
+        return Err(PublishError::RemoteTimeout);
+    }
+    match tokio::time::timeout_at(deadline, target.publish(report)).await {
+        Ok(result) => result,
+        // The cancelled call may already have written.
+        Err(_) => verify_after_timeout(
+            target,
+            std::slice::from_ref(report),
+            verify_deadline(deadline, lease_seconds),
+        )
+        .await
+        .map(|mut batch| batch.artifacts.remove(0)),
+    }
+}
+
+/// Longest wait a rate limit may impose on the next claim. GitHub's primary
+/// quota resets within the hour; a larger (or hostile) reset time must not
+/// park a record — which keeps owning its snapshot's articles — for longer.
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::hours(1);
+
+/// R1-P-S12: GitHub asks to wait until `reset_at` (Retry-After or quota
+/// reset) before trying again; persisted so the next claim honours it.
+/// Capped at `now + MAX_RATE_LIMIT_WAIT`; `None` for other errors and for a
+/// reset that is not in the future (no wait to honour — persisting `now`
+/// would only make a same-millisecond re-claim miss on SQLite's rounding).
+/// Also applies to the rate limit an unverified write's HEAD verification ran
+/// into (R3F-B2, [`PublishError::rate_limit_reset`]).
+fn rate_limit_retry_not_before(
+    error: &PublishError,
+    now: OffsetDateTime,
+) -> Option<OffsetDateTime> {
+    let reset_at = error.rate_limit_reset()?;
+    if reset_at <= now {
+        return None;
+    }
+    let latest = now.checked_add(MAX_RATE_LIMIT_WAIT).unwrap_or(now);
+    Some(reset_at.min(latest))
+}
+
+/// An attempt released without charging the stage budget — the record keeps
+/// its state and its snapshot's articles, the claim is refunded and only
+/// `next_attempt_at` (if any) delays the next claim:
+/// - R3F-B2: a write whose HEAD verification did not complete;
+/// - R4-1: a record whose earlier write is still unverified;
+/// - R3F-S12 / R4-4: every rate limit, whether or not it leaves a future wait
+///   to persist. GitHub refused the request; that is not a failed attempt, so
+///   even the last budget must not fold the record to `failed`. A deadline
+///   already past (`Retry-After: 0`, or one that elapsed before the release)
+///   stores no wait; the record is retried at the next run, one attempt per
+///   run, with no request resent inside a claim (R3F-B1).
+fn is_deferred_retry(error: &PublishError) -> bool {
+    matches!(
+        error,
+        PublishError::RemoteWriteUnverified { .. }
+            | PublishError::EarlierWriteUnverified { .. }
+            | PublishError::GitHubRateLimit { .. }
+    )
+}
+
 enum RemotePreparationError {
     Report(ReportError),
     Timeout,
-}
-
-impl RemotePreparationError {
-    fn error_kind(&self) -> &str {
-        match self {
-            Self::Report(error) => error.error_kind(),
-            Self::Timeout => "remote_timeout",
-        }
-    }
 }
 
 async fn prepare_remote_report(
@@ -98,6 +255,40 @@ async fn prepare_remote_report(
         return Err(RemotePreparationError::Timeout);
     }
     Ok(prepared)
+}
+
+/// Target drift guard: a `stored_local` record carries the destination it was
+/// initialised for (`owner/repo:branch`). If the configured target now
+/// declares a different identity, sending would publish the frozen snapshot to
+/// a repository/branch nobody chose for it, so the stage refuses before any
+/// request. Targets without an identity are not compared.
+fn target_drift(
+    claimed: &ClaimedPublishRecord,
+    target: &dyn PublishTarget,
+) -> Option<PublishError> {
+    let current = target.target_identity()?;
+    if claimed.remote_target.as_deref() == Some(current.as_str()) {
+        None
+    } else {
+        Some(PublishError::RemoteTargetMismatch {
+            stored: claimed.remote_target.clone(),
+            current,
+        })
+    }
+}
+
+fn mismatch_status(error: &PublishError) -> PublishRemoteStatus {
+    match error {
+        PublishError::RemoteTargetMismatch { stored, current } => {
+            PublishRemoteStatus::TargetMismatch {
+                stored: stored.clone(),
+                current: current.clone(),
+            }
+        }
+        other => PublishRemoteStatus::Failed {
+            error_kind: other.error_kind().to_string(),
+        },
+    }
 }
 
 impl PublishFlow {
@@ -197,10 +388,48 @@ impl PublishFlow {
             }
         };
 
+        if let Some(error) = target_drift(&claimed, target.as_ref()) {
+            self.release_publish_error_for_record(
+                claimed.id,
+                &owner,
+                &error,
+                "publish_remote",
+                &emitter,
+            )
+            .await;
+            return PublishRemoteOutcome {
+                publish_record_id: claimed.id,
+                status: mismatch_status(&error),
+                commit_sha: None,
+                remote_target: None,
+                item_count: 0,
+            };
+        }
+
+        let unverified_write = has_unverified_write(&claimed);
+        if let Some(status) = self
+            .remote_ownership_status(
+                claimed.id,
+                &owner,
+                unverified_write,
+                "publish_remote",
+                &emitter,
+            )
+            .await
+        {
+            return PublishRemoteOutcome {
+                publish_record_id: claimed.id,
+                status,
+                commit_sha: None,
+                remote_target: None,
+                item_count: 0,
+            };
+        }
+
         let render_config = RenderConfig {
             category_display_name: opts.category_display_name,
             report_title: opts.report_title,
-            generated_at: opts.generated_at,
+            generated_at: rendered_timestamp(claimed.rendered_at, opts.generated_at),
             templates: render_templates_from_ctx(&self.ctx, opts.path_template.as_deref()),
         };
         let (report, promote_article_ids) = match prepare_remote_report(
@@ -215,13 +444,18 @@ impl PublishFlow {
         {
             Ok(report) => report,
             Err(error) => {
-                self.release_preparation_error(claimed.id, &owner, &error, &emitter)
+                let error_kind = self
+                    .release_preparation_error(
+                        claimed.id,
+                        &owner,
+                        &error,
+                        unverified_write,
+                        &emitter,
+                    )
                     .await;
                 return PublishRemoteOutcome {
                     publish_record_id: claimed.id,
-                    status: PublishRemoteStatus::Failed {
-                        error_kind: error.error_kind().to_string(),
-                    },
+                    status: PublishRemoteStatus::Failed { error_kind },
                     commit_sha: None,
                     remote_target: None,
                     item_count: 0,
@@ -231,12 +465,16 @@ impl PublishFlow {
 
         let item_count = promote_article_ids.len() as u32;
 
-        let result = if Instant::now() >= deadline {
-            Err(PublishError::RemoteTimeout)
+        let lease_seconds = self.ctx.lease.publish_duration_seconds;
+        // R4-1: settle an earlier unverified write read-only before writing.
+        let result = if unverified_write {
+            match check_earlier_write(target.as_ref(), &report, deadline).await {
+                Ok(Some(artifact)) => Ok(artifact),
+                Ok(None) => send_report(target.as_ref(), &report, deadline, lease_seconds).await,
+                Err(error) => Err(error),
+            }
         } else {
-            tokio::time::timeout_at(deadline, target.publish(&report))
-                .await
-                .unwrap_or(Err(PublishError::RemoteTimeout))
+            send_report(target.as_ref(), &report, deadline, lease_seconds).await
         };
         let now = OffsetDateTime::now_utc();
         let artifact = match result {
@@ -262,79 +500,25 @@ impl PublishFlow {
             }
         };
 
-        let extras = PublishAdvanceExtras {
-            local_path: None,
-            remote_target: artifact.remote_target.clone(),
-            commit_sha: artifact.commit_sha.clone(),
-        };
-        match self
-            .ctx
-            .publish_record_repo
-            .release_terminal_advance_with_articles(
+        let status = self
+            .advance_published_remote(
                 claimed.id,
                 &owner,
-                PublishState::StoredLocal,
-                PublishState::PublishedRemote,
-                PublishTimestampField::RemotePublishedAt,
                 promote_article_ids,
-                extras,
+                &artifact,
+                item_count,
+                "publish_remote",
+                "published remotely",
                 now,
+                &emitter,
             )
-            .await
-        {
-            Ok(TerminalAdvanceOutcome {
-                status: TerminalAdvanceStatus::Advanced,
-            }) => {
-                emitter
-                    .emit(
-                        "publish_succeeded",
-                        "info",
-                        Some("publish_record"),
-                        Some(claimed.id),
-                        "published remotely",
-                        Some(json!({
-                            "phase": "publish_remote",
-                            "commit_sha": artifact.commit_sha.as_deref(),
-                            "remote_target": artifact.remote_target.as_deref(),
-                            "item_count": item_count
-                        })),
-                    )
-                    .await;
-                PublishRemoteOutcome {
-                    publish_record_id: claimed.id,
-                    status: PublishRemoteStatus::PublishedRemote,
-                    commit_sha: artifact.commit_sha,
-                    remote_target: artifact.remote_target,
-                    item_count,
-                }
-            }
-            Ok(TerminalAdvanceOutcome {
-                status: TerminalAdvanceStatus::PublishRecordConflict,
-            }) => PublishRemoteOutcome {
-                publish_record_id: claimed.id,
-                status: PublishRemoteStatus::Conflicted,
-                commit_sha: artifact.commit_sha,
-                remote_target: artifact.remote_target,
-                item_count,
-            },
-            Ok(TerminalAdvanceOutcome {
-                status: TerminalAdvanceStatus::ArticleStateConflict { article_id },
-            }) => PublishRemoteOutcome {
-                publish_record_id: claimed.id,
-                status: PublishRemoteStatus::ArticleConflict { article_id },
-                commit_sha: artifact.commit_sha,
-                remote_target: artifact.remote_target,
-                item_count,
-            },
-            Err(error) => PublishRemoteOutcome {
-                publish_record_id: claimed.id,
-                status: PublishRemoteStatus::Failed {
-                    error_kind: error.error_kind().to_string(),
-                },
-                commit_sha: artifact.commit_sha,
-                remote_target: artifact.remote_target,
-                item_count,
-            },
+            .await;
+        PublishRemoteOutcome {
+            publish_record_id: claimed.id,
+            status,
+            commit_sha: artifact.commit_sha,
+            remote_target: artifact.remote_target,
+            item_count,
         }
     }
 
@@ -448,10 +632,51 @@ impl PublishFlow {
                 }
             };
 
+            if let Some(error) = target_drift(claimed, target.as_ref()) {
+                self.release_publish_error_for_record(
+                    claimed.id,
+                    &owner,
+                    &error,
+                    "publish_remote_batch",
+                    &emitter,
+                )
+                .await;
+                outcomes.push(PublishRemoteOutcome {
+                    publish_record_id: claimed.id,
+                    status: mismatch_status(&error),
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count: 0,
+                });
+                continue;
+            }
+
+            let unverified_write = has_unverified_write(claimed);
+            // Only the losing record leaves the batch; the rest still commit.
+            if let Some(status) = self
+                .remote_ownership_status(
+                    claimed.id,
+                    &owner,
+                    unverified_write,
+                    "publish_remote_batch",
+                    &emitter,
+                )
+                .await
+            {
+                outcomes.push(PublishRemoteOutcome {
+                    publish_record_id: claimed.id,
+                    status,
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count: 0,
+                });
+                continue;
+            }
+
             let render_config = RenderConfig {
                 category_display_name: item.category_display_name,
                 report_title: item.report_title,
-                generated_at: item.generated_at,
+                generated_at: rendered_timestamp(claimed.rendered_at, item.generated_at),
                 templates: render_templates_from_ctx(&self.ctx, item.path_template.as_deref()),
             };
             let (report, promote_article_ids) = match prepare_remote_report(
@@ -466,13 +691,18 @@ impl PublishFlow {
             {
                 Ok(report) => report,
                 Err(error) => {
-                    self.release_preparation_error(claimed.id, &owner, &error, &emitter)
+                    let error_kind = self
+                        .release_preparation_error(
+                            claimed.id,
+                            &owner,
+                            &error,
+                            unverified_write,
+                            &emitter,
+                        )
                         .await;
                     outcomes.push(PublishRemoteOutcome {
                         publish_record_id: claimed.id,
-                        status: PublishRemoteStatus::Failed {
-                            error_kind: error.error_kind().to_string(),
-                        },
+                        status: PublishRemoteStatus::Failed { error_kind },
                         commit_sha: None,
                         remote_target: None,
                         item_count: 0,
@@ -482,6 +712,60 @@ impl PublishFlow {
             };
 
             let item_count = promote_article_ids.len() as u32;
+            // R4-1: each record with an unverified earlier write is checked on
+            // its own (`find_published` is all-or-nothing over its input, so a
+            // sibling's absence must not hide this record's landed write).
+            // Found → recorded from its receipt and left out of the batch
+            // write; check failed → deferred; confirmed absent → written with
+            // the batch.
+            if unverified_write {
+                match check_earlier_write(target.as_ref(), &report, deadline).await {
+                    Ok(Some(artifact)) => {
+                        let status = self
+                            .advance_published_remote(
+                                claimed.id,
+                                &owner,
+                                promote_article_ids,
+                                &artifact,
+                                item_count,
+                                "publish_remote_batch",
+                                "earlier remote write recorded in batch",
+                                OffsetDateTime::now_utc(),
+                                &emitter,
+                            )
+                            .await;
+                        outcomes.push(PublishRemoteOutcome {
+                            publish_record_id: claimed.id,
+                            status,
+                            commit_sha: artifact.commit_sha,
+                            remote_target: artifact.remote_target,
+                            item_count,
+                        });
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.release_publish_error_for_record(
+                            claimed.id,
+                            &owner,
+                            &error,
+                            "publish_remote_batch",
+                            &emitter,
+                        )
+                        .await;
+                        outcomes.push(PublishRemoteOutcome {
+                            publish_record_id: claimed.id,
+                            status: PublishRemoteStatus::Failed {
+                                error_kind: error.error_kind().to_string(),
+                            },
+                            commit_sha: None,
+                            remote_target: None,
+                            item_count,
+                        });
+                        continue;
+                    }
+                }
+            }
             reports.push(report);
             prepared.push(PreparedRemote {
                 publish_record_id: claimed.id,
@@ -500,22 +784,31 @@ impl PublishFlow {
         let result = if Instant::now() >= deadline {
             Err(PublishError::RemoteTimeout)
         } else {
-            tokio::time::timeout_at(deadline, target.publish_many(&reports))
-                .await
-                .unwrap_or(Err(PublishError::RemoteTimeout))
+            match tokio::time::timeout_at(deadline, target.publish_many(&reports)).await {
+                Ok(result) => result,
+                // The cancelled call may already have written.
+                Err(_) => {
+                    verify_after_timeout(
+                        target.as_ref(),
+                        &reports,
+                        verify_deadline(deadline, self.ctx.lease.publish_duration_seconds),
+                    )
+                    .await
+                }
+            }
         };
         let now = OffsetDateTime::now_utc();
         let batch = match result {
             Ok(batch) if batch.artifacts.len() == prepared.len() => batch,
             Ok(batch) => {
-                let error = PublishError::GitHubApiError {
-                    status: 502,
-                    message: format!(
+                let error = PublishError::api(
+                    502,
+                    format!(
                         "publish_many returned {} artifacts for {} reports",
                         batch.artifacts.len(),
                         prepared.len()
                     ),
-                };
+                );
                 self.release_publish_error_for_prepared(&prepared, &owner, &error, &emitter)
                     .await;
                 for item in prepared {
@@ -556,56 +849,19 @@ impl PublishFlow {
         };
 
         for (item, artifact) in prepared.into_iter().zip(batch.artifacts) {
-            let extras = PublishAdvanceExtras {
-                local_path: None,
-                remote_target: artifact.remote_target.clone(),
-                commit_sha: artifact.commit_sha.clone(),
-            };
-            let status = match self
-                .ctx
-                .publish_record_repo
-                .release_terminal_advance_with_articles(
+            let status = self
+                .advance_published_remote(
                     item.publish_record_id,
                     &owner,
-                    PublishState::StoredLocal,
-                    PublishState::PublishedRemote,
-                    PublishTimestampField::RemotePublishedAt,
                     item.promote_article_ids,
-                    extras,
+                    &artifact,
+                    item.item_count,
+                    "publish_remote_batch",
+                    "published remotely in batch",
                     now,
+                    &emitter,
                 )
-                .await
-            {
-                Ok(TerminalAdvanceOutcome {
-                    status: TerminalAdvanceStatus::Advanced,
-                }) => {
-                    emitter
-                        .emit(
-                            "publish_succeeded",
-                            "info",
-                            Some("publish_record"),
-                            Some(item.publish_record_id),
-                            "published remotely in batch",
-                            Some(json!({
-                                "phase": "publish_remote_batch",
-                                "commit_sha": artifact.commit_sha.as_deref(),
-                                "remote_target": artifact.remote_target.as_deref(),
-                                "item_count": item.item_count
-                            })),
-                        )
-                        .await;
-                    PublishRemoteStatus::PublishedRemote
-                }
-                Ok(TerminalAdvanceOutcome {
-                    status: TerminalAdvanceStatus::PublishRecordConflict,
-                }) => PublishRemoteStatus::Conflicted,
-                Ok(TerminalAdvanceOutcome {
-                    status: TerminalAdvanceStatus::ArticleStateConflict { article_id },
-                }) => PublishRemoteStatus::ArticleConflict { article_id },
-                Err(error) => PublishRemoteStatus::Failed {
-                    error_kind: error.error_kind().to_string(),
-                },
-            };
+                .await;
             outcomes.push(PublishRemoteOutcome {
                 publish_record_id: item.publish_record_id,
                 status,
@@ -619,6 +875,163 @@ impl PublishFlow {
             items: outcomes,
             commit_sha: batch.commit_sha,
         }
+    }
+
+    /// Pre-write ownership guard for a claimed `stored_local` record (P-B1);
+    /// `None` = clear to send.
+    async fn remote_ownership_status(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        unverified_write: bool,
+        phase: &'static str,
+        emitter: &RunEventEmitter<'_>,
+    ) -> Option<PublishRemoteStatus> {
+        match self
+            .guard_snapshot_ownership(
+                publish_record_id,
+                owner,
+                PublishState::StoredLocal,
+                unverified_write,
+                phase,
+                emitter,
+            )
+            .await
+        {
+            OwnershipGuard::Clear => None,
+            OwnershipGuard::Conflict { article_id } => {
+                Some(PublishRemoteStatus::ArticleConflict { article_id })
+            }
+            OwnershipGuard::Failed { error_kind } => {
+                Some(PublishRemoteStatus::Failed { error_kind })
+            }
+        }
+    }
+
+    /// Terminal advance `stored_local → published_remote` with the receipt of
+    /// `artifact`, promoting the snapshot's articles; emits
+    /// `publish_succeeded` (`message`) on success.
+    #[allow(clippy::too_many_arguments)]
+    async fn advance_published_remote(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        promote_article_ids: Vec<i64>,
+        artifact: &PublishedArtifact,
+        item_count: u32,
+        phase: &'static str,
+        message: &str,
+        now: OffsetDateTime,
+        emitter: &RunEventEmitter<'_>,
+    ) -> PublishRemoteStatus {
+        let extras = PublishAdvanceExtras {
+            local_path: None,
+            remote_target: artifact.remote_target.clone(),
+            commit_sha: artifact.commit_sha.clone(),
+        };
+        match self
+            .ctx
+            .publish_record_repo
+            .release_terminal_advance_with_articles(
+                publish_record_id,
+                owner,
+                PublishState::StoredLocal,
+                PublishState::PublishedRemote,
+                PublishTimestampField::RemotePublishedAt,
+                promote_article_ids,
+                extras,
+                now,
+            )
+            .await
+        {
+            Ok(TerminalAdvanceOutcome {
+                status: TerminalAdvanceStatus::Advanced,
+            }) => {
+                emitter
+                    .emit(
+                        "publish_succeeded",
+                        "info",
+                        Some("publish_record"),
+                        Some(publish_record_id),
+                        message,
+                        Some(json!({
+                            "phase": phase,
+                            "commit_sha": artifact.commit_sha.as_deref(),
+                            "remote_target": artifact.remote_target.as_deref(),
+                            "item_count": item_count
+                        })),
+                    )
+                    .await;
+                PublishRemoteStatus::PublishedRemote
+            }
+            Ok(TerminalAdvanceOutcome {
+                status: TerminalAdvanceStatus::PublishRecordConflict,
+            }) => PublishRemoteStatus::Conflicted,
+            Ok(TerminalAdvanceOutcome {
+                status: TerminalAdvanceStatus::ArticleStateConflict { article_id },
+            }) => PublishRemoteStatus::ArticleConflict { article_id },
+            Err(error) => PublishRemoteStatus::Failed {
+                error_kind: error.error_kind().to_string(),
+            },
+        }
+    }
+
+    /// R4-1: a retryable failure (`cause`: a snapshot or ownership read)
+    /// before the HEAD check of a record whose earlier write is unverified.
+    /// Nothing was written and nothing is settled, so the attempt is
+    /// released like [`PublishError::EarlierWriteUnverified`]: state kept,
+    /// claim refunded, `last_error_kind = remote_write_unverified` so the
+    /// next claim checks again.
+    pub(super) async fn release_unverified_recovery(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        cause: &dyn ClassifiedError,
+        phase: &'static str,
+        emitter: &RunEventEmitter<'_>,
+    ) {
+        let now = OffsetDateTime::now_utc();
+        let message = format!(
+            "github write of an earlier attempt still unverified: {}",
+            cause.display_user()
+        );
+        let released = self
+            .ctx
+            .publish_record_repo
+            .release_deferred_retry(
+                publish_record_id,
+                owner,
+                PublishState::StoredLocal,
+                &message,
+                REMOTE_WRITE_UNVERIFIED_KIND,
+                None,
+                now,
+            )
+            .await;
+        if let Err(persist_err) = &released {
+            tracing::warn!(
+                publish_record_id,
+                phase,
+                ?persist_err,
+                "deferred release could not be persisted; lease recovery remains available",
+            );
+        }
+        emitter
+            .emit(
+                "publish_failed",
+                "error",
+                Some("publish_record"),
+                Some(publish_record_id),
+                &message,
+                Some(json!({
+                    "phase": phase,
+                    "error_kind": REMOTE_WRITE_UNVERIFIED_KIND,
+                    "cause_kind": cause.error_kind(),
+                    "budget_exhausted": false,
+                    "attempt_refunded": matches!(released, Ok(true)),
+                })),
+            )
+            .await;
     }
 
     async fn release_publish_error_for_prepared(
@@ -650,16 +1063,33 @@ impl PublishFlow {
     ) {
         let now = OffsetDateTime::now_utc();
         let message = error.display_user();
+        let retry_not_before = rate_limit_retry_not_before(error, now);
         let mut budget_exhausted = false;
-        let release_result = if error.is_retryable() {
+        let deferred = is_deferred_retry(error);
+        let release_result = if deferred {
+            // Every caller releases a record claimed for the remote stage.
             self.ctx
                 .publish_record_repo
-                .release_retryable_failure(
+                .release_deferred_retry(
+                    publish_record_id,
+                    owner,
+                    PublishState::StoredLocal,
+                    &message,
+                    error.error_kind(),
+                    retry_not_before,
+                    now,
+                )
+                .await
+        } else if error.is_retryable() {
+            self.ctx
+                .publish_record_repo
+                .release_retryable_failure_until(
                     publish_record_id,
                     owner,
                     &message,
                     error.error_kind(),
                     self.ctx.retry.publish_max_attempts,
+                    retry_not_before,
                     now,
                 )
                 .await
@@ -679,6 +1109,9 @@ impl PublishFlow {
                 )
                 .await
         };
+        // R4-7: only a deferred release that updated the row refunded the
+        // claim (`Ok(false)` = the lease was lost, nothing changed).
+        let attempt_refunded = deferred && matches!(release_result, Ok(true));
         if let Err(persist_err) = release_result {
             tracing::warn!(
                 publish_record_id,
@@ -699,32 +1132,66 @@ impl PublishFlow {
                     "phase": phase,
                     "error_kind": error.error_kind(),
                     "budget_exhausted": budget_exhausted,
+                    // R3F-B2 / S12: released without charging the stage budget.
+                    "attempt_refunded": attempt_refunded,
+                    // R1-P-S1: where a GitHub failure happened, as fields.
+                    "operation": error.github_context().and_then(|context| context.operation),
+                    "http_status": error.github_context().and_then(|context| context.http_status),
+                    "request_id": error
+                        .github_context()
+                        .and_then(|context| context.request_id.as_deref()),
+                    "retry_not_before": retry_not_before.map(|at| at.to_string()),
                 })),
             )
             .await;
     }
 
+    /// Releases a failed preparation and returns the `error_kind` it was
+    /// released with. With `unverified_write` (R4-1) a retryable failure
+    /// is deferred under `remote_write_unverified` (nothing written, nothing
+    /// settled); a permanent report error is released as usual.
     async fn release_preparation_error(
         &self,
         publish_record_id: i64,
         owner: &str,
         error: &RemotePreparationError,
+        unverified_write: bool,
         emitter: &RunEventEmitter<'_>,
-    ) {
+    ) -> String {
         match error {
-            RemotePreparationError::Report(error) => {
-                self.release_report_error(publish_record_id, owner, error, emitter)
-                    .await;
-            }
-            RemotePreparationError::Timeout => {
-                self.release_publish_error_for_record(
+            RemotePreparationError::Report(error) if unverified_write && error.is_retryable() => {
+                self.release_unverified_recovery(
                     publish_record_id,
                     owner,
-                    &PublishError::RemoteTimeout,
+                    error,
                     "publish_remote.prepare",
                     emitter,
                 )
                 .await;
+                REMOTE_WRITE_UNVERIFIED_KIND.to_string()
+            }
+            RemotePreparationError::Report(error) => {
+                self.release_report_error(publish_record_id, owner, error, emitter)
+                    .await;
+                error.error_kind().to_string()
+            }
+            RemotePreparationError::Timeout => {
+                let error = if unverified_write {
+                    PublishError::EarlierWriteUnverified {
+                        verification: Box::new(PublishError::RemoteTimeout),
+                    }
+                } else {
+                    PublishError::RemoteTimeout
+                };
+                self.release_publish_error_for_record(
+                    publish_record_id,
+                    owner,
+                    &error,
+                    "publish_remote.prepare",
+                    emitter,
+                )
+                .await;
+                error.error_kind().to_string()
             }
         }
     }
@@ -736,38 +1203,16 @@ impl PublishFlow {
         error: &ReportError,
         emitter: &RunEventEmitter<'_>,
     ) {
-        if let Err(persist_err) = self
-            .ctx
-            .publish_record_repo
-            .release_permanent_failure(
-                publish_record_id,
-                owner,
-                &error.display_user(),
-                error.error_kind(),
-                OffsetDateTime::now_utc(),
-            )
-            .await
-        {
-            tracing::warn!(
-                publish_record_id,
-                phase = "publish_remote.report_error",
-                ?persist_err,
-                "release_permanent_failure 持久化失败；保留上游 ReportError 向上抛（F15-fix4）"
-            );
-        }
-        emitter
-            .emit(
-                "publish_failed",
-                "error",
-                Some("publish_record"),
-                Some(publish_record_id),
-                &error.display_user(),
-                Some(json!({
-                    "phase": "publish_remote",
-                    "error_kind": error.error_kind()
-                })),
-            )
-            .await;
+        // A snapshot read that failed transiently stays `stored_local`.
+        self.release_classified_failure(
+            publish_record_id,
+            owner,
+            error,
+            "publish_remote",
+            OffsetDateTime::now_utc(),
+            emitter,
+        )
+        .await;
     }
 }
 
@@ -835,6 +1280,12 @@ mod deadline_tests {
             }
             Ok(vec![])
         }
+        async fn find_snapshot_ownership_conflict(
+            &self,
+            _: i64,
+        ) -> Result<Option<SnapshotOwnershipConflict>, StorageError> {
+            unreachable!()
+        }
     }
     struct NoopEvents;
     #[async_trait::async_trait]
@@ -856,6 +1307,8 @@ mod deadline_tests {
             state: "stored_local".into(),
             remote_target: None,
             attempt_count: 1,
+            rendered_at: None,
+            last_error_kind: None,
         };
         let config = RenderConfig {
             category_display_name: "AI".into(),

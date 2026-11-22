@@ -158,6 +158,9 @@ release 折叠出终态时，既有失败事件升级：`ai_failed` / `entry_per
 `publish_failed` 携带 `"budget_exhausted": true`，severity 为 `error`（AI 同时
 `"retryable": false`）。maintenance 自身失败仅 `tracing::warn`（best-effort，不中断 run）。
 
+AI release 未落地（owner guard 命中 0 行或 release 存储报错）时不发 `ai_completed` / `ai_failed`，
+改发 `ai_release_not_applied`（warn / error，见 [./03-ai.md](./03-ai.md) §5.3）。
+
 ### 5.5 查询入口
 
 `run_events` 没有内置查询子命令，按 SQL 直查即可。typical query：
@@ -205,7 +208,7 @@ check，汇总成 `CheckReport`，按 outcome 染色输出。
 | `openai` | `[ai].enabled` 为 true 时探测 `OPENAI_BASE_URL` 可达 |
 | `github` | 远端 publish 启用时探测 `https://api.github.com/repos/<owner>/<repo>` |
 | `rsshub` | 任一 source 使用占位符时探测 `RSSHUB_BASE_URL` 健康端点 |
-| `Timezone` | `[publish].target_timezone` 是合法 IANA 时区 |
+| `Timezone` | `[publish].target_timezone` 是 IANA 时区库中存在的时区（不存在 → Fail） |
 | `disk` | SQLite 数据库所在文件系统的剩余空间；PostgreSQL 返回 Info/skip，本地路径不能代表数据库磁盘 |
 | `Expired leases` | 无过期未回收的 running AI 租约（与 deep I8 同源） |
 | `Failed backlog` | 终态失败计数（feed/ai/publish 三表），Info |

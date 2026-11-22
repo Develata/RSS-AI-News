@@ -60,6 +60,9 @@ pub struct ExtractDeps {
     pub retry: RetryConfig,
     pub artifact: ArtifactConfig,
     pub min_body_chars: u32,
+    /// `rule_versions.id` (`kind = 'extractor'`) written to
+    /// `articles.extractor_version`; resolved at assembly (A13).
+    pub extractor_version: i64,
     pub html_fetcher: Arc<dyn HtmlFetcher>,
     pub strategies: Vec<Arc<dyn ContentStrategy>>,
     pub feed_entry_repo: Arc<dyn FeedEntryRepository>,
@@ -79,6 +82,7 @@ pub struct AiDeps {
     pub ai_result_repo: Arc<dyn ArticleAiResultRepository>,
     pub artifact_repo: Arc<dyn RawArtifactRepository>,
     pub event_repo: Arc<dyn RunEventRepository>,
+    pub clock: Clock,
 }
 
 pub struct PublishDeps {

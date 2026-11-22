@@ -33,7 +33,8 @@ async fn pg_fixture_creates_isolated_schema_with_full_migrations() {
         "search_path={search_path:?} should include schema={schema:?}"
     );
 
-    // 2) 该 schema 下用户表数 = 12（0001+0002 共建 10 张，0006 加 2 张），加 `_sqlx_migrations` = 13
+    // 2) 该 schema 下用户表数 = 13（0001+0002 共建 10 张，0006 加 2 张，0009 加
+    //    ai_fresh_share_state），加 `_sqlx_migrations` = 14
     let table_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::BIGINT FROM information_schema.tables \
          WHERE table_schema = $1 AND table_type = 'BASE TABLE'",
@@ -43,8 +44,8 @@ async fn pg_fixture_creates_isolated_schema_with_full_migrations() {
     .await
     .expect("count tables in per-test schema");
     assert_eq!(
-        table_count, 13,
-        "per-test schema should contain 12 user tables (10 core + 2 decision-run, ADR 0011) + _sqlx_migrations, got {table_count}"
+        table_count, 14,
+        "per-test schema should contain 13 user tables (10 core + 2 decision-run, ADR 0011, + ai_fresh_share_state) + _sqlx_migrations, got {table_count}"
     );
 
     // 3) `public` schema 必须为空（migration 没污染默认 schema）

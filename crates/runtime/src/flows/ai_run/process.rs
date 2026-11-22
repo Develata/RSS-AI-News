@@ -7,13 +7,15 @@ use rss_ai_news_ai::{AiError, AiResponse, AiTask, ParsedResponse, parse_response
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_storage::{AiSuccessOutcome, ClaimedAiResult};
 use serde_json::json;
-use time::OffsetDateTime;
 
 use crate::artifact::ArtifactWriter;
 use crate::context::AiDeps;
 use crate::events::RunEventEmitter;
 
-use super::release::{finish_ai_failure, finish_ai_success, release_permanent_ai_failure};
+use super::release::{
+    finish_ai_failure, finish_ai_success, release_permanent_ai_failure,
+    release_retryable_ai_failure,
+};
 use super::{AiRunOptions, AiTaskOutcome};
 
 pub(super) async fn process_one(
@@ -38,22 +40,38 @@ pub(super) async fn process_one(
                 &claimed,
                 &message,
                 "article_missing",
-                OffsetDateTime::now_utc(),
+                (ctx.clock)(),
             )
             .await;
         }
+        // A transient read error (pool timeout, busy, serialization failure)
+        // says nothing about the task: it goes back through the budgeted
+        // retryable release like a 5xx. Only non-retryable errors are final.
+        // Either way the run's own database failed (R2-S5): the outcome is
+        // flagged so the run reports it, while the release state stays as
+        // it landed.
         Err(error) => {
             let message = error.display_user();
-            return release_permanent_ai_failure(
-                &ctx,
-                &emitter,
-                &owner,
-                &claimed,
-                &message,
-                error.error_kind(),
-                OffsetDateTime::now_utc(),
-            )
-            .await;
+            let kind = error.error_kind().to_string();
+            let now = (ctx.clock)();
+            let mut outcome = if error.is_retryable() {
+                release_retryable_ai_failure(
+                    &ctx,
+                    &emitter,
+                    &owner,
+                    &claimed,
+                    &message,
+                    &kind,
+                    opts.max_attempts,
+                    now,
+                )
+                .await
+            } else {
+                release_permanent_ai_failure(&ctx, &emitter, &owner, &claimed, &message, &kind, now)
+                    .await
+            };
+            outcome.storage_failed = true;
+            return outcome;
         }
     };
 

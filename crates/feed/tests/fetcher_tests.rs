@@ -221,3 +221,53 @@ async fn connection_error_does_not_expose_rsshub_key() {
         .expect_err("port zero cannot connect");
     assert!(!format!("{err:?} {err}").contains("rsshub-secret"));
 }
+
+/// A4: reqwest 0.12 sends the previous URL (with `?key=…`) as `Referer` on
+/// redirects by default. A cross-host redirect must not leak the RSSHub key.
+#[tokio::test]
+async fn cross_host_redirect_does_not_leak_rsshub_key_via_referer() {
+    let rsshub = MockServer::start().await;
+    let other_host = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/feed"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("Location", format!("{}/moved", other_host.uri()).as_str()),
+        )
+        .mount(&rsshub)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/moved"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(RSS_BODY))
+        .mount(&other_host)
+        .await;
+
+    let fetcher = ReqwestFeedFetcher::new(1024 * 1024).expect("fetcher should build");
+    let mut req = request(&rsshub, "/feed");
+    req.feed_kind = FeedKind::RssHub;
+    req.rsshub_access_key = Some(SecretString::new("rsshub-secret"));
+    let response = fetcher
+        .fetch(&req)
+        .await
+        .expect("redirected fetch succeeds");
+    assert!(!response.entries.is_empty());
+
+    let received = other_host
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 1);
+    let second = &received[0];
+    assert!(
+        second.headers.get("referer").is_none(),
+        "no Referer on the redirected request: {:?}",
+        second.headers.get("referer")
+    );
+    assert!(!second.url.as_str().contains("rsshub-secret"));
+    for (name, value) in &second.headers {
+        assert!(
+            !value.to_str().unwrap_or_default().contains("rsshub-secret"),
+            "header {name} leaks the key"
+        );
+    }
+}

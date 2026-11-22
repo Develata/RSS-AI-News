@@ -12,14 +12,18 @@ use crate::{NewRunEvent, RunEventRepository, StorageError, StoragePool, classify
 use super::decision_result::{
     ClaimedDecision, DecisionArticle, DecisionAttemptRecord, DecisionExecution, DecisionFailure,
     DecisionFailureMode, DecisionIdentity, DecisionRawRecord, DecisionResultRepo,
-    DecisionResultRepository, DecisionResultState, DecisionSuccess,
+    DecisionResultRepository, DecisionResultState, DecisionSuccess, GeneratedPage,
 };
 use super::decision_result_sql::{
-    CLAIM_PG_SQL, CLAIM_SQLITE_SQL, COUNT_OTHER_IDENTITY_PENDING_SQL, GENERATE_PENDING_PG_SQL,
-    GENERATE_PENDING_SQLITE_SQL, INSERT_RUN_EVENT_SQL, LOAD_ARTICLE_TEXT_SQL,
+    CLAIM_PG_SQL, CLAIM_SQLITE_SQL, COUNT_OTHER_IDENTITY_PENDING_SQL, EXPIRED_RAW_EXISTS_PG_SQL,
+    EXPIRED_RAW_EXISTS_SQLITE_SQL, GENERATE_PAGE_END_SQLITE_SQL, GENERATE_PAGE_PG_SQL,
+    GENERATE_PENDING_SQLITE_SQL, INSERT_RUN_EVENT_SQL, LOAD_ARTICLE_FULL_TEXT_SQLITE_SQL,
+    LOAD_ARTICLE_TEXT_SQL, LOAD_ARTICLE_TEXT_SQLITE_SQL, LOCK_DECISION_RESULTS_SQLITE_SQL,
     PURGE_EXPIRED_RAW_PG_SQL, PURGE_EXPIRED_RAW_SQLITE_SQL, RECLAIM_EXPIRED_SQL,
-    RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL, TERMINALIZE_EXHAUSTED_SQL, UPSERT_POLICY_SQL,
+    RECLAIM_EXPIRED_SQLITE_SQL, RELEASE_FAILURE_SQL, RELEASE_SUCCESS_SQL,
+    TERMINALIZE_EXHAUSTED_SQL, TERMINALIZE_EXHAUSTED_SQLITE_SQL, UPSERT_POLICY_SQL,
 };
+use super::{sqlite_instant_cutoff, sqlite_stored_deadline};
 
 /// A lock or statement timeout, wherever it was raised: PostgreSQL
 /// `query_canceled` (57014, `statement_timeout`) and `lock_not_available`
@@ -99,8 +103,9 @@ fn raw_columns(attempt: &DecisionAttemptRecord) -> RawColumns<'_> {
             withheld,
         }) => RawColumns {
             body: body.as_deref(),
-            // An expiry only means something for a stored body.
-            expires_at: body.as_ref().and(*expires_at),
+            // An expiry only means something for a stored body. Stored in
+            // UTC rounded up to the ms, so SQLite compares it by instant.
+            expires_at: body.as_ref().and(expires_at.map(sqlite_stored_deadline)),
             bytes: Some(*bytes),
             sha256: sha256.as_deref(),
             withheld: *withheld,
@@ -217,9 +222,10 @@ impl DecisionResultRepository for DecisionResultRepo {
         identity: &DecisionIdentity,
         execution: &DecisionExecution,
         cutoff: OffsetDateTime,
+        after_id: i64,
         limit: u32,
         now: OffsetDateTime,
-    ) -> Result<u64, StorageError> {
+    ) -> Result<GeneratedPage, StorageError> {
         let cutoff = whole_second(cutoff);
         let laya_max_len = execution.laya_max_len.map(i64::from);
         let classify = |error| {
@@ -227,24 +233,23 @@ impl DecisionResultRepository for DecisionResultRepo {
                 classify_db_error(error, "decision_results", &identity.category_key)
             })
         };
-        let count = match &self.pool {
-            StoragePool::Sqlite(pool) => sqlx::query(GENERATE_PENDING_SQLITE_SQL)
-                .bind(&identity.category_key)
-                .bind(&identity.policy_version)
-                .bind(&identity.execution_key)
-                .bind(&execution.provider)
-                .bind(&execution.requested_model)
-                .bind(laya_max_len)
-                .bind(now)
-                .bind(super::sqlite_utc_seconds(cutoff))
-                .bind(i64::from(limit))
-                .execute(pool)
-                .await
-                .map_err(classify)?
-                .rows_affected(),
-            StoragePool::Postgres(pool) => {
-                let mut tx = pg_begin_bounded(pool).await?;
-                let count = sqlx::query(GENERATE_PENDING_PG_SQL)
+        macro_rules! page_end {
+            ($sql:expr, $cutoff:expr, $tx:expr) => {
+                sqlx::query_scalar::<_, Option<i64>>($sql)
+                    .bind(&identity.category_key)
+                    .bind($cutoff)
+                    .bind(after_id)
+                    .bind(&identity.policy_version)
+                    .bind(&identity.execution_key)
+                    .bind(i64::from(limit))
+                    .fetch_one(&mut *$tx)
+                    .await
+                    .map_err(classify)?
+            };
+        }
+        macro_rules! insert {
+            ($sql:expr, $cutoff:expr, $page_end:expr, $tx:expr) => {
+                sqlx::query($sql)
                     .bind(&identity.category_key)
                     .bind(&identity.policy_version)
                     .bind(&identity.execution_key)
@@ -252,17 +257,62 @@ impl DecisionResultRepository for DecisionResultRepo {
                     .bind(&execution.requested_model)
                     .bind(laya_max_len)
                     .bind(now)
-                    .bind(cutoff)
-                    .bind(i64::from(limit))
-                    .execute(&mut *tx)
+                    .bind($cutoff)
+                    .bind(after_id)
+                    .bind($page_end)
+                    .execute(&mut *$tx)
                     .await
                     .map_err(classify)?
-                    .rows_affected();
+                    .rows_affected()
+            };
+        }
+        let page = match &self.pool {
+            StoragePool::Sqlite(pool) => {
+                let cutoff = super::sqlite_utc_seconds(cutoff);
+                let mut tx = pool.begin().await.map_err(bounded)?;
+                sqlx::query(LOCK_DECISION_RESULTS_SQLITE_SQL)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(classify)?;
+                let page = match page_end!(GENERATE_PAGE_END_SQLITE_SQL, &cutoff, tx) {
+                    None => GeneratedPage {
+                        inserted: 0,
+                        last_scanned_id: None,
+                    },
+                    Some(end) => GeneratedPage {
+                        inserted: insert!(GENERATE_PENDING_SQLITE_SQL, &cutoff, end, tx),
+                        last_scanned_id: Some(end),
+                    },
+                };
                 tx.commit().await.map_err(bounded)?;
-                count
+                page
+            }
+            StoragePool::Postgres(pool) => {
+                let mut tx = pg_begin_bounded(pool).await?;
+                let (page_end, inserted) =
+                    sqlx::query_as::<_, (Option<i64>, i64)>(GENERATE_PAGE_PG_SQL)
+                        .bind(&identity.category_key)
+                        .bind(&identity.policy_version)
+                        .bind(&identity.execution_key)
+                        .bind(&execution.provider)
+                        .bind(&execution.requested_model)
+                        .bind(laya_max_len)
+                        .bind(cutoff)
+                        .bind(after_id)
+                        .bind(i64::from(limit))
+                        .bind(now)
+                        .fetch_one(&mut *tx)
+                        .await
+                        .map_err(classify)?;
+                tx.commit().await.map_err(bounded)?;
+                GeneratedPage {
+                    // COUNT(*) of at most `limit` rows.
+                    inserted: u64::try_from(inserted).unwrap_or(0),
+                    last_scanned_id: page_end,
+                }
             }
         };
-        Ok(count)
+        Ok(page)
     }
 
     async fn claim(
@@ -274,19 +324,17 @@ impl DecisionResultRepository for DecisionResultRepo {
         limit: u32,
         now: OffsetDateTime,
     ) -> Result<Vec<ClaimedDecision>, StorageError> {
-        let query = |sql| {
-            sqlx::query_as::<_, ClaimedDecision>(sql)
+        match &self.pool {
+            StoragePool::Sqlite(pool) => Ok(sqlx::query_as::<_, ClaimedDecision>(CLAIM_SQLITE_SQL)
                 .bind(owner)
-                .bind(lease_expires_at)
+                .bind(sqlite_stored_deadline(lease_expires_at))
                 .bind(now)
                 .bind(&identity.category_key)
                 .bind(&identity.policy_version)
                 .bind(&identity.execution_key)
                 .bind(i64::from(max_attempts))
                 .bind(i64::from(limit))
-        };
-        match &self.pool {
-            StoragePool::Sqlite(pool) => Ok(query(CLAIM_SQLITE_SQL)
+                .bind(sqlite_instant_cutoff(now))
                 .fetch_all(pool)
                 .await
                 .map_err(bounded)?),
@@ -383,8 +431,8 @@ impl DecisionResultRepository for DecisionResultRepo {
         now: OffsetDateTime,
     ) -> Result<u64, StorageError> {
         macro_rules! query {
-            () => {
-                sqlx::query(RECLAIM_EXPIRED_SQL)
+            ($sql:expr) => {
+                sqlx::query($sql)
                     .bind(now)
                     .bind(&identity.category_key)
                     .bind(&identity.policy_version)
@@ -392,14 +440,15 @@ impl DecisionResultRepository for DecisionResultRepo {
             };
         }
         match &self.pool {
-            StoragePool::Sqlite(pool) => Ok(query!()
+            StoragePool::Sqlite(pool) => Ok(query!(RECLAIM_EXPIRED_SQLITE_SQL)
+                .bind(sqlite_instant_cutoff(now))
                 .execute(pool)
                 .await
                 .map_err(bounded)?
                 .rows_affected()),
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
-                let count = query!()
+                let count = query!(RECLAIM_EXPIRED_SQL)
                     .execute(&mut *tx)
                     .await
                     .map_err(bounded)?
@@ -417,8 +466,8 @@ impl DecisionResultRepository for DecisionResultRepo {
         now: OffsetDateTime,
     ) -> Result<u64, StorageError> {
         macro_rules! query {
-            () => {
-                sqlx::query(TERMINALIZE_EXHAUSTED_SQL)
+            ($sql:expr) => {
+                sqlx::query($sql)
                     .bind(now)
                     .bind(&identity.category_key)
                     .bind(&identity.policy_version)
@@ -427,14 +476,15 @@ impl DecisionResultRepository for DecisionResultRepo {
             };
         }
         match &self.pool {
-            StoragePool::Sqlite(pool) => Ok(query!()
+            StoragePool::Sqlite(pool) => Ok(query!(TERMINALIZE_EXHAUSTED_SQLITE_SQL)
+                .bind(sqlite_instant_cutoff(now))
                 .execute(pool)
                 .await
                 .map_err(bounded)?
                 .rows_affected()),
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
-                let count = query!()
+                let count = query!(TERMINALIZE_EXHAUSTED_SQL)
                     .execute(&mut *tx)
                     .await
                     .map_err(bounded)?
@@ -452,7 +502,7 @@ impl DecisionResultRepository for DecisionResultRepo {
     ) -> Result<u64, StorageError> {
         match &self.pool {
             StoragePool::Sqlite(pool) => Ok(sqlx::query(PURGE_EXPIRED_RAW_SQLITE_SQL)
-                .bind(now)
+                .bind(sqlite_instant_cutoff(now))
                 .bind(i64::from(limit))
                 .execute(pool)
                 .await
@@ -473,21 +523,82 @@ impl DecisionResultRepository for DecisionResultRepo {
         }
     }
 
-    async fn load_article(&self, article_id: i64) -> Result<Option<DecisionArticle>, StorageError> {
+    async fn load_article(
+        &self,
+        article_id: i64,
+        max_body_chars: u32,
+    ) -> Result<Option<DecisionArticle>, StorageError> {
         macro_rules! query {
             () => {
-                sqlx::query_as::<_, DecisionArticle>(LOAD_ARTICLE_TEXT_SQL).bind(article_id)
+                sqlx::query_as::<_, DecisionArticle>(LOAD_ARTICLE_TEXT_SQL)
+                    .bind(article_id)
+                    // INTEGER: PostgreSQL has no `substr(text, int, bigint)`.
+                    .bind(i32::try_from(max_body_chars).unwrap_or(i32::MAX))
             };
         }
         match &self.pool {
             StoragePool::Sqlite(pool) => {
-                Ok(query!().fetch_optional(pool).await.map_err(bounded)?)
+                let prefix =
+                    sqlx::query_as::<_, (String, String, bool)>(LOAD_ARTICLE_TEXT_SQLITE_SQL)
+                        .bind(article_id)
+                        .bind(i32::try_from(max_body_chars).unwrap_or(i32::MAX))
+                        .fetch_optional(pool)
+                        .await
+                        .map_err(bounded)?;
+                match prefix {
+                    None => Ok(None),
+                    Some((title, body_text, false)) => {
+                        Ok(Some(DecisionArticle { title, body_text }))
+                    }
+                    // Rare legacy rows: read the whole text once and cut it
+                    // at a character boundary like the SQL prefix would.
+                    Some((_, _, true)) => {
+                        let article =
+                            sqlx::query_as::<_, DecisionArticle>(LOAD_ARTICLE_FULL_TEXT_SQLITE_SQL)
+                                .bind(article_id)
+                                .fetch_optional(pool)
+                                .await
+                                .map_err(bounded)?;
+                        Ok(article.map(|mut article| {
+                            if let Some((cut, _)) = article
+                                .body_text
+                                .char_indices()
+                                .nth(max_body_chars as usize)
+                            {
+                                article.body_text.truncate(cut);
+                            }
+                            article
+                        }))
+                    }
+                }
             }
             StoragePool::Postgres(pool) => {
                 let mut tx = pg_begin_bounded(pool).await?;
                 let article = query!().fetch_optional(&mut *tx).await.map_err(bounded)?;
                 tx.commit().await.map_err(bounded)?;
                 Ok(article)
+            }
+        }
+    }
+
+    async fn expired_raw_remains(&self, now: OffsetDateTime) -> Result<bool, StorageError> {
+        match &self.pool {
+            StoragePool::Sqlite(pool) => {
+                sqlx::query_scalar::<_, bool>(EXPIRED_RAW_EXISTS_SQLITE_SQL)
+                    .bind(sqlite_instant_cutoff(now))
+                    .fetch_one(pool)
+                    .await
+                    .map_err(bounded)
+            }
+            StoragePool::Postgres(pool) => {
+                let mut tx = pg_begin_bounded(pool).await?;
+                let remains = sqlx::query_scalar::<_, bool>(EXPIRED_RAW_EXISTS_PG_SQL)
+                    .bind(now)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(bounded)?;
+                tx.commit().await.map_err(bounded)?;
+                Ok(remains)
             }
         }
     }

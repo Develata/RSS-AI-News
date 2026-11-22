@@ -85,7 +85,10 @@ async fn backfill_ai_creates_new_prompt_version_row() {
 }
 
 #[tokio::test]
-async fn backfill_ai_inserts_pending_for_persisted_without_state_change() {
+async fn backfill_ai_inserts_pending_and_advances_persisted_article() {
+    // C3: a persisted article enters the AI phase with its backfilled task,
+    // so the task's success can advance it (success only moves ai_pending /
+    // ai_done articles).
     let (_dir, pool) = common::make_test_pool().await;
     let article = common::seed_persisted_article(&pool, "bf-b", "B", "body text").await;
     let summary = backfill(&pool)
@@ -93,7 +96,45 @@ async fn backfill_ai_inserts_pending_for_persisted_without_state_change() {
         .await
         .unwrap();
     assert_eq!(summary.ai_tasks_inserted, 1);
-    assert_eq!(article_state(&pool, article).await, "persisted");
+    assert_eq!(article_state(&pool, article).await, "ai_pending");
+}
+
+#[tokio::test]
+async fn backfill_ai_conflict_with_pending_row_advances_persisted_article() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let article = common::seed_persisted_article(&pool, "bf-b2", "B2", "body text").await;
+    let opts = ai_opts(&pool, "prompt-b2", 10).await;
+    let schema = opts.output_schema_version;
+    let first = backfill(&pool).ai(opts).await.unwrap();
+    // Simulate a row inserted by an older build that left the article persisted.
+    sqlx::query("UPDATE articles SET state = 'persisted' WHERE id = ?")
+        .bind(article)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut again = ai_opts(&pool, "prompt-b2", 10).await;
+    again.output_schema_version = schema;
+    let second = backfill(&pool).ai(again).await.unwrap();
+    assert_eq!(first.ai_tasks_inserted, 1);
+    assert_eq!(second.ai_tasks_conflict, 1);
+    assert_eq!(article_state(&pool, article).await, "ai_pending");
+}
+
+#[tokio::test]
+async fn backfill_ai_keeps_published_article_state() {
+    let (_dir, pool) = common::make_test_pool().await;
+    let article = common::seed_persisted_article(&pool, "bf-pub", "P", "body text").await;
+    sqlx::query("UPDATE articles SET state = 'published' WHERE id = ?")
+        .bind(article)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let summary = backfill(&pool)
+        .ai(ai_opts(&pool, "prompt-pub", 10).await)
+        .await
+        .unwrap();
+    assert_eq!(summary.ai_tasks_inserted, 1);
+    assert_eq!(article_state(&pool, article).await, "published");
 }
 
 #[tokio::test]

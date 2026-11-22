@@ -32,9 +32,15 @@ push tag `v*` 时同时构建发布两套镜像：
 
 底层共享同一 builder stage；scheduler 镜像只在 runtime 镜像基础上多装 supercronic。
 
-镜像标签规则（`docker/metadata-action`）：
-- `vX.Y.Z` → `X.Y.Z` + `X.Y` + `latest`（仅 stable；workflow 不维护 `X` major-only alias）
-- `vX.Y.Z-rc.N` / `vX.Y.Z-alpha.N` → 仅完整版本号，**不**打 `latest`
+GHCR 只发布 `linux/amd64` 镜像（release runner 为 amd64，不做 QEMU 交叉构建）。Dockerfile 为 cargo-chef 与 supercronic
+同时固定了 amd64 / arm64 的 SHA-256，所以 arm64 主机可以本地 `docker build`；需要 arm64 镜像时在本机构建，或在
+arm64 主机上以 `--platform linux/amd64` 仿真运行已发布镜像。
+
+镜像标签规则：
+- `vX.Y.Z` → 先推 `X.Y.Z`（及 `X.Y.Z-scheduler`）；两镜像都成功后，若为仓库最高 stable tag 再晋升 `latest`，
+  若为 `X.Y` 线内最高再晋升 `X.Y`（各带 `-scheduler` 对应 tag）；重跑旧 tag 不会让它们回退。
+  workflow 不维护 `X` major-only alias。
+- prerelease tag（`vX.Y.Z-rc.N` 等）不推镜像：release verify gate 只接受 `X.Y.Z`。
 
 ## 3. Dockerfile multi-stage
 
@@ -47,7 +53,8 @@ builder  →  runtime  →  debug
 
 ### 3.1 `builder` stage
 
-- 从 Rust 1.97.0 bookworm 镜像直接 COPY 真实源码，不再构造占位源码或忽略构建失败。
+- 基于 `rust:1.97.0-slim-bookworm`（按 index digest 固定；digest 由 dependabot docker 生态刷新），直接 COPY 真实源码，
+  不再构造占位源码或忽略构建失败。
 - BuildKit cache mounts 复用 Cargo registry、git 与 target；执行 `cargo build --release --locked --bin rss-ai-news`。
 - 将二进制复制到 cache mount 外的 `/app/rss-ai-news` 并 strip，供后续 stage 复制。
 
@@ -58,7 +65,7 @@ builder  →  runtime  →  debug
 
 ### 3.3 `runtime` stage
 
-- `debian:bookworm-slim` 基础
+- `debian:bookworm-slim` 基础，按 index digest 固定（Debian 12 LTS 至 2028-06-30，暂不换发行版）
 - 安装最小运行时依赖（`ca-certificates` 等）
 - 从 builder 的 `/app/rss-ai-news` 复制最终二进制到 `/usr/local/bin/`。
 - `ENTRYPOINT ["/usr/local/bin/rss-ai-news"]`，以 UID/GID 10001 的 `appuser` 运行。
@@ -72,8 +79,15 @@ builder  →  runtime  →  debug
 
 ### 3.5 Rust 工具链
 
-`RUST_TOOLCHAIN=1.97.0` 在 Dockerfile 与 `.github/workflows/{ci,release}.yml` 三处保持一致。
-升级时三处同步改一次，避免 CI 通过但镜像构建失败的版本错位。
+唯一真相源是 `rust-toolchain.toml` 的 `channel`（当前 1.97.0）。同一版本另写在 `.github/workflows/` 的
+`ci.yml`、`release.yml`（`RUST_TOOLCHAIN`）、`audit.yml`、`maintenance.yml`（×2，`toolchain:`）与
+`docker/Dockerfile`（`FROM rust:<版本>-slim-bookworm@sha256:…`）共 6 处。升级时一次改全部；static acceptance lane 的
+Rust builder 镜像的 patch tag 在官方支持列表里只停留到下一个 Rust 版本发布，之后不再重建，所以它的 digest 随工具链升级一起
+刷新（Dependabot 只持续刷新 Debian 运行时镜像，见 [../operations/ci-and-release.md](../operations/ci-and-release.md)）。
+`toolchain-pins` 检查遍历 `.github/workflows/` 下全部 `*.yml` / `*.yaml`（不是固定清单）：每个 `RUST_TOOLCHAIN:` 必须是该
+literal，每个 `toolchain:` 输入只能是同一 literal 或恰好 `${{ env.RUST_TOOLCHAIN }}`（且同文件定义了它），其他表达式一律失败
+（可能解析成别的编译器，R3-9）；每个 `dtolnay/rust-toolchain` 步骤对应一个 `toolchain:` 输入；Dockerfile 恰有一个
+`FROM rust:` 且版本等于 channel。任一处漂移即失败。
 
 ## 4. scheduler 入口
 
@@ -88,7 +102,8 @@ builder  →  runtime  →  debug
 30 21 * * *  /usr/local/bin/rss-ai-news --config-dir /app/configs publish
 ```
 
-文件存在且非空 → 直接交给 supercronic，跳过 env 模式。
+文件是非空普通文件 → 直接交给 supercronic，跳过 env 模式；不存在或为空 → env 模式。
+路径存在但不是普通文件（bind-mount 的宿主文件不存在时 Docker 会建出目录）→ entrypoint 报错退出。
 适合需要分离 ingest 节奏与 publish 节奏的场景。
 
 ### 4.2 单行 env 模式（向后兼容）
@@ -98,12 +113,14 @@ RSS_CRON_SCHEDULE="0 */6 * * *"
 RSS_CRON_COMMAND="run --max-batches 3"
 ```
 
-entrypoint 在内存里拼一行 crontab 给 supercronic。适合简单场景。
+entrypoint 拼一行 `<RSS_CRON_SCHEDULE> /usr/local/bin/rss-ai-news --config-dir /app/configs <RSS_CRON_COMMAND>`
+给 supercronic。supercronic 用 `/bin/sh -c` 执行命令部分，所以 `RSS_CRON_COMMAND` 按 shell 命令行书写、只被解析一次
+（含空格的参数照常加引号）；两个变量含换行或回车时 entrypoint 拒绝启动。适合简单场景。
 
 ### 4.3 日志
 
-supercronic 把每个 cron job 的 stdout/stderr 透传到自身 stdout，
-`docker logs <container>` 可见。
+supercronic 0.2.49 默认**不**原样透传（`-passthrough-logs` 默认 `false`，[v0.2.49 main.go](https://github.com/aptible/supercronic/blob/v0.2.49/main.go#L32-L51)）：job 的每行 stdout / stderr 被包装成 supercronic 自己的一条 logrus 日志（带 `channel=stdout|stderr` 与 `job.command` 等字段），默认写到 supercronic 的 stderr；`docker logs` 合并两流，所以照样可见，只是带包装（R3-21）。
+crontab 语法可用 supercronic 自带的 `-test`（只解析、不执行 job）预先检查，例如 `docker run --rm --entrypoint /usr/local/bin/supercronic -v "$(pwd)/crontab:/app/crontab:ro" ghcr.io/develata/rss-ai-news:<tag>-scheduler -test /app/crontab`。
 
 ## 5. compose 部署形态
 
@@ -118,17 +135,35 @@ supercronic 把每个 cron job 的 stdout/stderr 透传到自身 stdout，
 - 常驻：状态走 docker 原生，cron 改环境即可调整；多一个 supercronic 进程
 - 一次性：cron job 失败由 1panel 计划任务可见性更好；需宿主侧维护 cron
 
-无论哪种形态，**首次 migrate 都必须显式执行一次**：
+迁移行为（以代码为准，见 `crates/cli/src/context_factory.rs` 的 `open_write_storage`）：
+- scheduler entrypoint 自身**不** migrate；
+- 任何**写命令**（`ingest`、`ai-run`、`publish`、`publish-all`、`run`、`backfill`、`reindex`（非 dry-run）、`decision-run`）打开数据库时都会先
+  应用 pending migrations 并轮换 active config 版本，所以 cron 触发的第一条写命令会自动完成首次迁移；
+- 只读命令（`doctor`、`recent-entries`、`replay`、`rebuild-report`、`reindex --dry-run`）不 migrate；遇到 pending migration 时
+  `doctor` 跳过 deep scan，其余报错退出。
+
+推荐做法：首次启动前与**每次升级镜像前**，用一次性 runtime 容器显式跑 `migrate run`（必要时再跑 `migrate check`），
+让 schema 变更只在一处、带可见输出地发生，而不是混在某个 cron job 的日志里；`migrate run` 在仍有活动 reindex job 时
+会拒绝执行。
+
+```bash
+# 与 scheduler 同一个 compose 服务：镜像版本（.env 的 RSS_AI_NEWS_VERSION，经 compose 插值）、挂载、网络与
+# 环境变量都与常驻容器一致；只把 entrypoint 换成 CLI 本身。
+docker compose -f docker-compose.scheduler.yml run --rm --no-deps \
+  --entrypoint /usr/local/bin/rss-ai-news \
+  rss-ai-news-scheduler --config-dir /app/configs migrate run
+```
+
+不用 compose 的 single-shot 部署才直接跑 runtime 镜像；此时镜像 tag 由宿主 shell 写死，`--env-file` 只把变量传进容器、
+不参与镜像名展开，所以 tag 必须手动写成与 scheduler 相同的版本（R3-11）：
 
 ```bash
 docker run --rm --env-file .env \
   -v "$(pwd)/configs:/app/configs:ro" \
   -v "$(pwd)/data:/app/data" \
-  ghcr.io/develata/rss-ai-news:0.7.0 \
+  ghcr.io/develata/rss-ai-news:0.10.4 \
   --config-dir /app/configs migrate run
 ```
-
-scheduler 容器不会在启动时自动 migrate（避免脏数据 / 误升级风险）。
 
 ## 6. CI workflow
 

@@ -36,7 +36,8 @@ async fn provider_error_does_not_expose_configured_token() {
         .await
         .expect_err("401 fails");
     assert!(!format!("{error:?} {error}").contains("review-private-token"));
-    assert!(error.display_user().contains("***"));
+    // R1-P-B6: server text is summarized, so the escaped token never appears.
+    assert!(error.display_user().contains("GET contents"));
 }
 
 #[tokio::test]
@@ -295,8 +296,8 @@ async fn publish_many_surfaces_422_after_max_retries() {
 
     assert!(matches!(
         &error,
-        PublishError::GitHubApiError { status: 422, message }
-            if message.to_lowercase().contains("fast forward")
+        PublishError::GitHubApiError { status: 422, message, .. }
+            if message.contains("not a fast-forward")
     ));
     // 422 lost-update 在 PublishError::is_retryable 中不属于 retryable
     // (只有 409 / 5xx / rate-limit 才是)，因此一旦透传到上层，会触发
@@ -320,7 +321,10 @@ async fn auth_failure_maps_to_github_auth_failed() {
 
     assert!(matches!(
         error,
-        PublishError::GitHubAuthFailed(reason) if reason == "Bad credentials"
+        PublishError::GitHubAuthFailed { message, context }
+            if message == "bad credentials"
+                && context.operation == Some("GET contents")
+                && context.http_status == Some(401)
     ));
 }
 
@@ -342,9 +346,89 @@ async fn rate_limit_maps_to_github_rate_limit() {
 
     assert!(matches!(
         error,
-        PublishError::GitHubRateLimit { reset_at }
+        PublishError::GitHubRateLimit { reset_at, .. }
             if reset_at == OffsetDateTime::from_unix_timestamp(1_800).unwrap()
     ));
+}
+
+/// GitHub answers an exhausted primary quota with 403 and
+/// `x-ratelimit-remaining: 0`; that is a retryable rate limit, not bad auth.
+#[tokio::test]
+async fn forbidden_with_exhausted_quota_maps_to_retryable_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(GITHUB_PATH))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .insert_header("x-ratelimit-remaining", "0")
+                .insert_header("x-ratelimit-reset", "1800")
+                .set_body_json(json!({ "message": "Forbidden" })),
+        )
+        .mount(&server)
+        .await;
+    let target = target(&server);
+
+    let error = target.publish(&sample_report()).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        PublishError::GitHubRateLimit { reset_at, .. }
+            if reset_at == OffsetDateTime::from_unix_timestamp(1_800).unwrap()
+    ));
+    assert!(error.is_retryable());
+}
+
+/// Secondary rate limits may carry only `retry-after`.
+#[tokio::test]
+async fn forbidden_with_retry_after_maps_to_retryable_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(GITHUB_PATH))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .insert_header("retry-after", "120")
+                .set_body_json(json!({ "message": "Forbidden" })),
+        )
+        .mount(&server)
+        .await;
+    let target = target(&server);
+    let before = OffsetDateTime::now_utc();
+
+    let error = target.publish(&sample_report()).await.unwrap_err();
+
+    match &error {
+        PublishError::GitHubRateLimit { reset_at, .. } => {
+            assert!(*reset_at >= before + time::Duration::seconds(120));
+        }
+        other => panic!("expected rate limit, got {other:?}"),
+    }
+    assert!(error.is_retryable());
+}
+
+/// A plain permission refusal stays a permanent auth failure.
+#[tokio::test]
+async fn forbidden_without_rate_limit_signals_maps_to_auth_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(GITHUB_PATH))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .insert_header("x-ratelimit-remaining", "4999")
+                .set_body_json(json!({ "message": "Resource not accessible by integration" })),
+        )
+        .mount(&server)
+        .await;
+    let target = target(&server);
+
+    let error = target.publish(&sample_report()).await.unwrap_err();
+
+    assert!(matches!(
+        &error,
+        PublishError::GitHubAuthFailed { message, context }
+            if message == "resource not accessible by token"
+                && context.http_status == Some(403)
+    ));
+    assert!(!error.is_retryable());
 }
 
 #[tokio::test]
@@ -454,12 +538,16 @@ async fn github_error_diagnostics_are_bounded() {
             .mount(&server)
             .await;
         let error = target(&server).publish(&sample_report()).await.unwrap_err();
-        assert!(error.display_user().len() <= 16 * 1024);
-        if structured {
-            assert!(error.display_user().contains("[truncated, original_bytes="));
-        } else {
-            assert!(error.display_user().contains("error body omitted"));
-            assert!(!error.display_user().contains("中文"));
+        // R1-P-B6: the reason is a fixed-vocabulary summary, never the text.
+        let shown = error.display_user();
+        assert!(shown.len() <= 512, "{}", shown.len());
+        assert!(
+            shown.contains("unrecognized GitHub message omitted"),
+            "{shown}"
+        );
+        assert!(!shown.contains("中文"));
+        if !structured {
+            assert!(shown.contains("unreadable error body"), "{shown}");
         }
     }
 }

@@ -157,6 +157,11 @@ WHERE id IN (
 RETURNING *;
 ```
 
+候选子查询 JOIN 了其它表时（如 AI claim 连接 `articles` / `feed_entries` / `feed_sources` 以按分类过滤），
+PG 必须写 `FOR UPDATE OF <被领取表别名> SKIP LOCKED`（AI：`OF aar`）。不带 `OF` 会锁住并跳过所有
+JOIN 表的行，另一事务锁住某个 source / article 行时，本可领取的任务会被当作"已锁"跳过，worker 把空批次
+当成队列耗尽提前结束（测试 `pg_claim_is_not_hidden_by_locked_source_or_article_rows`）。
+
 reclaim：
 
 ```sql
@@ -172,15 +177,21 @@ WHERE state IN ('fetching', 'extracting')
 与 sqlx 写入的 RFC3339（`T` 分隔）按文本比较时同一天的行会全部判错。
 
 SQLite 以小数位数可变的 RFC3339 TEXT 存时间，同一秒内字典序 ≠ 时刻序（`…00.12Z` <
-`…00.1Z`），故 `feed_entries` 的 claim / reclaim / `terminalize_exhausted` 在 SQLite 上用
+`…00.1Z`），故 `feed_entries` 与 `publish_records`（claim / 按 id claim / reclaim / `terminalize_exhausted`）在 SQLite 上用
 `julianday()` 比较 lease：比较侧 now 转 UTC 并向下取整到毫秒，claim 写入的
 `lease_expires_at` 转 UTC 并向上取整到毫秒；严格 `<` 加上 `julianday()` 的单调舍入，保证
 lease 绝不提前判过期（最多晚约 2 ms）。`julianday()` 解析不了的文本（例如 `+15:00` 偏移）
-回退到原先的文本比较，避免行被永久跳过。PG 直接比较 `TIMESTAMPTZ`。其余 lease 表
-（`article_ai_results` / `publish_records` / `reindex_jobs` / `decision_results`）与 doctor
-的同类谓词仍是字典序比较，待单独修复。
+回退到原先的文本比较，避免行被永久跳过。PG 直接比较 `TIMESTAMPTZ`。
+`article_ai_results`（claim / reclaim / `terminalize_exhausted`）与 `decision_results`（claim /
+reclaim / `terminalize_exhausted` / 原始响应 TTL 清理的 `raw_response_expires_at`）2026-11-21 起
+采用同一规则（`repo::sqlite_stored_deadline` 写入、`repo::sqlite_instant_cutoff` 比较，
+测试 `ai_decision_lease_instant_tests.rs`）。`reindex_jobs` 的 claim / claim_by_id / 续跑领取 / reclaim 与 checkpoint
+续租同样改用此规则（R2-S14，测试 `reindex_job_lease_instant_tests.rs`）。doctor 的同类谓词仍是字典序比较，待单独修复。
+C9 publish 窗口（AI task_gen 列表与 fresh claim）在 SQLite 上同样按 `julianday()` 毫秒比较来源时间，窗口两端向内取整到整毫秒；
+亚毫秒边界（同一毫秒内的未来来源时间可入窗、同毫秒内的先后改由 article id 决定、与 freeze 的 TEXT 比较在亚秒边界不一致）
+是已接受的已知行为，见 [03-ai §5.1](./03-ai.md)。
 
-**`attempt_count` 不重置**，作为重试预算的硬约束。
+**`attempt_count` 不重置**，作为重试预算的硬约束。publish_records 例外：预算读 `stage_attempt_count`（阶段推进清零），`attempt_count` 只累计审计（[11 §4.1](./11-error-and-recovery.md)）。
 
 涉及 lease 的表：`feed_entries` / `article_ai_results` / `publish_records` / `reindex_jobs` / `decision_results`（0006，见 ADR 0011）。
 
@@ -257,6 +268,8 @@ schema 变更只能新增迁移，且 SQLite / PostgreSQL 两个方言同时提�
 | 0005 | `0005_artifact_reference_indexes` | raw artifact 引用列索引（artifact 过期时的反查） |
 | 0006 | `0006_decision_results` | decision_policies / decision_results（typed-decision shadow，[ADR 0011](../adr/0011-decision-run-shadow-runner.md)） |
 | 0007 | `0007_feed_entry_retry_cooldown` | `feed_entries.next_attempt_at`：extract retryable 失败的冷却截止点（[02-extract §5.3](./02-extract.md)） |
+| 0008 | `0008_publish_stage_budget_and_item_article_index` | `publish_records.stage_attempt_count`（按阶段计的发布重试预算，存量行为 0）+ `idx_publish_items_article`（快照归属查询）+ `publish_records.next_attempt_at`（限流后的最早重试时刻，claim 遵守，R1-P-S12）；[ADR 0012](../adr/0012-per-stage-publish-budget-and-snapshot-ownership.md) |
+| 0009 | `0009_ai_share_state_and_article_origin_index` | `ai_fresh_share_state(category_key, stage, last_side)`：C9 batch=1 时 task_gen / claim 上一次实际服务的一侧（fresh / backlog），与推进或领取同事务写入（[03-ai §5.1/§5.2](./03-ai.md)，R2-B1）；`idx_articles_origin_feed_entry`：`persist_for_entry` 先按 entry 查其已拥有的 article（R2-S6，[02-extract](./02-extract.md)） |
 
 ### 7.2 migrate 子命令
 
@@ -287,8 +300,14 @@ prompt：`prompt_version` 语义见 [./03-ai.md](./03-ai.md) §3.2，历史文�
 - `link_hash` — 重算所有 feed_entries.link_hash（升级 normalizer 算法时）；每次 move 在事务内
   串行化写路径，对 old/new groups 按最小 id 原子重选 canonical；candidate 非最小 id 时计入
   `conflict_skipped`，collision chain 不留下 shadow-only group
-- `content_hash` — 重算所有 articles.content_hash（升级正文规范化算法时）
-- `categories` — 重算 article→category 关联（升级分类规则时）
+- `content_hash` — 重算所有 articles.content_hash（升级正文规范化算法时）。PG 上预检与 UPDATE 之间另一事务提交同一 hash
+  （READ COMMITTED）时，该行的 UPDATE 在 savepoint 内执行，唯一约束冲突只回滚这一行并记 `conflict_skipped`，
+  批次与 checkpoint 照常提交（R2-S16）。只吸收 SQLSTATE `23505` 且约束名为 `articles_content_hash_key` 的冲突；其它错误（含
+  别的唯一约束，例如触发器报告的 `23505`）使整批失败、外层事务回滚、checkpoint 不前进（R3E-S16）。SQLite 写路径串行，
+  UPDATE 的任何错误本来就整批失败
+- `categories` — 重算 article→category 关联（升级分类规则时）。每次 owner-guarded 的配置写入（upsert / archive）
+  在同一事务内把 job 的 `lease_expires_at` 续到 `now + lease`（R2-S18），与 hash target 的 checkpoint 续租一致；
+  此前只刷新 `updated_at`，而 reclaim 只看 `lease_expires_at`，同步总时长超过初始租期即可被另一 worker 接手
 
 active rule resolver 保证 reindex 中途 `active_rule(kind)` 仍返回旧 active 行，不污染读路径。
 详见 [../adr/0004-active-rule-resolver-partial-unique.md](../adr/0004-active-rule-resolver-partial-unique.md)。
@@ -298,6 +317,22 @@ active rule resolver 保证 reindex 中途 `active_rule(kind)` 仍返回旧 acti
 - partial unique index `UNIQUE (target) WHERE state IN ('pending', 'running')` 保证同 target
   只能有一个 active job
 - lease 过期 reclaim → 保留 last_processed_id checkpoint，下轮从 checkpoint resume
+- 续跑入口（2026-11-21）：每次 `reindex` 先在单事务内查该 target 的活动 job（`pending`，或 `running`
+  但 lease 已过期——reclaim 是 best-effort），规则 `kind` + `payload_sha256` 与本次请求一致即由本 worker
+  领取并从 `last_processed_id` 之后继续（`reindex_resumed` 事件）；没有活动 job 才新建
+  （`start_reindex_tx`）。`version_tag` 只是 CLI 每次自动生成的标签（`reindex-<target>-<unix-ts>`），
+  不参与匹配，否则普通重跑永远无法续跑。`payload_sha256` 由 CLI 生成（`reindex_rule_fingerprint`，R2-S17）：
+  对 target、该 target 的算法版本常量（`LINK_HASH_RULE_VERSION` / `CONTENT_HASH_RULE_VERSION` /
+  `CATEGORIES_RULE_VERSION`，改算法时递增）与决定改写结果的配置（`categories`：全部 source 的分类、key、显示名、feed URL、kind、enabled、
+  priority，排序后）做规范 JSON 的 SHA-256。不影响执行的配置不参与（R3E-S17）：`dedup.link_normalizer_version` 是保留字段、
+  不选择任何算法（只有一个内置 normalizer），故 `link_hash` 只由算法版本常量决定，仅改该字段仍可续跑。
+  此前只散列 target 名，算法或配置变化后旧 checkpoint 仍会被续跑、同一作业混用两套规则。升级前崩溃留下的
+  活动 job 用的是旧身份，续跑会被拒绝，需 `reindex --abort <id>` 后重跑。规则不一致或另一 worker 持有存活 lease → 显式
+  `StorageError::Conflict { table: "reindex_jobs" }`，信息含 `reindex --abort <id>`，不改任何行。
+- 每批一个事务：先执行 owner-guarded 的 checkpoint UPDATE（`last_processed_id` + 续租
+  `lease_expires_at`，同时取得 SQLite 写锁 / PG job 行锁，使 abort / reclaim 与本批串行化），再改写本批
+  业务行；owner 校验失败整批回滚，已失去 lease 的 worker 不会改动任何业务行。PG 的单行冲突用事务内预检
+  （不靠捕获失败语句，失败语句会中止整个 PG 事务）。
 - crash-after-batch：已 commit 批次保留，未 commit 丢失，从 checkpoint 重做
 
 测试覆盖：[`crates/runtime/tests/`](../../crates/runtime/tests/) 中的 reindex_* 测试。

@@ -131,6 +131,10 @@ LIMIT $4
 
 /// SQLite claim：子查询无 `FOR UPDATE`（语法不支持，整库写锁兜底）。
 ///
+/// `$9` 是可选分类（`ingest --category`）；只领取 `status='active'` 源的条目
+/// （A10，plan/09 §2）。源过滤写成 `source_id IN (子查询)` 而非 JOIN，使 PG 版
+/// 的 `FOR UPDATE SKIP LOCKED` 只锁 `feed_entries` 行。
+///
 /// `$8` 是 claim 时刻向下取整到毫秒：`next_attempt_at` 晚于它的行仍在冷却，
 /// 在 `LIMIT` 前被过滤、不占批次名额。`$7` 是调用方要排除的 id（JSON 数组）；
 /// extract 传本 run 内未确认终态的已领取 id，使失败行不在同一 run 内被重领。
@@ -162,6 +166,10 @@ WHERE id IN (
       AND (next_attempt_at IS NULL
            OR COALESCE(julianday(next_attempt_at) <= julianday($8), next_attempt_at <= $8))
       AND id NOT IN (SELECT value FROM json_each($7))
+      AND source_id IN (
+          SELECT fs.id FROM feed_sources fs
+          WHERE fs.status = 'active' AND ($9 IS NULL OR fs.category_key = $9)
+      )
     ORDER BY discovered_at ASC
     LIMIT $6
 )
@@ -186,6 +194,10 @@ WHERE id IN (
       AND attempt_count < $5
       AND (next_attempt_at IS NULL OR next_attempt_at <= $8)
       AND id <> ALL($7::BIGINT[])
+      AND source_id IN (
+          SELECT fs.id FROM feed_sources fs
+          WHERE fs.status = 'active' AND ($9::TEXT IS NULL OR fs.category_key = $9)
+      )
     ORDER BY discovered_at ASC
     LIMIT $6
     FOR UPDATE SKIP LOCKED

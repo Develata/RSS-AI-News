@@ -38,6 +38,17 @@
 | `link_hash_dup_skipped_aggregated_event` | 同上 | 一层 link 去重 |
 | `uid_dup_skipped_aggregated_event` | 同上 | 二层 uid 去重 |
 | `parse_failure_keeps_artifact_marks_failed` | 同上 | 解析失败 + artifact |
+| `not_modified_without_validators_keeps_them_for_the_next_request` | `crates/runtime/tests/ingest_tests.rs` | 304 无验证器保留旧值，下次仍条件请求 |
+| `a_response_for_a_moved_endpoint_is_stale_not_recorded` | 同上 | R2-S12 端点变更后的旧响应记为过期 |
+| `a_failure_for_a_moved_endpoint_is_stale_not_recorded` | 同上 | R3E-S12 端点变更后旧端点的失败也记为过期 |
+| `write_backs_for_a_moved_endpoint_match_no_row` | `crates/storage/tests/feed_source_update_tests.rs` | R2-S12 三种写回按端点保护 |
+| `not_modified_update_keeps_validators_the_304_omits` | `crates/storage/tests/feed_source_update_tests.rs` | COALESCE 写回（SQLite）；200 仍替换 |
+| `pg_not_modified_update_keeps_validators_the_304_omits` | `crates/storage/tests/feed_source_pg_tests.rs` | 同上（PG，需 docker） |
+| `source_success_writeback_matching_no_row_is_a_storage_failure` | `crates/runtime/tests/ingest_tests.rs` | 成功 / 304 写回 0 行 = 存储失败 |
+| `source_failure_writeback_matching_no_row_is_a_storage_failure` | 同上 | 失败记录写回 0 行 = 存储失败 |
+| `unreadable_upserted_source_fails_that_source_without_panicking` | 同上 | upsert 后回读不到行不 panic |
+| `atom_prefers_alternate_link_over_self_and_enclosure` | `crates/feed/src/parser.rs`（单元测试） | Atom 取 alternate 文章链接 |
+| `cross_host_redirect_does_not_leak_rsshub_key_via_referer` | `crates/feed/tests/fetcher_tests.rs` | 跨主机重定向不经 Referer 泄漏 RSSHub key |
 | `multi_source_concurrent_within_limit` | 同上 | 并发上限 |
 | `ingest_bootstrap_writes_config_kind_id_into_feed_sources_config_version` | 同上 | bootstrap rule 绑定 |
 | `ingest_cmd_with_mock_feed_succeeds` | `crates/cli/tests/ingest_cmd_tests.rs` | CLI 入口 e2e |

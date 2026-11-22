@@ -40,6 +40,10 @@ const CANCEL_GRACE: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone)]
 pub struct DecisionRunSettings {
     pub concurrency: u32,
+    /// The client's `max_state_chars`: an article body is loaded only up to
+    /// one character more (enough to keep `body_truncated` and the state
+    /// hash identical to cutting the full body).
+    pub max_state_chars: u32,
     pub lease_seconds: u32,
     pub max_attempts: u32,
     pub request_timeout: Duration,
@@ -296,15 +300,22 @@ impl DecisionRunFlow {
     }
 
     /// Raw cleanup across all identities, at most `max(1000, 2 × budget)`
-    /// rows per run (ADR 0011 §8). `raw_gc_backlog`: the cap was reached, so
-    /// expired bodies may remain.
+    /// rows per run (ADR 0011 §8). `raw_gc_backlog`: the cap was reached and a
+    /// one-row probe still finds an expired body (ADR 0011 §8: "达到上限后仍有
+    /// 过期行"), so clearing exactly the last row is not reported as backlog.
     async fn purge_raw(&self, opts: &DecisionRunOptions, summary: &mut DecisionRunSummary) {
         let cap = u64::from(opts.max_requests.saturating_mul(2).max(1000));
         let now = OffsetDateTime::now_utc();
         loop {
             let remaining = cap - summary.raw_purged;
             if remaining == 0 {
-                summary.raw_gc_backlog = true;
+                match Self::storage(self.deps.decision_repo.expired_raw_remains(now)).await {
+                    Ok(remains) => summary.raw_gc_backlog = remains,
+                    Err(error) => {
+                        Self::storage_failure(summary, error, "expired_raw_remains");
+                        return;
+                    }
+                }
                 break;
             }
             let batch = u32::try_from(remaining.min(u64::from(RAW_PURGE_BATCH))).unwrap_or(0);
@@ -407,6 +418,8 @@ impl DecisionRunFlow {
         let calls = Arc::new(AtomicU64::new(0));
         let mut budget = opts.max_requests;
         let mut idle = vec![false; plans.len()];
+        // Per category, per run: the generation keyset cursor (ADR 0011 §5).
+        let mut cursors = vec![0_i64; plans.len()];
         loop {
             let mut progressed = false;
             for (index, plan) in plans.iter().enumerate() {
@@ -419,7 +432,14 @@ impl DecisionRunFlow {
                 }
                 let window = deps.settings.concurrency.min(budget);
                 let claimed = match self
-                    .claim_or_generate(plan, &owner, window, cutoff, &mut summary.categories[index])
+                    .claim_or_generate(
+                        plan,
+                        &owner,
+                        window,
+                        cutoff,
+                        &mut cursors[index],
+                        &mut summary.categories[index],
+                    )
                     .await
                 {
                     Ok(claimed) => claimed,
@@ -447,12 +467,22 @@ impl DecisionRunFlow {
 
     /// Claims a window; when nothing is claimable, generates up to one window
     /// of new rows first (ADR 0011 §5).
+    ///
+    /// Generation pages by `cursor` (`a.id > cursor`, advanced to the last id
+    /// each page scanned) instead of rescanning the articles from the start
+    /// for every window. Invariant: every candidate with `id <= cursor` had a
+    /// row of this identity when its page was scanned (inserted here, or by a
+    /// concurrent run — the unique key keeps those single), so nothing below
+    /// the cursor is left unprocessed. The cursor lives for one run; an article
+    /// with a lower id committed later (PostgreSQL sequences can commit out of
+    /// order) is picked up by the next run.
     async fn claim_or_generate(
         &self,
         plan: &CategoryPlan,
         owner: &str,
         window: u32,
         cutoff: OffsetDateTime,
+        cursor: &mut i64,
         stats: &mut CategoryStats,
     ) -> Result<(Vec<ClaimedDecision>, Instant), Option<String>> {
         let deps = &self.deps;
@@ -478,17 +508,26 @@ impl DecisionRunFlow {
             stats.claimed += claimed.len() as u64;
             return Ok((claimed, started));
         }
-        let generated = Self::storage(deps.decision_repo.generate_pending(
-            &plan.identity,
-            &deps.execution,
-            cutoff,
-            window,
-            OffsetDateTime::now_utc(),
-        ))
-        .await?;
-        stats.generated += generated;
-        if generated == 0 {
-            return Ok((Vec::new(), started));
+        // Pages whose candidates were all taken concurrently insert nothing
+        // but still move the cursor; stop at the first page that inserted.
+        loop {
+            let page = Self::storage(deps.decision_repo.generate_pending(
+                &plan.identity,
+                &deps.execution,
+                cutoff,
+                *cursor,
+                window,
+                OffsetDateTime::now_utc(),
+            ))
+            .await?;
+            stats.generated += page.inserted;
+            let Some(last_scanned_id) = page.last_scanned_id else {
+                return Ok((Vec::new(), started));
+            };
+            *cursor = last_scanned_id;
+            if page.inserted > 0 {
+                break;
+            }
         }
         let (claimed, started) = claim().await?;
         stats.claimed += claimed.len() as u64;
@@ -579,7 +618,7 @@ impl DecisionRunFlow {
     async fn record(&self, outcome: TaskOutcome, summary: &mut DecisionRunSummary) {
         let index = outcome.category_index;
         let category = summary.categories[index].category.clone();
-        summary.input_tokens += outcome.input_tokens;
+        summary.input_tokens = add_input_tokens(summary.input_tokens, outcome.input_tokens);
         match outcome.fault {
             Some("storage_timeout") => summary.storage_timeouts += 1,
             Some(_) => summary.storage_errors += 1,
@@ -683,5 +722,30 @@ impl DecisionRunFlow {
         if let Some(abort) = outcome.abort {
             summary.abort(abort);
         }
+    }
+}
+
+/// Run total of input tokens (C8 checked addition): each response's count is
+/// bounded at decode (< 2^32) and calls are a `u32`, so the `u64` sum cannot
+/// overflow. An overflow therefore means a broken invariant: it is reported,
+/// and the total saturates instead of wrapping or panicking.
+fn add_input_tokens(total: u64, tokens: u64) -> u64 {
+    total.checked_add(tokens).unwrap_or_else(|| {
+        tracing::error!(
+            stage = "decision_run",
+            total,
+            tokens,
+            "input token total overflowed u64: decode bound invariant violated"
+        );
+        u64::MAX
+    })
+}
+
+#[cfg(test)]
+mod token_tests {
+    #[test]
+    fn input_token_total_is_checked() {
+        assert_eq!(super::add_input_tokens(1, 2), 3);
+        assert_eq!(super::add_input_tokens(u64::MAX - 1, 5), u64::MAX);
     }
 }

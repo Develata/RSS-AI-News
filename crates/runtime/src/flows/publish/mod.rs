@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_report::{RenderTemplates, ReportError};
-use rss_ai_news_storage::NewPublishRecord;
+use rss_ai_news_storage::{NewPublishRecord, PublishState};
 use serde_json::json;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 use crate::context::PublishDeps;
 use crate::events::RunEventEmitter;
@@ -22,14 +22,38 @@ use crate::flows::maintenance::emit_maintenance_outcome;
 
 mod dto;
 mod freeze;
+pub(crate) use freeze::published_since;
+mod paths;
 mod remote;
 mod render;
+mod report_date;
+mod rule_versions;
 mod store_local;
 
 pub use dto::*;
+pub use paths::{ReportPathSpec, check_report_path_collisions};
+pub use report_date::default_report_date;
+pub use rule_versions::{ForceRenderTrace, PublishRuleVersions, bootstrap_publish_rule_versions};
 
 pub struct PublishFlow {
     ctx: Arc<PublishDeps>,
+}
+
+/// `last_error_kind` of an article held by another active snapshot, shared by
+/// the freeze re-check and the pre-write guard (ADR 0012 §2).
+const OWNERSHIP_CONFLICT_KIND: &str = "article_owned_by_active_snapshot";
+
+/// Result of [`PublishFlow::guard_snapshot_ownership`].
+enum OwnershipGuard {
+    Clear,
+    /// Released: another snapshot keeps `article_id`; nothing was written.
+    Conflict {
+        article_id: i64,
+    },
+    /// The lookup failed and the claim was released by classification.
+    Failed {
+        error_kind: String,
+    },
 }
 
 fn render_templates_from_ctx(ctx: &PublishDeps, path_template: Option<&str>) -> RenderTemplates {
@@ -43,6 +67,26 @@ fn render_templates_from_ctx(ctx: &PublishDeps, path_template: Option<&str>) -> 
         report_template: template.report_template.clone(),
         item_template: template.item_template.clone(),
     }
+}
+
+/// The report's `generated_at`, fixed once by the first render and persisted
+/// as `publish_records.rendered_at`: UTC, truncated to whole microseconds, the
+/// finest precision both backends return unchanged (PostgreSQL `timestamptz`
+/// is microseconds; SQLite keeps the text as written). A value that survives
+/// the round trip is what lets store_local, remote retries and rebuild-report
+/// re-render byte-identical Markdown.
+fn report_timestamp(at: OffsetDateTime) -> OffsetDateTime {
+    let at = at.to_offset(UtcOffset::UTC);
+    at - Duration::nanoseconds(i64::from(at.nanosecond() % 1_000))
+}
+
+/// Timestamp for re-rendering an already rendered record: the persisted
+/// `rendered_at`; the caller's value only for a record that has none.
+fn rendered_timestamp(
+    rendered_at: Option<OffsetDateTime>,
+    caller: OffsetDateTime,
+) -> OffsetDateTime {
+    rendered_at.unwrap_or(caller)
 }
 
 impl PublishFlow {
@@ -121,31 +165,63 @@ impl PublishFlow {
         emit_maintenance_outcome(emitter, "publish_records", reclaimed, Some(swept)).await;
     }
 
-    async fn fail_claimed(
+    /// Releases a claimed record after a stage failure, by classification:
+    /// retryable errors (e.g. a transient [`rss_ai_news_storage::StorageError`]
+    /// wrapped in [`ReportError::Storage`]) keep the stage state and are charged
+    /// to the current stage's retry budget (ADR 0012, folded to `failed` in SQL once
+    /// exhausted); everything else is a permanent `failed`. A transient DB blip
+    /// must never become the day's terminal verdict, because the idempotency
+    /// key would then return the failed record on every later run.
+    ///
+    /// `&dyn ClassifiedError` lets report, storage and publish errors share one
+    /// release path without a generic per call site.
+    async fn release_classified_failure(
         &self,
         publish_record_id: i64,
         owner: &str,
-        error: &ReportError,
+        error: &dyn ClassifiedError,
+        phase: &'static str,
         now: OffsetDateTime,
         emitter: &RunEventEmitter<'_>,
     ) {
-        if let Err(persist_err) = self
-            .ctx
-            .publish_record_repo
-            .release_permanent_failure(
-                publish_record_id,
-                owner,
-                &error.display_user(),
-                error.error_kind(),
-                now,
-            )
-            .await
-        {
+        let message = error.display_user();
+        let retryable = error.is_retryable();
+        let mut budget_exhausted = false;
+        let release_result = if retryable {
+            self.ctx
+                .publish_record_repo
+                .release_retryable_failure(
+                    publish_record_id,
+                    owner,
+                    &message,
+                    error.error_kind(),
+                    self.ctx.retry.publish_max_attempts,
+                    now,
+                )
+                .await
+                .map(|outcome| {
+                    budget_exhausted = outcome.exhausted;
+                    outcome.released
+                })
+        } else {
+            self.ctx
+                .publish_record_repo
+                .release_permanent_failure(
+                    publish_record_id,
+                    owner,
+                    &message,
+                    error.error_kind(),
+                    now,
+                )
+                .await
+        };
+        if let Err(persist_err) = release_result {
             tracing::warn!(
                 publish_record_id,
-                phase = "render",
+                phase,
+                retryable,
                 ?persist_err,
-                "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
+                "release_*_failure 持久化失败；lease 回收仍可兜底（F15-fix4）"
             );
         }
         emitter
@@ -154,9 +230,151 @@ impl PublishFlow {
                 "error",
                 Some("publish_record"),
                 Some(publish_record_id),
-                &error.display_user(),
-                Some(json!({ "phase": "freeze", "error_kind": error.error_kind() })),
+                &message,
+                Some(json!({
+                    "phase": phase,
+                    "error_kind": error.error_kind(),
+                    "retryable": retryable,
+                    "budget_exhausted": budget_exhausted,
+                })),
             )
             .await;
+    }
+
+    /// P-B1: before a stage writes externally (local file, GitHub), make sure
+    /// no winning snapshot also holds one of this record's articles (only
+    /// pre-0008 data can contain such a pair). On a conflict the lease is
+    /// released at once, the claim refunded and the stage state kept; nothing
+    /// is written. A lookup error is released by its classification.
+    ///
+    /// `unverified_write`: the record's previous remote attempt ended
+    /// `remote_write_unverified` (R4-1). Its earlier write may have landed,
+    /// so a retryable lookup error is released without charging the stage
+    /// and both exits keep that `last_error_kind`, so the next claim still
+    /// starts with the read-only HEAD check.
+    async fn guard_snapshot_ownership(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        state: PublishState,
+        unverified_write: bool,
+        phase: &'static str,
+        emitter: &RunEventEmitter<'_>,
+    ) -> OwnershipGuard {
+        let now = OffsetDateTime::now_utc();
+        let conflict = match self
+            .ctx
+            .publish_item_repo
+            .find_snapshot_ownership_conflict(publish_record_id)
+            .await
+        {
+            Ok(None) => return OwnershipGuard::Clear,
+            Ok(Some(conflict)) => conflict,
+            Err(error) if unverified_write && error.is_retryable() => {
+                self.release_unverified_recovery(publish_record_id, owner, &error, phase, emitter)
+                    .await;
+                return OwnershipGuard::Failed {
+                    error_kind: rss_ai_news_publish::REMOTE_WRITE_UNVERIFIED_KIND.to_string(),
+                };
+            }
+            Err(error) => {
+                self.release_classified_failure(
+                    publish_record_id,
+                    owner,
+                    &error,
+                    phase,
+                    now,
+                    emitter,
+                )
+                .await;
+                return OwnershipGuard::Failed {
+                    error_kind: error.error_kind().to_string(),
+                };
+            }
+        };
+        let message = format!(
+            "article {} is also in publish record {}, which keeps it; record {publish_record_id} \
+             stops before writing (fail one of the two records to resolve)",
+            conflict.article_id, conflict.owner_record_id
+        );
+        let released = self
+            .ctx
+            .publish_record_repo
+            .release_ownership_conflict(
+                publish_record_id,
+                owner,
+                state,
+                &message,
+                if unverified_write {
+                    rss_ai_news_publish::REMOTE_WRITE_UNVERIFIED_KIND
+                } else {
+                    OWNERSHIP_CONFLICT_KIND
+                },
+                now,
+            )
+            .await;
+        match &released {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                publish_record_id,
+                "ownership conflict release lost the lease"
+            ),
+            Err(error) => tracing::warn!(
+                publish_record_id,
+                ?error,
+                "ownership conflict release failed; lease recovery remains available"
+            ),
+        }
+        emitter
+            .emit(
+                "publish_failed",
+                "warn",
+                Some("publish_record"),
+                Some(publish_record_id),
+                &message,
+                Some(json!({
+                    "phase": phase,
+                    "error_kind": OWNERSHIP_CONFLICT_KIND,
+                    "article_id": conflict.article_id,
+                    "owner_record_id": conflict.owner_record_id,
+                    "released": matches!(released, Ok(true)),
+                    "earlier_write_unverified": unverified_write,
+                })),
+            )
+            .await;
+        OwnershipGuard::Conflict {
+            article_id: conflict.article_id,
+        }
+    }
+
+    async fn fail_claimed(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        error: &ReportError,
+        phase: &'static str,
+        now: OffsetDateTime,
+        emitter: &RunEventEmitter<'_>,
+    ) {
+        self.release_classified_failure(publish_record_id, owner, error, phase, now, emitter)
+            .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_timestamp_is_utc_and_truncated_to_whole_microseconds() {
+        let at = OffsetDateTime::from_unix_timestamp_nanos(1_763_700_000_123_456_789)
+            .unwrap()
+            .to_offset(UtcOffset::from_hms(8, 0, 0).unwrap());
+
+        let normalized = report_timestamp(at);
+
+        assert_eq!(normalized.offset(), UtcOffset::UTC);
+        assert_eq!(normalized.unix_timestamp_nanos(), 1_763_700_000_123_456_000);
+        assert_eq!(report_timestamp(normalized), normalized, "idempotent");
     }
 }

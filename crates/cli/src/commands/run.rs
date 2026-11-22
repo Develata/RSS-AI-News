@@ -1,10 +1,13 @@
 //! `run` command — orchestrates ingest → ai-run → publish in one invocation.
 //!
-//! Per `docs-backup/design/cli-semantics.md` §4.11: any single stage failing must
-//! NOT block downstream stages (with the explicit exception that an
-//! "ingest 全量失败" — `ingest::run` returning `Err` — short-circuits
-//! because there are no new articles to process). The overall exit code
-//! reflects the most severe stage outcome; failures are surfaced to the
+//! Per `docs-backup/design/cli-semantics.md` §4.11 and docs/plan/11 §5: any
+//! single stage failing must NOT block downstream stages. An ingest failure
+//! (its preflight, e.g. a missing `RSSHUB_BASE_URL`, or the ingest itself
+//! returning `Err`) is recorded and ai-run and publish still run on what the
+//! database already holds, so one misconfigured source cannot hold back every
+//! category's report. Only a stage's own preconditions skip it: when the
+//! database cannot be opened (or migrated) no stage can run. The overall exit
+//! code reflects the most severe stage outcome; failures are surfaced to the
 //! user via the run summary, not silently dropped.
 //!
 //! §4.11 lines 362-368 carve-out: when `app.ai.enabled = false`, `run`
@@ -20,7 +23,7 @@ use std::{
     time::Instant,
 };
 
-use rss_ai_news_config as config;
+use rss_ai_news_config::{self as config, LoadedConfig};
 use serde::Serialize;
 
 use crate::{
@@ -32,9 +35,12 @@ use crate::{
     output::{CommandSummary, RenderedError},
 };
 
-/// Reason an ai-run stage was skipped (rather than executed-and-failed).
-/// Currently the only producer is the §4.11 `ai.enabled=false` branch.
+/// Reason an ai-run stage was skipped (rather than executed-and-failed):
+/// the §4.11 `ai.enabled=false` branch.
 pub const AI_RUN_SKIP_REASON_DISABLED: &str = "ai.enabled=false";
+/// ai-run (like every stage) was skipped because the database could not be
+/// opened; that failure is recorded once, under the `ingest` stage.
+pub const AI_RUN_SKIP_REASON_NO_DATABASE: &str = "database unavailable";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StageFailure {
@@ -50,12 +56,12 @@ pub struct RunCommandSummary {
     pub ai_run: Option<ai_run::AiRunCommandSummary>,
     pub publish: Option<publish_all::PublishAllCommandSummary>,
     pub stage_failures: Vec<StageFailure>,
-    /// `Some(reason)` iff the ai-run stage was deliberately skipped per
-    /// §4.11 (e.g. `ai.enabled=false`). Distinguishes the "skipped" branch
-    /// from the "executed and failed" branch — both surface as
-    /// `ai_run = None`, but only the latter pushes a `StageFailure`.
-    /// `None` means the stage either ran (regardless of outcome) or was
-    /// not reached because an earlier stage short-circuited.
+    /// `Some(reason)` iff the ai-run stage was skipped rather than run:
+    /// deliberately per §4.11 (`ai.enabled=false`), or because the database
+    /// was unavailable. Distinguishes the "skipped" branch from the
+    /// "executed and failed" branch — both surface as `ai_run = None`, but
+    /// only the latter pushes an `ai-run` `StageFailure`. `None` means the
+    /// stage ran (regardless of outcome).
     pub ai_run_skip_reason: Option<&'static str>,
     pub overall_duration_seconds: f64,
 }
@@ -193,6 +199,19 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
     // summary) instead of aborting ingest and publish for every category.
     let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())
         .map_err(CliError::Config)?;
+    run_loaded(&loaded, args, started).await
+}
+
+/// The stages of `run` on an already loaded config. The stage-isolation tests
+/// go through [`run`] itself, in a child process with a controlled
+/// environment (`crates/cli/tests/run_cmd_tests.rs`): the loader reads the
+/// process environment and expands RSSHub placeholders at load time, so a
+/// `LoadedConfig::env` cleared afterwards would not isolate them (R3-14).
+async fn run_loaded(
+    loaded: &LoadedConfig,
+    args: &RunArgs,
+    started: Instant,
+) -> Result<RunCommandSummary, CliError> {
     let ai_enabled = loaded.app.ai.enabled;
 
     // `run` 内部 ingest / ai-run 共用同一 --max-batches 生效值（已由
@@ -216,21 +235,34 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
     let mut stage_failures: Vec<StageFailure> = Vec::new();
     let mut ai_run_skip_reason: Option<&'static str> = None;
 
-    let pool = match ingest::preflight(&loaded) {
-        Ok(()) => match open_write_storage(&loaded).await {
-            Ok(pool) => Some(pool),
-            Err(err) => {
-                record_stage_failure(&mut stage_failures, "ingest", &err);
-                None
-            }
-        },
+    // Ingest's own precondition: a failure is recorded and only ingest is
+    // skipped; ai-run and publish still work on the stored state.
+    let ingest_ready = match ingest::preflight(loaded) {
+        Ok(()) => true,
         Err(err) => {
             record_stage_failure(&mut stage_failures, "ingest", &err);
-            None
+            false
         }
     };
-    let ingest_summary = match &pool {
-        Some(pool) => match ingest::run_loaded(&loaded, pool, &ingest_args).await {
+    // Every stage's precondition: without a usable database nothing can run.
+    // Reported under `ingest` (the first stage), as before.
+    let pool = match open_write_storage(loaded).await {
+        Ok(pool) => pool,
+        Err(err) => {
+            record_stage_failure(&mut stage_failures, "ingest", &err);
+            return Ok(RunCommandSummary {
+                ingest: None,
+                ai_run: None,
+                publish: None,
+                stage_failures,
+                ai_run_skip_reason: Some(AI_RUN_SKIP_REASON_NO_DATABASE),
+                overall_duration_seconds: started.elapsed().as_secs_f64(),
+            });
+        }
+    };
+    let pool = &pool;
+    let ingest_summary = if ingest_ready {
+        match ingest::run_loaded(loaded, pool, &ingest_args).await {
             Ok(summary) => {
                 record_summary_failures(&mut stage_failures, "ingest", &summary);
                 Some(summary)
@@ -239,57 +271,52 @@ pub async fn run(cli: &Cli, args: &RunArgs) -> Result<RunCommandSummary, CliErro
                 record_stage_failure(&mut stage_failures, "ingest", &err);
                 None
             }
-        },
-        None => None,
+        }
+    } else {
+        None
     };
 
-    // "全量失败导致无新文章": when ingest returns Err the database has no new
-    // entries to process, so ai-run and publish would either no-op or fail on
-    // stale state. Skip them and let the ingest failure be the sole cause.
-    let (ai_run_summary, publish_summary) = match (&pool, &ingest_summary) {
-        (Some(pool), Some(_)) => {
-            let ai_run_summary = if !ai_enabled {
-                // ai.enabled=false: skip ai-run with one INFO line and no
-                // StageFailure (the standalone ai-run exit-78 contract does
-                // not apply when run orchestrates it implicitly).
-                tracing::info!(
-                    stage = "ai-run",
-                    reason = AI_RUN_SKIP_REASON_DISABLED,
-                    "AI disabled (ai.enabled=false), skipping ai-run"
-                );
-                ai_run_skip_reason = Some(AI_RUN_SKIP_REASON_DISABLED);
+    // ai-run and publish run whatever ingest did: earlier runs may have left
+    // stored articles to score and reports to publish (e.g. stored_local
+    // records), and an ingest failure must not hold those back.
+    let ai_run_summary = if !ai_enabled {
+        // ai.enabled=false: skip ai-run with one INFO line and no
+        // StageFailure (the standalone ai-run exit-78 contract does
+        // not apply when run orchestrates it implicitly).
+        tracing::info!(
+            stage = "ai-run",
+            reason = AI_RUN_SKIP_REASON_DISABLED,
+            "AI disabled (ai.enabled=false), skipping ai-run"
+        );
+        ai_run_skip_reason = Some(AI_RUN_SKIP_REASON_DISABLED);
+        None
+    } else {
+        // Every selected category, each with its own credentials.
+        let categories = loaded.categories_filtered().cloned().collect::<Vec<_>>();
+        match ai_run::run_categories(loaded, pool, &categories, &ai_args).await {
+            Ok(summary) => {
+                record_summary_failures(&mut stage_failures, "ai-run", &summary);
+                Some(summary)
+            }
+            Err(err) => {
+                record_stage_failure(&mut stage_failures, "ai-run", &err);
                 None
-            } else {
-                // Every selected category, each with its own credentials.
-                let categories = loaded.categories_filtered().cloned().collect::<Vec<_>>();
-                match ai_run::run_categories(&loaded, pool, &categories, &ai_args).await {
-                    Ok(summary) => {
-                        record_summary_failures(&mut stage_failures, "ai-run", &summary);
-                        Some(summary)
-                    }
-                    Err(err) => {
-                        record_stage_failure(&mut stage_failures, "ai-run", &err);
-                        None
-                    }
-                }
-            };
-            let publish_result = match publish_all::preflight(&loaded, &publish_args) {
-                Ok(()) => publish_all::run_loaded(&loaded, pool, &publish_args).await,
-                Err(err) => Err(err),
-            };
-            let publish_summary = match publish_result {
-                Ok(summary) => {
-                    record_summary_failures(&mut stage_failures, "publish", &summary);
-                    Some(summary)
-                }
-                Err(err) => {
-                    record_stage_failure(&mut stage_failures, "publish", &err);
-                    None
-                }
-            };
-            (ai_run_summary, publish_summary)
+            }
         }
-        _ => (None, None),
+    };
+    let publish_result = match publish_all::preflight(loaded, &publish_args) {
+        Ok(date) => publish_all::run_loaded(loaded, pool, &publish_args, &date).await,
+        Err(err) => Err(err),
+    };
+    let publish_summary = match publish_result {
+        Ok(summary) => {
+            record_summary_failures(&mut stage_failures, "publish", &summary);
+            Some(summary)
+        }
+        Err(err) => {
+            record_stage_failure(&mut stage_failures, "publish", &err);
+            None
+        }
     };
 
     Ok(RunCommandSummary {

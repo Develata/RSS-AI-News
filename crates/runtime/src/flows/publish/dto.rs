@@ -60,6 +60,8 @@ pub enum PublishFreezeStatus {
 pub struct PublishRenderOptions {
     pub category_display_name: String,
     pub report_title: String,
+    /// Not used by the render stage itself, which stamps the report with its
+    /// own (persisted) render time; carried for the later stages' fallback.
     pub generated_at: OffsetDateTime,
     pub path_template: Option<String>,
 }
@@ -68,6 +70,8 @@ pub struct PublishRenderOptions {
 pub struct PublishStoreLocalOptions {
     pub category_display_name: String,
     pub report_title: String,
+    /// Fallback only: a rendered record re-renders with its persisted
+    /// `rendered_at`, so every stage produces the same bytes.
     pub generated_at: OffsetDateTime,
     pub path_template: Option<String>,
 }
@@ -76,6 +80,8 @@ pub struct PublishStoreLocalOptions {
 pub struct PublishRemoteOptions {
     pub category_display_name: String,
     pub report_title: String,
+    /// Fallback only: a rendered record re-renders with its persisted
+    /// `rendered_at`, so every stage produces the same bytes.
     pub generated_at: OffsetDateTime,
     pub path_template: Option<String>,
 }
@@ -85,6 +91,8 @@ pub struct PublishRemoteBatchItemOptions {
     pub publish_record_id: i64,
     pub category_display_name: String,
     pub report_title: String,
+    /// Fallback only: a rendered record re-renders with its persisted
+    /// `rendered_at`, so every stage produces the same bytes.
     pub generated_at: OffsetDateTime,
     pub path_template: Option<String>,
 }
@@ -146,7 +154,17 @@ pub enum PublishRemoteStatus {
     PublishedRemote,
     NothingToClaim,
     Conflicted,
-    ArticleConflict { article_id: i64 },
+    ArticleConflict {
+        article_id: i64,
+    },
     MissingTarget,
-    Failed { error_kind: String },
+    /// The record was initialised for `stored`, but the configured remote
+    /// target is `current`; nothing was sent and the record is `failed`.
+    TargetMismatch {
+        stored: Option<String>,
+        current: String,
+    },
+    Failed {
+        error_kind: String,
+    },
 }

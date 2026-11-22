@@ -95,6 +95,11 @@ impl<'a> LaneExecutor<'a> {
         self.options.dry_run
     }
 
+    /// The per-step wall-clock limit (`--step-timeout-secs`).
+    pub(crate) fn step_timeout(&self) -> Duration {
+        self.options.step_timeout
+    }
+
     pub(crate) fn status(&self) -> Status {
         if self.options.dry_run {
             Status::Planned

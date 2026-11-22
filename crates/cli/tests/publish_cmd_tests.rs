@@ -151,6 +151,273 @@ async fn publish_all_records_a_category_conflict_and_keeps_other_categories() {
     assert_eq!(second.exit_code(), ExitCode::RuntimeError);
 }
 
+/// `{YYYY}/{MM}/{DD}.md` vs `{YYYY}/{DD}/{MM}.md` passes the sample-date
+/// validate check but collides whenever month == day. publish-all renders the
+/// real paths for the run's date and refuses before any DB or file write.
+#[tokio::test]
+async fn publish_all_refuses_categories_whose_paths_collide_on_the_report_date() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    let output_dir = temp.path().join("output");
+    write_config(temp.path(), &db_path, &output_dir);
+    for (key, template) in [
+        ("ai", "{YYYY}/{MM}/{DD}.md"),
+        ("math", "{YYYY}/{DD}/{MM}.md"),
+    ] {
+        rewrite(
+            &temp.path().join("categories").join(format!("{key}.toml")),
+            |text| {
+                text.replace(
+                    "\n[[sources]]",
+                    &format!(
+                        "\n[category.publish_override]\npath_template = \"{template}\"\n\n[[sources]]"
+                    ),
+                )
+            },
+        );
+    }
+    let pool = migrated_pool(&db_path).await;
+    seed_persisted_article(&pool, "ai").await;
+    pool.close().await;
+
+    let mut cli = cli_for(temp.path(), "ai");
+    cli.category = None;
+    cli.command = Command::PublishAll(PublishArgs {
+        date: Some("2026-11-11".to_string()),
+        local_only: true,
+        force: false,
+    });
+    let args = match &cli.command {
+        Command::PublishAll(args) => args,
+        _ => unreachable!(),
+    };
+
+    let error = publish_all::run(&cli, args)
+        .await
+        .expect_err("colliding report paths must abort publish-all");
+
+    let message = error.to_string();
+    assert!(message.contains("2026/11/11.md"), "{message}");
+    let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
+    let records: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM publish_records")
+        .fetch_one(&pool)
+        .await
+        .expect("count records");
+    assert_eq!(records, 0, "no publish record may be created");
+    let render_rules: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM rule_versions WHERE kind = 'render'")
+            .fetch_one(&pool)
+            .await
+            .expect("count rules");
+    assert_eq!(render_rules, 0, "no rule version may be seeded");
+    pool.close().await;
+    assert!(
+        !output_dir.join("2026").exists(),
+        "no report may be written"
+    );
+
+    // Same config on a date where the paths differ publishes normally.
+    cli.command = Command::PublishAll(PublishArgs {
+        date: Some("2026-11-12".to_string()),
+        local_only: true,
+        force: false,
+    });
+    let args = match &cli.command {
+        Command::PublishAll(args) => args,
+        _ => unreachable!(),
+    };
+    let summary = publish_all::run(&cli, args).await.expect("distinct paths");
+    assert_eq!(summary.exit_code(), ExitCode::Success, "{summary:?}");
+}
+
+/// R1-P-S7: the real-date collision check runs before storage is opened, so
+/// a refused publish-all neither creates/migrates a database nor rotates the
+/// active config row.
+#[tokio::test]
+async fn publish_all_collision_check_runs_before_any_database_write() {
+    for existing_db in [false, true] {
+        let temp = TempDir::new().expect("temp dir");
+        let db_path = temp.path().join("rss.sqlite");
+        write_config(temp.path(), &db_path, &temp.path().join("output"));
+        for (key, template) in [
+            ("ai", "{YYYY}/{MM}/{DD}.md"),
+            ("math", "{YYYY}/{DD}/{MM}.md"),
+        ] {
+            rewrite(
+                &temp.path().join("categories").join(format!("{key}.toml")),
+                |text| {
+                    text.replace(
+                        "\n[[sources]]",
+                        &format!(
+                            "\n[category.publish_override]\npath_template = \"{template}\"\n\n[[sources]]"
+                        ),
+                    )
+                },
+            );
+        }
+        let rules_before = if existing_db {
+            let pool = migrated_pool(&db_path).await;
+            // An active config row from another config version.
+            let older = insert_rule(&pool, "config", "older").await;
+            sqlx::query("UPDATE rule_versions SET status = 'active' WHERE id = ?")
+                .bind(older)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let rows: Vec<(i64, String)> =
+                sqlx::query_as("SELECT id, status FROM rule_versions ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            pool.close().await;
+            Some(rows)
+        } else {
+            None
+        };
+
+        let mut cli = cli_for(temp.path(), "ai");
+        cli.category = None;
+        cli.command = Command::PublishAll(PublishArgs {
+            date: Some("2026-11-11".to_string()),
+            local_only: true,
+            force: false,
+        });
+        let args = match &cli.command {
+            Command::PublishAll(args) => args,
+            _ => unreachable!(),
+        };
+        publish_all::run(&cli, args)
+            .await
+            .expect_err("colliding report paths must abort publish-all");
+
+        match rules_before {
+            None => assert!(
+                !db_path.exists(),
+                "a refused publish-all must not create the database"
+            ),
+            Some(before) => {
+                let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
+                let after: Vec<(i64, String)> =
+                    sqlx::query_as("SELECT id, status FROM rule_versions ORDER BY id")
+                        .fetch_all(&pool)
+                        .await
+                        .unwrap();
+                pool.close().await;
+                assert_eq!(
+                    after, before,
+                    "no rule version (config included) may change"
+                );
+            }
+        }
+    }
+}
+
+/// `--force` on a fresh database: each invocation gets its own render
+/// version (two forces within one second must not collapse into one), and the
+/// force trace rows are never `active`, so a later normal publish still uses
+/// the default render rule instead of a force version.
+#[tokio::test]
+async fn publish_force_creates_unique_non_active_render_versions_on_a_fresh_db() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config(temp.path(), &db_path, &temp.path().join("output"));
+    migrated_pool(&db_path).await.close().await;
+
+    let mut cli = cli_for(temp.path(), "ai");
+    cli.command = Command::Publish(PublishArgs {
+        date: Some(REPORT_DATE.to_string()),
+        local_only: true,
+        force: true,
+    });
+    let first = publish::run(&cli, publish_args(&cli))
+        .await
+        .expect("force 1");
+    let second = publish::run(&cli, publish_args(&cli))
+        .await
+        .expect("force 2");
+    assert_ne!(
+        first.render_version, second.render_version,
+        "each --force invocation needs its own render version"
+    );
+    assert_ne!(first.publish_record_id, second.publish_record_id);
+
+    cli.command = Command::Publish(PublishArgs {
+        date: Some(REPORT_DATE.to_string()),
+        local_only: true,
+        force: false,
+    });
+    let normal = publish::run(&cli, publish_args(&cli))
+        .await
+        .expect("normal");
+
+    let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, version_tag, status FROM rule_versions WHERE kind = 'render' ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("render rules");
+    pool.close().await;
+    for forced in [first.render_version, second.render_version] {
+        let (_, tag, status) = rows
+            .iter()
+            .find(|(id, _, _)| *id == forced)
+            .expect("force row");
+        assert!(tag.starts_with("force-"), "{tag}");
+        assert_ne!(status, "active", "force trace row {tag} must not be active");
+    }
+    let (_, tag, status) = rows
+        .iter()
+        .find(|(id, _, _)| *id == normal.render_version)
+        .expect("normal row");
+    assert_eq!(tag, "default", "{rows:?}");
+    assert_eq!(status, "active");
+}
+
+/// B12: without --date the report date is today in the effective target
+/// timezone, and an unknown zone is a config error before any write.
+#[tokio::test]
+async fn publish_default_date_uses_the_effective_timezone_and_rejects_unknown_zones() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config(temp.path(), &db_path, &temp.path().join("output"));
+    migrated_pool(&db_path).await.close().await;
+
+    let mut cli = cli_for(temp.path(), "ai");
+    cli.timezone = Some("Mars/Olympus_Mons".to_string());
+    cli.command = Command::Publish(PublishArgs {
+        date: None,
+        local_only: true,
+        force: false,
+    });
+    let error = publish::run(&cli, publish_args(&cli))
+        .await
+        .expect_err("unknown zone");
+    assert_eq!(error.exit_code(), ExitCode::ConfigError, "{error}");
+    let pool = build_sqlite_pool(&db_path, 1, 5_000).await.expect("pool");
+    let records: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM publish_records")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(records, 0, "nothing may be written for an unknown zone");
+    pool.close().await;
+
+    for zone in ["Pacific/Kiritimati", "Pacific/Pago_Pago"] {
+        cli.timezone = Some(zone.to_string());
+        let expected = rss_ai_news_runtime::flows::publish::default_report_date(
+            OffsetDateTime::now_utc(),
+            zone,
+        )
+        .unwrap();
+        let summary = publish::run(&cli, publish_args(&cli))
+            .await
+            .expect("publish");
+        // +14:00 and -11:00 are on different calendar days for most of each
+        // UTC day; a UTC default would make both equal to the UTC date.
+        assert_eq!(summary.date, expected, "{zone}");
+    }
+}
+
 #[tokio::test]
 async fn ai_run_without_category_runs_every_category_and_reports_each_failure() {
     let temp = TempDir::new().expect("temp dir");
@@ -578,7 +845,7 @@ max_body_bytes = 1048576
 min_body_chars = 1
 
 [lease]
-fetch_duration_seconds = 30
+fetch_duration_seconds = 600
 ai_duration_seconds = 30
 publish_duration_seconds = 30
 reclaim_interval_seconds = 30

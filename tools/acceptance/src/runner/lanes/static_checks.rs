@@ -1,5 +1,5 @@
 use super::super::{
-    checks::{check_acceptance_documents, check_tooling_dependency_boundary},
+    checks::{check_acceptance_documents, check_toolchain_pins, check_tooling_dependency_boundary},
     executor::LaneExecutor,
     util::strings,
 };
@@ -51,6 +51,29 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         &strings([".ci/check_dependency_security_policy.sh"]),
         &[],
         0,
+    );
+    // The release workflow's image policy (version-tag reuse and alias
+    // reconciliation), against a file-backed fake registry.
+    executor.command(
+        "release-promotion",
+        "sh",
+        &strings([".github/scripts/release-promotion-test.sh"]),
+        &[],
+        0,
+    );
+    // Crontab selection and input rejection of the scheduler entrypoint, with
+    // a stub supercronic (no scheduler is started).
+    executor.command(
+        "scheduler-entrypoint",
+        "sh",
+        &strings(["docker/scheduler-entrypoint-test.sh"]),
+        &[],
+        0,
+    );
+    executor.check(
+        "toolchain-pins",
+        "workflow and Dockerfile toolchain pins equal rust-toolchain.toml's channel",
+        check_toolchain_pins(executor.repo_root()),
     );
     executor.check(
         "tooling-boundary",

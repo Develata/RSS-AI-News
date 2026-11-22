@@ -1,4 +1,3 @@
-use rss_ai_news_storage::RuleVersionRepository;
 use std::io::{self, Write};
 
 use rss_ai_news_config::{self as config, CategoryConfig, LoadedConfig};
@@ -6,6 +5,10 @@ use rss_ai_news_domain::error::ClassifiedError;
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishInitOptions, PublishInitOutcome,
     PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRenderOptions, RuntimeError,
+    flows::publish::{
+        ForceRenderTrace, PublishRuleVersions, ReportPathSpec, bootstrap_publish_rule_versions,
+        check_report_path_collisions, default_report_date,
+    },
 };
 use rss_ai_news_storage::StoragePool;
 use serde::Serialize;
@@ -17,7 +20,7 @@ use crate::{
         backfill::parse_date_start,
         publish::{
             PublishStageOutcome, StageVerdict, run_local_stages, stage, stage_errors, stage_trail,
-            stages_exit_code, today_utc,
+            stages_exit_code,
         },
     },
     context_factory::{build_publish_deps, open_write_storage},
@@ -96,13 +99,21 @@ impl CommandSummary for PublishAllCommandSummary {
 
 pub async fn run(cli: &Cli, args: &PublishArgs) -> Result<PublishAllCommandSummary, CliError> {
     let loaded = config::load_skip_env_checks(&cli.config_dir, None, cli.to_cli_overrides())?;
-    preflight(&loaded, args)?;
+    // Everything that can refuse the run (incl. the real-date path collision
+    // check) happens before storage is opened: opening it migrates the
+    // database and rotates the active config row (R1-P-S7).
+    let date = preflight(&loaded, args)?;
     let pool = open_write_storage(&loaded).await?;
-    run_loaded(&loaded, &pool, args).await
+    run_loaded(&loaded, &pool, args, &date).await
 }
 
-/// Config / argument checks for publish-all; run before storage is opened.
-pub(crate) fn preflight(loaded: &LoadedConfig, args: &PublishArgs) -> Result<(), CliError> {
+/// Config / argument checks for publish-all, run before storage is opened.
+/// Returns the run's report date, computed once here and passed to
+/// [`run_loaded`]: `--date`, else the date of now in the effective target
+/// timezone (B12). The real paths of every selected category are rendered for
+/// that date and checked for collisions (validate-config only checks one
+/// sample date).
+pub(crate) fn preflight(loaded: &LoadedConfig, args: &PublishArgs) -> Result<String, CliError> {
     config::validate::run_command_checks(
         loaded,
         config::validate::CommandKind::Publish,
@@ -110,29 +121,68 @@ pub(crate) fn preflight(loaded: &LoadedConfig, args: &PublishArgs) -> Result<(),
             local_only: args.local_only,
         },
     )?;
-    if loaded.categories_filtered().next().is_none() {
-        return Err(CliError::Runtime(RuntimeError::Config(
-            "no categories selected".to_string(),
-        )));
-    }
-    if args.date.is_some() {
-        let _ = parse_date_start(args.date.as_deref())?;
-    }
-    Ok(())
-}
-
-/// Publishes every selected category on an already loaded config and opened
-/// pool; callers run [`preflight`] first.
-pub(crate) async fn run_loaded(
-    loaded: &LoadedConfig,
-    pool: &StoragePool,
-    args: &PublishArgs,
-) -> Result<PublishAllCommandSummary, CliError> {
     let categories = loaded
         .categories_filtered()
         .cloned()
         .collect::<Vec<CategoryConfig>>();
-    let date = args.date.clone().unwrap_or_else(today_utc);
+    if categories.is_empty() {
+        return Err(CliError::Runtime(RuntimeError::Config(
+            "no categories selected".to_string(),
+        )));
+    }
+    let date = match &args.date {
+        Some(date) => {
+            let _ = parse_date_start(Some(date))?;
+            date.clone()
+        }
+        None => default_report_date(
+            OffsetDateTime::now_utc(),
+            &loaded.app.publish.target_timezone,
+        )?,
+    };
+    let path_templates = categories
+        .iter()
+        .map(|category| {
+            loaded
+                .effective_for_category(&category.category.key)
+                .map(|effective| {
+                    (
+                        category.category.key.as_str(),
+                        effective.path_template.clone(),
+                    )
+                })
+                .ok_or_else(|| {
+                    CliError::Runtime(RuntimeError::Config(format!(
+                        "category {} not found in loaded config",
+                        category.category.key
+                    )))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let path_specs = path_templates
+        .iter()
+        .map(|(category_key, path_template)| ReportPathSpec {
+            category_key,
+            path_template,
+        })
+        .collect::<Vec<_>>();
+    check_report_path_collisions(&path_specs, &date)?;
+    Ok(date)
+}
+
+/// Publishes every selected category on an already loaded config and opened
+/// pool, for the `date` [`preflight`] returned.
+pub(crate) async fn run_loaded(
+    loaded: &LoadedConfig,
+    pool: &StoragePool,
+    args: &PublishArgs,
+    date: &str,
+) -> Result<PublishAllCommandSummary, CliError> {
+    let date = date.to_string();
+    let categories = loaded
+        .categories_filtered()
+        .cloned()
+        .collect::<Vec<CategoryConfig>>();
     let ctx = build_publish_deps(loaded, pool, args.local_only)?;
     let rule_version_repo = rss_ai_news_storage::RuleVersionRepo::new_with_storage(pool.clone());
     let flow = PublishFlow::new(ctx.clone());
@@ -141,28 +191,18 @@ pub(crate) async fn run_loaded(
     } else {
         "remote"
     };
-    let render_version = if args.force {
-        let force_tag = format!(
-            "force-all-{}-{}",
-            date,
-            OffsetDateTime::now_utc().unix_timestamp()
-        );
-        rule_version_repo
-            .get_or_create("render", &force_tag, "force render trace", "v1")
-            .await?
-    } else {
-        rule_version_repo
-            .active_rule_or_register("render", "default", "default render", "v1")
-            .await?
-    };
-    let selection_policy_version = rule_version_repo
-        .active_rule_or_register(
-            "selection_policy",
-            "default",
-            "default selection policy",
-            "v1",
-        )
-        .await?;
+    let PublishRuleVersions {
+        render_version,
+        selection_policy_version,
+    } = bootstrap_publish_rule_versions(
+        &rule_version_repo,
+        args.force.then_some(ForceRenderTrace {
+            scope: "all",
+            report_date: &date,
+            run_id: &ctx.run.run_id,
+        }),
+    )
+    .await?;
 
     let mut summaries = Vec::with_capacity(categories.len());
     let mut remote_items = Vec::new();
@@ -181,14 +221,13 @@ pub(crate) async fn run_loaded(
                 target_timezone: loaded.app.publish.target_timezone.clone(),
                 render_version,
                 selection_policy_version,
-                remote_target: (mode == "remote").then(|| {
-                    format!(
-                        "{}/{}:{}",
-                        loaded.app.publish.github_owner,
-                        loaded.app.publish.github_repo,
-                        loaded.app.publish.github_branch
-                    )
-                }),
+                // The target's own identity (`owner/repo:branch`) is what the
+                // remote stage compares against before sending (target drift guard).
+                remote_target: ctx
+                    .publish_target_remote
+                    .as_ref()
+                    .filter(|_| mode == "remote")
+                    .and_then(|target| target.target_identity()),
             })
             .await
         {

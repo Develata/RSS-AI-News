@@ -2,14 +2,19 @@ mod common;
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_domain::Score0To100;
 use rss_ai_news_runtime::{
     PublishFlow, PublishFreezeOptions, PublishFreezeStatus, PublishInitOptions, PublishInitOutcome,
 };
-use rss_ai_news_storage::{PublishItemRepo, PublishItemRepository};
+use rss_ai_news_storage::{
+    FreezeSnapshotItem, FreezeSnapshotOutcome, PublishCandidateRow, PublishItemRepo,
+    PublishItemRepository, StorageError,
+};
 use sqlx::SqlitePool;
+use time::OffsetDateTime;
 
 use common::{
     app_config, insert_config_rule, make_test_pool, publish_deps, seed_ai_succeeded_article,
@@ -171,6 +176,127 @@ async fn freeze_record_isolates_two_concurrent_pending_records_by_id() {
     assert_eq!(items_b[0].article_id, article_b);
 }
 
+/// R1-P-S15: the no-ID freeze selects for `opts.category_key`, so it claims
+/// only that category's pending record — never an older record of another
+/// category (whose snapshot would then hold this category's articles).
+#[tokio::test]
+async fn freeze_without_id_claims_only_its_own_categorys_record() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flow(pool.clone());
+    let render = insert_config_rule(&pool).await;
+    let policy = insert_config_rule(&pool).await;
+    let older_ai = init_for_category(&flow, "ai", "2026-04-28", render, policy).await;
+    let ml = init_for_category(&flow, "ml", "2026-04-28", render, policy).await;
+    let (ml_article, _) =
+        seed_ai_succeeded_article(&pool, "ml", "own-cat-ml", "T", "b", "s", 88, 1).await;
+
+    let outcome = flow.freeze(freeze_opts_for_category("ml")).await;
+
+    assert_eq!(outcome.publish_record_id, ml);
+    assert_eq!(outcome.status, PublishFreezeStatus::Frozen);
+    assert_record_state(&pool, older_ai, "pending").await;
+    let items = PublishItemRepo::new(pool.clone())
+        .list_by_publish_record(ml)
+        .await
+        .unwrap();
+    assert_eq!(
+        items.iter().map(|item| item.article_id).collect::<Vec<_>>(),
+        vec![ml_article]
+    );
+}
+
+/// R1-P-S15: the by-id entry refuses a record of another category instead
+/// of freezing `opts.category_key`'s articles into it; the claim is refunded.
+#[tokio::test]
+async fn freeze_record_rejects_a_record_of_another_category() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flow(pool.clone());
+    let render = insert_config_rule(&pool).await;
+    let policy = insert_config_rule(&pool).await;
+    let ai = init_for_category(&flow, "ai", "2026-04-28", render, policy).await;
+    seed_ai_succeeded_article(&pool, "ml", "mismatch-ml", "T", "b", "s", 88, 1).await;
+
+    let outcome = flow.freeze_record(ai, freeze_opts_for_category("ml")).await;
+
+    assert!(
+        matches!(&outcome.status, PublishFreezeStatus::Failed { error_kind } if error_kind == "category_mismatch"),
+        "{:?}",
+        outcome.status
+    );
+    assert_record_state(&pool, ai, "pending").await;
+    let (attempts, owned, owner): (i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT attempt_count, (SELECT COUNT(*) FROM publish_items WHERE publish_record_id = ?), \
+         lease_owner FROM publish_records WHERE id = ?",
+    )
+    .bind(ai)
+    .bind(ai)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((attempts, owned, owner), (0, 0, None));
+}
+
+/// R3F-S15: the category is part of the by-id claim itself, so a mismatched
+/// call never claims (or touches) the other category's record — an
+/// interruption cannot leave it charged — and a record currently leased by
+/// another worker is still reported as a category mismatch, read-only.
+#[tokio::test]
+async fn freeze_record_of_another_category_is_never_claimed_even_when_leased() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flow(pool.clone());
+    let render = insert_config_rule(&pool).await;
+    let policy = insert_config_rule(&pool).await;
+    let ai = init_for_category(&flow, "ai", "2026-04-28", render, policy).await;
+    let row = |pool: SqlitePool| async move {
+        sqlx::query_as::<_, (i64, i64, Option<String>, String)>(
+            "SELECT attempt_count, stage_attempt_count, lease_owner, updated_at \
+             FROM publish_records WHERE id = ?",
+        )
+        .bind(ai)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let before = row(pool.clone()).await;
+
+    let outcome = flow.freeze_record(ai, freeze_opts_for_category("ml")).await;
+
+    assert!(
+        matches!(&outcome.status, PublishFreezeStatus::Failed { error_kind } if error_kind == "category_mismatch"),
+        "{:?}",
+        outcome.status
+    );
+    assert_eq!(row(pool.clone()).await, before, "the record is not touched");
+
+    // Leased by another worker: still a category mismatch, still untouched.
+    let lease_until = OffsetDateTime::now_utc() + time::Duration::minutes(5);
+    sqlx::query(
+        "UPDATE publish_records SET lease_owner = 'other', lease_expires_at = ? WHERE id = ?",
+    )
+    .bind(lease_until)
+    .bind(ai)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let leased = row(pool.clone()).await;
+
+    let outcome = flow.freeze_record(ai, freeze_opts_for_category("ml")).await;
+
+    assert!(
+        matches!(&outcome.status, PublishFreezeStatus::Failed { error_kind } if error_kind == "category_mismatch"),
+        "{:?}",
+        outcome.status
+    );
+    assert_eq!(row(pool.clone()).await, leased);
+    // A leased record of the right category is simply not claimable.
+    assert_eq!(
+        flow.freeze_record(ai, freeze_opts_for_category("ai"))
+            .await
+            .status,
+        PublishFreezeStatus::NothingToClaim
+    );
+}
+
 #[tokio::test]
 async fn freeze_with_ai_off_passthrough_promotes_persisted_articles_in_same_tx() {
     let (_dir, pool) = make_test_pool().await;
@@ -310,11 +436,13 @@ async fn freeze_run_start_maintenance_sweeps_exhausted_pending_record() {
     let (_dir, pool) = make_test_pool().await;
     let flow = flow(pool.clone());
     let exhausted_id = init_record(&flow, &pool).await;
-    sqlx::query("UPDATE publish_records SET attempt_count = 5 WHERE id = ?")
-        .bind(exhausted_id)
-        .execute(&pool)
-        .await
-        .expect("prime exhausted attempt_count");
+    sqlx::query(
+        "UPDATE publish_records SET attempt_count = 5, stage_attempt_count = 5 WHERE id = ?",
+    )
+    .bind(exhausted_id)
+    .execute(&pool)
+    .await
+    .expect("prime exhausted attempt_count");
 
     let outcome = flow.freeze(freeze_opts(true, false)).await;
 
@@ -428,4 +556,350 @@ async fn assert_article_state(pool: &SqlitePool, id: i64, expected: &str) {
         .await
         .unwrap();
     assert_eq!(state, expected);
+}
+
+// === B3: candidate-load storage errors keep their classification ===
+
+/// Delegates to the real repo but fails the first AI-path candidate read with
+/// `err`, the way a pool timeout or a dropped connection would.
+struct FlakyCandidateRepo {
+    inner: PublishItemRepo,
+    failures_left: AtomicUsize,
+    err: fn() -> StorageError,
+}
+
+#[async_trait::async_trait]
+impl PublishItemRepository for FlakyCandidateRepo {
+    async fn select_ai_path_candidates(
+        &self,
+        category_key: &str,
+        min_importance_score: i32,
+        published_since: OffsetDateTime,
+        published_until: OffsetDateTime,
+        max_items: NonZeroU32,
+    ) -> Result<Vec<PublishCandidateRow>, StorageError> {
+        if self
+            .failures_left
+            .fetch_update(AtomicOrdering::SeqCst, AtomicOrdering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err((self.err)());
+        }
+        self.inner
+            .select_ai_path_candidates(
+                category_key,
+                min_importance_score,
+                published_since,
+                published_until,
+                max_items,
+            )
+            .await
+    }
+
+    async fn select_ai_off_passthrough_candidates(
+        &self,
+        category_key: &str,
+        published_since: OffsetDateTime,
+        published_until: OffsetDateTime,
+        max_items: NonZeroU32,
+    ) -> Result<Vec<PublishCandidateRow>, StorageError> {
+        self.inner
+            .select_ai_off_passthrough_candidates(
+                category_key,
+                published_since,
+                published_until,
+                max_items,
+            )
+            .await
+    }
+
+    async fn freeze_snapshot(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        items: Vec<FreezeSnapshotItem>,
+        ai_off_promote_article_ids: Vec<i64>,
+        now: OffsetDateTime,
+    ) -> Result<FreezeSnapshotOutcome, StorageError> {
+        self.inner
+            .freeze_snapshot(
+                publish_record_id,
+                owner,
+                items,
+                ai_off_promote_article_ids,
+                now,
+            )
+            .await
+    }
+
+    async fn list_by_publish_record(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Vec<rss_ai_news_domain::model::PublishItem>, StorageError> {
+        self.inner.list_by_publish_record(publish_record_id).await
+    }
+
+    async fn find_snapshot_ownership_conflict(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Option<rss_ai_news_storage::SnapshotOwnershipConflict>, StorageError> {
+        self.inner
+            .find_snapshot_ownership_conflict(publish_record_id)
+            .await
+    }
+}
+
+fn flaky_flow(pool: SqlitePool, err: fn() -> StorageError) -> PublishFlow {
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let mut deps = publish_deps(
+        pool.clone(),
+        app,
+        Arc::new(rss_ai_news_publish::LocalFsTarget::new(std::env::temp_dir())),
+        None,
+    );
+    deps.publish_item_repo = Arc::new(FlakyCandidateRepo {
+        inner: PublishItemRepo::new(pool),
+        failures_left: AtomicUsize::new(1),
+        err,
+    });
+    PublishFlow::new(Arc::new(deps))
+}
+
+#[tokio::test]
+async fn freeze_transient_candidate_load_error_keeps_record_pending_and_next_run_freezes() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flaky_flow(pool.clone(), || StorageError::Timeout);
+    let publish_record_id = init_record(&flow, &pool).await;
+    seed_ai_succeeded_article(&pool, "ai", "flaky-ai", "Title", "body", "summary", 88, 1).await;
+
+    let first = flow.freeze(freeze_opts(true, false)).await;
+
+    assert_eq!(first.publish_record_id, publish_record_id);
+    assert!(
+        matches!(&first.status, PublishFreezeStatus::Failed { error_kind } if error_kind == "db_timeout"),
+        "{:?}",
+        first.status
+    );
+    // A transient DB failure is not a business verdict: the record stays
+    // claimable, the lease is released, and the attempt is charged to the
+    // retry budget.
+    let (state, kind, attempts, lease_owner): (String, Option<String>, i64, Option<String>) =
+        sqlx::query_as(
+            "SELECT state, last_error_kind, attempt_count, lease_owner \
+             FROM publish_records WHERE id = ?",
+        )
+        .bind(publish_record_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "pending");
+    assert_eq!(kind.as_deref(), Some("db_timeout"));
+    assert_eq!(attempts, 1);
+    assert_eq!(lease_owner, None);
+
+    let second = flow.freeze(freeze_opts(true, false)).await;
+
+    assert_eq!(second.status, PublishFreezeStatus::Frozen);
+    assert_eq!(second.publish_record_id, publish_record_id);
+    assert_record_state(&pool, publish_record_id, "snapshot_frozen").await;
+}
+
+#[tokio::test]
+async fn freeze_permanent_candidate_load_error_fails_record() {
+    let (_dir, pool) = make_test_pool().await;
+    let flow = flaky_flow(pool.clone(), || {
+        StorageError::Corruption("bad row".to_string())
+    });
+    let publish_record_id = init_record(&flow, &pool).await;
+    seed_ai_succeeded_article(&pool, "ai", "corrupt-ai", "Title", "body", "summary", 88, 1).await;
+
+    let outcome = flow.freeze(freeze_opts(true, false)).await;
+
+    assert!(
+        matches!(&outcome.status, PublishFreezeStatus::Failed { error_kind } if error_kind == "corruption"),
+        "{:?}",
+        outcome.status
+    );
+    assert_record_state(&pool, publish_record_id, "failed").await;
+}
+
+// === B2 (ADR 0012): a freeze that loses an article releases at once ===
+
+/// Real repo whose first AI-path selection is immediately followed by another
+/// worker freezing the top candidate into its own record (a concurrent
+/// freeze between selection and this freeze's transaction).
+struct RacingFreezeRepo {
+    inner: PublishItemRepo,
+    pool: SqlitePool,
+    rival_record: i64,
+    raced: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl PublishItemRepository for RacingFreezeRepo {
+    async fn select_ai_path_candidates(
+        &self,
+        category_key: &str,
+        min_importance_score: i32,
+        published_since: OffsetDateTime,
+        published_until: OffsetDateTime,
+        max_items: NonZeroU32,
+    ) -> Result<Vec<PublishCandidateRow>, StorageError> {
+        let rows = self
+            .inner
+            .select_ai_path_candidates(
+                category_key,
+                min_importance_score,
+                published_since,
+                published_until,
+                max_items,
+            )
+            .await?;
+        if self.raced.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+            let top = &rows[0];
+            sqlx::query(
+                "INSERT INTO publish_items (publish_record_id, position, article_id, \
+                 article_ai_result_id, frozen_title, frozen_summary, frozen_tags_json, \
+                 frozen_score, frozen_canonical_link, frozen_source_display_name) \
+                 VALUES (?, 1, ?, ?, 't', 's', '[]', 88, 'https://example.com', 'src')",
+            )
+            .bind(self.rival_record)
+            .bind(top.article_id)
+            .bind(top.article_ai_result_id)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE publish_records SET state = 'snapshot_frozen' WHERE id = ?")
+                .bind(self.rival_record)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+        Ok(rows)
+    }
+
+    async fn select_ai_off_passthrough_candidates(
+        &self,
+        category_key: &str,
+        published_since: OffsetDateTime,
+        published_until: OffsetDateTime,
+        max_items: NonZeroU32,
+    ) -> Result<Vec<PublishCandidateRow>, StorageError> {
+        self.inner
+            .select_ai_off_passthrough_candidates(
+                category_key,
+                published_since,
+                published_until,
+                max_items,
+            )
+            .await
+    }
+
+    async fn freeze_snapshot(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        items: Vec<FreezeSnapshotItem>,
+        ai_off_promote_article_ids: Vec<i64>,
+        now: OffsetDateTime,
+    ) -> Result<FreezeSnapshotOutcome, StorageError> {
+        self.inner
+            .freeze_snapshot(
+                publish_record_id,
+                owner,
+                items,
+                ai_off_promote_article_ids,
+                now,
+            )
+            .await
+    }
+
+    async fn list_by_publish_record(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Vec<rss_ai_news_domain::model::PublishItem>, StorageError> {
+        self.inner.list_by_publish_record(publish_record_id).await
+    }
+
+    async fn find_snapshot_ownership_conflict(
+        &self,
+        publish_record_id: i64,
+    ) -> Result<Option<rss_ai_news_storage::SnapshotOwnershipConflict>, StorageError> {
+        self.inner
+            .find_snapshot_ownership_conflict(publish_record_id)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn freeze_losing_an_article_releases_lease_without_charging_budget_and_retries_without_it() {
+    let (_dir, pool) = make_test_pool().await;
+    // A lost race must not exhaust even a single-attempt stage budget.
+    let mut app = app_config(RetentionPolicy::Always, 1);
+    app.retry.publish_max_attempts = 1;
+    let mut deps = publish_deps(
+        pool.clone(),
+        Arc::new(app),
+        Arc::new(rss_ai_news_publish::LocalFsTarget::new(std::env::temp_dir())),
+        None,
+    );
+    let rival_flow = flow(pool.clone());
+    let rival_render = insert_config_rule(&pool).await;
+    let rival_policy = insert_config_rule(&pool).await;
+    let rival_record =
+        init_for_category(&rival_flow, "ai", "2026-04-27", rival_render, rival_policy).await;
+    deps.publish_item_repo = Arc::new(RacingFreezeRepo {
+        inner: PublishItemRepo::new(pool.clone()),
+        pool: pool.clone(),
+        rival_record,
+        raced: AtomicUsize::new(0),
+    });
+    let racing = PublishFlow::new(Arc::new(deps));
+    let record = init_record(&racing, &pool).await;
+    let (contested, _) =
+        seed_ai_succeeded_article(&pool, "ai", "contested-ai", "Top", "body", "summary", 95, 1)
+            .await;
+    let (other, _) =
+        seed_ai_succeeded_article(&pool, "ai", "other-ai", "Next", "body", "summary", 70, 1).await;
+
+    let first = racing.freeze_record(record, freeze_opts(true, false)).await;
+
+    assert_eq!(
+        first.status,
+        PublishFreezeStatus::ArticleConflict {
+            article_id: contested
+        }
+    );
+    let (state, kind, attempts, stage_attempts, lease_owner): (
+        String,
+        Option<String>,
+        i64,
+        i64,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT state, last_error_kind, attempt_count, stage_attempt_count, lease_owner \
+         FROM publish_records WHERE id = ?",
+    )
+    .bind(record)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "pending");
+    assert_eq!(kind.as_deref(), Some("article_owned_by_active_snapshot"));
+    assert_eq!((attempts, stage_attempts), (0, 0), "claim refunded");
+    assert_eq!(lease_owner, None, "the lease is never held on a conflict");
+
+    let second = racing.freeze_record(record, freeze_opts(true, false)).await;
+
+    assert_eq!(second.status, PublishFreezeStatus::Frozen);
+    let items = PublishItemRepo::new(pool.clone())
+        .list_by_publish_record(record)
+        .await
+        .unwrap();
+    assert_eq!(
+        items.iter().map(|item| item.article_id).collect::<Vec<_>>(),
+        vec![other]
+    );
 }

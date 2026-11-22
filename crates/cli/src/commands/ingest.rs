@@ -4,7 +4,10 @@ use std::{
 };
 
 use rss_ai_news_config::{self as config, CategoryConfig, LoadedConfig};
-use rss_ai_news_runtime::{ExtractFlow, ExtractOptions, ExtractSummary, IngestFlow, IngestOptions};
+use rss_ai_news_runtime::{
+    ExtractFlow, ExtractOptions, ExtractSummary, IngestFlow, IngestOptions,
+    extract_lease_budget_seconds, fit_extract_batch_to_lease,
+};
 use rss_ai_news_storage::StoragePool;
 use serde::Serialize;
 
@@ -36,6 +39,15 @@ pub struct IngestCommandSummary {
     /// Sources that failed because of our own storage (entry inserts, source
     /// rows); included in `sources_failed`.
     pub sources_storage_failed: u32,
+    /// Extract entries whose path hit a failure of our own storage (article
+    /// write, summary read, release); a run failure like the source count.
+    pub extract_storage_failed: u32,
+    /// Extract releases that matched no row because another run reclaimed the
+    /// lease; reported, not a run failure (that run owns the entry now).
+    pub extract_lease_lost: u32,
+    /// Extract did not run: not even one wave of `concurrent_fetches` fits
+    /// `lease.fetch_duration_seconds` (R2-S9). A run failure (exit 1).
+    pub extract_lease_too_short: bool,
     pub duration_seconds: f64,
 }
 
@@ -51,6 +63,24 @@ impl IngestCommandSummary {
                     "{} sources failed to persist entries",
                     self.sources_storage_failed
                 ),
+            });
+        }
+        if self.extract_storage_failed > 0 {
+            errors.push(RenderedError {
+                kind: "extract_storage_failed".to_string(),
+                message: format!(
+                    "{} extract entries hit a storage failure",
+                    self.extract_storage_failed
+                ),
+            });
+        }
+        if self.extract_lease_too_short {
+            errors.push(RenderedError {
+                kind: "extract_lease_too_short".to_string(),
+                message: "extract skipped: one wave of http.concurrent_fetches can outlive \
+                          lease.fetch_duration_seconds; raise the lease or lower \
+                          http.timeout_seconds"
+                    .to_string(),
             });
         }
         if let Some(kind) = &self.extract_claim_error {
@@ -107,6 +137,11 @@ impl CommandSummary for IngestCommandSummary {
         )?;
         writeln!(writer, "  Articles fallback:    {}", self.articles_fallback)?;
         writeln!(writer, "  Fetch failed:         {}", self.fetch_failed)?;
+        writeln!(
+            writer,
+            "  Extract lease lost:   {}",
+            self.extract_lease_lost
+        )?;
         writeln!(writer, "  Tasks panicked:       {}", self.tasks_panicked)?;
         writeln!(
             writer,
@@ -133,6 +168,39 @@ pub(crate) fn preflight(loaded: &LoadedConfig) -> Result<(), CliError> {
     Ok(())
 }
 
+/// The extract batch size for this run: `requested`, shrunk to whole waves
+/// when its estimated budget exceeds the lease (R3E-S9) (the batch size is a CLI argument,
+/// so this is decided per run, like the AI lease budget). Shrinking instead of
+/// failing keeps configs that ran before the budget existed running. `None`
+/// when not even one wave fits (R2-S9): extract is skipped for the run.
+fn extract_batch_size(loaded: &LoadedConfig, requested: u32) -> Option<u32> {
+    let app = &loaded.app;
+    let concurrent = app.http.concurrent_fetches;
+    let timeout = app.http.timeout_seconds;
+    let lease = app.lease.fetch_duration_seconds;
+    let Some(fitted) = fit_extract_batch_to_lease(requested, concurrent, timeout, lease) else {
+        tracing::error!(
+            stage = "extract",
+            one_wave_seconds = extract_lease_budget_seconds(1, concurrent, timeout),
+            lease_seconds = lease,
+            "extract skipped: one wave of concurrent_fetches can outlive \
+             lease.fetch_duration_seconds; raise the lease or lower http.timeout_seconds"
+        );
+        return None;
+    };
+    if fitted < requested {
+        tracing::warn!(
+            stage = "extract",
+            requested_batch_size = requested,
+            batch_size = fitted,
+            lease_seconds = lease,
+            "extract batch shrunk so its estimated budget fits lease.fetch_duration_seconds \
+             (ceil(batch / concurrent_fetches) x (http.timeout_seconds + margin))"
+        );
+    }
+    Some(fitted)
+}
+
 /// Ingest (and extract unless `--skip-fetch`) on an already loaded config and
 /// opened pool; callers run [`preflight`] first.
 pub(crate) async fn run_loaded(
@@ -148,21 +216,30 @@ pub(crate) async fn run_loaded(
         IngestFlow::with_source_secrets(ctx.clone(), categories, loaded.source_secrets.clone());
     let ingest_summary = ingest_flow.run(IngestOptions::default()).await;
 
-    let extract_summary = if args.skip_fetch {
-        ExtractSummary::default()
+    let batch_size = if args.skip_fetch {
+        None
     } else {
-        let extract_flow = ExtractFlow::new(build_extract_deps(loaded, pool, ctx.run.clone())?);
+        extract_batch_size(loaded, args.batch_size)
+    };
+    let extract_lease_too_short = !args.skip_fetch && batch_size.is_none();
+    let extract_summary = if let Some(batch_size) = batch_size {
+        let extract_flow =
+            ExtractFlow::new(build_extract_deps(loaded, pool, ctx.run.clone()).await?);
         extract_flow
             .run(ExtractOptions {
-                batch_size: args.batch_size,
+                batch_size,
                 max_attempts: loaded.app.retry.feed_entry_max_attempts,
                 // F6-3: 从 app.runtime.max_batches_per_run 取生效值。
                 // `--max-batches` 已经由 CliOverrides::apply_to_app
                 // 覆盖到该字段（F5-6），所以此处只是把 CLI > config > 默认
                 // 三层解析的结果直传到 flow。
                 max_batches: loaded.app.runtime.max_batches_per_run,
+                // `--category` scopes extract like it scopes ingest (plan/09 §2).
+                category_key: loaded.cli_overrides.category_filter.clone(),
             })
             .await
+    } else {
+        ExtractSummary::default()
     };
 
     Ok(IngestCommandSummary {
@@ -178,6 +255,47 @@ pub(crate) async fn run_loaded(
         tasks_panicked: ingest_summary.tasks_panicked + extract_summary.tasks_panicked,
         extract_claim_error: extract_summary.claim_error,
         sources_storage_failed: ingest_summary.sources_storage_failed,
+        extract_storage_failed: extract_summary.storage_failed,
+        extract_lease_lost: extract_summary.lease_lost,
+        extract_lease_too_short,
         duration_seconds: started.elapsed().as_secs_f64(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary() -> IngestCommandSummary {
+        IngestCommandSummary {
+            sources_attempted: 1,
+            sources_succeeded: 1,
+            sources_not_modified: 0,
+            sources_failed: 0,
+            entries_discovered: 1,
+            entries_inserted: 1,
+            articles_persisted: 0,
+            articles_fallback: 0,
+            fetch_failed: 0,
+            tasks_panicked: 0,
+            extract_claim_error: None,
+            sources_storage_failed: 0,
+            extract_storage_failed: 0,
+            extract_lease_lost: 0,
+            extract_lease_too_short: false,
+            duration_seconds: 0.0,
+        }
+    }
+
+    #[test]
+    fn extract_storage_failures_fail_the_run_but_lost_leases_do_not() {
+        let mut lost = summary();
+        lost.extract_lease_lost = 2;
+        assert_eq!(lost.exit_code(), ExitCode::Success);
+
+        let mut failed = summary();
+        failed.extract_storage_failed = 1;
+        assert_eq!(failed.exit_code(), ExitCode::RuntimeError);
+        assert_eq!(failed.errors()[0].kind, "extract_storage_failed");
+    }
 }

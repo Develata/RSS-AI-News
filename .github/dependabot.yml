@@ -16,3 +16,48 @@ updates:
     ignore:
       - dependency-name: '*'
         update-types: ['version-update:semver-major']
+
+  # Workflow actions are pinned to full commit SHAs with a `# vX.Y.Z` comment;
+  # Dependabot bumps the SHA and the comment together. Same conservative
+  # cadence and grouping as cargo.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    rebase-strategy: disabled
+    groups:
+      actions-compatible:
+        patterns: ['*']
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
+
+  # Base images in docker/Dockerfile are pinned by digest; this keeps the
+  # Debian runtime image's digest (security rebuilds of bookworm-slim) fresh.
+  # The Rust builder image's version is the toolchain pin, which
+  # rust-toolchain.toml owns and the static acceptance lane checks for drift
+  # (`toolchain-pins`), so its version bumps are ignored here: a toolchain
+  # upgrade is a deliberate change of every pin at once. Docker Official Images
+  # rebuild only tags still in their supported list, and a patch tag such as
+  # 1.97.0-slim-bookworm leaves it once a newer Rust ships, so its digest is
+  # NOT kept fresh by this entry; the builder is refreshed by the next
+  # toolchain upgrade (R3-13). It is a build stage only, not shipped in the
+  # runtime image.
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    rebase-strategy: disabled
+    groups:
+      docker-base-images:
+        patterns: ['*']
+    ignore:
+      - dependency-name: rust
+        update-types:
+          - 'version-update:semver-major'
+          - 'version-update:semver-minor'
+          - 'version-update:semver-patch'
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']

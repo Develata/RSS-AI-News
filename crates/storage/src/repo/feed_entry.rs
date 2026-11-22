@@ -167,10 +167,25 @@ pub trait FeedEntryRepository: Send + Sync {
     /// retry cooldown，不被领取（比较精确到毫秒，从不提前）。`exclude_ids` 中的
     /// 行不被领取；extract 传本 run 内失败或结果未确认的已领取 id，使失败行不在
     /// 同一 run 内被重领，即使其 release 因 lease 被他人 reclaim 而落空。
+    ///
+    /// Only entries of `status='active'` sources are claimed (a paused or
+    /// archived source's backlog waits until the source is active again).
+    /// Same as [`Self::claim_pending_fetch_in_scope`] with no category.
     async fn claim_pending_fetch(
         &self,
         request: &ClaimRequest,
         exclude_ids: &[i64],
+    ) -> Result<Vec<ClaimedFeedEntry>, StorageError> {
+        self.claim_pending_fetch_in_scope(request, exclude_ids, None)
+            .await
+    }
+    /// [`Self::claim_pending_fetch`] limited to the sources of `category_key`
+    /// when it is `Some` (`ingest --category`, plan/09 §2).
+    async fn claim_pending_fetch_in_scope(
+        &self,
+        request: &ClaimRequest,
+        exclude_ids: &[i64],
+        category_key: Option<&str>,
     ) -> Result<Vec<ClaimedFeedEntry>, StorageError>;
     async fn release_success(
         &self,

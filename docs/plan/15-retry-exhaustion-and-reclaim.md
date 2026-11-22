@@ -9,6 +9,12 @@
 > **整条 retryable 路径的统一设计**落地，不塞进单一分支。探查进一步确认 feed_entries /
 > publish_records 同构卡死，且 `reclaim_expired_leases` 四个 repo 全部实现但生产路径零调用。
 
+
+> **2026-11-21 更新（ADR 0012）**：Publish 的预算改为按阶段计。下文 Publish 行中的
+> `attempt_count`（claim 过滤 `< max`、release 折叠 `>= max`、sweep `>= max`）对 publish_records
+> 一律读作 `stage_attempt_count`；它随 claim 自增、阶段推进成功清零，`attempt_count` 只作累计审计。
+> 互补性论证（§3）对 `stage_attempt_count` 逐字成立。
+
 ## 1. 现状缺口
 
 ### 1.1 缺口一：耗尽卡死（三个 lease 状态机同构）
@@ -99,6 +105,16 @@ pub struct ReleaseFailureOutcome {
 flow 据 `exhausted` 发准确事件（见 §7）。调用点共 5 处：`extract.rs`、`ai_run.rs`
 （`release_retryable_ai_failure` helper）、`publish/remote.rs` ×2、`publish/store_local.rs`。
 
+Publish 后续变化（ADR 0012）：预算列为 `stage_attempt_count`（0008）而非 `attempt_count`；`PublishRecordRepository`
+另有 `release_retryable_failure_until(…, retry_not_before: Option<OffsetDateTime>, now)`，同一条 SQL 额外写
+`next_attempt_at = $7`（远端限流时为 GitHub 的重试时刻，否则 NULL），`release_retryable_failure` 即其 `None` 版本；
+publish 的 claim 还要求 `next_attempt_at` 为空或已到（R1-P-S12）。sweep 谓词不看 `next_attempt_at`。
+另有不计预算的 `release_deferred_retry(id, owner, state, error, kind, retry_not_before, now)`（2026-11-22，R3F-B2 / R3F-S12）：
+保持 `state`、清 lease、两个计数都退还、写 `next_attempt_at`——用于写入歧义且只读核对未完成的远端尝试（以及其下一次 claim
+写前恢复比对仍未出结论的尝试，R4-1），以及所有限流（期限在未来时写入等待，已到 / 已过时写 NULL；R3F-S12，R4-4）。
+因此这两类记录不会被 sweep 收口，
+持续如此的记录会一直持有文章归属（ADR 0012 §3 / §3a 的已知代价）。
+
 ### 3.3 一致性论证
 
 claim 过滤 `attempt_count < max` 发生在自增**前** ⇒ claim 后 `attempt_count ≤ max` ⇒
@@ -171,6 +187,8 @@ count=0 静默，同一 run 内多次执行无害（codex W15-P4 复审补全）
 ## 8. 不变契约
 
 1. claim SQL 一字不动（含 `attempt_count < max` 过滤与 PG `FOR UPDATE SKIP LOCKED`）。
+   W15 之后的改动（2026-11-21）：SQLite lease 按时刻比较（C5）、AI claim 的 PG 锁限定为 `OF aar`（C6）、
+   AI claim 增加 publish 窗口份额的 fresh 变体（C9，plan/03 §5.2）；预算谓词与自增语义不变。
 2. `attempt_count` 契约不变（11 §4.1：claim 时自增，成功不清零，失败/reclaim 不改值；
    唯一例外是 Publish `SnapshotEmpty` 退还该次 claim 的计数，空快照不计入 sweep 预算）。
 3. `release_permanent_failure` / `release_success*` 语义与签名不变。

@@ -8,8 +8,7 @@ use rss_ai_news_report::{
     SelectionConfig, SnapshotConfig, freeze as snapshot_freeze, load_candidates, to_storage_items,
 };
 use rss_ai_news_storage::{
-    ClaimRequest, FreezeSnapshotOutcome, FreezeSnapshotStatus, PublishState, build_owner_id,
-    lease_expires_at,
+    ClaimRequest, FreezeSnapshotOutcome, FreezeSnapshotStatus, build_owner_id, lease_expires_at,
 };
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
@@ -17,6 +16,8 @@ use time::{Duration, OffsetDateTime};
 use super::PublishFlow;
 use super::dto::{PublishFreezeOptions, PublishFreezeOutcome, PublishFreezeStatus};
 use crate::events::RunEventEmitter;
+
+const PHASE: &str = "freeze";
 
 impl PublishFlow {
     pub async fn freeze(&self, opts: PublishFreezeOptions) -> PublishFreezeOutcome {
@@ -69,14 +70,23 @@ impl PublishFlow {
             max_attempts: self.ctx.retry.publish_max_attempts,
         };
         let claimed_result = if let Some(publish_record_id) = publish_record_id {
+            // The category is part of the claim (R3F-S15): selection below is
+            // for `opts.category_key`, and a mismatched call must not claim —
+            // or, if interrupted, charge — another category's record.
             self.ctx
                 .publish_record_repo
-                .claim_publish_by_ids(&claim, PublishState::Pending, &[publish_record_id])
+                .claim_pending_for_freeze_by_id_in_category(
+                    &claim,
+                    publish_record_id,
+                    &opts.category_key,
+                )
                 .await
         } else {
+            // Selection below is for `opts.category_key`; claiming another
+            // category's record would freeze these articles into it (R1-P-S15).
             self.ctx
                 .publish_record_repo
-                .claim_pending_for_freeze(&claim)
+                .claim_pending_for_freeze_in_category(&claim, &opts.category_key)
                 .await
         };
         let claimed = match claimed_result {
@@ -95,6 +105,17 @@ impl PublishFlow {
         let claimed = match claimed.into_iter().next() {
             Some(claimed) => claimed,
             None => {
+                if let Some(publish_record_id) = publish_record_id
+                    && let Some(status) = self
+                        .by_id_category_mismatch(publish_record_id, &opts.category_key, &emitter)
+                        .await
+                {
+                    return PublishFreezeOutcome {
+                        publish_record_id,
+                        status,
+                        item_count: 0,
+                    };
+                }
                 emitter
                     .emit(
                         "publish_completed",
@@ -136,7 +157,7 @@ impl PublishFlow {
         {
             Ok(candidates) => candidates,
             Err(error) => {
-                self.fail_claimed(claimed.id, &owner, &error, now, &emitter)
+                self.fail_claimed(claimed.id, &owner, &error, PHASE, now, &emitter)
                     .await;
                 return PublishFreezeOutcome {
                     publish_record_id: claimed.id,
@@ -210,7 +231,7 @@ impl PublishFlow {
         ) {
             Ok(frozen) => frozen,
             Err(error) => {
-                self.fail_claimed(claimed.id, &owner, &error, now, &emitter)
+                self.fail_claimed(claimed.id, &owner, &error, PHASE, now, &emitter)
                     .await;
                 return PublishFreezeOutcome {
                     publish_record_id: claimed.id,
@@ -268,40 +289,44 @@ impl PublishFlow {
             Ok(FreezeSnapshotOutcome {
                 status: FreezeSnapshotStatus::ArticleStateConflict { article_id },
                 ..
-            }) => PublishFreezeOutcome {
-                publish_record_id: claimed.id,
-                status: PublishFreezeStatus::ArticleConflict { article_id },
-                item_count: 0,
-            },
+            }) => {
+                let message =
+                    format!("article {article_id} is no longer persisted or ready_for_publish");
+                self.release_article_conflict(
+                    claimed.id,
+                    &owner,
+                    article_id,
+                    &message,
+                    "article_state_conflict",
+                    &emitter,
+                )
+                .await
+            }
+            Ok(FreezeSnapshotOutcome {
+                status:
+                    FreezeSnapshotStatus::ArticleOwnershipConflict {
+                        article_id,
+                        owner_record_id,
+                    },
+                ..
+            }) => {
+                let message = format!(
+                    "article {article_id} is already in active publish record {owner_record_id}"
+                );
+                self.release_article_conflict(
+                    claimed.id,
+                    &owner,
+                    article_id,
+                    &message,
+                    super::OWNERSHIP_CONFLICT_KIND,
+                    &emitter,
+                )
+                .await
+            }
             Err(error) => {
-                if let Err(persist_err) = self
-                    .ctx
-                    .publish_record_repo
-                    .release_permanent_failure(
-                        claimed.id,
-                        &owner,
-                        &error.to_string(),
-                        error.error_kind(),
-                        now,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        publish_record_id = claimed.id,
-                        phase = "freeze",
-                        ?persist_err,
-                        "release_permanent_failure 持久化失败；保留上游错误向上抛（F15-fix4）"
-                    );
-                }
-                emitter
-                    .emit(
-                        "publish_failed",
-                        "error",
-                        Some("publish_record"),
-                        Some(claimed.id),
-                        &error.to_string(),
-                        Some(json!({ "phase": "freeze", "error_kind": error.error_kind() })),
-                    )
+                // The freeze transaction rolled back; a transient storage error
+                // keeps the record `pending` (budgeted retry), not `failed`.
+                self.release_classified_failure(claimed.id, &owner, &error, PHASE, now, &emitter)
                     .await;
                 PublishFreezeOutcome {
                     publish_record_id: claimed.id,
@@ -315,7 +340,122 @@ impl PublishFlow {
     }
 }
 
-fn published_since(now: OffsetDateTime, window_hours: u32) -> OffsetDateTime {
+impl PublishFlow {
+    /// The freeze transaction rolled back because an article was taken by
+    /// another snapshot or changed state after selection (ADR 0012). Nothing
+    /// was written; release the lease at once (never hold it on a conflict)
+    /// and refund the claim, so the next run re-selects without that article.
+    async fn release_article_conflict(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        article_id: i64,
+        message: &str,
+        kind: &str,
+        emitter: &RunEventEmitter<'_>,
+    ) -> PublishFreezeOutcome {
+        let released = self
+            .ctx
+            .publish_record_repo
+            .release_freeze_conflict(
+                publish_record_id,
+                owner,
+                message,
+                kind,
+                OffsetDateTime::now_utc(),
+            )
+            .await;
+        match &released {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(publish_record_id, "freeze conflict release lost the lease")
+            }
+            Err(error) => tracing::warn!(
+                publish_record_id,
+                ?error,
+                "freeze conflict release failed; lease recovery remains available"
+            ),
+        }
+        emitter
+            .emit(
+                "publish_failed",
+                "warn",
+                Some("publish_record"),
+                Some(publish_record_id),
+                message,
+                Some(json!({
+                    "phase": PHASE,
+                    "error_kind": kind,
+                    "article_id": article_id,
+                    "released": matches!(released, Ok(true)),
+                })),
+            )
+            .await;
+        PublishFreezeOutcome {
+            publish_record_id,
+            status: PublishFreezeStatus::ArticleConflict { article_id },
+            item_count: 0,
+        }
+    }
+
+    /// R3F-S15: the by-id claim (which filters by category) found nothing.
+    /// A read-only lookup tells a record of another category — refused as
+    /// `category_mismatch`, whether it is claimable or leased right now —
+    /// from one that is simply not claimable (`None`: nothing to claim). The
+    /// record itself is never touched.
+    async fn by_id_category_mismatch(
+        &self,
+        publish_record_id: i64,
+        category_key: &str,
+        emitter: &RunEventEmitter<'_>,
+    ) -> Option<PublishFreezeStatus> {
+        let record = match self
+            .ctx
+            .publish_record_repo
+            .find_by_id(publish_record_id)
+            .await
+        {
+            Ok(record) => record?,
+            Err(error) => {
+                tracing::warn!(
+                    publish_record_id,
+                    ?error,
+                    "publish record lookup after an empty by-id claim failed"
+                );
+                return None;
+            }
+        };
+        if record.category_key == category_key {
+            return None;
+        }
+        let message = format!(
+            "publish record {publish_record_id} belongs to category {:?}, not {category_key:?}",
+            record.category_key
+        );
+        emitter
+            .emit(
+                "publish_failed",
+                "error",
+                Some("publish_record"),
+                Some(publish_record_id),
+                &message,
+                Some(json!({
+                    "phase": PHASE,
+                    "error_kind": "category_mismatch",
+                    "claimed": false,
+                })),
+            )
+            .await;
+        Some(PublishFreezeStatus::Failed {
+            error_kind: "category_mismatch".to_string(),
+        })
+    }
+}
+
+/// Start of the publish candidate window: `now - candidate_window_hours`, and
+/// `0` = no window (everything is eligible). Shared with ai-run's fresh share
+/// (`flows/ai_run`, plan/03 §5.1) so both stages use one eligibility clock.
+pub(crate) fn published_since(now: OffsetDateTime, window_hours: u32) -> OffsetDateTime {
     if window_hours == 0 {
         OffsetDateTime::UNIX_EPOCH
     } else {

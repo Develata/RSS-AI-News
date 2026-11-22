@@ -60,7 +60,7 @@ pub struct ReindexJob {
 
 /// `claim_pending` 返回值：只暴露 reindex flow 在批处理循环中需要的字段，
 /// 屏蔽 lease/timestamps 细节。
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct ClaimedReindexJob {
     pub id: i64,
     pub target: String,
@@ -90,6 +90,41 @@ pub struct StartReindexTxOutcome {
 pub struct FinishReindexTxOutcome {
     pub job_completed: bool,
     pub demoted_rule_version_id: Option<i64>,
+}
+
+/// [`ReindexJobRepository::claim_resumable_by_target`] 返回值。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeReindexOutcome {
+    /// The target has no pending / running job: start a new one.
+    NoActiveJob,
+    /// The active job had the requested rule and was claimed by this owner;
+    /// continue after `last_processed_id`.
+    Resumed(ClaimedReindexJob),
+    /// The active job belongs to another rule (kind or sha256 differ); it is
+    /// left untouched and must be aborted before a different rule can run.
+    RuleMismatch {
+        job_id: i64,
+        state: String,
+        version_tag: String,
+        payload_sha256: String,
+    },
+    /// The active job has the requested rule but another worker holds a live
+    /// lease on it.
+    Busy { job_id: i64, state: String },
+}
+
+/// Per-batch writes of one reindex page, applied by
+/// [`ReindexJobRepository::apply_link_hash_batch`] /
+/// [`ReindexJobRepository::apply_content_hash_batch`].
+#[derive(Debug, Clone, Copy)]
+pub struct ReindexBatchCheckpoint<'a> {
+    pub job_id: i64,
+    pub owner: &'a str,
+    /// Last row id scanned in this page (also when nothing changed).
+    pub last_processed_id: i64,
+    pub now: OffsetDateTime,
+    /// Renewed lease deadline.
+    pub lease_expires_at: OffsetDateTime,
 }
 
 #[async_trait]
@@ -216,16 +251,50 @@ pub trait ReindexJobRepository: Send + Sync {
         lease_expires_at: OffsetDateTime,
     ) -> Result<Option<ClaimedReindexJob>, StorageError>;
 
-    /// `running → running`（checkpoint 提交）。`WHERE state='running' AND
-    /// lease_owner = :owner` 双 guard 防止 lease 被 reclaim 后原 worker 还
-    /// 在写。返回是否真的更新了一行。
+    /// `running → running`（checkpoint 提交 + 续租 `lease_expires_at`）。`WHERE
+    /// state='running' AND lease_owner = :owner` 双 guard 防止 lease 被 reclaim
+    /// 后原 worker 还在写。返回是否真的更新了一行。
     async fn advance_checkpoint(
         &self,
         id: i64,
         owner: &str,
         last_processed_id: i64,
         now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
     ) -> Result<bool, StorageError>;
+
+    /// 续跑入口（05-storage §8.1）：单事务内查 `target` 的活动 job 及其规则，
+    /// 规则（`kind` + `payload_sha256`）与请求一致且无存活 lease（`pending`，或
+    /// `running` 但 lease 已过期）时由 `owner` 领取，返回 checkpoint。规则不一致
+    /// 或有存活 lease 时不改任何行。`version_tag` 只是标签（CLI 每次自动生成），
+    /// 不参与匹配。
+    async fn claim_resumable_by_target(
+        &self,
+        target: &str,
+        rule_kind: &str,
+        rule_payload_sha256: &str,
+        owner: &str,
+        now: OffsetDateTime,
+        lease_expires_at: OffsetDateTime,
+    ) -> Result<ResumeReindexOutcome, StorageError>;
+
+    /// link_hash 一页：单事务内先 checkpoint + 续租 + owner 校验，再逐行按
+    /// `update_link_hash` 的语义改写。owner 校验失败时整段回滚、不改任何行，
+    /// 返回 `None`；否则返回与 `updates` 同序的结果。
+    async fn apply_link_hash_batch(
+        &self,
+        checkpoint: ReindexBatchCheckpoint<'_>,
+        updates: &[(i64, String)],
+    ) -> Result<Option<Vec<crate::UpdateLinkHashOutcome>>, StorageError>;
+
+    /// content_hash 一页，事务与返回语义同 [`Self::apply_link_hash_batch`]；
+    /// 单行语义同 `ArticleRepository::update_content_hash`（行缺失或新 hash 已被
+    /// 占用 → `Conflict`，相同 → `Unchanged`）。
+    async fn apply_content_hash_batch(
+        &self,
+        checkpoint: ReindexBatchCheckpoint<'_>,
+        updates: &[(i64, String)],
+    ) -> Result<Option<Vec<crate::UpdateContentHashOutcome>>, StorageError>;
 
     /// 仅校验 lease 是否仍由 `owner` 持有；不写 last_processed_id。
     /// reindex flow 中 `categories` 这种"无 after_id 分页 / 无 checkpoint
