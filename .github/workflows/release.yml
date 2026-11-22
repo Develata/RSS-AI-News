@@ -179,8 +179,14 @@ jobs:
             | sh .github/scripts/release-promotion.sh tag-commit "${GITHUB_REF_NAME#v}" "$GITHUB_SHA"
 
       # Digests of version tags already built from this commit (empty = build).
+      # "Missing" is only an authenticated exact-tag manifest HEAD answering
+      # 404 (release-registry.sh, R4-2); the adapter gets its token from GHCR
+      # with the same credential as the login above.
       - id: existing
         name: reuse version tags built from this commit
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           image="$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
@@ -283,6 +289,9 @@ jobs:
       # previous job's outputs, is the source of truth for every digest: the
       # script reads each released version's tags and every alias.
       - name: reconcile aliases to the highest released version
+        env:
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           image="$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"

@@ -7,7 +7,8 @@
 # Adapter contract (`sh "$RELEASE_REGISTRY" <command> ...`):
 #   inspect <image>:<tag>   exit 0: one line `<digest> <version-label> <revision-label>`
 #                           (`-` for a missing label); exit 3: the tag does not
-#                           exist; any other exit: a read error.
+#                           exist (its exact manifest HEAD answered 404); any
+#                           other exit: a read error.
 #   copy <image>@<digest> <image>:<tag>
 #                           point the tag at exactly that manifest or index.
 #
