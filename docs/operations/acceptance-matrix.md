@@ -47,7 +47,7 @@ cargo acceptance run --lane release --expected-version 0.10.4
 
 | Lane | local | full | 责任 |
 |---|---:|---:|---|
-| `static` | ✓ | ✓ | rustfmt、Clippy、rustdoc（`RUSTDOCFLAGS=-D warnings`）、swallowed-error、dependency policy、release 镜像策略脚本测试（含真实适配器 `release-registry.sh` 的 stub-docker 用例，需 `jq`；GitHub `ubuntu-latest` runner 预装）、scheduler entrypoint 测试、工具链 pin 一致性（`toolchain-pins`） |
+| `static` | ✓ | ✓ | rustfmt、Clippy、rustdoc（`RUSTDOCFLAGS=-D warnings`）、swallowed-error、dependency policy、release 镜像策略脚本测试（含真实适配器 `release-registry.sh` 的 stub-curl + stub-docker 用例，需 `jq`；GitHub `ubuntu-latest` runner 预装）、scheduler entrypoint 测试、工具链 pin 一致性（`toolchain-pins`） |
 | `workspace` | ✓ | ✓ | workspace locked build/test |
 | `sqlite` | ✓ | ✓ | release binary、SQLite migrate run/check、CLI contract smokes |
 | `postgres` |  | ✓ | storage `--ignored`（只跑 PG / Docker 用例，普通用例由 workspace lane 覆盖）与 CLI migrate parity；要求 `DATABASE_URL` + Docker |
@@ -103,7 +103,8 @@ SQLite lane 必须用真实 release binary 验证两种调用：
   另给约 2 秒宽限（清理本身不另设硬上限），随后判 `pipes_held` 失败并保留已读输出；该遗留进程已脱离进程树，
   不会被杀。docker lane 等待 scheduler smoke job 时的每次 `docker logs --tail 200` 轮询也走同一受限执行
   （上限取 75 秒总期限剩余时间与 `--step-timeout-secs` 的较小者），卡住的轮询不会越过期限与 cleanup（R3-15）。
-  `docker-scheduler-job-contract` 只看期限内是否见到标记（R3G-S15）；失败时再读一次 `docker logs --tail 50`（限 10 秒）
+  `docker-scheduler-job-contract` 只看期限内是否见到标记（R3G-S15）：一次轮询只有未超时、且在总期限之前返回时，其输出中的
+  标记才算数（受限执行每 50 ms 先查退出再查超时，期限刚过时退出的轮询仍会报告未超时，R4-8）；失败时再读一次 `docker logs --tail 50`（限 10 秒）
   放进错误信息，仅作诊断，不参与判定（原先期限后的无界 `docker-scheduler-logs` step 已移除）。子进程与 runner 同一进程组，
   终端 Ctrl-C 会一并终止正在运行的构建。
 - 产品 CLI smoke 在一次性工作区内运行（`cwd` 为该目录，不读仓库根 `.env`），并清除产品固定读取的环境变量

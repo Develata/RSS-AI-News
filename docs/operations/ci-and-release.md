@@ -148,12 +148,31 @@ Jobs：
   - Buildx CLI 由 `setup-buildx-action` 固定为 `v0.38.2`（两个镜像 job 相同）。
   - 测试：static lane 的 `release-promotion` 步骤用文件后端的假 registry（`release-registry-fake.sh`）离线覆盖上述规则，含低版本 run
     晋升最高版本、删除更高 tag 不回退、别名 label 校验、读错误零写入、scheduler 写失败后重跑补齐、重跑复用版本 tag。真实适配器
-    `release-registry.sh`（imagetools + jq）的"缺失"判定只看该 tag 自身的顶层 manifest 请求（`imagetools inspect --raw`，
-    Buildx v0.38.2 只解析并取顶层 manifest）：只有它报 `not found` / `manifest unknown` 才算 tag 不存在；顶层已解析后，digest、
-    子 manifest 或镜像 config 的任何读取失败（containerd 对缺失子对象同样报 `not found`）都是读错误、使 job 失败（R3G-B1）。
-    同一测试脚本用 stub `docker` 覆盖这两类情形；本地 `registry:2`（Buildx v0.38.1）上也实测过：缺失 tag 退出 3，删去镜像
-    config blob 后旧实现误报缺失（退出 3）、现实现退出 1。适配器此前已在本地 `registry:2` 上对带 provenance 的 index 与普通
-    manifest 验证；GHCR 上的行为（尤其 tag 不存在时的报错文本）要到首个真实 tag 才能确认。
+    `release-registry.sh`（curl + imagetools + jq）的"缺失"判定**只**看精确 tag 的 manifest 存在性请求
+    `HEAD /v2/<name>/manifests/<tag>`（OCI distribution-spec v1.1.1 "Checking if content exists in the registry"：存在 → `200`，
+    不存在 → `404`），按 HTTP 状态码判定，不匹配报错文本（R4-2）：`404` → tag 不存在（退出 3）；`200` → 用响应头
+    `Docker-Content-Digest` 固定 digest，之后的 label 读取一律走 `<image>@<digest>`（`imagetools inspect --format '{{json .Image}}'`），
+    其任何失败（含 `not found`）都是读错误；其他状态（`401` / `403` / `429` / `5xx` / `3xx`）、缺少或格式不对的 digest 头、token
+    请求失败、curl 传输错误也都是读错误（退出 1，job 失败、零写入）。不再用 `imagetools inspect --raw` 判定缺失：Buildx v0.38.2
+    `Resolver.Get` 先解析 tag（HEAD）、再按返回的 digest GET manifest，第二个请求的 `404` 同样报 `not found`，原实现会把"tag 存在、
+    按 digest 读失败"误判为缺失，`existing` 输出空 digest、随后 `push: true` 覆盖已有版本。认证：首个 HEAD 不带凭据；registry 回
+    `401` + `WWW-Authenticate: Bearer realm=…,service=…,scope=…` 时，按 distribution token 认证流程以 Basic 凭据
+    `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`（`release.yml` 在 `existing` 与 `reconcile` 两步传入 `github.actor` 与
+    `GITHUB_TOKEN`，即 `docker/login-action` 用的同一凭据）向 https realm 取 token，再带 bearer token 重发 HEAD。被要求认证却没有
+    这两个变量、realm 不是 https、或质询不是 Bearer 时直接失败（匿名对私有包的回答不能证明缺失）；同理，设置了这两个变量时，
+未经质询的 `404` 也是读错误，"缺失"只认带 token 的 HEAD 的 `404`（无凭据时才接受无认证 registry，如本地 `registry:2`，的直接回答）。凭据与 token 经 `curl -K -`（stdin）
+    传入，不进 argv，也不写进日志或 step summary。`Accept` 列出全部四种 manifest / index 类型：本地 `registry:2` 实测，只接受 Docker
+    类型时 HEAD 一个 OCI index 返回 `404`。选择 curl 而非读取 `~/.docker/config.json`：后者依赖 runner 有无 credential helper，
+    step `env` 传凭据更直接。
+    测试：同一测试脚本用 stub `curl` + stub `docker` 覆盖：无认证 / Bearer 认证下的存在与 `404` 缺失；精确 tag `200` 后按 digest
+    读 `not found` → 读错误；`401` / `403` / `429` / `500` / `503` / `301`、无凭据质询、凭据错误、无 token、非 https realm、Basic
+    质询、设置凭据时未经质询的 `404`、缺少或畸形 digest、curl 退出 3（不得被当成缺失）均为读错误；凭据与 token 不出现在 curl argv 与消息中。实测（Buildx
+    v0.38.1，dash 与 macOS sh）：一次性的本地替身 registry 让 tag HEAD 返回 `200` + digest、按 digest GET 返回 `404`，旧实现退出 3
+    （误报缺失）、现实现退出 1；本地 `registry:2` 上带 provenance 的 index 与普通 manifest 退出 0 且 label 正确，缺失 tag 退出 3，
+    删去镜像 config blob 后退出 1，`copy` 后读回 digest 一致。GHCR 匿名只读探测确认：匿名 HEAD（已有 tag、不存在的 tag、
+    不存在的仓库）一律回 `401` + Bearer 质询（realm `https://ghcr.io/token`）；经 `curl -K -` 传入匿名 token 后，已有 tag 回 `200`
+    且带 `docker-content-digest`，不存在的 tag 回 `404`。真实 curl 经 `-K -` 发出的 Basic 与 Bearer 头已在本地替身服务器上核对。
+    用 `GITHUB_TOKEN` 的 Basic 凭据换 token、以及包尚不存在时的回答，要到首个真实 tag 才能确认。
   四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit 不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
 
 ### 修复前 release run 的重跑边界（R3-1）

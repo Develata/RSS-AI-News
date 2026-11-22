@@ -592,52 +592,119 @@ tag_commit 1.0 c100
 expect_rc 2
 done_case
 
-# --- release-registry.sh (the real adapter) with a stub docker ---------------
-# The stub answers `docker buildx imagetools inspect <ref> <flags>` per mode
-# (raw = `--raw`, manifest = `--format '{{json .Manifest}}'`, image =
-# `--format '{{json .Image}}'`) from $STUB_DOCKER/<mode>.{rc,out,err}; a mode
-# without an .rc file succeeds with its .out.
+
+# --- release-registry.sh (the real adapter) with stub curl and docker --------
+# Stub curl answers per request kind from $STUB_HTTP/<kind>.{code,headers,body,rc}:
+#   head-anon   HEAD of the manifest URL without a bearer token
+#   head-auth   HEAD of the manifest URL with `Authorization: Bearer stub-token`
+#   token       GET of the token realm with Basic user `ci:s3cret`
+#               (other credentials get 401)
+# A kind without .code answers 404 (head-*) / 500 (token); .rc is curl's
+# exit status (a transport error). Stub docker answers `imagetools inspect
+# <image>@<digest> --format '{{json .Image}}'` from $STUB_HTTP/image.{rc,out,err}.
+# Both log their requests to $STUB_HTTP/calls, and curl its argv to
+# $STUB_HTTP/argv (credentials must never appear there).
 
 adapter="$here/release-registry.sh"
+DIGEST="sha256:$(printf '%064d' 0 | tr 0 a)"
+REALM="https://auth.example.test/token"
 mkdir -p "$work/bin"
+cat >"$work/bin/curl" <<'STUB'
+#!/usr/bin/env sh
+set -eu
+echo "$*" >>"$STUB_HTTP/argv"
+config="$(cat)"
+method=GET hdr="" out="" url="" data=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -I) method=HEAD ;;
+        -D) hdr="$2"; shift ;;
+        -o) out="$2"; shift ;;
+        --data-urlencode) data="$data&$2"; shift ;;
+        -H | -w | -K) shift ;;
+        http://* | https://*) url="$1" ;;
+    esac
+    shift
+done
+case "$url" in
+    */manifests/*)
+        case "$config" in
+            *'header = "Authorization: Bearer stub-token"'*) kind=head-auth ;;
+            *) kind=head-anon ;;
+        esac
+        default=404
+        ;;
+    "$STUB_REALM")
+        kind=token
+        default=500
+        case "$config" in *'user = "ci:s3cret"'*) ;; *) kind=token-denied ;; esac
+        ;;
+    *) echo "stub curl: unexpected URL $url" >&2; exit 2 ;;
+esac
+echo "$method $url $kind$data" >>"$STUB_HTTP/calls"
+rc="$(cat "$STUB_HTTP/$kind.rc" 2>/dev/null || echo 0)"
+if [ "$rc" -ne 0 ]; then
+    echo "curl: ($rc) stub transport error" >&2
+    printf '000'
+    exit "$rc"
+fi
+code="$(cat "$STUB_HTTP/$kind.code" 2>/dev/null || echo "$default")"
+[ "$kind" != token-denied ] || code=401
+if [ -n "$hdr" ]; then
+    {
+        printf 'HTTP/2 %s\r\n' "$code"
+        [ ! -f "$STUB_HTTP/$kind.headers" ] || sed 's/$/\r/' "$STUB_HTTP/$kind.headers"
+        printf '\r\n'
+    } >"$hdr"
+fi
+if [ -n "$out" ] && [ "$out" != /dev/null ]; then
+    cat "$STUB_HTTP/$kind.body" >"$out" 2>/dev/null || : >"$out"
+fi
+printf '%s' "$code"
+STUB
 cat >"$work/bin/docker" <<'STUB'
 #!/usr/bin/env sh
 set -eu
 [ "$1 $2 $3" = "buildx imagetools inspect" ] || { echo "stub docker: unexpected $*" >&2; exit 2; }
-shift 4
-case "$*" in
-    --raw) mode=raw ;;
-    "--format {{json .Manifest}}") mode=manifest ;;
-    "--format {{json .Image}}") mode=image ;;
-    *) echo "stub docker: unexpected flags $*" >&2; exit 2 ;;
-esac
-echo "$mode" >>"$STUB_DOCKER/calls"
-[ ! -f "$STUB_DOCKER/$mode.err" ] || cat "$STUB_DOCKER/$mode.err" >&2
-[ ! -f "$STUB_DOCKER/$mode.out" ] || cat "$STUB_DOCKER/$mode.out"
-exit "$(cat "$STUB_DOCKER/$mode.rc" 2>/dev/null || echo 0)"
+[ "$5 $6" = "--format {{json .Image}}" ] || { echo "stub docker: unexpected flags $*" >&2; exit 2; }
+echo "image $4" >>"$STUB_HTTP/calls"
+[ ! -f "$STUB_HTTP/image.err" ] || cat "$STUB_HTTP/image.err" >&2
+[ ! -f "$STUB_HTTP/image.out" ] || cat "$STUB_HTTP/image.out"
+exit "$(cat "$STUB_HTTP/image.rc" 2>/dev/null || echo 0)"
 STUB
-chmod +x "$work/bin/docker"
+chmod +x "$work/bin/curl" "$work/bin/docker"
 
-# Starts an adapter case whose registry holds one healthy image.
+# Starts an adapter case: a registry without auth holding one healthy image.
 start_adapter() {
     description="adapter: $1"
     case_no=$((case_no + 1))
-    STUB_DOCKER="$work/$case_no"
-    export STUB_DOCKER
-    mkdir -p "$STUB_DOCKER"
-    : >"$STUB_DOCKER/calls"
-    echo '{"schemaVersion":2}' >"$STUB_DOCKER/raw.out"
-    echo '{"digest":"sha256:abc"}' >"$STUB_DOCKER/manifest.out"
+    STUB_HTTP="$work/$case_no"
+    STUB_REALM="$REALM"
+    export STUB_HTTP STUB_REALM
+    mkdir -p "$STUB_HTTP"
+    : >"$STUB_HTTP/calls"
+    : >"$STUB_HTTP/argv"
+    echo 200 >"$STUB_HTTP/head-anon.code"
+    echo "Docker-Content-Digest: $DIGEST" >"$STUB_HTTP/head-anon.headers"
     echo '{"config":{"Labels":{"org.opencontainers.image.version":"1.2.3","org.opencontainers.image.revision":"c123"}}}' \
-        >"$STUB_DOCKER/image.out"
+        >"$STUB_HTTP/image.out"
+    unset REGISTRY_USERNAME REGISTRY_PASSWORD || true
     case_failures=$failures
 }
 
-# stub_fail MODE RC MESSAGE
-stub_fail() {
-    echo "$2" >"$STUB_DOCKER/$1.rc"
-    echo "$3" >"$STUB_DOCKER/$1.err"
-    rm -f "$STUB_DOCKER/$1.out"
+# with_auth: the anonymous HEAD gets a bearer challenge, the token realm
+# grants `stub-token` to ci:s3cret, and the authenticated HEAD finds the tag.
+with_auth() {
+    echo 401 >"$STUB_HTTP/head-anon.code"
+    echo "Www-Authenticate: Bearer realm=\"$REALM\",service=\"registry.example.test\",scope=\"repository:example/rss:pull\"" \
+        >"$STUB_HTTP/head-anon.headers"
+    echo 200 >"$STUB_HTTP/token.code"
+    echo '{"token":"stub-token"}' >"$STUB_HTTP/token.body"
+    echo 200 >"$STUB_HTTP/head-auth.code"
+    echo "Docker-Content-Digest: $DIGEST" >"$STUB_HTTP/head-auth.headers"
+    REGISTRY_USERNAME=ci
+    REGISTRY_PASSWORD=s3cret
+    export REGISTRY_USERNAME REGISTRY_PASSWORD
 }
 
 adapter_inspect() {
@@ -647,41 +714,170 @@ adapter_inspect() {
     set -e
 }
 
-start_adapter "an existing tag prints digest, version and revision"
+# called PATTERN: some stub request matches the extended regex PATTERN.
+called() {
+    grep -Eq "$1" "$STUB_HTTP/calls" || fail "no request matching '$1' (calls: $(tr '\n' ';' <"$STUB_HTTP/calls"))"
+}
+
+not_called() {
+    ! grep -Eq "$1" "$STUB_HTTP/calls" || fail "unexpected request matching '$1' (calls: $(tr '\n' ';' <"$STUB_HTTP/calls"))"
+}
+
+TAG_URL="https://ghcr.io/v2/example/rss/manifests/1.2.3"
+
+start_adapter "an existing tag prints digest, version and revision from the pinned digest"
 adapter_inspect
 expect_rc 0
-[ "$out" = "sha256:abc 1.2.3 c123" ] || fail "got '$out'"
+[ "$out" = "$DIGEST 1.2.3 c123" ] || fail "got '$out'"
+called "^HEAD $TAG_URL head-anon\$"
+called "^image $IMAGE@$DIGEST\$"
 done_case
 
-start_adapter "a top-level 'not found' is a missing tag"
-stub_fail raw 1 "ERROR: $IMAGE:1.2.3: not found"
+start_adapter "an existing tag behind a bearer challenge (token auth)"
+with_auth
+adapter_inspect
+expect_rc 0
+[ "$out" = "$DIGEST 1.2.3 c123" ] || fail "got '$out'"
+called "^GET $REALM token&scope=repository:example/rss:pull&service=registry.example.test\$"
+called "^HEAD $TAG_URL head-auth\$"
+called "^image $IMAGE@$DIGEST\$"
+if grep -q s3cret "$STUB_HTTP/argv" || grep -q stub-token "$STUB_HTTP/argv"; then
+    fail "a credential or token is on curl's argv"
+fi
+if grep -q s3cret "$work/stderr" || grep -q stub-token "$work/stderr"; then
+    fail "a credential or token is in the adapter's messages"
+fi
+done_case
+
+start_adapter "an exact-tag 404 is a missing tag (registry without auth)"
+echo 404 >"$STUB_HTTP/head-anon.code"
 adapter_inspect
 expect_rc 3
+not_called "^image "
 done_case
 
-start_adapter "a top-level 'manifest unknown' is a missing tag"
-stub_fail raw 1 "ERROR: unexpected status 404: MANIFEST_UNKNOWN: manifest unknown"
+start_adapter "an unchallenged 404 with credentials configured is a read error"
+REGISTRY_USERNAME=ci
+REGISTRY_PASSWORD=s3cret
+export REGISTRY_USERNAME REGISTRY_PASSWORD
+echo 404 >"$STUB_HTTP/head-anon.code"
+adapter_inspect
+expect_rc 1
+not_called "^GET "
+done_case
+
+start_adapter "an authenticated exact-tag 404 is a missing tag"
+with_auth
+echo 404 >"$STUB_HTTP/head-auth.code"
 adapter_inspect
 expect_rc 3
+not_called "^image "
 done_case
 
-start_adapter "a top-level auth or network error is a read error"
-stub_fail raw 1 "ERROR: unexpected status 401 Unauthorized"
+# R4-2: Buildx resolves the tag, then GETs the manifest by digest; a 404 on
+# that read must not read as a missing tag once the exact tag answered 200.
+start_adapter "an exact-tag 200 with a digest read 'not found' is a read error"
+with_auth
+echo 1 >"$STUB_HTTP/image.rc"
+echo "ERROR: httpReadSeeker: failed open: content at https://ghcr.io/v2/example/rss/manifests/$DIGEST not found: not found" \
+    >"$STUB_HTTP/image.err"
+rm -f "$STUB_HTTP/image.out"
 adapter_inspect
 expect_rc 1
 done_case
 
-# Buildx loads child manifests and image configs for `--format`; once the
-# top-level manifest resolved, their "not found" must not read as a missing tag.
-start_adapter "a child manifest 'not found' after the top level resolved is a read error"
-stub_fail manifest 1 "ERROR: sha256:child: not found"
+start_adapter "an image config 'not found' after the tag resolved is a read error"
+echo 1 >"$STUB_HTTP/image.rc"
+echo "ERROR: blob sha256:config: not found" >"$STUB_HTTP/image.err"
+rm -f "$STUB_HTTP/image.out"
 adapter_inspect
 expect_rc 1
 done_case
 
-start_adapter "an image config 'not found' after the top level resolved is a read error"
-stub_fail image 1 "ERROR: blob sha256:config: not found"
+for status in 401 403 429 500 503 301; do
+    start_adapter "an authenticated exact-tag $status is a read error"
+    with_auth
+    echo "$status" >"$STUB_HTTP/head-auth.code"
+    adapter_inspect
+    expect_rc 1
+    not_called "^image "
+    done_case
+done
+
+for status in 403 500; do
+    start_adapter "an anonymous exact-tag $status is a read error"
+    echo "$status" >"$STUB_HTTP/head-anon.code"
+    adapter_inspect
+    expect_rc 1
+    done_case
+done
+
+start_adapter "a challenge without REGISTRY_USERNAME / REGISTRY_PASSWORD is a read error"
+with_auth
+unset REGISTRY_USERNAME REGISTRY_PASSWORD
 adapter_inspect
+expect_rc 1
+not_called "^GET $REALM"
+done_case
+
+start_adapter "wrong credentials at the token realm are a read error"
+with_auth
+REGISTRY_PASSWORD=wrong
+adapter_inspect
+expect_rc 1
+not_called "head-auth"
+done_case
+
+start_adapter "a token response without a token is a read error"
+with_auth
+echo '{}' >"$STUB_HTTP/token.body"
+adapter_inspect
+expect_rc 1
+done_case
+
+start_adapter "a non-https token realm gets no credentials"
+with_auth
+echo 'Www-Authenticate: Bearer realm="http://auth.example.test/token",service="x"' >"$STUB_HTTP/head-anon.headers"
+adapter_inspect
+expect_rc 1
+not_called "^GET "
+done_case
+
+start_adapter "a Basic challenge is a read error"
+with_auth
+echo 'Www-Authenticate: Basic realm="registry"' >"$STUB_HTTP/head-anon.headers"
+adapter_inspect
+expect_rc 1
+done_case
+
+start_adapter "a 200 without a Docker-Content-Digest is a read error"
+: >"$STUB_HTTP/head-anon.headers"
+adapter_inspect
+expect_rc 1
+not_called "^image "
+done_case
+
+start_adapter "a 200 with a malformed digest is a read error"
+echo "Docker-Content-Digest: sha256:abc" >"$STUB_HTTP/head-anon.headers"
+adapter_inspect
+expect_rc 1
+done_case
+
+# curl exits 3 on a malformed URL: the adapter's exit 3 means "missing" only.
+for kind in head-anon token head-auth; do
+    start_adapter "a curl transport error (exit 3) on $kind is a read error, not missing"
+    with_auth
+    echo 3 >"$STUB_HTTP/$kind.rc"
+    adapter_inspect
+    expect_rc 1
+    done_case
+done
+
+start_adapter "a malformed reference is a usage error"
+set +e
+out="$(PATH="$work/bin:$PATH" sh "$adapter" inspect "$IMAGE@$DIGEST" 2>"$work/stderr")"
+rc=$?
+set -e
 expect_rc 1
 done_case
 
