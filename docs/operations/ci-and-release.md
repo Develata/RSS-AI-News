@@ -159,17 +159,19 @@ Jobs：
     `401` + `WWW-Authenticate: Bearer realm=…,service=…,scope=…` 时，按 distribution token 认证流程以 Basic 凭据
     `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`（`release.yml` 在 `existing` 与 `reconcile` 两步传入 `github.actor` 与
     `GITHUB_TOKEN`，即 `docker/login-action` 用的同一凭据）向 https realm 取 token，再带 bearer token 重发 HEAD。被要求认证却没有
-    这两个变量、realm 不是 https、或质询不是 Bearer 时直接失败（匿名对私有包的回答不能证明缺失）。凭据与 token 经 `curl -K -`（stdin）
+    这两个变量、realm 不是 https、或质询不是 Bearer 时直接失败（匿名对私有包的回答不能证明缺失）；同理，设置了这两个变量时，
+未经质询的 `404` 也是读错误，"缺失"只认带 token 的 HEAD 的 `404`（无凭据时才接受无认证 registry，如本地 `registry:2`，的直接回答）。凭据与 token 经 `curl -K -`（stdin）
     传入，不进 argv，也不写进日志或 step summary。`Accept` 列出全部四种 manifest / index 类型：本地 `registry:2` 实测，只接受 Docker
     类型时 HEAD 一个 OCI index 返回 `404`。选择 curl 而非读取 `~/.docker/config.json`：后者依赖 runner 有无 credential helper，
     step `env` 传凭据更直接。
     测试：同一测试脚本用 stub `curl` + stub `docker` 覆盖：无认证 / Bearer 认证下的存在与 `404` 缺失；精确 tag `200` 后按 digest
     读 `not found` → 读错误；`401` / `403` / `429` / `500` / `503` / `301`、无凭据质询、凭据错误、无 token、非 https realm、Basic
-    质询、缺少或畸形 digest、curl 退出 3（不得被当成缺失）均为读错误；凭据与 token 不出现在 curl argv 与消息中。实测（Buildx
+    质询、设置凭据时未经质询的 `404`、缺少或畸形 digest、curl 退出 3（不得被当成缺失）均为读错误；凭据与 token 不出现在 curl argv 与消息中。实测（Buildx
     v0.38.1，dash 与 macOS sh）：一次性的本地替身 registry 让 tag HEAD 返回 `200` + digest、按 digest GET 返回 `404`，旧实现退出 3
     （误报缺失）、现实现退出 1；本地 `registry:2` 上带 provenance 的 index 与普通 manifest 退出 0 且 label 正确，缺失 tag 退出 3，
-    删去镜像 config blob 后退出 1，`copy` 后读回 digest 一致。GHCR 匿名只读探测确认：匿名 HEAD 回 `401` + Bearer 质询
-    （realm `https://ghcr.io/token`），取到的 token 下已有 tag 回 `200` 且带 `docker-content-digest`，不存在的 tag 回 `404`。
+    删去镜像 config blob 后退出 1，`copy` 后读回 digest 一致。GHCR 匿名只读探测确认：匿名 HEAD（已有 tag、不存在的 tag、
+    不存在的仓库）一律回 `401` + Bearer 质询（realm `https://ghcr.io/token`）；经 `curl -K -` 传入匿名 token 后，已有 tag 回 `200`
+    且带 `docker-content-digest`，不存在的 tag 回 `404`。真实 curl 经 `-K -` 发出的 Basic 与 Bearer 头已在本地替身服务器上核对。
     用 `GITHUB_TOKEN` 的 Basic 凭据换 token、以及包尚不存在时的回答，要到首个真实 tag 才能确认。
   四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit 不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
 

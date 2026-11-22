@@ -32,6 +32,8 @@
 # GITHUB_TOKEN, the same credential its docker/login-action uses), then the
 # HEAD is repeated with the bearer token. A challenged request without those
 # variables fails: an anonymous answer for a private package proves nothing.
+# For the same reason, with those variables set an unchallenged 404 is a read
+# error: "missing" then needs the authenticated HEAD's 404.
 # Credentials and tokens go to curl through `-K -` (stdin), never argv, and
 # never into messages. A registry without auth (a local `registry:2`) answers
 # the first HEAD directly; RELEASE_REGISTRY_SCHEME=http reaches one over plain
@@ -131,6 +133,12 @@ inspect_tag() {
     fi
     case "$code" in
         404)
+            # With credentials configured (release.yml), only an
+            # authenticated answer may prove absence: an unchallenged 404
+            # could be a registry hiding a package from anonymous clients.
+            if [ -z "${token:-}" ] && [ -n "${REGISTRY_USERNAME:-}${REGISTRY_PASSWORD:-}" ]; then
+                die "HEAD $url answered 404 without an authentication challenge although credentials are set; refusing to treat it as missing"
+            fi
             echo missing
             return 0
             ;;

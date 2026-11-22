@@ -756,6 +756,16 @@ expect_rc 3
 not_called "^image "
 done_case
 
+start_adapter "an unchallenged 404 with credentials configured is a read error"
+REGISTRY_USERNAME=ci
+REGISTRY_PASSWORD=s3cret
+export REGISTRY_USERNAME REGISTRY_PASSWORD
+echo 404 >"$STUB_HTTP/head-anon.code"
+adapter_inspect
+expect_rc 1
+not_called "^GET "
+done_case
+
 start_adapter "an authenticated exact-tag 404 is a missing tag"
 with_auth
 echo 404 >"$STUB_HTTP/head-auth.code"
