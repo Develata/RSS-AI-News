@@ -1258,6 +1258,50 @@ async fn publish_remote_stops_the_higher_record_sharing_an_article_before_sendin
     assert_eq!(target.sent(), 1);
 }
 
+/// R4-1: a losing record whose earlier write is unverified keeps the
+/// `remote_write_unverified` kind (refunded, nothing sent), so once the
+/// keeper fails, its next claim still starts with the read-only HEAD check.
+#[tokio::test]
+async fn ownership_loser_with_an_unverified_write_keeps_its_recovery_mark() {
+    let (_dir, pool) = make_test_pool().await;
+    let keeper = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let loser = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let shared = share_first_article(&pool, keeper, loser).await;
+    sqlx::query(
+        "UPDATE publish_records SET last_error_kind = 'remote_write_unverified' WHERE id = ?",
+    )
+    .bind(loser)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow.publish_remote_record(loser, remote_opts()).await;
+
+    assert_eq!(
+        outcome.status,
+        PublishRemoteStatus::ArticleConflict { article_id: shared }
+    );
+    assert_eq!(target.sent(), 0, "the losing record must not be sent");
+    assert_record_state(&pool, loser, "stored_local").await;
+    assert_last_error_kind(&pool, loser, "remote_write_unverified").await;
+    assert_eq!(
+        record_counters(&pool, loser).await,
+        (0, 0, None),
+        "refunded"
+    );
+    let payload: String = sqlx::query_scalar(
+        "SELECT context_json FROM run_events WHERE event_kind = 'publish_failed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["error_kind"], "article_owned_by_active_snapshot");
+    assert_eq!(payload["earlier_write_unverified"], true);
+}
+
 /// A published owner wins even with the higher id: its articles are already
 /// `published`, so the lower record could only write and then fail.
 #[tokio::test]

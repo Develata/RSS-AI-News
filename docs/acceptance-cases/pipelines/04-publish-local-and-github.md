@@ -103,6 +103,7 @@
 | `publish_remote_stops_the_higher_record_sharing_an_article_before_sending` | `crates/runtime/tests/publish_remote_tests.rs` | 存量重复归属：败方不发请求、保态、退还 claim |
 | `publish_remote_stops_a_lower_record_whose_article_a_published_record_holds` | 同上 | 已发布的持有者无论 id 都胜出 |
 | `publish_remote_batch_drops_only_the_record_losing_a_shared_article` | 同上 | 批量只剔除败方 |
+| `ownership_loser_with_an_unverified_write_keeps_its_recovery_mark` | 同上 | 待恢复的败方：不发请求、退还，持久化 kind 仍为 `remote_write_unverified`，事件带 `earlier_write_unverified: true`（R4-1） |
 | `three_owners_are_all_told_the_published_record_keeps_the_article` | 同上 | 三方共享：同一排序决定并报告胜方，两个败方都报已发布记录（R3F-P-B1） |
 | `pg_three_owners_all_name_the_same_top_ranked_winner` | `crates/storage/tests/publish_record_pg_tests.rs` | PG 三方共享同一胜方；胜方 failed 后低 id 胜出 |
 | `publish_remote_sends_the_other_record_after_the_keeper_failed` | 同上 | 胜方 failed 后归属释放 |
@@ -162,6 +163,7 @@
 | `publish_remote_batch_timeout_with_an_unfinished_check_keeps_every_record` | 同上 | 批量同上：每条记录保持 `stored_local`、退还 claim |
 | `sqlite_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait` | `crates/storage/tests/publish_stage_recovery_tests.rs` | 不计预算的释放：保态、清 lease、退还两计数、写 / 清 `next_attempt_at`；两类 claim 的投影带回 `last_error_kind`（R4-1；PG 同名 `pg_…`） |
 | `unverified_record_whose_recovery_check_fails_again_keeps_ownership_then_records_the_receipt` | `crates/runtime/tests/publish_remote_recovery_tests.rs` | 审查序列（R4-1）：`(stored_local, 0, remote_write_unverified)` → 下次所有 GET 503 → 保态、退还、kind 与归属保留、零写请求；HEAD 含报告后 → 以该 commit 记回执、零写请求 |
+| `unverified_record_whose_recovery_check_is_rate_limited_waits_out_the_deadline` | 同上 | 恢复比对被限流（`retry-after: 600`）→ 保态、退还、保留 kind、零写请求，期限写入 `next_attempt_at`，期内 `NothingToClaim` 且不发请求 |
 | `unverified_record_confirmed_absent_is_written_and_charged_normally` | 同上 | 恢复比对确认缺失 → 照常 PUT；PUT 409 照常计预算（末次 → `failed`） |
 | `unverified_record_confirmed_absent_publishes_with_a_normal_write` | 同上 | 确认缺失 → 正常写入并发布 |
 | `batch_checks_each_unverified_record_on_its_own_before_writing` | 同上 | 批量逐条比对：已落地者记回执不入批、比对失败者 deferred、缺失者与普通记录一起写入 |

@@ -349,6 +349,56 @@ async fn unverified_record_whose_recovery_check_fails_again_keeps_ownership_then
     );
 }
 
+/// The recovery check is itself rate limited: nothing is written, the claim
+/// is refunded, the recovery mark kept, and GitHub's deadline is persisted
+/// so the next run inside it does not claim (or call GitHub).
+#[tokio::test]
+async fn unverified_record_whose_recovery_check_is_rate_limited_waits_out_the_deadline() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local(&pool).await;
+    let server = MockServer::start().await;
+    let flow = github_flow(pool.clone(), Recording::new(&server.uri()));
+    first_attempt_left_unverified(&server, &flow, id).await;
+
+    server.reset().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "600")
+                .set_body_json(serde_json::json!({"message": "API rate limit exceeded"})),
+        )
+        .mount(&server)
+        .await;
+    let before = OffsetDateTime::now_utc();
+    let outcome = flow.publish_remote_record(id, remote_opts()).await;
+
+    assert!(
+        matches!(&outcome.status, PublishRemoteStatus::Failed { error_kind } if error_kind == UNVERIFIED),
+        "{:?}",
+        outcome.status
+    );
+    assert_kept_and_refunded(&pool, id).await;
+    assert_eq!(non_get_requests(&server).await, Vec::<String>::new());
+    let wait: Option<OffsetDateTime> =
+        sqlx::query_scalar("SELECT next_attempt_at FROM publish_records WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let wait = wait.expect("the check's deadline is persisted");
+    assert!(wait >= before + time::Duration::seconds(599), "{wait}");
+    let requests_before = server.received_requests().await.unwrap_or_default().len();
+    assert_eq!(
+        flow.publish_remote_record(id, remote_opts()).await.status,
+        PublishRemoteStatus::NothingToClaim
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        requests_before,
+        "no request inside the window"
+    );
+}
+
 /// Recovery check confirms the report is absent at HEAD: the normal write
 /// runs, and its failure is charged like any retryable failure (here the
 /// last budget, so the record fails).
