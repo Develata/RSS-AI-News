@@ -115,9 +115,12 @@
   并钳制到 `[now, now + 1 h]`——记录在等待期间仍持有文章归属，过远的时刻（或恶意头）不能把它长期挂起。
   **有意的取舍**：GitHub 要求超过 1 h 时（如两小时的 `retry-after`），记录在 1 h 后即可再领取，那次请求大概率再被限流，
   再写一次期限；用多一次请求换取归属不被长期挂起。其它 retryable release 把它写回 NULL，每次阶段推进（含 freeze）清零。
-- **限流不计阶段预算（R3F-S12）**：写入了等待期限的限流尝试用 `release_deferred_retry` 释放（与 §3 核对未完成相同）：
-  保持阶段态、退还本次 claim，节流由 `next_attempt_at` 负责，因此最后一次预算遇到限流也不会转 `failed`。
-  reset 已过去（不写等待）的限流照常计预算，避免无等待、无节流地反复免费重试。发布客户端不在一次 claim 内重发 429（R3F-B1）。
+- **限流不计阶段预算（R3F-S12；2026-11-22 R4-4 扩展到所有限流）**：任何 `GitHubRateLimit` 尝试都用 `release_deferred_retry`
+  释放（与 §3 核对未完成相同）：保持阶段态、退还本次 claim，因此最后一次预算遇到限流也不会转 `failed`、不会释放文章归属。
+  期限在未来 → 写入 `next_attempt_at`，节流由它负责；期限已到或已过（`Retry-After: 0`，或正数期限在释放前刚好过去）→
+  不写等待（NULL），下一次运行即可再领取。**有意的取舍**：已过期限的限流因此可以不计预算地反复重试；节流来自运行节奏本身
+  （每次运行每条记录至多一次尝试），且发布客户端不在一次 claim 内重发 429（R3F-B1）。GitHub 拒绝请求不是一次失败的发布尝试，
+  按预算把记录转 `failed` 会释放可能仍在等待发布的文章归属（R3F-S12 的本意）。
 - 四个 claim 入口（按状态扫描的 SQLite / PG SQL 与两个按 ID 的构造器）都要求 `next_attempt_at IS NULL OR <= now`；
   SQLite 照 lease 的做法按 `julianday` 比较（写入向上、now 向下取整到毫秒），不会提前领取。
 - 等待期内的运行领不到记录：`NothingToClaim`（verdict `skipped`，exit 0），不发任何 GitHub 请求、不耗预算；

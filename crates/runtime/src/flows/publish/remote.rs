@@ -191,17 +191,20 @@ fn rate_limit_retry_not_before(
 /// its state and its snapshot's articles, the claim is refunded and only
 /// `next_attempt_at` (if any) delays the next claim:
 /// - R3F-B2: a write whose HEAD verification did not complete;
-/// - R3F-S12: a rate limit whose wait is persisted (`retry_not_before`). The
-///   wait, not the budget, throttles it. A rate limit whose reset is already
-///   past imposes no wait, so it is charged like any retryable failure —
-///   otherwise repeated rate limits would retry for free and unthrottled.
-fn is_deferred_retry(error: &PublishError, retry_not_before: Option<OffsetDateTime>) -> bool {
-    match error {
+/// - R4-1: a record whose earlier write is still unverified;
+/// - R3F-S12 / R4-4: every rate limit, whether or not it leaves a future wait
+///   to persist. GitHub refused the request; that is not a failed attempt, so
+///   even the last budget must not fold the record to `failed`. A deadline
+///   already past (`Retry-After: 0`, or one that elapsed before the release)
+///   stores no wait; the record is retried at the next run, one attempt per
+///   run, with no request resent inside a claim (R3F-B1).
+fn is_deferred_retry(error: &PublishError) -> bool {
+    matches!(
+        error,
         PublishError::RemoteWriteUnverified { .. }
-        | PublishError::EarlierWriteUnverified { .. } => true,
-        PublishError::GitHubRateLimit { .. } => retry_not_before.is_some(),
-        _ => false,
-    }
+            | PublishError::EarlierWriteUnverified { .. }
+            | PublishError::GitHubRateLimit { .. }
+    )
 }
 
 enum RemotePreparationError {
@@ -1062,7 +1065,7 @@ impl PublishFlow {
         let message = error.display_user();
         let retry_not_before = rate_limit_retry_not_before(error, now);
         let mut budget_exhausted = false;
-        let deferred = is_deferred_retry(error, retry_not_before);
+        let deferred = is_deferred_retry(error);
         let release_result = if deferred {
             // Every caller releases a record claimed for the remote stage.
             self.ctx

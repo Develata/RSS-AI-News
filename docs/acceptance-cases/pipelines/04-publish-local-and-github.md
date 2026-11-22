@@ -45,9 +45,9 @@
 - 远端 401，或无限流信号的 403 → `GithubAuthFailed`（终态，不重试）
 - 单报告 Contents API：路径按段百分号编码、`ref` 编码为查询参数（中文 / 空格 / 保留字符路径可发布）；任何 GitHub 失败的消息含操作、状态、message 的固定词表摘要与 `x-github-request-id`（整值符合 GitHub 形状且不含 token 时）；服务端回显的自由文本不落库、不进事件
 - 远端 403 且 `x-ratelimit-remaining: 0` / 带 `retry-after` / message 提到 rate limit → `GithubRateLimit`（可重试）
-- 远端 429（及带限流信号的 403）→ `GithubRateLimit`，article 不晋升；GitHub 要求的重试时刻（适用期限中最晚者，钳制 1 h）在未来时
-  写入 `next_attempt_at`，到点前的运行 `NothingToClaim`，且该次尝试**不计预算**（退还 claim、state 保持 `stored_local`，最后一次预算
-  也不转 `failed`）；reset 已过去（不写等待）时按普通 retryable 计本阶段预算，**预算耗尽 → `failed`**（R3F-S12 / R3F-S16）
+- 远端 429（及带限流信号的 403）→ `GithubRateLimit`，article 不晋升；该次尝试**不计预算**（退还 claim、state 保持 `stored_local`，
+  最后一次预算也不转 `failed`，R3F-S12 / R4-4）；GitHub 要求的重试时刻（适用期限中最晚者，钳制 1 h）在未来时写入 `next_attempt_at`，
+  到点前的运行 `NothingToClaim`；期限已到 / 已过（`Retry-After: 0`）时不写等待，下一次运行即可再领取
 - 远端 422 non-fast-forward：同一次尝试内重试一次；第二次 422 为永久错误 → record `failed`（`github_api_error`），文章不晋升
 - 远端 5xx / 传输失败 / 远端超时 / 409 → retryable：保持 `StoredLocal`、计本阶段预算（耗尽 → `failed`）；
   写请求之后的 5xx / 传输失败 / 超时先走下面的歧义写入核对，只有"确认未落地"才按此计预算
@@ -124,6 +124,8 @@
 | `publish_remote_rate_limit_persists_the_reset_and_skips_claims_until_then` | 同上 | 限流 reset 写入 `next_attempt_at`；期内重跑不领取、不请求；到点后发布 |
 | `publish_remote_rate_limit_wait_is_clamped_to_one_hour` | 同上 | 远期 reset 钳制到 1 h |
 | `publish_remote_rate_limit_with_a_wait_does_not_spend_the_last_attempt` | 同上 | 写入等待的限流不计预算：末次预算仍 `stored_local`、退还 claim，到点后发布（R3F-S12） |
+| `publish_remote_rate_limit_with_a_passed_deadline_does_not_spend_the_last_attempt` | 同上 | 期限已过的限流同样不计预算：末次预算仍 `stored_local`、退还、不写等待，事件 `attempt_refunded: true`，下次即发布（R4-4） |
+| `publish_remote_retry_after_zero_on_the_last_attempt_keeps_the_record` | 同上 | 真实 GitHub 客户端收到 `429` + `Retry-After: 0`：末次预算仍 `stored_local`、退还、无等待（R4-4） |
 | `exhausted_quota_reset_later_than_retry_after_wins` | `crates/publish/tests/github_classify_tests.rs` | 配额耗尽时取 `retry-after` 与 reset 中较晚者 |
 | `retry_after_later_than_an_exhausted_quota_reset_wins` | 同上 | 较晚的 `retry-after` 胜出 |
 | `reset_does_not_apply_while_quota_remains_and_retry_after_is_given` | 同上 | 仍有配额时 reset 不适用，只看 `retry-after` |

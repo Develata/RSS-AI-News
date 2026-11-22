@@ -26,7 +26,8 @@ use common::{
     app_config, insert_config_rule, make_test_pool, publish_deps, seed_ai_succeeded_article,
 };
 
-/// Fails the first `failures` remote publishes with a retryable rate limit.
+/// Fails the first `failures` remote publishes with a retryable 503 (a rate
+/// limit would not be charged to the stage, R4-4).
 struct FlakyRemote {
     failures: AtomicUsize,
 }
@@ -41,7 +42,7 @@ impl PublishTarget for FlakyRemote {
             })
             .is_ok()
         {
-            return Err(PublishError::rate_limit(OffsetDateTime::now_utc()));
+            return Err(PublishError::api(503, "unavailable"));
         }
         Ok(PublishedArtifact {
             local_path: None,
