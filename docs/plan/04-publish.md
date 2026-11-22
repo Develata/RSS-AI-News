@@ -298,7 +298,8 @@ GitHub 形状（恰好 5 组、每组 1–16 位十六进制、以 `:` 分隔—
 403 由 `http_status` 区分；403 / 429 限流、超过 16 MiB 的成功响应、缺必需字段（`object.sha` / `tree.sha` / `sha` /
 `commit.sha`）的 2xx 也保留操作、实际状态与 request id（缺字段仍按 502 协议错误分类，显示 `(http 201)` 之类的实际状态）。
 Contents API 200 但无字符串 `sha`（如目录列表）是协议错误，不当作"文件不存在"。runtime 的 `publish_failed` 事件 payload
-增加 `operation` / `http_status` / `request_id` 三个字段。
+增加 `operation` / `http_status` / `request_id` 三个字段。远端阶段的该事件另有 `attempt_refunded`：仅当本次以不计预算的
+`release_deferred_retry` 释放**且该释放确实更新了记录**时为 `true`；lease 已被他人取得、释放更新 0 行时为 `false`（R4-7）。
 
 ### 4.2.1 Atomic batch publish
 

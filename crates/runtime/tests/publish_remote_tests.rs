@@ -927,6 +927,54 @@ async fn publish_remote_retry_after_zero_on_the_last_attempt_keeps_the_record() 
     assert_referenced_articles_state(&pool, id, "ready_for_publish").await;
 }
 
+/// Loses the lease to another owner while the request is in flight, then is
+/// rate limited: the deferred release updates no row.
+struct LeaseStolenThenRateLimited {
+    pool: SqlitePool,
+}
+
+#[async_trait]
+impl PublishTarget for LeaseStolenThenRateLimited {
+    async fn publish(&self, _report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        sqlx::query("UPDATE publish_records SET lease_owner = 'another-worker'")
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        Err(PublishError::rate_limit(
+            OffsetDateTime::now_utc() + time::Duration::minutes(5),
+        ))
+    }
+}
+
+/// R4-7: `publish_failed.attempt_refunded` reports the refund that actually
+/// happened. When the lease was lost (the owner-guarded release updates zero
+/// rows) nothing was refunded, so the event says `false`.
+#[tokio::test]
+async fn publish_failed_reports_no_refund_when_the_release_lost_the_lease() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+    let flow = flow(
+        pool.clone(),
+        Some(Arc::new(LeaseStolenThenRateLimited { pool: pool.clone() })),
+    );
+
+    flow.publish_remote_record(id, remote_opts()).await;
+
+    let payload: String = sqlx::query_scalar(
+        "SELECT context_json FROM run_events WHERE event_kind = 'publish_failed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["error_kind"], "github_rate_limit");
+    assert_eq!(payload["attempt_refunded"], false, "{payload}");
+    // The other owner's claim is untouched (not refunded by this run).
+    let (attempts, stage_attempts, owner) = record_counters(&pool, id).await;
+    assert_eq!((attempts, stage_attempts), (1, 1));
+    assert_eq!(owner.as_deref(), Some("another-worker"));
+}
+
 /// A reset far in the future is clamped to one hour: the record keeps owning
 /// its articles, so it must not be parked for longer.
 #[tokio::test]

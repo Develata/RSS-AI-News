@@ -126,6 +126,7 @@
 | `publish_remote_rate_limit_with_a_wait_does_not_spend_the_last_attempt` | 同上 | 写入等待的限流不计预算：末次预算仍 `stored_local`、退还 claim，到点后发布（R3F-S12） |
 | `publish_remote_rate_limit_with_a_passed_deadline_does_not_spend_the_last_attempt` | 同上 | 期限已过的限流同样不计预算：末次预算仍 `stored_local`、退还、不写等待，事件 `attempt_refunded: true`，下次即发布（R4-4） |
 | `publish_remote_retry_after_zero_on_the_last_attempt_keeps_the_record` | 同上 | 真实 GitHub 客户端收到 `429` + `Retry-After: 0`：末次预算仍 `stored_local`、退还、无等待（R4-4） |
+| `publish_failed_reports_no_refund_when_the_release_lost_the_lease` | 同上 | lease 已被他人取得、deferred 释放更新 0 行 → 事件 `attempt_refunded: false`，他人的 claim 不被退还（R4-7） |
 | `exhausted_quota_reset_later_than_retry_after_wins` | `crates/publish/tests/github_classify_tests.rs` | 配额耗尽时取 `retry-after` 与 reset 中较晚者 |
 | `retry_after_later_than_an_exhausted_quota_reset_wins` | 同上 | 较晚的 `retry-after` 胜出 |
 | `reset_does_not_apply_while_quota_remains_and_retry_after_is_given` | 同上 | 仍有配额时 reset 不适用，只看 `retry-after` |

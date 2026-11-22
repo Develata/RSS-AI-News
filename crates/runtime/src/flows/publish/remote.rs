@@ -1109,6 +1109,9 @@ impl PublishFlow {
                 )
                 .await
         };
+        // R4-7: only a deferred release that updated the row refunded the
+        // claim (`Ok(false)` = the lease was lost, nothing changed).
+        let attempt_refunded = deferred && matches!(release_result, Ok(true));
         if let Err(persist_err) = release_result {
             tracing::warn!(
                 publish_record_id,
@@ -1130,7 +1133,7 @@ impl PublishFlow {
                     "error_kind": error.error_kind(),
                     "budget_exhausted": budget_exhausted,
                     // R3F-B2 / S12: released without charging the stage budget.
-                    "attempt_refunded": deferred,
+                    "attempt_refunded": attempt_refunded,
                     // R1-P-S1: where a GitHub failure happened, as fields.
                     "operation": error.github_context().and_then(|context| context.operation),
                     "http_status": error.github_context().and_then(|context| context.http_status),
