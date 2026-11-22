@@ -509,8 +509,24 @@ async fn sqlite_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wa
         .await
         .unwrap();
     assert_eq!(again.len(), 1);
+    // R4-1: the claim projection carries the kind of the last release.
+    assert_eq!(
+        again[0].last_error_kind.as_deref(),
+        Some("remote_write_unverified")
+    );
     assert!(
         repo.release_deferred_retry(id, "d3", PublishState::StoredLocal, "x", "y", None, later)
+            .await
+            .unwrap()
+    );
+    let scanned = repo
+        .claim_local_for_remote_publish(&claim_at(later, "d4"))
+        .await
+        .unwrap();
+    assert_eq!(scanned.len(), 1);
+    assert_eq!(scanned[0].last_error_kind.as_deref(), Some("y"));
+    assert!(
+        repo.release_deferred_retry(id, "d4", PublishState::StoredLocal, "x", "y", None, later)
             .await
             .unwrap()
     );

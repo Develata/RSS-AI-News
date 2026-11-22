@@ -850,6 +850,131 @@ async fn publish_remote_rate_limit_with_a_wait_does_not_spend_the_last_attempt()
     assert_eq!(second.status, PublishRemoteStatus::PublishedRemote);
 }
 
+/// R4-4: a rate limit whose deadline is already past (`Retry-After: 0`, or a
+/// positive deadline that elapsed before the release) imposes no wait, but it
+/// is still a rate limit, not a failed attempt: the last budget is refunded,
+/// the record stays `stored_local` with its articles and no wait is stored.
+#[tokio::test]
+async fn publish_remote_rate_limit_with_a_passed_deadline_does_not_spend_the_last_attempt() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+    let target = Arc::new(RateLimitedOnce {
+        reset_at: OffsetDateTime::now_utc() - time::Duration::seconds(1),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut app = app_config(RetentionPolicy::Always, 1);
+    app.retry.publish_max_attempts = 1;
+    let flow = PublishFlow::new(Arc::new(publish_deps(
+        pool.clone(),
+        Arc::new(app),
+        Arc::new(LocalFsTarget::new(std::env::temp_dir())),
+        Some(target),
+    )));
+
+    let first = flow.publish_remote_record(id, remote_opts()).await;
+
+    assert!(
+        matches!(&first.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "github_rate_limit"),
+        "{:?}",
+        first.status
+    );
+    assert_record_state(&pool, id, "stored_local").await;
+    assert_eq!(record_counters(&pool, id).await, (0, 0, None), "refunded");
+    assert_eq!(next_attempt_at(&pool, id).await, None, "no wait to honour");
+    assert_referenced_articles_state(&pool, id, "ready_for_publish").await;
+    let payload: String = sqlx::query_scalar(
+        "SELECT context_json FROM run_events WHERE event_kind = 'publish_failed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["attempt_refunded"], true);
+    assert_eq!(payload["budget_exhausted"], false);
+    // No wait: the next run can claim at once and publishes.
+    let second = flow.publish_remote_record(id, remote_opts()).await;
+    assert_eq!(second.status, PublishRemoteStatus::PublishedRemote);
+}
+
+/// R4-4 with GitHub's literal `Retry-After: 0` on the last budget.
+#[tokio::test]
+async fn publish_remote_retry_after_zero_on_the_last_attempt_keeps_the_record() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "0")
+                .set_body_json(serde_json::json!({"message": "secondary rate limit"})),
+        )
+        .mount(&server)
+        .await;
+    let flow = github_last_attempt_flow(pool.clone(), &server.uri());
+
+    let outcome = flow.publish_remote_record(id, remote_opts()).await;
+
+    assert!(
+        matches!(&outcome.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "github_rate_limit"),
+        "{:?}",
+        outcome.status
+    );
+    assert_record_state(&pool, id, "stored_local").await;
+    assert_eq!(record_counters(&pool, id).await, (0, 0, None));
+    assert_eq!(next_attempt_at(&pool, id).await, None);
+    assert_referenced_articles_state(&pool, id, "ready_for_publish").await;
+}
+
+/// Loses the lease to another owner while the request is in flight, then is
+/// rate limited: the deferred release updates no row.
+struct LeaseStolenThenRateLimited {
+    pool: SqlitePool,
+}
+
+#[async_trait]
+impl PublishTarget for LeaseStolenThenRateLimited {
+    async fn publish(&self, _report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        sqlx::query("UPDATE publish_records SET lease_owner = 'another-worker'")
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        Err(PublishError::rate_limit(
+            OffsetDateTime::now_utc() + time::Duration::minutes(5),
+        ))
+    }
+}
+
+/// R4-7: `publish_failed.attempt_refunded` reports the refund that actually
+/// happened. When the lease was lost (the owner-guarded release updates zero
+/// rows) nothing was refunded, so the event says `false`.
+#[tokio::test]
+async fn publish_failed_reports_no_refund_when_the_release_lost_the_lease() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local_publish_record(&pool).await;
+    let flow = flow(
+        pool.clone(),
+        Some(Arc::new(LeaseStolenThenRateLimited { pool: pool.clone() })),
+    );
+
+    flow.publish_remote_record(id, remote_opts()).await;
+
+    let payload: String = sqlx::query_scalar(
+        "SELECT context_json FROM run_events WHERE event_kind = 'publish_failed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["error_kind"], "github_rate_limit");
+    assert_eq!(payload["attempt_refunded"], false, "{payload}");
+    // The other owner's claim is untouched (not refunded by this run).
+    let (attempts, stage_attempts, owner) = record_counters(&pool, id).await;
+    assert_eq!((attempts, stage_attempts), (1, 1));
+    assert_eq!(owner.as_deref(), Some("another-worker"));
+}
+
 /// A reset far in the future is clamped to one hour: the record keeps owning
 /// its articles, so it must not be parked for longer.
 #[tokio::test]
@@ -1133,6 +1258,50 @@ async fn publish_remote_stops_the_higher_record_sharing_an_article_before_sendin
     assert_eq!(target.sent(), 1);
 }
 
+/// R4-1: a losing record whose earlier write is unverified keeps the
+/// `remote_write_unverified` kind (refunded, nothing sent), so once the
+/// keeper fails, its next claim still starts with the read-only HEAD check.
+#[tokio::test]
+async fn ownership_loser_with_an_unverified_write_keeps_its_recovery_mark() {
+    let (_dir, pool) = make_test_pool().await;
+    let keeper = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let loser = seed_stored_local_for_target(&pool, "owner/repo:main").await;
+    let shared = share_first_article(&pool, keeper, loser).await;
+    sqlx::query(
+        "UPDATE publish_records SET last_error_kind = 'remote_write_unverified' WHERE id = ?",
+    )
+    .bind(loser)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let target = IdentifiedTarget::new("owner/repo:main");
+    let flow = flow(pool.clone(), Some(target.clone()));
+
+    let outcome = flow.publish_remote_record(loser, remote_opts()).await;
+
+    assert_eq!(
+        outcome.status,
+        PublishRemoteStatus::ArticleConflict { article_id: shared }
+    );
+    assert_eq!(target.sent(), 0, "the losing record must not be sent");
+    assert_record_state(&pool, loser, "stored_local").await;
+    assert_last_error_kind(&pool, loser, "remote_write_unverified").await;
+    assert_eq!(
+        record_counters(&pool, loser).await,
+        (0, 0, None),
+        "refunded"
+    );
+    let payload: String = sqlx::query_scalar(
+        "SELECT context_json FROM run_events WHERE event_kind = 'publish_failed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["error_kind"], "article_owned_by_active_snapshot");
+    assert_eq!(payload["earlier_write_unverified"], true);
+}
+
 /// A published owner wins even with the higher id: its articles are already
 /// `published`, so the lower record could only write and then fail.
 #[tokio::test]
@@ -1362,8 +1531,16 @@ async fn publish_remote_unverified_write_on_the_last_attempt_keeps_the_record_an
         "{events:?}"
     );
 
-    // A later run can claim it again and complete.
+    // A later run can claim it again and complete: it first checks HEAD
+    // read-only (R4-1), finds the report absent, then writes normally.
     server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "object": { "sha": "head-without-report" }
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path_regex("^/repos/owner/repo/contents/"))
         .respond_with(

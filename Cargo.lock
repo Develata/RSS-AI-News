@@ -3134,6 +3134,7 @@ dependencies = [
  "rss-ai-news-report",
  "rss-ai-news-storage",
  "serde_json",
+ "sha1",
  "sha2 0.10.9",
  "sqlx",
  "tempfile",

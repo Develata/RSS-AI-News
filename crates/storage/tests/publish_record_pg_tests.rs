@@ -940,12 +940,15 @@ async fn pg_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait()
         .unwrap()
         .is_empty()
     );
+    let again = repo
+        .claim_publish_by_ids(&request("d3", not_before), PublishState::StoredLocal, &[id])
+        .await
+        .unwrap();
+    assert_eq!(again.len(), 1);
+    // R4-1: the claim projection carries the kind of the last release.
     assert_eq!(
-        repo.claim_publish_by_ids(&request("d3", not_before), PublishState::StoredLocal, &[id])
-            .await
-            .unwrap()
-            .len(),
-        1
+        again[0].last_error_kind.as_deref(),
+        Some("remote_write_unverified")
     );
     assert!(
         repo.release_deferred_retry(
@@ -961,6 +964,12 @@ async fn pg_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait()
         .unwrap()
     );
     assert_eq!(row(id).await.4, None, "None clears the wait");
+    let scanned = repo
+        .claim_local_for_remote_publish(&request("d4", not_before))
+        .await
+        .unwrap();
+    assert_eq!(scanned.len(), 1);
+    assert_eq!(scanned[0].last_error_kind.as_deref(), Some("y"));
 }
 
 /// B2 (ADR 0012) on PostgreSQL under READ COMMITTED: a freeze locks its

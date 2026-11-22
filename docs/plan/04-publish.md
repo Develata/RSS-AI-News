@@ -231,9 +231,10 @@ validate 只用一个样例日期（`2026-01-03`，ADR 0008）渲染，无法发
 
 碰撞规则（2026-11-22，R1-P-B5；validate 与 publish-all 共用 `config::validate::report_path_collisions`）：
 按段比较，且**忽略大小写与 Unicode 规范化差异**——`News/{date}.md` 与 `news/{date}.md` 在 macOS / Windows 默认的
-大小写不敏感卷上是同一文件；比较键（2026-11-22，R3F-B3，`path_segment_key`）为 NFD → `to_uppercase().to_lowercase()`
-（近似 Unicode 完整大小写折叠：`ſ` → `s`、`ß` → `ss`，单纯小写会漏掉）→ 再 NFD，即近似 Unicode §3.13 的 canonical caseless
-match，因此 `ſ` 与 `s`、组合与分解的 `é` 也算同名（APFS 实测 `04-publiſh.md` 与 `04-publish.md` 指向同一文件）。这是近似，
+大小写不敏感卷上是同一文件；比较键（2026-11-22，R3F-B3，`path_segment_key`）为 NFD → `to_lowercase().to_uppercase().to_lowercase()`
+（近似 Unicode 完整大小写折叠：`ſ` → `s`、`ß` → `ss`，单纯小写会漏掉；开头的小写让大写 `ẞ` 先变 `ß` 再折成 `ss`，R4-6）→ 再 NFD，
+即近似 Unicode §3.13 的 canonical caseless match，因此 `ſ` 与 `s`、`ß` / `ẞ` 与 `SS`、组合与分解的 `é` 也算同名
+（APFS 实测 `04-publiſh.md` 与 `04-publish.md`、`Straße`、`Straẞe`、`STRASSE` 三种拼写都指向同一文件）。这是近似，
 不是某一文件系统（APFS / HFS+ / NTFS 各有自己的折叠表）的精确规则，偏向多报碰撞；一个路径是另一个路径的**整段前缀**（`news/2026-01-03` 与 `news/2026-01-03/ml.md`）也算碰撞，
 一个分类要写文件的位置另一个分类需要目录。Git tree 路径本身区分大小写，但每份报告都先落本地，因此统一用更严格的规则。
 根内目录符号链接造成的别名不在此检查之列。
@@ -297,7 +298,8 @@ GitHub 形状（恰好 5 组、每组 1–16 位十六进制、以 `:` 分隔—
 403 由 `http_status` 区分；403 / 429 限流、超过 16 MiB 的成功响应、缺必需字段（`object.sha` / `tree.sha` / `sha` /
 `commit.sha`）的 2xx 也保留操作、实际状态与 request id（缺字段仍按 502 协议错误分类，显示 `(http 201)` 之类的实际状态）。
 Contents API 200 但无字符串 `sha`（如目录列表）是协议错误，不当作"文件不存在"。runtime 的 `publish_failed` 事件 payload
-增加 `operation` / `http_status` / `request_id` 三个字段。
+增加 `operation` / `http_status` / `request_id` 三个字段。远端阶段的该事件另有 `attempt_refunded`：仅当本次以不计预算的
+`release_deferred_retry` 释放**且该释放确实更新了记录**时为 `true`；lease 已被他人取得、释放更新 0 行时为 `false`（R4-7）。
 
 ### 4.2.1 Atomic batch publish
 
@@ -315,6 +317,10 @@ v0.3 引入：`publish_many(reports: &[RenderedReport])` 在一次 commit 内推
 一致 → 以 HEAD commit 记成功；不一致 → 保留原错误按分类释放。4xx 与限流不核对。
 核对本身出错 / 被限流 / 用完时限 → `RemoteWriteUnverified`（R3F-B2）：保持 `stored_local`、退还本次 claim、不转 `failed`、
 文章归属保留；核对遇限流时其期限写入 `next_attempt_at`。
+**下一次 claim 先恢复（R4-1，ADR 0012 §3）**：claim 带回 `last_error_kind`；为 `remote_write_unverified` 的记录在任何写请求前
+先对自己这一份报告做固定 HEAD 只读比对（批量中逐条单独比对）：已含 → 以 HEAD commit 记回执、不写；确认缺失 → 照常写、照常计预算；
+比对再失败 / 被限流 / 超时 → `EarlierWriteUnverified`（同一 `error_kind`）：保态、退还 claim、保留该 kind 与文章归属。
+比对之前的可重试失败（准备超时、快照 / 归属读取的可重试存储错误）同样退还并保留该 kind；目标漂移与永久渲染错误照常 `failed`。
 
 ### 4.2.2 422 lost-update retry
 
@@ -386,13 +392,14 @@ Markdown **byte-equal**；跨渲染器版本（例如 YAML 引号规则调整）
 | 本地落盘失败 | `PublishError::LocalIoError` | `Interrupted` / `WouldBlock` / `TimedOut` → 保持 `rendered` + 计预算；其它 IO 错误（权限、空间等）→ `failed` |
 | 路径越界 / 非法 | `PublishError::InvalidPath` | `failed` |
 | GitHub 401；无限流信号的 403 | `PublishError::GitHubAuthFailed`（`context.http_status` 区分 401 / 403） | `failed` |
-| GitHub 429；带限流信号的 403（`x-ratelimit-remaining: 0`、存在 `retry-after`，或 message 含 "rate limit" / "secondary rate limit"，见 GitHub REST 文档 "Exceeding the rate limit"） | `PublishError::GitHubRateLimit { reset_at }`（适用期限中最晚者：`retry-after`，以及配额耗尽（`remaining: 0`）或无可用 `retry-after` 时的 `x-ratelimit-reset`；都没有 → now+60s，R3F-S12；`retry-after` 接受秒数与 HTTP 日期（RFC 9110 §10.2.3；日期按 §5.6.7 接受 IMF-fixdate、RFC 850、asctime 三种形式，经 `httpdate` 解析，R3F-S11），秒数封顶 24 h、受检加法，过去的日期视为 now；只要有 `retry-after` 头（即使无法解析）403 就算限流；message 中的 "rate limit" 从完整文本提取，R1-P-S11） | retryable：维持阶段态；`reset_at`（钳制到 1 h 内）写入 `next_attempt_at`，claim 到点前不领取（R1-P-S12）；写入了等待的限流**不计预算**（退还 claim，最后一次预算也不 `failed`），reset 已过去（无等待）则照常计预算（R3F-S12） |
+| GitHub 429；带限流信号的 403（`x-ratelimit-remaining: 0`、存在 `retry-after`，或 message 含 "rate limit" / "secondary rate limit"，见 GitHub REST 文档 "Exceeding the rate limit"） | `PublishError::GitHubRateLimit { reset_at }`（适用期限中最晚者：`retry-after`，以及配额耗尽（`remaining: 0`）或无可用 `retry-after` 时的 `x-ratelimit-reset`；都没有 → now+60s，R3F-S12；`retry-after` 接受秒数与 HTTP 日期（RFC 9110 §10.2.3；日期按 §5.6.7 接受 IMF-fixdate、RFC 850、asctime 三种形式，经 `httpdate` 解析，R3F-S11），秒数封顶 24 h、受检加法，过去的日期视为 now；只要有 `retry-after` 头（即使无法解析）403 就算限流；message 中的 "rate limit" 从完整文本提取，R1-P-S11） | retryable：维持阶段态；`reset_at`（钳制到 1 h 内）写入 `next_attempt_at`，claim 到点前不领取（R1-P-S12）；任何限流尝试都**不计预算**（退还 claim，最后一次预算也不 `failed`；R3F-S12，R4-4）：期限已到 / 已过（如 `Retry-After: 0`）时不写等待，下一次运行即可再领取 |
 | GitHub 422 lost-update | `GitHubApiError { status: 422 }`（`is_branch_concurrently_updated`） | 同一次尝试内重新取 HEAD 再试 1 次；第二次 422 为永久错误 → `failed`（不保持 `stored_local`） |
 | 其它 GitHub 4xx（如 400 / 404 / 其它 422） | `GitHubApiError { status }` | `failed` |
 | GitHub 409 | `GitHubApiError { status: 409 }` | 保持 `stored_local` + 计预算 |
 | GitHub 5xx / 传输失败 / 响应读取失败 | `GitHubApiError { status: 5xx }`（传输类归为 503） | 写请求之后的歧义失败先只读核对 HEAD（已落地 → 成功，ADR 0012 §3）；确认未落地 → 保持 `stored_local` + 计预算，本地文件保留 |
 | 远端 deadline（lease 的 80%）超时 | `PublishError::RemoteTimeout` | 先只读核对 HEAD（已落地 → 成功）；确认未落地 → 保持 `stored_local` + 计预算 |
-| 歧义写入 / 远端超时之后的只读核对本身失败、被限流或超时 | `PublishError::RemoteWriteUnverified { write, verification }`（R3F-B2） | 保持 `stored_local`、**退还**本次 claim（不计预算，最后一次预算也不转 `failed`）、文章归属保留；`verification` 为限流时其期限（钳制 1 h）写入 `next_attempt_at`；下一次尝试的写前 HEAD 比对幂等 |
+| 歧义写入 / 远端超时之后的只读核对本身失败、被限流或超时 | `PublishError::RemoteWriteUnverified { write, verification }`（R3F-B2） | 保持 `stored_local`、**退还**本次 claim（不计预算，最后一次预算也不转 `failed`）、文章归属保留；`verification` 为限流时其期限（钳制 1 h）写入 `next_attempt_at`；下一次 claim 先做只读恢复比对（R4-1） |
+| 上次以 `remote_write_unverified` 释放的记录，本次写前的恢复比对失败、被限流或超时（或比对前的可重试失败） | `PublishError::EarlierWriteUnverified { verification }`（R4-1；`error_kind = remote_write_unverified`） | 未发写请求；保持 `stored_local`、**退还**本次 claim、文章归属与该 kind 保留；`verification` 为限流时其期限写入 `next_attempt_at`；请求上下文取自失败的比对 |
 | 2xx 但超过 16 MiB / 缺必需字段 | `ResponseTooLarge` / `GitHubApiError { status: 502 }` | 前者 `failed`；后者按 5xx 计预算 |
 | 目标漂移：record 的 `remote_target`（init 时写入的 `owner/repo:branch`）≠ 当前配置目标 | `PublishError::RemoteTargetMismatch`（`PublishRemoteStatus::TargetMismatch { stored, current }`） | 发请求前拦截，不重试，state='failed'，`last_error` 含两个目标；恢复配置或 `--force` 由运维决定 |
 

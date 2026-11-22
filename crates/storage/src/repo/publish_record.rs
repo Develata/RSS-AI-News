@@ -57,6 +57,12 @@ pub struct ClaimedPublishRecord {
     /// `{generated_at}`); later stages re-render with it so stored, remote and
     /// rebuilt reports stay byte-identical. `None` before render.
     pub rendered_at: Option<OffsetDateTime>,
+    /// The kind of the failure the record was last released with, as read
+    /// by the claim. The remote stage uses it to recognise a record whose
+    /// previous attempt ended `remote_write_unverified` (R4-1): that record's
+    /// write may have landed, so its next attempt starts with a read-only
+    /// HEAD check instead of a write.
+    pub last_error_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

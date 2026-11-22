@@ -579,23 +579,32 @@ fn path_segments(path: &str) -> Vec<String> {
 /// Comparison key of one path segment (R3F-B3): caseless and
 /// normalization-insensitive, so names one local volume may treat as the
 /// same file compare equal. NFD, then full case folding approximated by
-/// `to_uppercase().to_lowercase()` (maps `ſ` → `S` → `s`, `ß` → `SS` → `ss`,
-/// which a plain `to_lowercase()` misses), then NFD again because case
-/// mapping can yield unnormalized sequences. This approximates Unicode
+/// `to_lowercase().to_uppercase().to_lowercase()`, then NFD again because
+/// case mapping can yield unnormalized sequences. The first lowercase is
+/// needed for capitals whose uppercase is themselves but whose lowercase
+/// uppercases further (R4-6: `ẞ` → `ß` → `SS` → `ss`, which a plain
+/// `to_uppercase().to_lowercase()` leaves at `ß`); the upper/lower round trip
+/// then maps `ſ` → `S` → `s` and `ß` → `SS` → `ss`, which a plain
+/// `to_lowercase()` misses. This approximates Unicode
 /// `toNFD(toCasefold(toNFD(x)))` (the canonical caseless match of Unicode
 /// §3.13), not the exact folding table of any one file system (APFS, HFS+,
 /// NTFS each use their own); it errs toward reporting more collisions.
 fn path_segment_key(segment: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     let decomposed = segment.nfd().collect::<String>();
-    decomposed.to_uppercase().to_lowercase().nfd().collect()
+    decomposed
+        .to_lowercase()
+        .to_uppercase()
+        .to_lowercase()
+        .nfd()
+        .collect()
 }
 
 /// Cross-category collisions among `(category_key, rendered relative path)`
 /// pairs, shared by validate-config (sample date) and publish-all (real report
 /// date). Paths are compared by segment after normalization and a caseless,
 /// normalization-insensitive key (`path_segment_key`), so `News/x.md` and
-/// `news/x.md`, `ſ` and `s`, or composed and decomposed `é` collide (one file
+/// `news/x.md`, `ſ` and `s`, `ß`, `ẞ` and `SS`, or composed and decomposed `é` collide (one file
 /// on a case-insensitive volume), and a path that is a whole-segment prefix of
 /// another (`a/x` vs `a/x/y.md`) collides because one category needs a
 /// directory where the other writes a file. Git tree paths are case-sensitive,
@@ -1079,6 +1088,35 @@ mod path_collision_tests {
             ("ml", "docs/04-publi\u{017F}h.md"),
         ]));
         assert_eq!(collisions.len(), 1, "{collisions:?}");
+    }
+
+    /// R4-6: `ß` (U+00DF), capital `ẞ` (U+1E9E) and `SS` fold to one key
+    /// (Unicode full case folding maps both sharp s to `ss`); a plain
+    /// `to_uppercase().to_lowercase()` turns `ẞ` into `ß`, not `ss`.
+    #[test]
+    fn sharp_s_capital_sharp_s_and_double_s_collide() {
+        let collisions = report_path_collisions(&paths(&[
+            ("ai", "Stra\u{df}e/2026.md"),
+            ("ml", "STRASSE/2026.md"),
+            ("tech", "Stra\u{1e9e}e/2026.md"),
+        ]));
+        assert!(
+            matches!(collisions.as_slice(), [PathCollision::Same { keys, .. }] if keys == &["ai", "ml", "tech"]),
+            "{collisions:?}"
+        );
+    }
+
+    #[test]
+    fn capital_sharp_s_parent_directory_collides_with_a_child_path() {
+        let collisions = report_path_collisions(&paths(&[
+            ("ai", "Stra\u{1e9e}e"),
+            ("ml", "strasse/2026.md"),
+        ]));
+        assert!(
+            matches!(collisions.as_slice(), [PathCollision::Nested { parent_key, child_key, .. }]
+                if parent_key == "ai" && child_key == "ml"),
+            "{collisions:?}"
+        );
     }
 
     #[test]
