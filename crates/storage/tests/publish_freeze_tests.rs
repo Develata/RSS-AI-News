@@ -18,6 +18,16 @@ async fn freeze_snapshot_inserts_items_advances_record_to_snapshot_frozen() {
     let article_id = seed_article(&pool, "freeze-ai", "ready_for_publish").await;
     let ai_id = seed_ai_row(&pool, article_id).await;
     let repo = PublishItemRepo::new(pool.clone());
+    // A stray recorded write (e.g. left by a manual repair) is cleared like
+    // every other stage-advance field (R5-2).
+    sqlx::query(
+        "UPDATE publish_records SET unverified_write_path = 'stray.md', \
+         unverified_write_blob_sha = 'stray' WHERE id = ?",
+    )
+    .bind(record_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let outcome = repo
         .freeze_snapshot(
@@ -38,6 +48,15 @@ async fn freeze_snapshot_inserts_items_advances_record_to_snapshot_frozen() {
         .await
         .unwrap();
     assert_eq!(state, "snapshot_frozen");
+    let recorded: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT unverified_write_path, unverified_write_blob_sha FROM publish_records \
+         WHERE id = ?",
+    )
+    .bind(record_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(recorded, (None, None));
     let items = repo
         .list_by_publish_record(record_id)
         .await

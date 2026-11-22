@@ -119,10 +119,39 @@ kind。下一次 claim 走上一条的恢复比对，命中即记回执、不发
   归属败方 → 保留原记录；R5-1 回执未落库 → 记录该回执对应的 blob；限流 deferral（此时没有未定写入）→ 清空。阶段推进与计预算的
   retryable release 清空（后者只发生在比对已确认缺失或本不在恢复中时）；永久失败保留，供人工核对。只在 `last_error_kind =
   remote_write_unverified` 时读取。
-- 恢复比对确认缺失后照常按**当前**配置写入；该写入再歧义时记录新的一对，替换已确认缺失的旧值。
+- 恢复比对在记录的路径上确认缺失之后，只有当本次要写的**最终路径与记录的路径相同**时才写入（见下文 R5-4）；该写入之前先按
+  R5-3 记录新的一对，替换已确认缺失的旧值。
 - 存量（0010 之前已带恢复标记、没有记录）与不记录 blob 的目标：退回按当前渲染比对（`find_published`），行为同 R4-1。
   `find_remote_blob` 的默认实现返回可重试错误，使"有记录但目标查不了"的恢复保持未决，而不是当作缺失。
 **代价**：记录的是写入时的路径；恢复命中时记录被标为发布在旧路径上（这正是那次写入的去处），之后的报告才按新配置。
+
+**远端写入的最后几道闸（2026-11-22，R5-3 / R5-4 / R5-5，Develata 批准；无新迁移）**。对 R5-2 的独立复审又给出三个反例：
+写入与"记录这次写入"之间崩溃；目的地改变后，先前尚在途中的请求晚到；改前缀后一个分类的新路径正是另一分类的旧路径。
+远端阶段（单条与批量）在发出任何写请求之前，按固定顺序过闸：R4-1 恢复比对（只读）→ R5-4 → R5-5 → R5-3 → 发送。
+- **R5-4 目的地改变即暂停**：恢复比对在记录的路径上确认缺失，但本次要写的最终路径与之不同（前缀或路径模板改了；或目标不给
+  路径）时，不写：结果为 `EarlierWriteUnverified { verification: RemoteDestinationChanged { recorded, current } }`，按 deferred
+  释放（保态、退还、保留恢复标记与记录的写入），事件带 `recorded_path` / `current_path`。原因：固定 HEAD 上的缺失不能排除先前那次
+  请求稍后才落地，往别处再写一份就可能留下两份。路径相同则照常写——GitHub 单文件按 `sha` 更新（无 `sha` 时已有文件的 PUT
+  被拒），批量的 ref 更新只接受快进，同一路径上至多留下一份内容（晚到的写入使这次 PUT 被拒时，记录按"其它 4xx"转 `failed`，
+  需按 §Consequences 人工核对；文件本身仍只有一份）。暂停期间每次运行仍先做同一个比对，先前的写入一旦出现即记回执。
+  **运维处理**：要么恢复原前缀 / 路径模板（目的地相同，下一次运行即写入原路径），要么在核实记录的路径上确无该 blob 之后，按
+  §Consequences 的人工步骤把记录置为 `failed`（其文章随之释放，进入之后的报告，按新配置发布）。
+- **R5-5 他人占用的目的地**：若**另一个分类**的记录已占用本次写入的确切最终路径——它在该路径上的写入仍未决（`stored_local`、
+  `remote_write_unverified`、记录的路径相同、目标身份相同），或它已 `published_remote` 于该路径（回执 `remote_target` 相同）——
+  则不写，以 `release_deferred_retry` 释放（保态、退还、清空记录的写入，`last_error_kind = remote_path_conflict`，事件带
+  `path` 与 `holder_record_id`），每次运行重复同一检查，直到运维改开路径模板 / 前缀。按确切路径比较：git 路径区分大小写，只有
+  确切相同的路径才会被覆盖。同一分类不在此列（重跑、`--force`、不含日期的模板本就覆盖自己的文件）。批量中这一检查在逐条处理
+  之后进行，因此本批刚恢复或仍未决的记录也算在内；检查查询数据库，跨运行同样生效。`PublishTarget::receipt_target(path)` 给出
+  该路径的回执形式（GitHub：`github://owner/repo/branch/path`；默认 `None`，不检查）。
+- **R5-3 先记录再发送**：每个写请求（单报告的 `PUT contents`、批量的 `PATCH ref`；批量中每条成员）发出之前，带 owner 与阶段守卫
+  写入 `last_error_kind = remote_write_unverified` 与本次写入的路径、blob（`mark_remote_write_pending`，保留 lease 与计数）；
+  lease 已失或写库失败则不发送。写入的结果照常覆盖它：成功推进清空，拒绝 / 限流按原规则释放并清空，歧义写入照记。于是写入之后、
+  记录结果之前崩溃，lease 过期回收后下一次 claim 会以恢复比对在**原路径**上找到它，而不是按当前配置再写一份。
+  **仍未解决（残留）**：崩溃的这次尝试已计预算；若它是本阶段最后一次预算，lease 过期后 sweep 仍会把记录转 `failed`（未核对、
+  归属释放），见下文"残留限制"。关闭这一窗口需要为预算耗尽的行提供一次只读核对入口，另行设计。
+- **R5-4 不覆盖的边界**：同一次尝试内，写请求返回 5xx / 超时、随即的只读核对在 HEAD 上未找到 → 按原写入错误计预算释放（清空
+  记录与恢复标记，R3F-S16）。先前请求在其后落地的论证同样适用于这里；由于下一次尝试写的是同一路径（目的地未变），GitHub 的
+  `sha` / 快进约束仍保证该路径至多一份，故不扩展 R5-4。
 **代价（未解决）**：每次尝试都以"写入歧义 + 核对未完成"结束、此后比对也一直不出结论的记录（例如 GitHub 长期对读写都不可达）
 不会耗尽预算、一直持有文章归属；它每次运行最多再发一次只读比对。因此 `publish_max_attempts = 1` 或默认预算的最后一次尝试里
 "PATCH 已落地、响应丢失"也会记为 `published_remote`，而不是 `failed` 并释放文章归属。限流（`GitHubRateLimit`）不核对，
@@ -132,7 +161,8 @@ kind。下一次 claim 走上一条的恢复比对，命中即记回执、不发
 需运维处理（恢复凭据 / 分支，或按 §Consequences 的人工核对步骤）。比对之前的永久错误不在此列：目标漂移（`remote_target_mismatch`）
 与永久的渲染错误仍直接 `failed`（运维改了配置或模板，同样需人工核对远端）。
 **残留限制**：进程在写请求之后、核对之前崩溃（或在恢复比对途中崩溃），且该阶段预算已耗尽时，过期清扫仍会把记录转 `failed`
-（未核对、归属释放）；预算未耗尽时，下一次运行的多报告幂等比对 / 单报告幂等（§3 下文）会补回执。
+（未核对、归属释放）；预算未耗尽时，写请求之前已按 R5-3 记录恢复标记与路径 / blob，下一次运行的恢复比对在**原路径**上补回执
+（0010 之前的行与不记录 blob 的目标退回多报告幂等比对 / 单报告幂等，§3 下文，它们只在路径与内容未变时成立）。
 R5-1 的 deferred 释放与推进写同一个数据库：释放本身也失败时（例如数据库整段不可用），记录同样留着 lease，落入这条残留限制。
 
 ### 3a. 限流等待写入记录（2026-11-22，R1-P-S12，同属未发布的 migration 0008）
@@ -197,7 +227,8 @@ R5-1 的 deferred 释放与推进写同一个数据库：释放本身也失败�
   归属规则排除在之后的报告之外（同日即可发生）。上文"按日期重跑"的办法对 force 记录无效。**人工处理**（2026-11-22 改为原子守卫，R3F-B4；
   守卫改为比对核对时读到的确切行版本，R4-5）：
   1. 找出候选并**记下每条的 `state`、`render_version`、`updated_at` 原值**：`SELECT id, state, render_version, updated_at,
-     last_error_kind, remote_target, local_path, lease_owner, lease_expires_at FROM publish_records
+     last_error_kind, remote_target, local_path, unverified_write_path, unverified_write_blob_sha, lease_owner,
+     lease_expires_at FROM publish_records
      WHERE state IN ('pending', 'snapshot_frozen', 'rendered', 'stored_local') AND render_version IN (SELECT id FROM rule_versions
      WHERE kind = 'render' AND version_tag LIKE 'force-%')`。
   2. **先核实远端回执**：`stored_local` 记录（尤其 `last_error_kind = remote_write_unverified` / `remote_timeout`）的远端写入

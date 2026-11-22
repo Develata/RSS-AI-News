@@ -51,6 +51,14 @@ pub trait PublishTarget: Send + Sync {
         None
     }
 
+    /// R5-5: the receipt (`PublishedArtifact::remote_target`) this target
+    /// gives a report written at final `path`, so the stage can find another
+    /// record already published there. `None` = the target cannot tell (the
+    /// default); no such check is made.
+    fn receipt_target(&self, _path: &str) -> Option<String> {
+        None
+    }
+
     /// R5-2: read-only lookup of a recorded write: `Some` receipt (at the
     /// commit the lookup read) iff the destination holds `blob.blob_sha` at
     /// `blob.path`; `None` = it does not. Never writes. Only a target whose

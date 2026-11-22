@@ -572,6 +572,131 @@ async fn sqlite_deferred_retry_records_keeps_and_clears_the_unverified_write() {
     assert_eq!(columns().await, (None, None), "the advance clears");
 }
 
+/// R5-3: recording a write before it is sent sets the recovery kind, path
+/// and blob, keeps the lease and both counters, and is owner- and
+/// state-guarded.
+#[tokio::test]
+async fn sqlite_mark_remote_write_pending_records_the_write_and_keeps_the_lease() {
+    use rss_ai_news_domain::dto::publish::RemoteBlob;
+    use rss_ai_news_storage::PublishState;
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_record(&pool, "pending-write", "stored_local", 1, None).await;
+    let repo = PublishRecordRepo::new(pool.clone());
+    let at = now();
+    repo.claim_publish_by_ids(&claim_at(at, "w1"), PublishState::StoredLocal, &[id])
+        .await
+        .unwrap();
+    let blob = RemoteBlob {
+        path: "reports/ai.md".to_string(),
+        blob_sha: "abc".to_string(),
+    };
+    for (owner, state) in [
+        ("other", PublishState::StoredLocal),
+        ("w1", PublishState::Rendered),
+    ] {
+        assert!(
+            !repo
+                .mark_remote_write_pending(id, owner, state, "x", "k", Some(&blob), at)
+                .await
+                .unwrap()
+        );
+    }
+    assert!(
+        repo.mark_remote_write_pending(
+            id,
+            "w1",
+            PublishState::StoredLocal,
+            "in flight",
+            "remote_write_unverified",
+            Some(&blob),
+            at,
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        state_counters_lease(&pool, id).await,
+        ("stored_local".to_string(), 2, 2, Some("w1".to_string())),
+        "lease and counters kept"
+    );
+    let recorded: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT last_error_kind, unverified_write_path, unverified_write_blob_sha \
+         FROM publish_records WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        recorded,
+        (
+            Some("remote_write_unverified".to_string()),
+            Some("reports/ai.md".to_string()),
+            Some("abc".to_string())
+        )
+    );
+}
+
+/// R5-5: the holder of a remote destination is another category's record
+/// published there, or another category's record whose write there is
+/// unsettled for the same target; never the record itself, a record of the
+/// same category, or an unsettled write for another target.
+#[tokio::test]
+async fn sqlite_find_remote_destination_holder_matches_other_categories_only() {
+    let (_dir, pool) = make_test_pool().await;
+    let repo = PublishRecordRepo::new(pool.clone());
+    let me = seed_record(&pool, "me", "stored_local", 0, None).await;
+    let published = seed_record(&pool, "published", "published_remote", 0, None).await;
+    let pending = seed_record(&pool, "pending", "stored_local", 0, None).await;
+    let set = |id: i64,
+               category: &'static str,
+               target: &'static str,
+               path: Option<&'static str>| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "UPDATE publish_records SET category_key = ?, remote_target = ?, \
+                 last_error_kind = CASE WHEN ? IS NULL THEN NULL ELSE 'remote_write_unverified' END, \
+                 unverified_write_path = ? WHERE id = ?",
+            )
+            .bind(category)
+            .bind(target)
+            .bind(path)
+            .bind(path)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    let receipt = "github://o/r/main/p.md";
+    let holder = || {
+        repo.find_remote_destination_holder(
+            me,
+            "mine",
+            "p.md",
+            "remote_write_unverified",
+            "o/r:main",
+            receipt,
+        )
+    };
+    set(me, "mine", "o/r:main", None).await;
+    set(published, "mine", receipt, None).await;
+    set(pending, "mine", "o/r:main", Some("p.md")).await;
+    assert_eq!(holder().await.unwrap(), None, "same category");
+
+    set(pending, "theirs", "o/x:main", Some("p.md")).await;
+    assert_eq!(holder().await.unwrap(), None, "another target's write");
+    set(pending, "theirs", "o/r:main", Some("p.md")).await;
+    assert_eq!(holder().await.unwrap(), Some(pending), "unsettled write");
+
+    set(pending, "theirs", "o/r:main", None).await;
+    set(published, "theirs", receipt, None).await;
+    assert_eq!(holder().await.unwrap(), Some(published), "published there");
+    set(published, "theirs", "github://o/r/main/q.md", None).await;
+    assert_eq!(holder().await.unwrap(), None, "published elsewhere");
+}
+
 /// R3F-B2 / S12: a deferred retry keeps the stage state, clears the lease,
 /// refunds the claim on both counters and persists the wait (a sub-millisecond
 /// deadline is rounded up, never claimable early); a release for another

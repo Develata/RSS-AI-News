@@ -196,6 +196,10 @@ impl PublishTarget for GitHubTarget {
         })
     }
 
+    fn receipt_target(&self, path: &str) -> Option<String> {
+        Some(self.remote_target_url(path))
+    }
+
     /// The recorded path is used as stored (it was joined and validated when
     /// recorded), never re-joined with the current prefix: the point is to
     /// look where the earlier write went.

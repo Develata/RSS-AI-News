@@ -65,6 +65,9 @@
     归属保留，不留 lease 等 sweep）；下一次运行由恢复比对记回执、零写请求
   - **恢复按记录的写入核对**（R5-2）：恢复比对查记录的最终路径与 blob（migration 0010），歧义写入之后改了
     `github_path_prefix` / 路径模板也只查原路径、命中即记回执、零写请求；比对未出结论时保留记录，阶段推进与计预算的释放清空
+  - **写前闸**（R5-3 / R5-4 / R5-5）：确认缺失但目的地已变 → 不写、保留记录，恢复原配置后写入原路径；另一分类已发布于 / 未决于
+    同一确切路径 → 不写、`remote_path_conflict`，下一次运行仍不写；写请求之前先记录恢复标记与路径 / blob，写入后崩溃、改前缀，
+    下一次运行在原路径记回执、零写请求；批量重复 ID → 不领取、不发送
 - promote target article 已被其它流转推进 → `ArticleConflict`
 - 存量重复归属（0008 前两份未失败快照共享文章）：store_local / remote 写前拦截，已发布者或低 id 者胜出；败方不写外部产物、
   释放 lease、退还 claim、保持阶段态 → `ArticleConflict`（`article_owned_by_active_snapshot`）
@@ -177,7 +180,13 @@
 | `batch_receipt_not_recorded_defers_only_that_record` | 同上 | 批量：只有回执落库失败的那条 deferred，其余照常发布；下一批由恢复比对记回执、不再写 |
 | `recovery_after_a_prefix_change_checks_the_recorded_path_and_writes_nothing` | 同上 | 审查序列（R5-2）：`reports/` 下歧义写入 + 核对失败 → 记录路径与 blob；前缀改为 `archive` 后比对再失败 → 记录保留；HEAD 只在 `reports/` 下有该 blob → 以该 commit 记回执、`remote_target` 指向原路径、只查原路径、零写请求，推进后记录清空 |
 | `unrecorded_receipt_is_found_at_its_recorded_path_after_a_prefix_change` | 同上 | R5-1 + R5-2：写入成功、回执未落库 → 记录回执的路径与 blob；改前缀后下一次运行按原路径记回执、零写请求 |
-| `batch_recovery_checks_each_recorded_write` | 同上 | 批量逐条按记录的写入比对：已落地者按记录路径记回执、不入批；缺失者随批写入 |
+| `batch_recovery_checks_each_recorded_write` | 同上 | 批量逐条按记录的写入（路径与 blob）比对：已落地者按记录路径记回执、不入批；路径对但 blob 不同且目的地已变者暂停（R5-4）；在原路径确认缺失者与普通记录随批写入 |
+| `recovery_confirmed_absent_at_a_changed_destination_holds_until_restored` | 同上 | R5-4：记录的路径上确认缺失、前缀已改 → 零写请求、保留记录、事件带两条路径；恢复原前缀后在记录的路径上 PUT |
+| `crash_after_a_landed_write_recovers_at_the_recorded_path_after_a_prefix_change` | 同上 | R5-3：PUT 落地后进程"死亡"、改前缀 → 下一次运行在原路径记回执、零写请求（写前已记录） |
+| `write_to_a_path_another_category_holds_is_held` | 同上 | R5-5（批量，复审序列）：另一分类在本批恢复于同一路径 → 不写、`remote_path_conflict`、退还；之后单独再跑仍不写；同分类可写 |
+| `single_write_to_a_path_published_by_another_category_is_held` | 同上 | R5-5（单条，真实目标）：另一分类已发布于同一路径 → 零请求、`remote_path_conflict`、退还 |
+| `batch_with_a_repeated_record_id_claims_and_sends_nothing` | 同上 | 批量重复 ID：不领取、不发送 |
+| `sqlite_mark_remote_write_pending_records_the_write_and_keeps_the_lease`、`sqlite_find_remote_destination_holder_matches_other_categories_only` | `crates/storage/tests/publish_stage_recovery_tests.rs` | 写前记录保留 lease 与计数、带守卫；占用者只认另一分类的已发布或同目标未决写入（PG：`pg_pending_write_and_destination_holder`） |
 | `deferred_releases_record_keep_or_clear_the_unverified_write` | `crates/runtime/src/flows/publish/remote.rs` | 新歧义写入 → 记录本次写入；恢复未决 → 保留；限流 → 清空 |
 | `sqlite_deferred_retry_records_keeps_and_clears_the_unverified_write` | `crates/storage/tests/publish_stage_recovery_tests.rs` | `Record` 写入、`Keep` 保留、两类 claim 投影带回、`Record(None)` / 计预算释放 / 阶段推进清空（PG 同名 `pg_…`，`publish_record_pg_tests.rs`） |
 | `git_blob_sha_matches_git_hash_object` | `crates/publish/src/github.rs` | blob sha 与 `git hash-object` 一致（含中文） |

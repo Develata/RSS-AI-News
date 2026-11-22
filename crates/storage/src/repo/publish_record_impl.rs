@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use sqlx::{PgPool, Postgres, QueryBuilder, Sqlite, SqlitePool};
 use time::OffsetDateTime;
 
+use rss_ai_news_domain::dto::publish::RemoteBlob;
+
 use crate::{ClaimRequest, ReleaseFailureOutcome, StorageError, StoragePool, classify_db_error};
 
 use super::{
@@ -18,7 +20,8 @@ use super::{
     },
     publish_record_sql::{
         ADVANCE_LOCAL_SQL, ADVANCE_REMOTE_SQL, ADVANCE_RENDERED_SQL, ADVANCE_SNAPSHOT_SQL,
-        CREATE_IF_NEW_SQL, PROMOTE_ARTICLE_PUBLISHED_SQL, PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL,
+        CREATE_IF_NEW_SQL, FIND_REMOTE_DESTINATION_HOLDER_SQL, MARK_REMOTE_WRITE_PENDING_SQL,
+        PROMOTE_ARTICLE_PUBLISHED_SQL, PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL,
         RECLAIM_PUBLISH_LEASES_SQL, RECLAIM_PUBLISH_LEASES_SQLITE_SQL,
         RELEASE_DEFERRED_RETRY_RECORDING_SQL, RELEASE_DEFERRED_RETRY_SQL,
         RELEASE_EMPTY_SNAPSHOT_SQL, RELEASE_FREEZE_CONFLICT_SQL, RELEASE_OWNERSHIP_CONFLICT_SQL,
@@ -364,6 +367,86 @@ impl PublishRecordRepository for PublishRecordRepo {
             }
         };
         Ok(affected == 1)
+    }
+
+    async fn mark_remote_write_pending(
+        &self,
+        id: i64,
+        owner: &str,
+        state: PublishState,
+        error: &str,
+        kind: &str,
+        blob: Option<&RemoteBlob>,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let path = blob.map(|blob| blob.path.as_str());
+        let blob_sha = blob.map(|blob| blob.blob_sha.as_str());
+        let affected = match self.storage_pool() {
+            StoragePool::Sqlite(p) => sqlx::query(MARK_REMOTE_WRITE_PENDING_SQL)
+                .bind(error)
+                .bind(kind)
+                .bind(path)
+                .bind(blob_sha)
+                .bind(now)
+                .bind(id)
+                .bind(owner)
+                .bind(state.as_str())
+                .execute(p)
+                .await
+                .map_err(StorageError::from)?
+                .rows_affected(),
+            StoragePool::Postgres(p) => sqlx::query(MARK_REMOTE_WRITE_PENDING_SQL)
+                .bind(error)
+                .bind(kind)
+                .bind(path)
+                .bind(blob_sha)
+                .bind(now)
+                .bind(id)
+                .bind(owner)
+                .bind(state.as_str())
+                .execute(p)
+                .await
+                .map_err(StorageError::from)?
+                .rows_affected(),
+        };
+        Ok(affected == 1)
+    }
+
+    async fn find_remote_destination_holder(
+        &self,
+        id: i64,
+        category_key: &str,
+        path: &str,
+        unverified_kind: &str,
+        target_identity: &str,
+        receipt_target: &str,
+    ) -> Result<Option<i64>, StorageError> {
+        match self.storage_pool() {
+            StoragePool::Sqlite(p) => {
+                sqlx::query_scalar::<_, i64>(FIND_REMOTE_DESTINATION_HOLDER_SQL)
+                    .bind(id)
+                    .bind(category_key)
+                    .bind(path)
+                    .bind(unverified_kind)
+                    .bind(target_identity)
+                    .bind(receipt_target)
+                    .fetch_optional(p)
+                    .await
+                    .map_err(StorageError::from)
+            }
+            StoragePool::Postgres(p) => {
+                sqlx::query_scalar::<_, i64>(FIND_REMOTE_DESTINATION_HOLDER_SQL)
+                    .bind(id)
+                    .bind(category_key)
+                    .bind(path)
+                    .bind(unverified_kind)
+                    .bind(target_identity)
+                    .bind(receipt_target)
+                    .fetch_optional(p)
+                    .await
+                    .map_err(StorageError::from)
+            }
+        }
     }
 
     async fn release_permanent_failure(

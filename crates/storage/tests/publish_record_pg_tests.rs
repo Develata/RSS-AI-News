@@ -1137,6 +1137,134 @@ async fn pg_deferred_retry_records_keeps_and_clears_the_unverified_write() {
     assert_eq!(columns().await, (None, None), "the advance clears");
 }
 
+/// R5-3 / R5-5 on PostgreSQL: recording a write before it is sent keeps the
+/// lease and is owner-guarded; the destination holder is another category's
+/// record published there or unsettled there for the same target.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_pending_write_and_destination_holder() {
+    use rss_ai_news_domain::dto::publish::RemoteBlob;
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "holder").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let mut ids = Vec::new();
+    for key in ["idem-me", "idem-published", "idem-pending"] {
+        ids.push(
+            repo.create_if_new(&new_record(key, "ai", render, policy))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let (me, published, pending) = (ids[0], ids[1], ids[2]);
+    sqlx::query("UPDATE publish_records SET state = 'stored_local', remote_target = 'o/r:main'")
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    let at = OffsetDateTime::now_utc();
+    let request = ClaimRequest {
+        owner: "w1".to_string(),
+        now: at,
+        lease_expires_at: lease_expires(at),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+    repo.claim_publish_by_ids(&request, PublishState::StoredLocal, &[me])
+        .await
+        .unwrap();
+    let blob = RemoteBlob {
+        path: "p.md".to_string(),
+        blob_sha: "abc".to_string(),
+    };
+    assert!(
+        !repo
+            .mark_remote_write_pending(
+                me,
+                "other",
+                PublishState::StoredLocal,
+                "x",
+                "k",
+                Some(&blob),
+                at
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        repo.mark_remote_write_pending(
+            me,
+            "w1",
+            PublishState::StoredLocal,
+            "in flight",
+            "remote_write_unverified",
+            Some(&blob),
+            at,
+        )
+        .await
+        .unwrap()
+    );
+    let row: (Option<String>, Option<String>, Option<String>, i64) = sqlx::query_as(
+        "SELECT lease_owner, last_error_kind, unverified_write_path, stage_attempt_count \
+         FROM publish_records WHERE id = $1",
+    )
+    .bind(me)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        (
+            Some("w1".to_string()),
+            Some("remote_write_unverified".to_string()),
+            Some("p.md".to_string()),
+            1
+        )
+    );
+
+    let receipt = "github://o/r/main/p.md";
+    let holder = || {
+        repo.find_remote_destination_holder(
+            me,
+            "ai",
+            "p.md",
+            "remote_write_unverified",
+            "o/r:main",
+            receipt,
+        )
+    };
+    let update = |sql: &'static str, id: i64| {
+        let pool = ctx.pg_pool().clone();
+        async move {
+            sqlx::query(sql).bind(id).execute(&pool).await.unwrap();
+        }
+    };
+    update(
+        "UPDATE publish_records SET last_error_kind = 'remote_write_unverified', \
+         unverified_write_path = 'p.md' WHERE id = $1",
+        pending,
+    )
+    .await;
+    assert_eq!(holder().await.unwrap(), None, "same category");
+    update(
+        "UPDATE publish_records SET category_key = 'other' WHERE id = $1",
+        pending,
+    )
+    .await;
+    assert_eq!(holder().await.unwrap(), Some(pending), "unsettled write");
+    update(
+        "UPDATE publish_records SET last_error_kind = NULL WHERE id = $1",
+        pending,
+    )
+    .await;
+    update(
+        "UPDATE publish_records SET state = 'published_remote', category_key = 'other', \
+         remote_target = 'github://o/r/main/p.md' WHERE id = $1",
+        published,
+    )
+    .await;
+    assert_eq!(holder().await.unwrap(), Some(published), "published there");
+}
+
 /// B2 (ADR 0012) on PostgreSQL under READ COMMITTED: a freeze locks its
 /// articles before the ownership re-check, so it waits for a concurrent
 /// freeze of the same article and then sees that snapshot's committed items

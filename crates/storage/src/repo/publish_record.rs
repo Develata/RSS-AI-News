@@ -291,6 +291,37 @@ pub trait PublishRecordRepository: Send + Sync {
         unverified_write: UnverifiedWriteUpdate<'_>,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
+    /// R5-3: records the remote write about to be sent by the claimed record
+    /// (`kind` = the recovery kind, `blob` = its final path and git blob id;
+    /// `None` records none), keeping the lease and the counters. A crash
+    /// before the outcome is recorded then leaves a record the next claim
+    /// recovers at that path. Returns `false` when the lease was lost (send
+    /// nothing).
+    #[allow(clippy::too_many_arguments)]
+    async fn mark_remote_write_pending(
+        &self,
+        id: i64,
+        owner: &str,
+        state: PublishState,
+        error: &str,
+        kind: &str,
+        blob: Option<&RemoteBlob>,
+        now: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+    /// R5-5: the id of another record, of a category other than
+    /// `category_key`, that holds remote destination `path`: its write there
+    /// is unsettled (`stored_local`, `last_error_kind = unverified_kind`,
+    /// recorded at `path`, initialised for `target_identity`) or it is
+    /// `published_remote` with receipt `receipt_target`. `None` = free.
+    async fn find_remote_destination_holder(
+        &self,
+        id: i64,
+        category_key: &str,
+        path: &str,
+        unverified_kind: &str,
+        target_identity: &str,
+        receipt_target: &str,
+    ) -> Result<Option<i64>, StorageError>;
     async fn release_permanent_failure(
         &self,
         id: i64,

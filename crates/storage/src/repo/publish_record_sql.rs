@@ -277,6 +277,26 @@ pub(super) const RELEASE_DEFERRED_RETRY_SQL: &str = "UPDATE publish_records SET 
 /// [`RELEASE_DEFERRED_RETRY_SQL`] that also records the write whose outcome
 /// is not on record (R5-2): `$8` = its destination path, `$9` = its git
 /// blob id; both NULL clear it ([`crate::UnverifiedWriteUpdate::Record`]).
+/// R5-3: before a remote write is sent, the claimed record records it — the
+/// recovery kind (`$2`), its final path (`$3`) and blob (`$4`) — keeping the
+/// lease, so a crash between the write and its outcome leaves a record the
+/// next claim recovers at that path. Owner- and state-guarded.
+pub(super) const MARK_REMOTE_WRITE_PENDING_SQL: &str = "UPDATE publish_records SET last_error = $1, last_error_kind = $2, unverified_write_path = $3, unverified_write_blob_sha = $4, updated_at = $5 WHERE id = $6 AND lease_owner = $7 AND state = $8";
+/// R5-5: another record, of another category, that holds remote destination
+/// `$3`: one whose write there is unsettled (`stored_local`, marked `$4`,
+/// recorded at `$3`, initialised for target `$5`) or one published there
+/// (`published_remote`, receipt `$6`). Exact paths: git paths are
+/// case-sensitive, and only an exact match is overwritten.
+pub(super) const FIND_REMOTE_DESTINATION_HOLDER_SQL: &str = r#"
+SELECT id FROM publish_records
+WHERE id <> $1
+  AND category_key <> $2
+  AND ((state = 'stored_local' AND last_error_kind = $4
+        AND unverified_write_path = $3 AND remote_target = $5)
+    OR (state = 'published_remote' AND remote_target = $6))
+ORDER BY id ASC
+LIMIT 1
+"#;
 pub(super) const RELEASE_DEFERRED_RETRY_RECORDING_SQL: &str = "UPDATE publish_records SET lease_owner = NULL, lease_expires_at = NULL, attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, stage_attempt_count = CASE WHEN stage_attempt_count > 0 THEN stage_attempt_count - 1 ELSE 0 END, last_error = $1, last_error_kind = $2, updated_at = $3, next_attempt_at = $7, unverified_write_path = $8, unverified_write_blob_sha = $9 WHERE id = $4 AND lease_owner = $5 AND state = $6";
 pub(super) const RECLAIM_PUBLISH_LEASES_SQL: &str = r#"
 UPDATE publish_records

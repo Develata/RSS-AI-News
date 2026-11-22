@@ -35,6 +35,7 @@ struct PreparedRemote {
     item_count: u32,
     /// R5-2: what the batch write puts at the destination for this record.
     blob: Option<RemoteBlob>,
+    report: RenderedReport,
 }
 
 // Start the shared preparation/remote budget before claiming so claim latency
@@ -172,6 +173,39 @@ async fn check_earlier_write(
         Ok(Err(error)) => Err(unsettled(error)),
         Err(_) => Err(unsettled(PublishError::RemoteTimeout)),
     }
+}
+
+/// R5-5: kind of a write held because another category's record holds its
+/// destination.
+pub(super) const REMOTE_PATH_CONFLICT_KIND: &str = "remote_path_conflict";
+/// Outcome kind of every item of a batch that repeats a record id.
+const DUPLICATE_BATCH_RECORD_KIND: &str = "duplicate_publish_record";
+/// R5-3: `last_error` while a write is in flight (recorded before sending).
+const PENDING_WRITE_NOTE: &str = "github write sent; its outcome is not recorded yet";
+
+/// R5-4: the recovery check confirmed the recorded write absent at its
+/// recorded path. If this attempt would write elsewhere, a request of the
+/// earlier attempt may still land there and leave two copies, so the attempt
+/// is held: `Some` = [`PublishError::EarlierWriteUnverified`] carrying
+/// [`PublishError::RemoteDestinationChanged`] (deferred, recorded write
+/// kept). Same path → `None`, write (GitHub's update-by-sha and the batch's
+/// fast-forward-only ref update keep one file there). No recorded write (rows
+/// marked before migration 0010, targets that record none) → `None`, as
+/// R4-1.
+fn destination_changed(
+    recorded: Option<&RemoteBlob>,
+    written: Option<&RemoteBlob>,
+) -> Option<PublishError> {
+    let recorded = recorded?;
+    if written.is_some_and(|written| written.path == recorded.path) {
+        return None;
+    }
+    Some(PublishError::EarlierWriteUnverified {
+        verification: Box::new(PublishError::RemoteDestinationChanged {
+            recorded: recorded.path.clone(),
+            current: written.map(|written| written.path.clone()),
+        }),
+    })
 }
 
 /// R5-2: what a deferred release of `error` does with the recorded write.
@@ -523,20 +557,45 @@ impl PublishFlow {
         let lease_seconds = self.ctx.lease.publish_duration_seconds;
         // R5-2: what a write of this report puts at the destination now.
         let written = target.remote_blob(&report);
-        // R4-1: settle an earlier unverified write read-only before writing.
-        let result = if unverified_write {
+        // Gates in order: R4-1 recovery check (read-only, before any write)
+        // → R5-4 hold on a changed destination → R5-5 destination held by
+        // another category → R5-3 record the write → send.
+        let settled = if unverified_write {
             let recorded = claimed.unverified_write();
             match check_earlier_write(target.as_ref(), &report, recorded.as_ref(), deadline).await {
-                Ok(Some(found)) => Ok(found),
-                Ok(None) => send_report(target.as_ref(), &report, deadline, lease_seconds)
-                    .await
-                    .map(|artifact| (artifact, written.clone())),
-                Err(error) => Err(error),
+                Ok(Some(found)) => Some(Ok(found)),
+                Ok(None) => destination_changed(recorded.as_ref(), written.as_ref()).map(Err),
+                Err(error) => Some(Err(error)),
             }
         } else {
-            send_report(target.as_ref(), &report, deadline, lease_seconds)
-                .await
-                .map(|artifact| (artifact, written.clone()))
+            None
+        };
+        let result = match settled {
+            Some(result) => result,
+            None => {
+                if let Err(status) = self
+                    .gate_remote_write(
+                        &claimed,
+                        &owner,
+                        target.as_ref(),
+                        written.as_ref(),
+                        "publish_remote",
+                        &emitter,
+                    )
+                    .await
+                {
+                    return PublishRemoteOutcome {
+                        publish_record_id: claimed.id,
+                        status,
+                        commit_sha: None,
+                        remote_target: None,
+                        item_count,
+                    };
+                }
+                send_report(target.as_ref(), &report, deadline, lease_seconds)
+                    .await
+                    .map(|artifact| (artifact, written.clone()))
+            }
         };
         let now = OffsetDateTime::now_utc();
         let (artifact, receipt_blob) = match result {
@@ -623,6 +682,33 @@ impl PublishFlow {
                 commit_sha: None,
             };
         }
+        // One claim serves every item with its id, so a repeated id would
+        // send one snapshot twice (e.g. under two path templates). A caller
+        // bug: nothing is claimed or sent.
+        let mut seen = std::collections::HashSet::new();
+        if !opts
+            .items
+            .iter()
+            .all(|item| seen.insert(item.publish_record_id))
+        {
+            tracing::error!("publish_remote_batch called with a repeated publish_record_id");
+            return PublishRemoteBatchOutcome {
+                commit_sha: None,
+                items: opts
+                    .items
+                    .into_iter()
+                    .map(|item| PublishRemoteOutcome {
+                        publish_record_id: item.publish_record_id,
+                        status: PublishRemoteStatus::Failed {
+                            error_kind: DUPLICATE_BATCH_RECORD_KIND.to_string(),
+                        },
+                        commit_sha: None,
+                        remote_target: None,
+                        item_count: 0,
+                    })
+                    .collect(),
+            };
+        }
 
         // W15 §5：remote batch 是独立 CLI 入口（publish_all 跨类目第二阶段），
         // 首次 claim 前执行一次 ① reclaim + ② sweep（顺序固定，best-effort）。
@@ -679,7 +765,6 @@ impl PublishFlow {
             .collect::<HashMap<_, _>>();
 
         let mut prepared = Vec::new();
-        let mut reports = Vec::new();
         let mut outcomes = Vec::with_capacity(opts.items.len());
         for item in opts.items {
             let claimed = match claimed_by_id.get(&item.publish_record_id) {
@@ -835,23 +920,83 @@ impl PublishFlow {
                         continue;
                     }
                 }
+                // R5-4: confirmed absent, but this batch would write elsewhere.
+                if let Some(hold) =
+                    destination_changed(recorded.as_ref(), target.remote_blob(&report).as_ref())
+                {
+                    self.release_publish_error_for_record(
+                        claimed.id,
+                        &owner,
+                        &hold,
+                        None,
+                        "publish_remote_batch",
+                        &emitter,
+                    )
+                    .await;
+                    outcomes.push(PublishRemoteOutcome {
+                        publish_record_id: claimed.id,
+                        status: PublishRemoteStatus::Failed {
+                            error_kind: hold.error_kind().to_string(),
+                        },
+                        commit_sha: None,
+                        remote_target: None,
+                        item_count,
+                    });
+                    continue;
+                }
             }
             let blob = target.remote_blob(&report);
-            reports.push(report);
             prepared.push(PreparedRemote {
                 publish_record_id: claimed.id,
                 promote_article_ids,
                 item_count,
                 blob,
+                report,
             });
         }
 
+        // R5-5 / R5-3 after every member was checked: the records this batch
+        // recovered or left unverified are on record by now, so a member
+        // aimed at one of their destinations is held; the rest record their
+        // write before it is sent. A member stopped here leaves the batch
+        // (its report with it — `prepared` is the batch, in order).
+        let mut ready = Vec::with_capacity(prepared.len());
+        for item in prepared {
+            let Some(claimed) = claimed_by_id.get(&item.publish_record_id) else {
+                continue;
+            };
+            match self
+                .gate_remote_write(
+                    claimed,
+                    &owner,
+                    target.as_ref(),
+                    item.blob.as_ref(),
+                    "publish_remote_batch",
+                    &emitter,
+                )
+                .await
+            {
+                Ok(()) => ready.push(item),
+                Err(status) => outcomes.push(PublishRemoteOutcome {
+                    publish_record_id: item.publish_record_id,
+                    status,
+                    commit_sha: None,
+                    remote_target: None,
+                    item_count: item.item_count,
+                }),
+            }
+        }
+        let prepared = ready;
         if prepared.is_empty() {
             return PublishRemoteBatchOutcome {
                 items: outcomes,
                 commit_sha: None,
             };
         }
+        let reports = prepared
+            .iter()
+            .map(|item| item.report.clone())
+            .collect::<Vec<_>>();
 
         let result = if Instant::now() >= deadline {
             Err(PublishError::RemoteTimeout)
@@ -948,6 +1093,156 @@ impl PublishFlow {
             items: outcomes,
             commit_sha: batch.commit_sha,
         }
+    }
+
+    /// The last gates before a remote write of `claimed`, after the R4-1
+    /// check and the R5-4 hold; `Ok` = send now, `Err` = the attempt ended
+    /// here (released) with that status.
+    /// 1. R5-5: another category's record holds `written`'s destination —
+    ///    published there, or its write there unsettled — so writing would
+    ///    overwrite that report: held without a write (refunded, ownership
+    ///    kept, `remote_path_conflict`) until the paths are fixed.
+    /// 2. R5-3: record the write about to be sent (recovery kind, path,
+    ///    blob), so a crash between the write and its outcome leaves a record
+    ///    the next claim recovers at that path. A lost lease or a storage
+    ///    error sends nothing.
+    async fn gate_remote_write(
+        &self,
+        claimed: &ClaimedPublishRecord,
+        owner: &str,
+        target: &dyn PublishTarget,
+        written: Option<&RemoteBlob>,
+        phase: &'static str,
+        emitter: &RunEventEmitter<'_>,
+    ) -> Result<(), PublishRemoteStatus> {
+        let now = OffsetDateTime::now_utc();
+        if let Some(blob) = written
+            && let Some(identity) = claimed.remote_target.as_deref()
+            && let Some(receipt) = target.receipt_target(&blob.path)
+        {
+            match self
+                .ctx
+                .publish_record_repo
+                .find_remote_destination_holder(
+                    claimed.id,
+                    &claimed.category_key,
+                    &blob.path,
+                    REMOTE_WRITE_UNVERIFIED_KIND,
+                    identity,
+                    &receipt,
+                )
+                .await
+            {
+                Ok(None) => {}
+                Ok(Some(holder)) => {
+                    self.release_path_conflict(
+                        claimed.id, owner, &blob.path, holder, phase, emitter,
+                    )
+                    .await;
+                    return Err(PublishRemoteStatus::Failed {
+                        error_kind: REMOTE_PATH_CONFLICT_KIND.to_string(),
+                    });
+                }
+                Err(error) => {
+                    self.release_classified_failure(claimed.id, owner, &error, phase, now, emitter)
+                        .await;
+                    return Err(PublishRemoteStatus::Failed {
+                        error_kind: error.error_kind().to_string(),
+                    });
+                }
+            }
+        }
+        match self
+            .ctx
+            .publish_record_repo
+            .mark_remote_write_pending(
+                claimed.id,
+                owner,
+                PublishState::StoredLocal,
+                PENDING_WRITE_NOTE,
+                REMOTE_WRITE_UNVERIFIED_KIND,
+                written,
+                now,
+            )
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                tracing::warn!(
+                    publish_record_id = claimed.id,
+                    phase,
+                    "lease lost before the remote write; nothing sent"
+                );
+                Err(PublishRemoteStatus::Conflicted)
+            }
+            Err(error) => {
+                self.release_classified_failure(claimed.id, owner, &error, phase, now, emitter)
+                    .await;
+                Err(PublishRemoteStatus::Failed {
+                    error_kind: error.error_kind().to_string(),
+                })
+            }
+        }
+    }
+
+    /// R5-5: releases a write held because record `holder` (another
+    /// category) holds its destination `path`: no write, claim refunded,
+    /// state and ownership kept; any recorded write is cleared (the recovery
+    /// check confirmed it absent, or there was none).
+    async fn release_path_conflict(
+        &self,
+        publish_record_id: i64,
+        owner: &str,
+        path: &str,
+        holder: i64,
+        phase: &'static str,
+        emitter: &RunEventEmitter<'_>,
+    ) {
+        let now = OffsetDateTime::now_utc();
+        let message = format!(
+            "remote path {path} is held by publish record {holder} of another category \
+             (published there, or its write there is unverified); record {publish_record_id} \
+             sends nothing until the path templates or the prefix stop sharing it"
+        );
+        let released = self
+            .ctx
+            .publish_record_repo
+            .release_deferred_retry(
+                publish_record_id,
+                owner,
+                PublishState::StoredLocal,
+                &message,
+                REMOTE_PATH_CONFLICT_KIND,
+                None,
+                UnverifiedWriteUpdate::Record(None),
+                now,
+            )
+            .await;
+        if let Err(persist_err) = &released {
+            tracing::warn!(
+                publish_record_id,
+                phase,
+                ?persist_err,
+                "path-conflict release could not be persisted; lease recovery remains available",
+            );
+        }
+        emitter
+            .emit(
+                "publish_failed",
+                "error",
+                Some("publish_record"),
+                Some(publish_record_id),
+                &message,
+                Some(json!({
+                    "phase": phase,
+                    "error_kind": REMOTE_PATH_CONFLICT_KIND,
+                    "path": path,
+                    "holder_record_id": holder,
+                    "budget_exhausted": false,
+                    "attempt_refunded": matches!(released, Ok(true)),
+                })),
+            )
+            .await;
     }
 
     /// Pre-write ownership guard for a claimed `stored_local` record (P-B1);
@@ -1252,6 +1547,9 @@ impl PublishFlow {
                         .github_context()
                         .and_then(|context| context.request_id.as_deref()),
                     "retry_not_before": retry_not_before.map(|at| at.to_string()),
+                    // R5-4: a recovery held on a changed destination.
+                    "recorded_path": error.destination_change().map(|(recorded, _)| recorded),
+                    "current_path": error.destination_change().and_then(|(_, current)| current),
                 })),
             )
             .await;
