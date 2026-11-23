@@ -143,6 +143,17 @@ pub struct RenderedReport {
     pub relative_path: String,
 }
 
+/// Where a remote write of a report puts it and what it puts there: the
+/// destination path (with any target prefix) and the git blob id of the
+/// content. Recorded with a write whose outcome is not on record so that its
+/// recovery checks this exact blob at this exact path, whatever the
+/// configured paths or templates say by then (R5-2, ADR 0012 §3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteBlob {
+    pub path: String,
+    pub blob_sha: String,
+}
+
 /// Publishing outcome.
 #[derive(Debug, Clone)]
 pub struct PublishOutcome {

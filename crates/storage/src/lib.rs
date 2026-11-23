@@ -27,7 +27,7 @@ pub use repo::{
     ClaimedFeedEntry, ClaimedPublishRecord, ClaimedReindexJob, ConfigRotation,
     ContentHashReindexCandidate, DecisionArticle, DecisionAttemptRecord, DecisionExecution,
     DecisionFailure, DecisionFailureMode, DecisionIdentity, DecisionRawRecord, DecisionResultRepo,
-    DecisionResultRepository, DecisionResultState, DecisionSuccess, FeedEntry,
+    DecisionResultRepository, DecisionResultState, DecisionSuccess, DestinationCheck, FeedEntry,
     FeedEntryInsertOutcome, FeedEntryRepo, FeedEntryRepository, FeedSourceRepo,
     FeedSourceRepository, FinishReindexTxOutcome, FreezeSnapshotItem, FreezeSnapshotOutcome,
     FreezeSnapshotStatus, GeneratedPage, InsertPendingOutcome, LeaseGuardedWriteOutcome,
@@ -36,11 +36,11 @@ pub use repo::{
     PublishItemRepository, PublishRecord, PublishRecordRepo, PublishRecordRepository, PublishState,
     PublishTimestampField, RawArtifactRepo, RawArtifactRepository, RecentFeedEntry,
     RecentFeedEntryFilter, RecentFeedEntryRepository, RecentFeedSourceHealth,
-    RecentFeedSourceHealthRepository, ReindexBatchCheckpoint, ReindexJob, ReindexJobRepo,
-    ReindexJobRepository, ReleaseSuccessOutcome, ResetFailedFilter, ResetFailedOutcome,
-    ResumeReindexOutcome, RuleVersion, RuleVersionRepo, RuleVersionRepository, RunEventRepo,
-    RunEventRepository, StartReindexTxOutcome, TerminalAdvanceOutcome, TerminalAdvanceStatus,
-    UpdateContentHashOutcome, UpdateLinkHashOutcome,
+    RecentFeedSourceHealthRepository, RecordedWrite, ReindexBatchCheckpoint, ReindexJob,
+    ReindexJobRepo, ReindexJobRepository, ReleaseSuccessOutcome, ResetFailedFilter,
+    ResetFailedOutcome, ResumeReindexOutcome, RuleVersion, RuleVersionRepo, RuleVersionRepository,
+    RunEventRepo, RunEventRepository, StartReindexTxOutcome, TerminalAdvanceOutcome,
+    TerminalAdvanceStatus, UnverifiedWriteUpdate, UpdateContentHashOutcome, UpdateLinkHashOutcome,
 };
 pub use repo::{FeedEndpoint, FreshWindow, ShareMark, ShareSide, ShareStage};
 pub use repo::{

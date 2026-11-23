@@ -8,11 +8,14 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Limited, combinators::BoxBody};
 use octocrab::Octocrab;
 use octocrab::service::middleware::retry::RetryConfig;
-use rss_ai_news_domain::{SecretString, dto::publish::RenderedReport};
+use rss_ai_news_domain::{
+    SecretString,
+    dto::publish::{RemoteBlob, RenderedReport},
+};
 use serde_json::{Value, json};
 
 use crate::error::{GitHubRequestContext, PublishError};
-use crate::target::{PublishTarget, PublishedArtifact, PublishedBatchArtifact};
+use crate::target::{PublishTarget, PublishedArtifact, PublishedBatchArtifact, WriteGuard};
 
 /// GitHub remote-target configuration. The `token` field is a
 /// [`SecretString`] so its raw value is redacted by the type's own
@@ -122,45 +125,23 @@ impl PublishTarget for GitHubTarget {
     }
 
     async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
-        let final_path = self.join_path(&report.relative_path)?;
-        let local_blob = git_blob_sha(report.markdown_content.as_bytes());
-        let mut existing_sha = self.existing_sha(&final_path).await?;
-        // R1-P-S2: the branch already holds this exact blob (an earlier
-        // attempt landed, or a batch whose other receipts were recorded is
-        // resumed with this one report): confirm it at a fixed HEAD commit and
-        // record that commit instead of a PUT. A mismatch at HEAD (the branch
-        // moved in between) falls through to the normal PUT, which then
-        // carries what that fixed-HEAD lookup saw — the file's current blob or
-        // its absence — not the stale first lookup (R3F-S2): GitHub updates
-        // only with the sha of the file being replaced.
-        if existing_sha.as_deref() == Some(local_blob.as_str()) {
-            let head_commit_sha = self.head_commit_sha().await?;
-            let at_head = self.existing_sha_at(&final_path, &head_commit_sha).await?;
-            if at_head.as_deref() == Some(local_blob.as_str()) {
-                return Ok(PublishedArtifact {
-                    local_path: None,
-                    commit_sha: Some(head_commit_sha),
-                    remote_target: Some(self.remote_target_url(&final_path)),
-                });
-            }
-            existing_sha = at_head;
-        }
-        match self
-            .put_file(report, &final_path, existing_sha.as_deref())
-            .await
-        {
-            Ok(commit_sha) => Ok(PublishedArtifact {
-                local_path: None,
-                commit_sha: Some(commit_sha),
-                remote_target: Some(self.remote_target_url(&final_path)),
-            }),
-            Err(error) => {
-                let mut batch = self
-                    .recover_ambiguous_write(error, std::slice::from_ref(report))
-                    .await?;
-                Ok(batch.artifacts.remove(0))
-            }
-        }
+        self.publish_with(report, None).await
+    }
+
+    async fn publish_guarded(
+        &self,
+        report: &RenderedReport,
+        guard: &dyn WriteGuard,
+    ) -> Result<PublishedArtifact, PublishError> {
+        self.publish_with(report, Some(guard)).await
+    }
+
+    async fn publish_many_guarded(
+        &self,
+        reports: &[RenderedReport],
+        guard: &dyn WriteGuard,
+    ) -> Result<PublishedBatchArtifact, PublishError> {
+        self.publish_many_with(reports, Some(guard)).await
     }
 
     async fn find_published(
@@ -182,9 +163,60 @@ impl PublishTarget for GitHubTarget {
         }
     }
 
+    /// The final path (prefix included) and the git blob id of the content
+    /// — what [`Self::publish`] would compare and write. `None` for a path
+    /// the target rejects (no write of it can have been sent).
+    fn remote_blob(&self, report: &RenderedReport) -> Option<RemoteBlob> {
+        let path = self.join_path(&report.relative_path).ok()?;
+        Some(RemoteBlob {
+            path,
+            blob_sha: git_blob_sha(report.markdown_content.as_bytes()),
+        })
+    }
+
+    fn receipt_target(&self, path: &str) -> Option<String> {
+        Some(self.remote_target_url(path))
+    }
+
+    /// The recorded path is used as stored (it was joined and validated when
+    /// recorded), never re-joined with the current prefix: the point is to
+    /// look where the earlier write went.
+    async fn find_remote_blob(
+        &self,
+        blob: &RemoteBlob,
+    ) -> Result<Option<PublishedArtifact>, PublishError> {
+        let head_commit_sha = self.head_commit_sha().await?;
+        let expected = [(blob.path.clone(), blob.blob_sha.clone())];
+        if self
+            .head_contains_blobs(&head_commit_sha, &expected)
+            .await?
+        {
+            Ok(Some(PublishedArtifact {
+                local_path: None,
+                commit_sha: Some(head_commit_sha),
+                remote_target: Some(self.remote_target_url(&blob.path)),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     async fn publish_many(
         &self,
         reports: &[RenderedReport],
+    ) -> Result<PublishedBatchArtifact, PublishError> {
+        self.publish_many_with(reports, None).await
+    }
+}
+
+impl GitHubTarget {
+    /// The batch write; `guard` (R5-9) is confirmed right before each ref
+    /// update, after the HEAD read the new commit is built on — again after
+    /// the fresh HEAD of a 422 rebuild.
+    async fn publish_many_with(
+        &self,
+        reports: &[RenderedReport],
+        guard: Option<&dyn WriteGuard>,
     ) -> Result<PublishedBatchArtifact, PublishError> {
         if reports.is_empty() {
             return Ok(PublishedBatchArtifact {
@@ -193,7 +225,7 @@ impl PublishTarget for GitHubTarget {
             });
         }
         if reports.len() == 1 {
-            let artifact = self.publish(&reports[0]).await?;
+            let artifact = self.publish_with(&reports[0], guard).await?;
             return Ok(PublishedBatchArtifact {
                 commit_sha: artifact.commit_sha.clone(),
                 artifacts: vec![artifact],
@@ -213,7 +245,7 @@ impl PublishTarget for GitHubTarget {
         // return）的路径不存在。
         const MAX_ATTEMPTS: u32 = 2;
         for attempt in 1..=MAX_ATTEMPTS {
-            match self.publish_many_atomic(reports).await {
+            match self.publish_many_atomic(reports, guard).await {
                 Ok(batch) => {
                     if attempt > 1 {
                         tracing::info!(
@@ -238,6 +270,64 @@ impl PublishTarget for GitHubTarget {
              the last attempt; reaching this point implies the retry guard semantics were \
              broken"
         )
+    }
+}
+
+impl GitHubTarget {
+    /// The single-report write; `guard` (R5-9) is confirmed after the reads
+    /// the PUT is conditional on (the file's blob at the branch / fixed HEAD)
+    /// and right before the PUT itself.
+    async fn publish_with(
+        &self,
+        report: &RenderedReport,
+        guard: Option<&dyn WriteGuard>,
+    ) -> Result<PublishedArtifact, PublishError> {
+        let final_path = self.join_path(&report.relative_path)?;
+        let local_blob = git_blob_sha(report.markdown_content.as_bytes());
+        let mut existing_sha = self.existing_sha(&final_path).await?;
+        // R1-P-S2: the branch already holds this exact blob (an earlier
+        // attempt landed, or a batch whose other receipts were recorded is
+        // resumed with this one report): confirm it at a fixed HEAD commit and
+        // record that commit instead of a PUT. A mismatch at HEAD (the branch
+        // moved in between) falls through to the normal PUT, which then
+        // carries what that fixed-HEAD lookup saw — the file's current blob or
+        // its absence — not the stale first lookup (R3F-S2): GitHub updates
+        // only with the sha of the file being replaced.
+        if existing_sha.as_deref() == Some(local_blob.as_str()) {
+            let head_commit_sha = self.head_commit_sha().await?;
+            let at_head = self.existing_sha_at(&final_path, &head_commit_sha).await?;
+            if at_head.as_deref() == Some(local_blob.as_str()) {
+                return Ok(PublishedArtifact {
+                    local_path: None,
+                    commit_sha: Some(head_commit_sha),
+                    remote_target: Some(self.remote_target_url(&final_path)),
+                });
+            }
+            existing_sha = at_head;
+        }
+        // R5-9: after the read the PUT is conditional on (its `sha`: the blob
+        // being replaced, or none to create). A takeover after this check is
+        // refused by GitHub itself: a replaced blob no longer matches `sha`,
+        // and a create without `sha` fails once the file exists.
+        if let Some(guard) = guard {
+            guard.confirm().await?;
+        }
+        match self
+            .put_file(report, &final_path, existing_sha.as_deref())
+            .await
+        {
+            Ok(commit_sha) => Ok(PublishedArtifact {
+                local_path: None,
+                commit_sha: Some(commit_sha),
+                remote_target: Some(self.remote_target_url(&final_path)),
+            }),
+            Err(error) => {
+                let mut batch = self
+                    .recover_ambiguous_write(error, std::slice::from_ref(report))
+                    .await?;
+                Ok(batch.artifacts.remove(0))
+            }
+        }
     }
 }
 
@@ -343,6 +433,7 @@ impl GitHubTarget {
     async fn publish_many_atomic(
         &self,
         reports: &[RenderedReport],
+        guard: Option<&dyn WriteGuard>,
     ) -> Result<PublishedBatchArtifact, PublishError> {
         let (expected_blobs, artifacts) = self.expected_blobs(reports)?;
         let tree_entries = expected_blobs
@@ -378,6 +469,12 @@ impl GitHubTarget {
         let commit_sha = self
             .create_commit(&commit_message, &tree_sha, &head_commit_sha)
             .await?;
+        // R5-9: after the HEAD read the commit is built on, before the ref
+        // update. A takeover after this check moves the branch, and the
+        // fast-forward-only update is refused (422).
+        if let Some(guard) = guard {
+            guard.confirm().await?;
+        }
         if let Err(error) = self.update_branch_ref(&commit_sha).await {
             return self.recover_ambiguous_write(error, reports).await;
         }

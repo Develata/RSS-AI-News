@@ -321,6 +321,21 @@ v0.3 引入：`publish_many(reports: &[RenderedReport])` 在一次 commit 内推
 先对自己这一份报告做固定 HEAD 只读比对（批量中逐条单独比对）：已含 → 以 HEAD commit 记回执、不写；确认缺失 → 照常写、照常计预算；
 比对再失败 / 被限流 / 超时 → `EarlierWriteUnverified`（同一 `error_kind`）：保态、退还 claim、保留该 kind 与文章归属。
 比对之前的可重试失败（准备超时、快照 / 归属读取的可重试存储错误）同样退还并保留该 kind；目标漂移与永久渲染错误照常 `failed`。
+**远端已有、回执未落库（R5-1，ADR 0012 §3）**：拿到回执后终态推进返回存储错误（可重试与否）→ 同样 deferred：保态、退还、
+写 `remote_write_unverified`，下一次 claim 由恢复比对补回执、不再写；不留 lease 等过期后被 sweep 转 `failed`。
+**恢复按记录的写入核对（R5-2，migration 0010，ADR 0012 §3）**：以 `remote_write_unverified` 释放时同时记录那次写入的最终路径
+（含 `github_path_prefix`）与 git blob id（`unverified_write_path` / `_blob_sha`）；恢复比对在固定 HEAD 上核对**这一对原值**，
+不按当前前缀 / 路径模板 / 报告模板重新计算，因此其间改配置不会让恢复去新路径判"缺失"再写一份。比对未出结论时保留记录；
+没有记录的存量行与不记录 blob 的目标退回按当前渲染比对。
+**写前闸（R5-3 / R5-4 / R5-5，ADR 0012 §3）**：任何写请求之前依次 ——
+恢复比对 → **目的地改变即暂停**（确认缺失但本次要写的路径与记录的不同：不写、deferred、保留记录，事件带两条路径；恢复原前缀 /
+模板或人工置 `failed` 解除）→ **他人占用的目的地**（另一分类的记录已发布于该确切路径、或在该路径上的写入未决：不写、退还、
+`remote_path_conflict`，跨运行有效）→ **先记录再发送**（写入恢复标记与本次路径 / blob，崩溃后下一次 claim 在原路径恢复）。
+批量中每条成员各自过闸，未通过者不入本批写入。占用检查与登记是同一个按目的地串行的事务（R5-7），owner / repo / 路径按 ASCII
+折叠大小写比较（R5-8）；发送前在依赖的读取之后再按 lease owner 复核一次（`WriteGuard`，R5-9，批量任一成员租约已失则整批不发）。
+**恢复标记不丢（R5-6）**：claim 时已在恢复中的记录，本次尝试无论以何种结果结束（成功推进与终态 `failed` 除外）都保留恢复标记与
+记录的写入（本次自己的写入被拒或未发出时，写回 claim 时那一对）；新记录只有在 GitHub 以 4xx 拒绝了本次写请求、或本次根本没发出
+（以 `WriteGuard` 是否放行为准）时才清空，5xx / 传输失败 / 截止时间都保留（计预算照旧）。0010 之前的恢复行占用其目标的所有路径。
 
 ### 4.2.2 422 lost-update retry
 
@@ -400,6 +415,11 @@ Markdown **byte-equal**；跨渲染器版本（例如 YAML 引号规则调整）
 | 远端 deadline（lease 的 80%）超时 | `PublishError::RemoteTimeout` | 先只读核对 HEAD（已落地 → 成功）；确认未落地 → 保持 `stored_local` + 计预算 |
 | 歧义写入 / 远端超时之后的只读核对本身失败、被限流或超时 | `PublishError::RemoteWriteUnverified { write, verification }`（R3F-B2） | 保持 `stored_local`、**退还**本次 claim（不计预算，最后一次预算也不转 `failed`）、文章归属保留；`verification` 为限流时其期限（钳制 1 h）写入 `next_attempt_at`；下一次 claim 先做只读恢复比对（R4-1） |
 | 上次以 `remote_write_unverified` 释放的记录，本次写前的恢复比对失败、被限流或超时（或比对前的可重试失败） | `PublishError::EarlierWriteUnverified { verification }`（R4-1；`error_kind = remote_write_unverified`） | 未发写请求；保持 `stored_local`、**退还**本次 claim、文章归属与该 kind 保留；`verification` 为限流时其期限写入 `next_attempt_at`；请求上下文取自失败的比对 |
+| 恢复比对在记录的路径上确认缺失，本次要写的路径与之不同 | `EarlierWriteUnverified { verification: RemoteDestinationChanged }`（R5-4） | 不写；保持 `stored_local`、**退还**、保留恢复标记与记录的写入；事件带 `recorded_path` / `current_path`；恢复原路径配置或人工 `failed` 解除 |
+| 另一分类的记录已发布于本次写入的路径，或在该路径上的写入未决（ASCII 大小写折叠后相同） | 结果 `remote_path_conflict`（R5-5 / R5-8） | 不写；保持 `stored_local`、**退还**；新记录清空记录的写入，恢复中的记录保留恢复标记（R5-6）；事件带 `path` / `holder_record_id`；每次运行重复检查，直到路径配置不再重叠 |
+| 发送前复核发现本次已不再持有记录（被其它 worker 接手），或无法确认 | `PublishError::WriteNotConfirmed`（R5-9） | 不发送；deferred 释放（已被接手的记录 0 行）；批量任一成员在闸口租约已失则整批不发送 |
+| 恢复中的记录本次以任何错误结束（含 429 / 409 / 422 / 5xx / 存储错误） | 原错误（R5-6） | 计预算与否照原规则；持久化的 kind 保持 `remote_write_unverified`、保留记录的写入，事件 `error_kind` 为原错误并带 `recovery_mark_kept` |
+| 已拿到回执（远端已有报告），终态推进返回存储错误（可重试与否） | `StorageError`（R5-1；结果 `error_kind = remote_write_unverified`，事件 `cause_kind` 为存储错误） | 保持 `stored_local`、**退还**本次 claim、写 `remote_write_unverified`、文章归属保留；下一次 claim 的恢复比对命中即记回执、不写 |
 | 2xx 但超过 16 MiB / 缺必需字段 | `ResponseTooLarge` / `GitHubApiError { status: 502 }` | 前者 `failed`；后者按 5xx 计预算 |
 | 目标漂移：record 的 `remote_target`（init 时写入的 `owner/repo:branch`）≠ 当前配置目标 | `PublishError::RemoteTargetMismatch`（`PublishRemoteStatus::TargetMismatch { stored, current }`） | 发请求前拦截，不重试，state='failed'，`last_error` 含两个目标；恢复配置或 `--force` 由运维决定 |
 

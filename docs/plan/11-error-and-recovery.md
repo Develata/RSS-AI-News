@@ -109,7 +109,7 @@ Reindex 无预算（claim 不过滤 attempt_count，失败 `mark_failed` 直转�
 - **例外（仅 Publish，均不是一次发布尝试，两个计数都退）**：freeze 选不到候选（`SnapshotEmpty`，`release_empty_snapshot`，
   记录回 `pending`）——否则同日反复空跑会耗尽预算、被 sweep 转 `failed`；freeze 输掉文章归属竞争（`release_freeze_conflict`）；
   store_local / remote 写前发现存量重复归属的败方（`release_ownership_conflict`，保持阶段态，R1-P-B1）；远端写入歧义且只读核对
-  未完成（`remote_write_unverified`，R3F-B2）与所有限流（R3F-S12，R4-4）——二者用 `release_deferred_retry`（保持阶段态，
+  未完成（`remote_write_unverified`，R3F-B2；远端已有、回执落库失败同此，R5-1）与所有限流（R3F-S12，R4-4）——二者用 `release_deferred_retry`（保持阶段态，
   同时写 / 清 `next_attempt_at`）。按 ID freeze 遇分类不符（`category_mismatch`）自 R3F-S15 起在 claim 的 SQL 中即被排除，
   记录根本不被领取，无需退还。见 [./08-state-machines.md](./08-state-machines.md) §6.1
 

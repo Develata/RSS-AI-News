@@ -203,7 +203,7 @@ retryable 失败**不**作为独立状态。语义上"暂时失败、稍后再�
 某阶段耗尽才转 `failed`。`attempt_count` 为跨阶段累计值，仅供审计。
 
 **退还 claim 的释放**（不是一次发布尝试，两个计数都退、清 lease、保持阶段态，2026-11-22）：远端写入歧义且只读核对未完成
-（`remote_write_unverified`，R3F-B2）与所有限流（`github_rate_limit`，R3F-S12 / R4-4，期限在未来时同时写 `next_attempt_at`）；空快照（`snapshot_empty`）；
+（`remote_write_unverified`，R3F-B2；远端已有报告、回执落库失败同此，R5-1）与所有限流（`github_rate_limit`，R3F-S12 / R4-4，期限在未来时同时写 `next_attempt_at`）；空快照（`snapshot_empty`）；
 freeze 输掉归属竞争（`article_owned_by_active_snapshot` / `article_state_conflict`）；store_local / remote 写前发现存量
 重复归属的败方（`article_owned_by_active_snapshot`，R1-P-B1）。按 ID freeze 的分类不符（`category_mismatch`）自 R3F-S15 起根本不领取记录，因此无需退还。
 

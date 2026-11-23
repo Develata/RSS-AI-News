@@ -113,7 +113,8 @@ WHERE id IN (
 )
 RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           render_version, selection_policy_version, state, remote_target,
-          attempt_count, rendered_at, last_error_kind
+          attempt_count, rendered_at, last_error_kind,
+          unverified_write_path, unverified_write_blob_sha
 "#;
 
 /// PG claim：§6.4 契约——子查询 `FOR UPDATE SKIP LOCKED`，让 publish flow
@@ -136,7 +137,8 @@ WHERE id IN (
 )
 RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           render_version, selection_policy_version, state, remote_target,
-          attempt_count, rendered_at, last_error_kind
+          attempt_count, rendered_at, last_error_kind,
+          unverified_write_path, unverified_write_blob_sha
 "#;
 
 /// Pending claim limited to one category (R1-P-S15): the freeze selects
@@ -162,7 +164,8 @@ WHERE id IN (
 )
 RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           render_version, selection_policy_version, state, remote_target,
-          attempt_count, rendered_at, last_error_kind
+          attempt_count, rendered_at, last_error_kind,
+          unverified_write_path, unverified_write_blob_sha
 "#;
 
 /// PG variant of [`CLAIM_PENDING_IN_CATEGORY_SQLITE_SQL`].
@@ -184,7 +187,8 @@ WHERE id IN (
 )
 RETURNING id, idempotency_key, category_key, report_date, target_timezone,
           render_version, selection_policy_version, state, remote_target,
-          attempt_count, rendered_at, last_error_kind
+          attempt_count, rendered_at, last_error_kind,
+          unverified_write_path, unverified_write_blob_sha
 "#;
 
 pub(super) async fn claim_pending_in_category_sqlite(
@@ -225,20 +229,47 @@ pub(super) async fn claim_pending_in_category_pg(
         .map_err(StorageError::from)
 }
 
-pub(super) const ADVANCE_SNAPSHOT_SQL: &str = "UPDATE publish_records SET state = $1, snapshot_frozen_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
-pub(super) const ADVANCE_RENDERED_SQL: &str = "UPDATE publish_records SET state = $1, rendered_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
-pub(super) const ADVANCE_LOCAL_SQL: &str = "UPDATE publish_records SET state = $1, local_stored_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
-pub(super) const ADVANCE_REMOTE_SQL: &str = "UPDATE publish_records SET state = $1, remote_published_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
+pub(super) const ADVANCE_SNAPSHOT_SQL: &str = "UPDATE publish_records SET state = $1, snapshot_frozen_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, unverified_write_path = NULL, unverified_write_blob_sha = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
+pub(super) const ADVANCE_RENDERED_SQL: &str = "UPDATE publish_records SET state = $1, rendered_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, unverified_write_path = NULL, unverified_write_blob_sha = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
+pub(super) const ADVANCE_LOCAL_SQL: &str = "UPDATE publish_records SET state = $1, local_stored_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, unverified_write_path = NULL, unverified_write_blob_sha = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
+pub(super) const ADVANCE_REMOTE_SQL: &str = "UPDATE publish_records SET state = $1, remote_published_at = $2, local_path = COALESCE($3, local_path), remote_target = COALESCE($4, remote_target), commit_sha = COALESCE($5, commit_sha), lease_owner = NULL, lease_expires_at = NULL, stage_attempt_count = 0, next_attempt_at = NULL, unverified_write_path = NULL, unverified_write_blob_sha = NULL, last_error = NULL, last_error_kind = NULL, updated_at = $6 WHERE id = $7 AND lease_owner = $8 AND state = $9";
 /// W15 §3 折叠：retryable 失败按预算决定维持原阶段态（清 lease 后等下轮
 /// claim）/ 转终态 `failed`，规则收口在 SQL。`RETURNING state` 供调用方判定
 /// 走向。预算按阶段计（`stage_attempt_count`，ADR 0012）：claim 自增、阶段推进清零。
 /// `$7` = 最早重试时刻（限流时为 Retry-After / reset，否则 NULL；R1-P-S12），claim 在此之前不领取。
+/// 计预算的释放只发生在没有未定写入时（R5-2：恢复比对已确认缺失，或本就不在恢复中），故清空记录的写入。
 pub(super) const RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL: &str = r#"
 UPDATE publish_records
 SET state = CASE WHEN stage_attempt_count >= $1 THEN 'failed' ELSE state END,
     lease_owner = NULL, lease_expires_at = NULL,
     last_error = $2, last_error_kind = $3, updated_at = $4,
+    next_attempt_at = $7,
+    unverified_write_path = NULL, unverified_write_blob_sha = NULL
+WHERE id = $5 AND lease_owner = $6
+RETURNING state
+"#;
+/// R5-6: [`RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL`] for an attempt that may
+/// leave a write in flight: charged the same way, but the recorded write is
+/// kept (the caller persists the recovery kind as `$3`).
+pub(super) const RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_MARK_SQL: &str = r#"
+UPDATE publish_records
+SET state = CASE WHEN stage_attempt_count >= $1 THEN 'failed' ELSE state END,
+    lease_owner = NULL, lease_expires_at = NULL,
+    last_error = $2, last_error_kind = $3, updated_at = $4,
     next_attempt_at = $7
+WHERE id = $5 AND lease_owner = $6
+RETURNING state
+"#;
+/// R5-6: [`RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_MARK_SQL`] that also
+/// sets the recorded write (`$8` path, `$9` blob) — e.g. back to the one
+/// recorded at claim when this attempt's own write was refused or never sent.
+pub(super) const RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_MARK_RECORDING_SQL: &str = r#"
+UPDATE publish_records
+SET state = CASE WHEN stage_attempt_count >= $1 THEN 'failed' ELSE state END,
+    lease_owner = NULL, lease_expires_at = NULL,
+    last_error = $2, last_error_kind = $3, updated_at = $4,
+    next_attempt_at = $7,
+    unverified_write_path = $8, unverified_write_blob_sha = $9
 WHERE id = $5 AND lease_owner = $6
 RETURNING state
 "#;
@@ -265,8 +296,58 @@ pub(super) const RELEASE_OWNERSHIP_CONFLICT_SQL: &str = "UPDATE publish_records 
 /// Like [`RELEASE_OWNERSHIP_CONFLICT_SQL`] it keeps the state (the record keeps
 /// owning its snapshot's articles), clears the lease and refunds the claim on
 /// both counters; in addition `$7` = the earliest next claim
-/// (`next_attempt_at`, NULL = no wait).
+/// (`next_attempt_at`, NULL = no wait). The recorded unverified write is
+/// left as it is ([`crate::UnverifiedWriteUpdate::Keep`]).
 pub(super) const RELEASE_DEFERRED_RETRY_SQL: &str = "UPDATE publish_records SET lease_owner = NULL, lease_expires_at = NULL, attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, stage_attempt_count = CASE WHEN stage_attempt_count > 0 THEN stage_attempt_count - 1 ELSE 0 END, last_error = $1, last_error_kind = $2, updated_at = $3, next_attempt_at = $7 WHERE id = $4 AND lease_owner = $5 AND state = $6";
+/// [`RELEASE_DEFERRED_RETRY_SQL`] that also records the write whose outcome
+/// is not on record (R5-2): `$8` = its destination path, `$9` = its git
+/// blob id; both NULL clear it ([`crate::UnverifiedWriteUpdate::Record`]).
+/// R5-3: before a remote write is sent, the claimed record records it — the
+/// recovery kind (`$2`), its final path (`$3`) and blob (`$4`) — keeping the
+/// lease, so a crash between the write and its outcome leaves a record the
+/// next claim recovers at that path. Owner- and state-guarded.
+pub(super) const MARK_REMOTE_WRITE_PENDING_SQL: &str = "UPDATE publish_records SET last_error = $1, last_error_kind = $2, unverified_write_path = $3, unverified_write_blob_sha = $4, updated_at = $5 WHERE id = $6 AND lease_owner = $7 AND state = $8";
+/// R5-5 / R5-8: another record, of another category, that holds remote
+/// destination `$3`: one whose write there is unsettled (`stored_local`,
+/// marked `$4`, recorded at `$3`, initialised for target `$5`) or one
+/// published there (`published_remote`, receipt `$6`). Compared with ASCII
+/// letters folded to lower case (the caller passes `$3`, `$5`, `$6` folded
+/// the same way): GitHub owner and repository names are case-insensitive;
+/// folding the branch and path as well errs toward holding, like the caseless
+/// collision rule of validate-config. SQLite's built-in `lower()` folds ASCII
+/// only; the PostgreSQL variant uses `translate` for the same result on
+/// non-ASCII text. A row marked for recovery before migration 0010 has
+/// no recorded path: it holds every path of its target, until its own
+/// recovery records one or settles (R5-5, conservative).
+pub(super) const FIND_REMOTE_DESTINATION_HOLDER_SQLITE_SQL: &str = r#"
+SELECT id FROM publish_records
+WHERE id <> $1
+  AND category_key <> $2
+  AND ((state = 'stored_local' AND last_error_kind = $4 AND lower(remote_target) = $5
+        AND (unverified_write_path IS NULL OR lower(unverified_write_path) = $3))
+    OR (state = 'published_remote' AND lower(remote_target) = $6))
+ORDER BY id ASC
+LIMIT 1
+"#;
+/// PostgreSQL variant of [`FIND_REMOTE_DESTINATION_HOLDER_SQLITE_SQL`].
+pub(super) const FIND_REMOTE_DESTINATION_HOLDER_PG_SQL: &str = r#"
+SELECT id FROM publish_records
+WHERE id <> $1
+  AND category_key <> $2
+  AND ((state = 'stored_local' AND last_error_kind = $4
+        AND translate(remote_target, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $5
+        AND (unverified_write_path IS NULL
+             OR translate(unverified_write_path, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $3))
+    OR (state = 'published_remote'
+        AND translate(remote_target, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $6))
+ORDER BY id ASC
+LIMIT 1
+"#;
+/// R5-7 (PostgreSQL): serialises the record-and-check of one destination
+/// (`$1` = its folded key) for the rest of the transaction.
+pub(super) const LOCK_REMOTE_DESTINATION_PG_SQL: &str =
+    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))";
+pub(super) const RELEASE_DEFERRED_RETRY_RECORDING_SQL: &str = "UPDATE publish_records SET lease_owner = NULL, lease_expires_at = NULL, attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, stage_attempt_count = CASE WHEN stage_attempt_count > 0 THEN stage_attempt_count - 1 ELSE 0 END, last_error = $1, last_error_kind = $2, updated_at = $3, next_attempt_at = $7, unverified_write_path = $8, unverified_write_blob_sha = $9 WHERE id = $4 AND lease_owner = $5 AND state = $6";
 pub(super) const RECLAIM_PUBLISH_LEASES_SQL: &str = r#"
 UPDATE publish_records
 SET lease_owner = NULL, lease_expires_at = NULL, updated_at = $1

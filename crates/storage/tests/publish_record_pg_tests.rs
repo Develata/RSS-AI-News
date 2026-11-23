@@ -907,7 +907,16 @@ async fn pg_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait()
     );
     assert!(
         !repo
-            .release_deferred_retry(id, "d1", PublishState::Rendered, "x", "x", None, first)
+            .release_deferred_retry(
+                id,
+                "d1",
+                PublishState::Rendered,
+                "x",
+                "x",
+                None,
+                rss_ai_news_storage::UnverifiedWriteUpdate::Keep,
+                first
+            )
             .await
             .unwrap()
     );
@@ -920,6 +929,7 @@ async fn pg_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait()
             "verification incomplete",
             "remote_write_unverified",
             Some(not_before),
+            rss_ai_news_storage::UnverifiedWriteUpdate::Keep,
             first,
         )
         .await
@@ -958,6 +968,7 @@ async fn pg_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait()
             "x",
             "y",
             None,
+            rss_ai_news_storage::UnverifiedWriteUpdate::Keep,
             not_before
         )
         .await
@@ -970,6 +981,451 @@ async fn pg_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait()
         .unwrap();
     assert_eq!(scanned.len(), 1);
     assert_eq!(scanned[0].last_error_kind.as_deref(), Some("y"));
+}
+
+/// R5-2 on PostgreSQL: a deferred release records the unverified write, a
+/// later one keeps it, both claims project it, and a charged retryable
+/// release and a stage advance clear it.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_deferred_retry_records_keeps_and_clears_the_unverified_write() {
+    use rss_ai_news_domain::dto::publish::RemoteBlob;
+    use rss_ai_news_storage::UnverifiedWriteUpdate;
+    let ctx = make_pg_test_pool().await;
+    let (render, policy) = seed_render_and_policy_rules(&ctx, "recorded").await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let id = repo
+        .create_if_new(&new_record("idem-recorded", "ai", render, policy))
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE publish_records SET state = 'stored_local' WHERE id = $1")
+        .bind(id)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    let at = OffsetDateTime::now_utc();
+    let request = |owner: &str| ClaimRequest {
+        owner: owner.to_string(),
+        now: at,
+        lease_expires_at: lease_expires(at),
+        batch_size: 1,
+        max_attempts: 5,
+    };
+    let columns = || {
+        let pool = ctx.pg_pool().clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                "SELECT unverified_write_path, unverified_write_blob_sha FROM publish_records \
+                 WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let blob = RemoteBlob {
+        path: "reports/ai/2026/20260517.md".to_string(),
+        blob_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+    };
+    async fn defer(
+        repo: &PublishRecordRepo,
+        id: i64,
+        owner: &str,
+        update: UnverifiedWriteUpdate<'_>,
+        at: OffsetDateTime,
+    ) {
+        assert!(
+            repo.release_deferred_retry(
+                id,
+                owner,
+                PublishState::StoredLocal,
+                "unverified",
+                "remote_write_unverified",
+                None,
+                update,
+                at,
+            )
+            .await
+            .unwrap(),
+            "{owner}"
+        );
+    }
+    let blob = &blob;
+
+    let by_id = |owner: &'static str| {
+        let repo = repo.clone();
+        async move {
+            let claimed = repo
+                .claim_publish_by_ids(&request(owner), PublishState::StoredLocal, &[id])
+                .await
+                .unwrap();
+            assert_eq!(claimed.len(), 1, "{owner}");
+            claimed.into_iter().next().unwrap()
+        }
+    };
+    assert_eq!(by_id("p1").await.unverified_write(), None);
+    defer(
+        &repo,
+        id,
+        "p1",
+        UnverifiedWriteUpdate::Record(Some(blob)),
+        at,
+    )
+    .await;
+    let scanned = repo
+        .claim_local_for_remote_publish(&request("p2"))
+        .await
+        .unwrap();
+    assert_eq!(scanned.len(), 1);
+    assert_eq!(
+        scanned[0].unverified_write(),
+        Some(blob.clone()),
+        "scan claim"
+    );
+    defer(&repo, id, "p2", UnverifiedWriteUpdate::Keep, at).await;
+    assert_eq!(
+        by_id("p3").await.unverified_write(),
+        Some(blob.clone()),
+        "kept"
+    );
+    defer(&repo, id, "p3", UnverifiedWriteUpdate::Record(None), at).await;
+    assert_eq!(columns().await, (None, None), "Record(None) clears");
+
+    by_id("p4").await;
+    defer(
+        &repo,
+        id,
+        "p4",
+        UnverifiedWriteUpdate::Record(Some(blob)),
+        at,
+    )
+    .await;
+    by_id("p5").await;
+    let released = repo
+        .release_retryable_failure(id, "p5", "refused", "github_api_error", 5, at)
+        .await
+        .unwrap();
+    assert!(released.released && !released.exhausted);
+    assert_eq!(columns().await, (None, None), "a charged release clears");
+
+    by_id("p6").await;
+    defer(
+        &repo,
+        id,
+        "p6",
+        UnverifiedWriteUpdate::Record(Some(blob)),
+        at,
+    )
+    .await;
+    by_id("p7").await;
+    let advanced = repo
+        .release_terminal_advance_with_articles(
+            id,
+            "p7",
+            PublishState::StoredLocal,
+            PublishState::PublishedRemote,
+            PublishTimestampField::RemotePublishedAt,
+            Vec::new(),
+            PublishAdvanceExtras::default(),
+            at,
+        )
+        .await
+        .unwrap();
+    assert_eq!(advanced.status, TerminalAdvanceStatus::Advanced);
+    assert_eq!(columns().await, (None, None), "the advance clears");
+}
+
+/// Three `stored_local` records of `ctx`, initialised for `o/r:main`.
+async fn pg_destination_records(ctx: &PgTestContext, tag: &str) -> (PublishRecordRepo, Vec<i64>) {
+    let (render, policy) = seed_render_and_policy_rules(ctx, tag).await;
+    let repo = PublishRecordRepo::new_with_storage(ctx.storage_pool().clone());
+    let mut ids = Vec::new();
+    for n in 0..3 {
+        ids.push(
+            repo.create_if_new(&new_record(
+                &format!("idem-{tag}-{n}"),
+                "ai",
+                render,
+                policy,
+            ))
+            .await
+            .unwrap()
+            .unwrap(),
+        );
+    }
+    sqlx::query("UPDATE publish_records SET state = 'stored_local', remote_target = 'o/r:main'")
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    (repo, ids)
+}
+
+fn pg_claim(owner: &str, at: OffsetDateTime) -> ClaimRequest {
+    ClaimRequest {
+        owner: owner.to_string(),
+        now: at,
+        lease_expires_at: lease_expires(at),
+        batch_size: 1,
+        max_attempts: 50,
+    }
+}
+
+/// R5-3 / R5-5 / R5-8 on PostgreSQL: recording a write keeps the lease and
+/// is owner-guarded; the destination holder is another category's record
+/// published there or unsettled there for the same target, compared with
+/// ASCII letters folded and non-ASCII text exact (the same answers as
+/// SQLite); a held write records nothing.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_record_remote_write_and_destination_holder() {
+    use rss_ai_news_domain::dto::publish::RemoteBlob;
+    use rss_ai_news_storage::{DestinationCheck, RecordedWrite};
+    let ctx = make_pg_test_pool().await;
+    let (repo, ids) = pg_destination_records(&ctx, "holder").await;
+    let (me, other) = (ids[0], ids[1]);
+    let path = "报告/AI/É.md";
+    let blob = RemoteBlob {
+        path: path.to_string(),
+        blob_sha: "abc".to_string(),
+    };
+    let check = DestinationCheck {
+        category_key: "ai",
+        target_identity: "o/r:main",
+        receipt_target: "github://o/r/main/报告/AI/É.md",
+    };
+    let at = OffsetDateTime::now_utc();
+    repo.claim_publish_by_ids(&pg_claim("w0", at), PublishState::StoredLocal, &[me])
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.record_remote_write(
+            me,
+            "other",
+            PublishState::StoredLocal,
+            "x",
+            "k",
+            Some(&blob),
+            Some(check),
+            at
+        )
+        .await
+        .unwrap(),
+        RecordedWrite::LeaseLost
+    );
+    let set_other = |sql: &'static str| {
+        let pool = ctx.pg_pool().clone();
+        async move {
+            sqlx::query(sql).bind(other).execute(&pool).await.unwrap();
+        }
+    };
+    let mut round = 0;
+    for (setup, expected, why) in [
+        (
+            "UPDATE publish_records SET state = 'published_remote', \
+             remote_target = 'github://o/r/main/报告/AI/É.md' WHERE id = $1",
+            RecordedWrite::Recorded,
+            "same category",
+        ),
+        (
+            "UPDATE publish_records SET state = 'stored_local', category_key = 'theirs', \
+             remote_target = 'o/x:main', last_error_kind = 'remote_write_unverified', \
+             unverified_write_path = '报告/AI/É.md' WHERE id = $1",
+            RecordedWrite::Recorded,
+            "another target's write",
+        ),
+        (
+            "UPDATE publish_records SET remote_target = 'O/R:main', \
+             unverified_write_path = NULL WHERE id = $1",
+            RecordedWrite::HeldBy(other),
+            "pre-0010 recovering row holds every path of its target",
+        ),
+        (
+            "UPDATE publish_records SET remote_target = 'O/R:main', \
+             unverified_write_path = '报告/ai/É.md' WHERE id = $1",
+            RecordedWrite::HeldBy(other),
+            "unsettled write, other ASCII case",
+        ),
+        (
+            "UPDATE publish_records SET state = 'published_remote', last_error_kind = NULL, \
+             unverified_write_path = NULL, \
+             remote_target = 'github://O/R/main/报告/ai/É.md' WHERE id = $1",
+            RecordedWrite::HeldBy(other),
+            "published there, other ASCII case",
+        ),
+        (
+            "UPDATE publish_records SET remote_target = 'github://o/r/main/报告/AI/é.md' \
+             WHERE id = $1",
+            RecordedWrite::Recorded,
+            "non-ASCII letters are not folded",
+        ),
+    ] {
+        set_other(setup).await;
+        round += 1;
+        let owner = format!("w{round}");
+        sqlx::query("UPDATE publish_records SET lease_owner = $1 WHERE id = $2")
+            .bind(&owner)
+            .bind(me)
+            .execute(ctx.pg_pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.record_remote_write(
+                me,
+                &owner,
+                PublishState::StoredLocal,
+                "in flight",
+                "remote_write_unverified",
+                Some(&blob),
+                Some(check),
+                at,
+            )
+            .await
+            .unwrap(),
+            expected,
+            "{why}"
+        );
+    }
+    let row: (Option<String>, Option<String>, Option<String>, i64) = sqlx::query_as(
+        "SELECT lease_owner, last_error_kind, unverified_write_path, stage_attempt_count \
+         FROM publish_records WHERE id = $1",
+    )
+    .bind(me)
+    .fetch_one(ctx.pg_pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        (
+            Some(format!("w{round}")),
+            Some("remote_write_unverified".to_string()),
+            Some(path.to_string()),
+            1
+        ),
+        "recorded, lease and counters kept"
+    );
+    assert!(
+        repo.owns_publish_records(&[me], &format!("w{round}"), PublishState::StoredLocal)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .owns_publish_records(
+                &[me, other],
+                &format!("w{round}"),
+                PublishState::StoredLocal
+            )
+            .await
+            .unwrap()
+    );
+}
+
+/// R5-7 on PostgreSQL: two records of different categories race for one
+/// free path, both parked behind the destination's advisory lock held by a
+/// third session. Once it is released, exactly one records its write and the
+/// other is held by it.
+#[tokio::test]
+#[ignore = "需要 docker daemon"]
+async fn pg_concurrent_record_remote_write_clears_one_writer_per_destination() {
+    use rss_ai_news_domain::dto::publish::RemoteBlob;
+    use rss_ai_news_storage::{DestinationCheck, RecordedWrite};
+    let ctx = make_pg_test_pool().await;
+    let (repo, ids) = pg_destination_records(&ctx, "race").await;
+    let (first, second) = (ids[0], ids[1]);
+    sqlx::query("UPDATE publish_records SET category_key = 'bcat' WHERE id = $1")
+        .bind(second)
+        .execute(ctx.pg_pool())
+        .await
+        .unwrap();
+    let at = OffsetDateTime::now_utc();
+    for (id, owner) in [(first, "wa"), (second, "wb")] {
+        repo.claim_publish_by_ids(&pg_claim(owner, at), PublishState::StoredLocal, &[id])
+            .await
+            .unwrap();
+    }
+    let receipt = "github://o/r/main/p.md";
+    let mut locker = ctx.pg_pool().acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(receipt)
+        .execute(&mut *locker)
+        .await
+        .unwrap();
+    let contend = |id: i64, owner: &'static str, category: &'static str| {
+        let repo = repo.clone();
+        tokio::spawn(async move {
+            let blob = RemoteBlob {
+                path: "p.md".to_string(),
+                blob_sha: "abc".to_string(),
+            };
+            repo.record_remote_write(
+                id,
+                owner,
+                PublishState::StoredLocal,
+                "in flight",
+                "remote_write_unverified",
+                Some(&blob),
+                Some(DestinationCheck {
+                    category_key: category,
+                    target_identity: "o/r:main",
+                    receipt_target: receipt,
+                }),
+                at,
+            )
+            .await
+            .unwrap()
+        })
+    };
+    let a = contend(first, "wa", "ai");
+    let b = contend(second, "wb", "bcat");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!a.is_finished() && !b.is_finished(), "both parked");
+    sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(receipt)
+        .execute(&mut *locker)
+        .await
+        .unwrap();
+    drop(locker);
+    let outcomes = [(first, a.await.unwrap()), (second, b.await.unwrap())];
+    // Exactly one winner; the loser is held by the winner and its own row
+    // was rolled back (nothing recorded on it).
+    let winners = outcomes
+        .iter()
+        .filter(|(_, outcome)| *outcome == RecordedWrite::Recorded)
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    assert_eq!(winners.len(), 1, "{outcomes:?}");
+    let winner = winners[0];
+    let loser = if winner == first { second } else { first };
+    assert!(
+        outcomes.contains(&(loser, RecordedWrite::HeldBy(winner))),
+        "{outcomes:?}"
+    );
+    let recorded = |id: i64| {
+        let pool = ctx.pg_pool().clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                "SELECT last_error_kind, unverified_write_path FROM publish_records WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        recorded(winner).await,
+        (
+            Some("remote_write_unverified".to_string()),
+            Some("p.md".to_string())
+        )
+    );
+    assert_eq!(
+        recorded(loser).await,
+        (None, None),
+        "the loser recorded nothing"
+    );
 }
 
 /// B2 (ADR 0012) on PostgreSQL under READ COMMITTED: a freeze locks its

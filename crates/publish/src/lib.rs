@@ -8,4 +8,4 @@ pub mod target;
 pub use error::{GitHubRequestContext, PublishError, REMOTE_WRITE_UNVERIFIED_KIND};
 pub use github::{GitHubTarget, GitHubTargetConfig};
 pub use local::LocalFsTarget;
-pub use target::{PublishTarget, PublishedArtifact, PublishedBatchArtifact};
+pub use target::{PublishTarget, PublishedArtifact, PublishedBatchArtifact, WriteGuard};

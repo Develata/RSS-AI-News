@@ -128,3 +128,82 @@
 - 事故 2 相关提交：4ca3347、31b2d3b、79b7919、3ce4ece、9577bba、b48657a、13301b0；锁定测试为
   `crates/runtime/tests/ai_run_tests.rs` 中的 `fresh_*` / `batch_size_*` / `older_backlog_*` 用例
 - 两起事故的修复分散在本分支多个提交中，不是两个独立的最小补丁；如需先单独热修，可按上面的提交挑选
+
+## 2026-11-23 追加：R5 —— 第四轮复核遗留的两个 BLOCKER 及两轮复审发现
+
+- 作者 / Agent：Claude Code（Opus 5.5，实现与集成）+ Codex gpt-6.2-astra（独立复审，max，三轮）
+- 分支：`fix/r5-recovery-blockers`（基于 `main` `cb5f562`，即 PR #10 合并后）
+- 相关 commit：`7b2d931` [R5-1]、`eeaa719` [R5-2]、`4e4fb02` [R5-3..R5-5]、`5c1ab54` [R5-6..R5-9]、`2f36cc9` [R5-10]
+  （`cb5f562..HEAD`）
+- 相关 tag / release：N/A（未推送、未发布、未部署）
+- 状态：`validated`（仅本地）；第三轮独立复审仍判 BLOCKER，按 Develata 决定只修其中的缺陷后停止（未再复审）
+
+### 工作摘要
+
+修上文"风险与后续事项"中第四轮只出报告复核留下的两个 BLOCKER：恢复命中后回执落库失败被 sweep 成 `failed`（R5-1），以及
+歧义写入后改 `github_path_prefix` 导致恢复去新路径判缺失、再写一份（R5-2，migration 0010，Develata 按宪法 §7.1 批准）。
+第一轮独立复审（`cb5f562..eeaa719`）判两条主场景成立，另给 3 个 BLOCKER → R5-3/4/5（Develata 决定全修；跨批次路径占用按
+Develata 批准的"数据库持久检查"实现）。第二轮（`cb5f562..4e4fb02`）又给 4 个 BLOCKER → R5-6/7/8/9（Develata 决定全修）。
+第三轮（`cb5f562..5c1ab54`）再给 4 个 BLOCKER；Develata 决定只修其中确属本分支实现缺陷的部分（R5-10），其余记录在案、不再追加轮次。
+
+### 关键变更
+
+- R5-1：远端终态推进（拿到回执之后）返回任何存储错误 → deferred（保态、退还、`remote_write_unverified`），下一次比对补回执。
+- R5-2：migration 0010（`unverified_write_path` / `unverified_write_blob_sha`，两方言 up/down，已 pin）；恢复按记录的确切
+  路径与 blob 在固定 HEAD 上核对（`PublishTarget::remote_blob` / `find_remote_blob`）。
+- R5-3：每个写请求发出前带守卫登记恢复标记与路径 / blob（`record_remote_write`，保留 lease）。
+- R5-4：在记录的路径上确认缺失、但本次要写别处 → 不写、保留记录；ADR 给出普通记录的人工解除语句。
+- R5-5：另一分类已发布于 / 未决于同一目的地 → 不写、退还、`remote_path_conflict`（单条与批量、跨运行）。
+- R5-6：恢复标记不变量（恢复中一律保留；新记录只有 4xx 拒绝或未发出才清空；5xx / 超时保留）；新的
+  `release_retryable_failure_keeping_mark`；持久化 kind 为恢复 kind，事件带真实 `error_kind` 与 `recovery_mark_kept`。
+- R5-7：登记与占用检查同一事务（SQLite 写先行取写锁；PG `READ COMMITTED` + 目的地 advisory lock）。
+- R5-8：占用比较只折叠 ASCII 大小写（SQLite `lower()`、PG `translate()`，非 ASCII 两方言一致）；存储的身份与回执不变。
+- R5-9：`WriteGuard` 在 PUT / PATCH 之前、依赖的读取之后按 lease owner 复核（422 重建再问）；批量任一成员闸口租约已失则整批不发。
+- R5-10：恢复中的记录本次写入被拒或未发出时写回 claim 时那一对；"已发出"以 `WriteGuard` 放行为准；租约复核改为单条语句；
+  0010 之前的恢复行占用其目标的所有路径；事件只在释放落库后报告 `recovery_mark_kept`；并发测试校验败方回滚。
+- 另：批量重复 record id 拒绝；freeze SQL 清空记录的写入；ADR 人工查询带新列；登记文案改为"意图已登记"；测试按确切路径与
+  blob 匹配、同分类用例写同一路径。
+- 文档：ADR 0012 §3（R5-1…R5-9，R5-10 的修正并入其中；残留限制、人工步骤）、plan/04 §4.2 与错误表、plan/05 迁移表、plan/08、plan/11、plan/15、
+  acceptance 04。
+
+### 验证与验收（HEAD `2f36cc9`）
+
+- `cargo fmt --all -- --check`：通过
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过
+- `cargo test --workspace --locked --no-fail-fast`：1457 passed，0 failed（exit 0）
+- `cargo test -p rss-ai-news-storage --locked --no-fail-fast -- --ignored --test-threads=1`（testcontainers，真实 PG 16）：
+  98 passed，0 failed（exit 0）
+- 变异核对：R5-1 用例在修复前失败；R5-2…R5-10 各自的用例在去掉对应机制时失败（含两方言并发用例；均已还原）
+- 验收 lanes（每条都带 `CARGO_PROFILE_RELEASE_STRIP=none`，完整日志留存）：static / workspace / sqlite / release 一次运行通过（exit 0）；
+  postgres（一次性 PG 16 容器）通过（exit 0）；docker 首次在 scheduler 镜像构建时 `apt-get` 连不上 `deb.debian.org`（网络超时，
+  本分支未改 `docker/`）失败，单独重跑通过（exit 0）
+- 手工：真实 GitHub 请求未执行；release.yml 未在真实 tag 上执行
+
+### 独立复审
+
+- 第一轮（`cb5f562..eeaa719`）：**BLOCKER**（3 BLOCKER、5 SHOULD_FIX、2 NICE、1 NEEDS_VERIFICATION），已修 3 BLOCKER 与其中 4 项。
+- 第二轮（`cb5f562..4e4fb02`）：**BLOCKER**（4 BLOCKER、6 SHOULD_FIX、1 NICE），已修 4 BLOCKER 与其中 4 项 SHOULD_FIX、1 NICE。
+- 第三轮（`cb5f562..5c1ab54`）：**BLOCKER**（4 BLOCKER、6 SHOULD_FIX、1 NEEDS_VERIFICATION）。按 Develata 决定修了其中两个实现缺陷
+  （429 后保留了新 blob 而非原 blob；未发出也按已发出处理）、逐行租约复核、0010 之前行的占用漏洞、事件标志、并发测试与 ADR 步骤；
+  "复核之后、请求到达之前被接手"的窗口无法用 lease 关闭（需目的地围栏令牌），已在 ADR 写明；其余 SHOULD_FIX 记入 ADR 0012。
+  修复后未再做独立复审。
+
+### 风险与后续事项（未修，均已写入 ADR 0012 或此处）
+
+- R5-9 复核之后、请求到达 GitHub 之前被接手的窗口（需目的地围栏令牌，GitHub 不提供）。
+- 崩溃发生在本阶段最后一次预算时，lease 过期后 sweep 仍转 `failed`（需为耗尽行提供只读核对入口，另行设计）。
+- R5-4 暂停的记录需要运维处理（恢复原路径配置，或按 ADR 守卫语句核实后置 `failed`）；暂停期间持有文章归属。
+- 回执串无法区分分支与路径的边界（`release` + `2026/x.md` 与 `release/2026` + `x.md`），R5-5 可能误判占用。
+- 非 GitHub 目标的默认 trait 行为：`find_published` 的 `Ok(None)` 被当作缺失、默认 `publish_many` 丢逐项回执。
+- 已收到的 429 响应体中断时被合成为 503；目标漂移守卫逐字节比较身份（只改 owner / repo 大小写会让记录按漂移失败）；
+  公开的 `with_client` 可带入会重发的 Octocrab；含 `.` 段的路径在占用比较中不同键（GitHub 行为未核实）；0010 的 down 未钉哈希。
+- 0010 之前的恢复行在恢复结束前挡住其它分类对同一目标的写入（保守规则）。
+- 私库权限丢失时 Contents 404 被当作缺失；PG 提交结果未知时回执已落库却报 Failed；R5-1 回执未存 commit sha；
+  终态推进收到重复文章 ID 时两方言行为不同（基线已有）。
+
+### 给下一位 Agent 的备注
+
+- 入口：ADR 0012 §3 中 R5-1…R5-9 段落（R5-10 并入 R5-5 / R5-6 / R5-9 段）；`crates/runtime/src/flows/publish/remote.rs`（`check_earlier_write`、
+  `destination_changed`、`gate_remote_write`、`mark_after`、`LeaseGuard`）；`crates/storage/src/repo/publish_record_impl.rs`
+  （`record_remote_write`）；`crates/publish/src/github.rs`（`publish_with` / `publish_many_with` 中的 guard 位置）。
+- 写前闸顺序（单条与批量相同）：恢复比对 → R5-4 → [R5-5 + R5-3 同一事务] → R5-9 复核 → 发送；批量中闸口在逐条处理之后。
