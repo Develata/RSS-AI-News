@@ -114,11 +114,9 @@ kind。下一次 claim 走上一条的恢复比对，命中即记回执、不发
   那次写入的**最终路径**（含前缀）与 **git blob id**。`PublishTarget::remote_blob(report)` 给出这一对（GitHub：`join_path` +
   `git_blob_sha`，纯计算；默认 `None`），`PublishTarget::find_remote_blob(blob)` 在固定 HEAD commit 上只读比对**原样**的路径与
   blob（不再按当前前缀拼接），命中即以该 commit 记回执，`remote_target` 指向记录的路径。
-- 写入规则（`release_deferred_retry` 的 `UnverifiedWriteUpdate`，每个调用点显式选择）：新的歧义写入核对未完成
-  （`RemoteWriteUnverified`）→ 记录本次写入；恢复比对未出结论（`EarlierWriteUnverified`、比对前的可重试失败）与持有恢复标记的
-  归属败方 → 保留原记录；R5-1 回执未落库 → 记录该回执对应的 blob；限流 deferral（此时没有未定写入）→ 清空。阶段推进与计预算的
-  retryable release 清空（后者只发生在比对已确认缺失或本不在恢复中时）；永久失败保留，供人工核对。只在 `last_error_kind =
-  remote_write_unverified` 时读取。
+- 何时记录、保留、清空，由下文 R5-6 的不变量统一决定（`release_deferred_retry` 的 `UnverifiedWriteUpdate` 与计预算释放的两个
+  变体，每个调用点显式选择）。两列只在 `last_error_kind = remote_write_unverified` 时有意义；其它 kind 的行上残留的值（例如永久
+  失败行）不参与恢复，人工核对时以 kind 区分"仍未决"与"已结束"。
 - 恢复比对在记录的路径上确认缺失之后，只有当本次要写的**最终路径与记录的路径相同**时才写入（见下文 R5-4）；该写入之前先按
   R5-3 记录新的一对，替换已确认缺失的旧值。
 - 存量（0010 之前已带恢复标记、没有记录）与不记录 blob 的目标：退回按当前渲染比对（`find_published`），行为同 R4-1。
@@ -135,23 +133,59 @@ kind。下一次 claim 走上一条的恢复比对，命中即记回执、不发
   被拒），批量的 ref 更新只接受快进，同一路径上至多留下一份内容（晚到的写入使这次 PUT 被拒时，记录按"其它 4xx"转 `failed`，
   需按 §Consequences 人工核对；文件本身仍只有一份）。暂停期间每次运行仍先做同一个比对，先前的写入一旦出现即记回执。
   **运维处理**：要么恢复原前缀 / 路径模板（目的地相同，下一次运行即写入原路径），要么在核实记录的路径上确无该 blob 之后，按
-  §Consequences 的人工步骤把记录置为 `failed`（其文章随之释放，进入之后的报告，按新配置发布）。
-- **R5-5 他人占用的目的地**：若**另一个分类**的记录已占用本次写入的确切最终路径——它在该路径上的写入仍未决（`stored_local`、
+  下文"R5-4 运维处理（普通记录）"的守卫语句把记录置为 `failed`（其文章随之释放，进入之后的报告，按新配置发布）。
+- **R5-5 他人占用的目的地**：若**另一个分类**的记录已占用本次写入的最终路径——它在该路径上的写入仍未决（`stored_local`、
   `remote_write_unverified`、记录的路径相同、目标身份相同），或它已 `published_remote` 于该路径（回执 `remote_target` 相同）——
-  则不写，以 `release_deferred_retry` 释放（保态、退还、清空记录的写入，`last_error_kind = remote_path_conflict`，事件带
-  `path` 与 `holder_record_id`），每次运行重复同一检查，直到运维改开路径模板 / 前缀。按确切路径比较：git 路径区分大小写，只有
-  确切相同的路径才会被覆盖。同一分类不在此列（重跑、`--force`、不含日期的模板本就覆盖自己的文件）。批量中这一检查在逐条处理
-  之后进行，因此本批刚恢复或仍未决的记录也算在内；检查查询数据库，跨运行同样生效。`PublishTarget::receipt_target(path)` 给出
-  该路径的回执形式（GitHub：`github://owner/repo/branch/path`；默认 `None`，不检查）。
+  则不写，以 `release_deferred_retry` 释放（保态、退还；新记录清空记录的写入、持久化 `remote_path_conflict`；恢复中的记录按 R5-6
+  保留恢复标记；事件 `error_kind = remote_path_conflict`，带 `path` 与 `holder_record_id`），每次运行重复同一检查，直到运维改开
+  路径模板 / 前缀。比较按 R5-8 折叠 ASCII 大小写。同一分类不在此列（重跑、`--force` 本就覆盖自己的文件；不含日期的路径模板已被
+  validate-config 拒绝，不是正常场景）。批量中这一检查在逐条处理之后进行，因此本批刚恢复或仍未决的记录也算在内；检查查询数据库，
+  跨运行同样生效，且与 R5-3 的记录在同一事务里（R5-7）。`PublishTarget::receipt_target(path)` 给出该路径的回执形式
+  （GitHub：`github://owner/repo/branch/path`；默认 `None`，不检查）。
 - **R5-3 先记录再发送**：每个写请求（单报告的 `PUT contents`、批量的 `PATCH ref`；批量中每条成员）发出之前，带 owner 与阶段守卫
-  写入 `last_error_kind = remote_write_unverified` 与本次写入的路径、blob（`mark_remote_write_pending`，保留 lease 与计数）；
-  lease 已失或写库失败则不发送。写入的结果照常覆盖它：成功推进清空，拒绝 / 限流按原规则释放并清空，歧义写入照记。于是写入之后、
-  记录结果之前崩溃，lease 过期回收后下一次 claim 会以恢复比对在**原路径**上找到它，而不是按当前配置再写一份。
+  写入 `last_error_kind = remote_write_unverified` 与本次写入的路径、blob（`record_remote_write`，保留 lease 与计数；`last_error`
+  写"写入意图已登记，是否发出与结果未知"）；lease 已失或写库失败则不发送。写入的结果按 R5-6 覆盖或保留它。于是写入之后、记录结果
+  之前崩溃，lease 过期回收后下一次 claim 会以恢复比对在**原路径**上找到它，而不是按当前配置再写一份。登记之后、真正发送之前崩溃
+  同样留下这个标记：下一次先做一次只读比对（缺失且路径未变即照常写入；路径已变则按 R5-4 暂停，此时运维看到的是"意图已登记"）。
   **仍未解决（残留）**：崩溃的这次尝试已计预算；若它是本阶段最后一次预算，lease 过期后 sweep 仍会把记录转 `failed`（未核对、
   归属释放），见下文"残留限制"。关闭这一窗口需要为预算耗尽的行提供一次只读核对入口，另行设计。
-- **R5-4 不覆盖的边界**：同一次尝试内，写请求返回 5xx / 超时、随即的只读核对在 HEAD 上未找到 → 按原写入错误计预算释放（清空
-  记录与恢复标记，R3F-S16）。先前请求在其后落地的论证同样适用于这里；由于下一次尝试写的是同一路径（目的地未变），GitHub 的
-  `sha` / 快进约束仍保证该路径至多一份，故不扩展 R5-4。
+
+**写入可能在途期间恢复标记不丢（2026-11-23，R5-6 / R5-7 / R5-8 / R5-9，Develata 批准；无新迁移）**。对上述各闸的第二次独立复审
+给出四个反例：同路径恢复在 PUT 之前遇 429，释放清掉了旧写入的去向；两个分类同时争一条空路径都过了 R5-5；GitHub owner / repo
+大小写不同即绕过 R5-5；批量成员在租约易主后仍可能发送。
+- **R5-6 不变量**：一旦有写入可能在途，恢复标记（`last_error_kind = remote_write_unverified` 与记录的路径 / blob）在除"成功推进"
+  与"终态 `failed`"之外的每一次释放中都保留：
+  - claim 时已在恢复中的记录：本次尝试的任何结果（429、409、422、5xx、存储错误、路径占用、写入未确认……）都不能证明先前那次请求
+    不会落地 → 一律保留（计预算与否照旧；计预算的释放改用 `release_retryable_failure_keeping_write`）；
+  - 新记录、本次写入已发出：只有 GitHub 以 4xx 拒绝了本次请求（含限流、认证失败）、或本次根本没发出（目标漂移、非法路径、写入未
+    确认）才证明没有落地 → 清空；5xx、传输失败、截止时间、超大 2xx 一律保留（宁可多一次只读比对、宁可暂停）；
+  - 新记录、写入之前就失败：没有在途写入 → 清空。
+  保留时持久化的 kind 是恢复 kind（与归属败方的先例一致），事件里的 `error_kind` 仍是真实错误，另带 `recovery_mark_kept`。
+  这取代了此前"同一次尝试内 5xx / 超时随即核对未找到 → 清空"的边界（R3F-S16 的计预算不变，只是不再清空标记）。GitHub 客户端
+  每个写请求只发一次，批量只在 422 非快进拒绝后重建一次，所以一次调用最终返回 4xx 时，它发出的每个写请求都已被明确拒绝。
+  **代价**：一次记录的 blob 只能描述一次渲染；若同一路径先后有两次渲染都可能落地，恢复只按最后记录的那个 blob 认"已落地"，
+  另一个出现时视为缺失、路径未变则再写一次（同一路径，GitHub 仍只留一份文件）。
+- **R5-7 原子登记**：R5-3 的登记与 R5-5 的占用检查合为一个存储事务（`record_remote_write`）：SQLite 先执行带守卫的登记 UPDATE
+  （取得写锁，沿用 §2 freeze 的写先行约定），再查占用者，命中则回滚；PostgreSQL 先显式 `READ COMMITTED`，再对目的地（折叠后的
+  回执串）取事务级 advisory lock，然后登记、查询，命中则回滚。并发的两个登记因此串行，后者必然看到前者，同一条空路径只放行一个。
+- **R5-8 大小写**：GitHub 的 owner 与 repo 不区分大小写。占用比较对目标身份、记录的路径与回执都只把 ASCII 字母折成小写
+  （SQLite 内建 `lower()` 只折 ASCII；PostgreSQL 用 `translate` 做同样的事，两方言对非 ASCII 文本答案一致）；分支与路径一并折叠
+  会多拦，与 validate-config 的大小写不敏感碰撞规则同向。存储的身份与回执原样不变（改动会让现存 `stored_local` 行触发目标漂移）。
+- **R5-9 发送前复核租约**：发布目标在每个改动分支的请求之前、在该请求所依赖的读取之后，调用 `WriteGuard::confirm`
+  （单报告：取得文件 `sha` 之后、`PUT` 之前；批量：取得 HEAD 并建好 commit 之后、`PATCH ref` 之前，422 重建后再问一次）。runtime 的
+  实现按 lease owner（不看过期时间，因此与各机时钟无关）确认本次仍持有全部记录；不再持有或无法确认 → `WriteNotConfirmed`，不发送，
+  按 deferred 释放（已被他人接手的记录释放为 0 行）。复核之后才被接手的，由 GitHub 自己拒绝：被替换的 blob 与 `sha` 不再相符、
+  无 `sha` 的创建遇到已存在的文件、非快进的 ref 更新都会被拒。批量另有第一道线：任何成员在闸口发现租约已失，整批都不发送。
+- **R5-4 运维处理（普通记录）**：§Consequences 中的守卫式 UPDATE 写给 `--force` 记录；因目的地改变而暂停的普通记录用下面的
+  守卫语句（同样先按第 1 步读出 `state`、`render_version`、`updated_at`、`unverified_write_path`、`unverified_write_blob_sha`，
+  核实记录的路径在分支 HEAD 上确无该 blob；一次 HEAD 缺失仍不能排除在途请求稍后落地，置 `failed` 之前应确认原请求早已超时）：
+  - SQLite：`BEGIN IMMEDIATE; UPDATE publish_records SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL,
+    last_error_kind = 'operator_failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = <id> AND state = 'stored_local'
+    AND last_error_kind = 'remote_write_unverified' AND render_version = <读到的值> AND updated_at = '<读到的原文>'
+    AND unverified_write_path IS '<读到的路径>' AND unverified_write_blob_sha IS '<读到的 blob>' AND (lease_expires_at IS NULL OR
+    julianday(lease_expires_at) < julianday('now')) RETURNING id;` → 恰好一行 `COMMIT;`，否则 `ROLLBACK;`
+  - PostgreSQL：同上，`updated_at = '<读到的值>'::timestamptz`、`unverified_write_path IS NOT DISTINCT FROM '<路径>'`、
+    `unverified_write_blob_sha IS NOT DISTINCT FROM '<blob>'`、`lease_expires_at < now()`，`updated_at = now()`。
 **代价（未解决）**：每次尝试都以"写入歧义 + 核对未完成"结束、此后比对也一直不出结论的记录（例如 GitHub 长期对读写都不可达）
 不会耗尽预算、一直持有文章归属；它每次运行最多再发一次只读比对。因此 `publish_max_attempts = 1` 或默认预算的最后一次尝试里
 "PATCH 已落地、响应丢失"也会记为 `published_remote`，而不是 `failed` 并释放文章归属。限流（`GitHubRateLimit`）不核对，

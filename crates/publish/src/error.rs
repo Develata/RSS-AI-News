@@ -133,6 +133,11 @@ pub enum PublishError {
         recorded: String,
         current: Option<String>,
     },
+    /// R5-9: the caller's [`crate::WriteGuard`] did not confirm the write
+    /// right before the mutating request (another worker took the record
+    /// over, or ownership could not be checked). The request was not sent.
+    #[error("remote write not sent: {reason}")]
+    WriteNotConfirmed { reason: String },
     /// The record was initialised for a different remote destination than the
     /// one configured now. Never retried: the operator decides (restore the
     /// config, or `--force` a new render version for the new target).
@@ -160,6 +165,32 @@ impl PublishError {
             // No write in this attempt: where the check failed.
             Self::EarlierWriteUnverified { verification } => verification.github_context(),
             _ => None,
+        }
+    }
+
+    /// R5-6: the attempt ended on an answer that proves its own write did not
+    /// land: GitHub refused a request with a 4xx (including rate limits and
+    /// auth failures), or nothing was sent at all (a target mismatch, an
+    /// invalid path, an unconfirmed write). A 5xx, a transport failure, a
+    /// deadline or an oversized 2xx may have followed a write that landed,
+    /// and the unverified kinds say so outright: none of those settle it.
+    /// The GitHub client sends each write once and retries a batch only after
+    /// a 422 non-fast-forward refusal, so a final 4xx means every write the
+    /// call sent was refused.
+    pub fn is_definite_refusal(&self) -> bool {
+        match self {
+            Self::GitHubApiError { status, .. } => (400..500).contains(status),
+            Self::GitHubAuthFailed { .. }
+            | Self::GitHubRateLimit { .. }
+            | Self::RemoteTargetMismatch { .. }
+            | Self::InvalidPath(_)
+            | Self::WriteNotConfirmed { .. } => true,
+            Self::LocalIoError(_)
+            | Self::RemoteTimeout
+            | Self::ResponseTooLarge { .. }
+            | Self::RemoteWriteUnverified { .. }
+            | Self::EarlierWriteUnverified { .. }
+            | Self::RemoteDestinationChanged { .. } => false,
         }
     }
 
@@ -238,6 +269,7 @@ impl ClassifiedError for PublishError {
             | Self::RemoteTargetMismatch { .. } => false,
             // Only ever the cause inside `EarlierWriteUnverified`, which is retryable.
             Self::RemoteDestinationChanged { .. } => true,
+            Self::WriteNotConfirmed { .. } => true,
             Self::GitHubApiError { status, .. } => *status == 409 || *status >= 500,
             Self::GitHubRateLimit { .. }
             | Self::RemoteTimeout
@@ -260,6 +292,7 @@ impl ClassifiedError for PublishError {
             Self::ResponseTooLarge { .. } => "response_too_large",
             Self::RemoteTargetMismatch { .. } => "remote_target_mismatch",
             Self::RemoteDestinationChanged { .. } => "remote_destination_changed",
+            Self::WriteNotConfirmed { .. } => "write_not_confirmed",
         }
     }
 

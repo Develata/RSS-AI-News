@@ -16,9 +16,42 @@ pub struct PublishedBatchArtifact {
     pub commit_sha: Option<String>,
 }
 
+/// R5-9: asked by a target right before each request that changes the
+/// destination (a contents PUT, a branch ref PATCH), after the reads the
+/// request is conditional on. `Err` = do not send: the caller no longer owns
+/// the write (another worker took it over) or cannot tell. The target returns
+/// that error and sends nothing more for the call.
+#[async_trait]
+pub trait WriteGuard: Send + Sync {
+    async fn confirm(&self) -> Result<(), PublishError>;
+}
+
 #[async_trait]
 pub trait PublishTarget: Send + Sync {
     async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError>;
+
+    /// [`Self::publish`], with `guard` confirmed right before the mutating
+    /// request. The default confirms once before calling [`Self::publish`];
+    /// a target with its own reads before the write (GitHub) confirms after
+    /// them instead.
+    async fn publish_guarded(
+        &self,
+        report: &RenderedReport,
+        guard: &dyn WriteGuard,
+    ) -> Result<PublishedArtifact, PublishError> {
+        guard.confirm().await?;
+        self.publish(report).await
+    }
+
+    /// [`Self::publish_many`] with `guard`, as [`Self::publish_guarded`].
+    async fn publish_many_guarded(
+        &self,
+        reports: &[RenderedReport],
+        guard: &dyn WriteGuard,
+    ) -> Result<PublishedBatchArtifact, PublishError> {
+        guard.confirm().await?;
+        self.publish_many(reports).await
+    }
 
     /// Stable identity of the destination this target writes to, in the form
     /// stored in `publish_records.remote_target` at init (`owner/repo:branch`

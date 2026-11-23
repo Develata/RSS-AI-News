@@ -68,6 +68,10 @@
   - **写前闸**（R5-3 / R5-4 / R5-5）：确认缺失但目的地已变 → 不写、保留记录，恢复原配置后写入原路径；另一分类已发布于 / 未决于
     同一确切路径 → 不写、`remote_path_conflict`，下一次运行仍不写；写请求之前先记录恢复标记与路径 / blob，写入后崩溃、改前缀，
     下一次运行在原路径记回执、零写请求；批量重复 ID → 不领取、不发送
+  - **恢复标记不丢 / 原子登记 / 大小写 / 发送前复核**（R5-6…R5-9）：同路径恢复遇 429 → 标记与记录的路径保留，改前缀后暂停；
+    两个分类并发争同一空路径 → 恰好一个登记、另一个被占用（两方言）；owner / repo 大小写不同仍视为同一目的地、非 ASCII 不折叠
+    （两方言一致）；闸口之后、PUT 之前被接手 → 不发 PUT；批量成员租约已失 → 整批不发；`WriteGuard` 在读取之后、PUT / PATCH 之前
+    （422 重建再问一次）
 - promote target article 已被其它流转推进 → `ArticleConflict`
 - 存量重复归属（0008 前两份未失败快照共享文章）：store_local / remote 写前拦截，已发布者或低 id 者胜出；败方不写外部产物、
   释放 lease、退还 claim、保持阶段态 → `ArticleConflict`（`article_owned_by_active_snapshot`）
@@ -171,7 +175,7 @@
 | `sqlite_deferred_retry_keeps_state_refunds_the_claim_and_persists_the_wait` | `crates/storage/tests/publish_stage_recovery_tests.rs` | 不计预算的释放：保态、清 lease、退还两计数、写 / 清 `next_attempt_at`；两类 claim 的投影带回 `last_error_kind`（R4-1；PG 同名 `pg_…`） |
 | `unverified_record_whose_recovery_check_fails_again_keeps_ownership_then_records_the_receipt` | `crates/runtime/tests/publish_remote_recovery_tests.rs` | 审查序列（R4-1）：`(stored_local, 0, remote_write_unverified)` → 下次所有 GET 503 → 保态、退还、kind 与归属保留、零写请求；HEAD 含报告后 → 以该 commit 记回执、零写请求 |
 | `unverified_record_whose_recovery_check_is_rate_limited_waits_out_the_deadline` | 同上 | 恢复比对被限流（`retry-after: 600`）→ 保态、退还、保留 kind、零写请求，期限写入 `next_attempt_at`，期内 `NothingToClaim` 且不发请求 |
-| `unverified_record_confirmed_absent_is_written_and_charged_normally` | 同上 | 恢复比对确认缺失 → 照常 PUT；PUT 409 照常计预算（末次 → `failed`） |
+| `unverified_record_confirmed_absent_is_written_and_charged_normally` | 同上 | 恢复比对确认缺失 → 照常 PUT；PUT 409 照常计预算（末次 → `failed`），持久化 kind 保持 `remote_write_unverified`（R5-6），事件为 `github_api_error` |
 | `unverified_record_confirmed_absent_publishes_with_a_normal_write` | 同上 | 确认缺失 → 正常写入并发布 |
 | `batch_checks_each_unverified_record_on_its_own_before_writing` | 同上 | 批量逐条比对：已落地者记回执不入批、比对失败者 deferred、缺失者与普通记录一起写入 |
 | `unverified_record_whose_preparation_times_out_is_deferred` | 同上 | 比对前准备超时：末次预算仍不 `failed`、保留 kind、零写入 |
@@ -183,11 +187,17 @@
 | `batch_recovery_checks_each_recorded_write` | 同上 | 批量逐条按记录的写入（路径与 blob）比对：已落地者按记录路径记回执、不入批；路径对但 blob 不同且目的地已变者暂停（R5-4）；在原路径确认缺失者与普通记录随批写入 |
 | `recovery_confirmed_absent_at_a_changed_destination_holds_until_restored` | 同上 | R5-4：记录的路径上确认缺失、前缀已改 → 零写请求、保留记录、事件带两条路径；恢复原前缀后在记录的路径上 PUT |
 | `crash_after_a_landed_write_recovers_at_the_recorded_path_after_a_prefix_change` | 同上 | R5-3：PUT 落地后进程"死亡"、改前缀 → 下一次运行在原路径记回执、零写请求（写前已记录） |
-| `write_to_a_path_another_category_holds_is_held` | 同上 | R5-5（批量，复审序列）：另一分类在本批恢复于同一路径 → 不写、`remote_path_conflict`、退还；之后单独再跑仍不写；同分类可写 |
+| `write_to_a_path_another_category_holds_is_held` | 同上 | R5-5（批量，复审序列）：另一分类在本批恢复于同一路径 → 不写、`remote_path_conflict`、退还；之后单独再跑仍不写；占用者改为同分类后写同一路径（`dest/newcat.md`） |
 | `single_write_to_a_path_published_by_another_category_is_held` | 同上 | R5-5（单条，真实目标）：另一分类已发布于同一路径 → 零请求、`remote_path_conflict`、退还 |
 | `batch_with_a_repeated_record_id_claims_and_sends_nothing` | 同上 | 批量重复 ID：不领取、不发送 |
-| `sqlite_mark_remote_write_pending_records_the_write_and_keeps_the_lease`、`sqlite_find_remote_destination_holder_matches_other_categories_only` | `crates/storage/tests/publish_stage_recovery_tests.rs` | 写前记录保留 lease 与计数、带守卫；占用者只认另一分类的已发布或同目标未决写入（PG：`pg_pending_write_and_destination_holder`） |
-| `deferred_releases_record_keep_or_clear_the_unverified_write` | `crates/runtime/src/flows/publish/remote.rs` | 新歧义写入 → 记录本次写入；恢复未决 → 保留；限流 → 清空 |
+| `sqlite_record_remote_write_records_the_write_and_keeps_the_lease` | `crates/storage/tests/publish_stage_recovery_tests.rs` | 写前登记保留 lease 与计数、带守卫，租约已失不登记；`owns_publish_records` 按 owner 判定 |
+| `sqlite_record_remote_write_is_held_by_another_categorys_destination` | 同上 | 占用者只认另一分类的已发布或同目标未决写入；owner / repo / 路径 ASCII 大小写折叠、中文与 `É` 不折叠；被占用时不登记（PG：`pg_record_remote_write_and_destination_holder`，同一组答案） |
+| `sqlite_concurrent_record_remote_write_clears_one_writer_per_destination` | 同上 | R5-7：两个分类被第三个连接的写锁挡住后同时争一条空路径 → 恰好一个 `Recorded`、一个 `HeldBy`（PG：`pg_concurrent_record_remote_write_clears_one_writer_per_destination`，挡在 advisory lock 上） |
+| `rate_limited_same_path_recovery_keeps_the_mark_and_later_holds` | `crates/runtime/tests/publish_remote_recovery_tests.rs` | R5-6 复审序列：同路径恢复在 PUT 前的读取遇 429 → kind 与记录的路径保留、零写请求；改前缀后下一次运行暂停、零写请求 |
+| `takeover_after_the_gate_sends_no_put` | 同上 | R5-9：闸口之后、PUT 之前租约易主 → `write_not_confirmed`、零 PUT，记录留给接手者 |
+| `batch_member_taken_over_at_its_gate_sends_nothing` | 同上 | R5-9 第一道线：批量一员闸口租约已失 → 整批不发，仍持有的成员不计预算、清空登记 |
+| `recovery_mark_is_kept_while_a_write_may_be_in_flight` | `crates/runtime/src/flows/publish/remote.rs` | R5-6 决策表：恢复中一律保留；新记录写后只有 4xx / 未发出才清空 |
+| `refused_guard_sends_no_contents_put`、`confirmed_guard_lets_the_contents_put_through`、`refused_guard_sends_no_ref_patch`、`rebuild_after_a_non_fast_forward_asks_the_guard_again` | `crates/publish/tests/github_write_guard_tests.rs` | `WriteGuard` 的位置：单报告在内容读取之后、PUT 之前；批量在建好 commit 之后、PATCH 之前；422 重建再问一次，拒绝即不发 |
 | `sqlite_deferred_retry_records_keeps_and_clears_the_unverified_write` | `crates/storage/tests/publish_stage_recovery_tests.rs` | `Record` 写入、`Keep` 保留、两类 claim 投影带回、`Record(None)` / 计预算释放 / 阶段推进清空（PG 同名 `pg_…`，`publish_record_pg_tests.rs`） |
 | `git_blob_sha_matches_git_hash_object` | `crates/publish/src/github.rs` | blob sha 与 `git hash-object` 一致（含中文） |
 | `auth_failure_maps_to_github_auth_failed` | 同上 | 401 映射 |

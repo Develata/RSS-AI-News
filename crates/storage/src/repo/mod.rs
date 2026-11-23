@@ -112,9 +112,9 @@ pub use publish_item::{
     PublishItemRepo, PublishItemRepository, SnapshotOwnershipConflict,
 };
 pub use publish_record::{
-    ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord, PublishRecordRepo,
-    PublishRecordRepository, PublishState, PublishTimestampField, TerminalAdvanceOutcome,
-    TerminalAdvanceStatus, UnverifiedWriteUpdate,
+    ClaimedPublishRecord, DestinationCheck, NewPublishRecord, PublishAdvanceExtras, PublishRecord,
+    PublishRecordRepo, PublishRecordRepository, PublishState, PublishTimestampField, RecordedWrite,
+    TerminalAdvanceOutcome, TerminalAdvanceStatus, UnverifiedWriteUpdate,
 };
 pub use raw_artifact::{NewRawArtifact, RawArtifactRepo, RawArtifactRepository};
 pub use reindex_job::{

@@ -99,6 +99,28 @@ pub enum UnverifiedWriteUpdate<'a> {
     Record(Option<&'a RemoteBlob>),
 }
 
+/// R5-5: the destination check of [`PublishRecordRepository::record_remote_write`]:
+/// the recording record's category and target identity, and the receipt a
+/// write at the blob's path would get. Compared ASCII-case-insensitively.
+#[derive(Debug, Clone, Copy)]
+pub struct DestinationCheck<'a> {
+    pub category_key: &'a str,
+    pub target_identity: &'a str,
+    pub receipt_target: &'a str,
+}
+
+/// Outcome of [`PublishRecordRepository::record_remote_write`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordedWrite {
+    /// Recorded: send the write.
+    Recorded,
+    /// Another category's record (this id) holds the destination; nothing
+    /// was recorded.
+    HeldBy(i64),
+    /// The lease was lost; nothing was recorded.
+    LeaseLost,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishState {
     Pending,
@@ -291,14 +313,17 @@ pub trait PublishRecordRepository: Send + Sync {
         unverified_write: UnverifiedWriteUpdate<'_>,
         now: OffsetDateTime,
     ) -> Result<bool, StorageError>;
-    /// R5-3: records the remote write about to be sent by the claimed record
-    /// (`kind` = the recovery kind, `blob` = its final path and git blob id;
-    /// `None` records none), keeping the lease and the counters. A crash
-    /// before the outcome is recorded then leaves a record the next claim
-    /// recovers at that path. Returns `false` when the lease was lost (send
-    /// nothing).
+    /// R5-3 / R5-7: records the remote write about to be sent by the claimed
+    /// record (`error` / `kind` = the in-flight note and the recovery kind,
+    /// `blob` = its final path and git blob id, `None` records none), keeping
+    /// the lease and the counters — and, with `check`, only if no other
+    /// category's record holds that destination (R5-5). Recording and the
+    /// check are one transaction, serialised per destination (SQLite: the
+    /// guarded UPDATE first takes the write lock; PostgreSQL: a
+    /// transaction-scoped advisory lock on the folded destination, under READ
+    /// COMMITTED), so two records cannot both be cleared for one path.
     #[allow(clippy::too_many_arguments)]
-    async fn mark_remote_write_pending(
+    async fn record_remote_write(
         &self,
         id: i64,
         owner: &str,
@@ -306,22 +331,32 @@ pub trait PublishRecordRepository: Send + Sync {
         error: &str,
         kind: &str,
         blob: Option<&RemoteBlob>,
+        check: Option<DestinationCheck<'_>>,
         now: OffsetDateTime,
-    ) -> Result<bool, StorageError>;
-    /// R5-5: the id of another record, of a category other than
-    /// `category_key`, that holds remote destination `path`: its write there
-    /// is unsettled (`stored_local`, `last_error_kind = unverified_kind`,
-    /// recorded at `path`, initialised for `target_identity`) or it is
-    /// `published_remote` with receipt `receipt_target`. `None` = free.
-    async fn find_remote_destination_holder(
+    ) -> Result<RecordedWrite, StorageError>;
+    /// R5-6: a charged retryable release (same budget fold as
+    /// [`Self::release_retryable_failure_until`]) that keeps the recorded
+    /// write, for an attempt that may leave one in flight; `kind` is the
+    /// recovery kind the caller persists.
+    #[allow(clippy::too_many_arguments)]
+    async fn release_retryable_failure_keeping_write(
         &self,
         id: i64,
-        category_key: &str,
-        path: &str,
-        unverified_kind: &str,
-        target_identity: &str,
-        receipt_target: &str,
-    ) -> Result<Option<i64>, StorageError>;
+        owner: &str,
+        error: &str,
+        kind: &str,
+        max_attempts: u32,
+        retry_not_before: Option<OffsetDateTime>,
+        now: OffsetDateTime,
+    ) -> Result<ReleaseFailureOutcome, StorageError>;
+    /// R5-9: `true` iff `owner` still holds every record of `ids` in `state`.
+    /// Compares the lease owner, not the expiry, so no clock is involved.
+    async fn owns_publish_records(
+        &self,
+        ids: &[i64],
+        owner: &str,
+        state: PublishState,
+    ) -> Result<bool, StorageError>;
     async fn release_permanent_failure(
         &self,
         id: i64,

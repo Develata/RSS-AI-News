@@ -16,16 +16,16 @@ use rss_ai_news_config::RetentionPolicy;
 use rss_ai_news_domain::dto::publish::{RemoteBlob, RenderedReport};
 use rss_ai_news_publish::{
     GitHubTarget, GitHubTargetConfig, LocalFsTarget, PublishError, PublishTarget,
-    PublishedArtifact, PublishedBatchArtifact,
+    PublishedArtifact, PublishedBatchArtifact, WriteGuard,
 };
 use rss_ai_news_runtime::{
     PublishFlow, PublishRemoteBatchItemOptions, PublishRemoteBatchOptions, PublishRemoteOptions,
     PublishRemoteStatus,
 };
 use rss_ai_news_storage::{
-    ClaimRequest, ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord,
-    PublishRecordRepository, PublishState, PublishTimestampField, ReleaseFailureOutcome,
-    StorageError, TerminalAdvanceOutcome, UnverifiedWriteUpdate,
+    ClaimRequest, ClaimedPublishRecord, DestinationCheck, NewPublishRecord, PublishAdvanceExtras,
+    PublishRecord, PublishRecordRepository, PublishState, PublishTimestampField, RecordedWrite,
+    ReleaseFailureOutcome, StorageError, TerminalAdvanceOutcome, UnverifiedWriteUpdate,
 };
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -208,6 +208,28 @@ impl PublishTarget for Recording {
         self.inner.publish(report).await
     }
 
+    /// The real target's guarded write, so the guard is asked where GitHub
+    /// asks it (after the reads, before the PUT).
+    async fn publish_guarded(
+        &self,
+        report: &RenderedReport,
+        guard: &dyn WriteGuard,
+    ) -> Result<PublishedArtifact, PublishError> {
+        self.remember(report);
+        self.inner.publish_guarded(report, guard).await
+    }
+
+    async fn publish_many_guarded(
+        &self,
+        reports: &[RenderedReport],
+        guard: &dyn WriteGuard,
+    ) -> Result<PublishedBatchArtifact, PublishError> {
+        if let Some(report) = reports.first() {
+            self.remember(report);
+        }
+        self.inner.publish_many_guarded(reports, guard).await
+    }
+
     fn target_identity(&self) -> Option<String> {
         self.inner.target_identity()
     }
@@ -239,7 +261,7 @@ impl PublishTarget for Recording {
     }
 }
 
-fn github_flow(pool: SqlitePool, target: Arc<Recording>) -> PublishFlow {
+fn github_flow(pool: SqlitePool, target: Arc<dyn PublishTarget>) -> PublishFlow {
     let mut app = app_config(RetentionPolicy::Always, 1);
     app.retry.publish_max_attempts = 1;
     PublishFlow::new(Arc::new(publish_deps(
@@ -469,9 +491,13 @@ async fn unverified_record_confirmed_absent_is_written_and_charged_normally() {
     let (state, _, stage, kind, _) = record_row(&pool, id).await;
     assert_eq!(
         (state.as_str(), stage, kind.as_deref()),
-        ("failed", 1, Some("github_api_error")),
-        "charged: confirmed absent means the normal budget applies"
+        ("failed", 1, Some(UNVERIFIED)),
+        "charged: confirmed absent means the normal budget applies; the earlier \
+         write may still land, so the recovery kind is what stays on record (R5-6)"
     );
+    let event = last_publish_failed(&pool).await;
+    assert_eq!(event["error_kind"], "github_api_error");
+    assert_eq!(event["recovery_mark_kept"], true);
 }
 
 /// Confirmed absent, then the normal write succeeds.
@@ -529,7 +555,10 @@ impl ScriptedTarget {
         PublishedArtifact {
             local_path: None,
             commit_sha: Some(commit.to_string()),
-            remote_target: Some(format!("github://owner/repo/main/{}", report.relative_path)),
+            remote_target: Some(format!(
+                "github://owner/repo/main/dest/{}.md",
+                report.category_key
+            )),
         }
     }
 }
@@ -773,6 +802,9 @@ struct UnrecordedReceipts {
     inner: rss_ai_news_storage::PublishRecordRepo,
     failures: AtomicUsize,
     error: fn() -> StorageError,
+    /// Recording this record's write reports a lost lease (another worker
+    /// took it over between the claim and the gate).
+    lose_lease_of: Option<i64>,
 }
 
 impl UnrecordedReceipts {
@@ -781,6 +813,16 @@ impl UnrecordedReceipts {
             inner: rss_ai_news_storage::PublishRecordRepo::new(pool.clone()),
             failures: AtomicUsize::new(failures),
             error,
+            lose_lease_of: None,
+        })
+    }
+
+    fn losing_lease_of(pool: &SqlitePool, id: i64) -> Arc<Self> {
+        Arc::new(Self {
+            inner: rss_ai_news_storage::PublishRecordRepo::new(pool.clone()),
+            failures: AtomicUsize::new(0),
+            error: db_unavailable,
+            lose_lease_of: Some(id),
         })
     }
 }
@@ -972,7 +1014,7 @@ impl PublishRecordRepository for UnrecordedReceipts {
             .release_permanent_failure(id, owner, error, kind, now)
             .await
     }
-    async fn mark_remote_write_pending(
+    async fn record_remote_write(
         &self,
         id: i64,
         owner: &str,
@@ -980,31 +1022,45 @@ impl PublishRecordRepository for UnrecordedReceipts {
         error: &str,
         kind: &str,
         blob: Option<&RemoteBlob>,
+        check: Option<DestinationCheck<'_>>,
         now: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<RecordedWrite, StorageError> {
+        if self.lose_lease_of == Some(id) {
+            return Ok(RecordedWrite::LeaseLost);
+        }
         self.inner
-            .mark_remote_write_pending(id, owner, state, error, kind, blob, now)
+            .record_remote_write(id, owner, state, error, kind, blob, check, now)
             .await
     }
-    async fn find_remote_destination_holder(
+    async fn release_retryable_failure_keeping_write(
         &self,
         id: i64,
-        category_key: &str,
-        path: &str,
-        unverified_kind: &str,
-        target_identity: &str,
-        receipt_target: &str,
-    ) -> Result<Option<i64>, StorageError> {
+        owner: &str,
+        error: &str,
+        kind: &str,
+        max_attempts: u32,
+        retry_not_before: Option<OffsetDateTime>,
+        now: OffsetDateTime,
+    ) -> Result<ReleaseFailureOutcome, StorageError> {
         self.inner
-            .find_remote_destination_holder(
+            .release_retryable_failure_keeping_write(
                 id,
-                category_key,
-                path,
-                unverified_kind,
-                target_identity,
-                receipt_target,
+                owner,
+                error,
+                kind,
+                max_attempts,
+                retry_not_before,
+                now,
             )
             .await
+    }
+    async fn owns_publish_records(
+        &self,
+        ids: &[i64],
+        owner: &str,
+        state: PublishState,
+    ) -> Result<bool, StorageError> {
+        self.inner.owns_publish_records(ids, owner, state).await
     }
     async fn reclaim_expired_leases(&self, now: OffsetDateTime) -> Result<u64, StorageError> {
         self.inner.reclaim_expired_leases(now).await
@@ -1655,6 +1711,18 @@ impl PublishTarget for DiesAfterWrite {
         std::future::pending().await
     }
 
+    async fn publish_guarded(
+        &self,
+        report: &RenderedReport,
+        guard: &dyn WriteGuard,
+    ) -> Result<PublishedArtifact, PublishError> {
+        self.0
+            .publish_guarded(report, guard)
+            .await
+            .expect("the write lands");
+        std::future::pending().await
+    }
+
     fn target_identity(&self) -> Option<String> {
         self.0.target_identity()
     }
@@ -1819,13 +1887,25 @@ async fn write_to_a_path_another_category_holds_is_held() {
     );
     assert_eq!(target.written.load(Ordering::SeqCst), 0);
 
-    // Same category as the holder: its own path, written.
-    set_category(&pool, new, "oldcat").await;
+    // The holder turns out to be of the same category (a rerun or `--force`
+    // of the same report): the same final path is written over.
+    set_category(&pool, old, "newcat").await;
     let same_category = flow.publish_remote_batch(items(&[(new, "New")])).await;
     assert_eq!(
         status(&same_category, new),
         PublishRemoteStatus::PublishedRemote
     );
+    let written_at = same_category
+        .items
+        .iter()
+        .find(|item| item.publish_record_id == new)
+        .and_then(|item| item.remote_target.clone());
+    assert_eq!(
+        written_at.as_deref(),
+        Some("github://owner/repo/main/dest/newcat.md"),
+        "the held path itself"
+    );
+    assert_eq!(target.written.load(Ordering::SeqCst), 1);
 }
 
 /// R5-5 (single): a record published at the path this record would write,
@@ -1916,4 +1996,233 @@ async fn batch_with_a_repeated_record_id_claims_and_sends_nothing() {
     assert_eq!(target.written.load(Ordering::SeqCst), 0);
     let (state, attempts, _, _, lease) = record_row(&pool, id).await;
     assert_eq!((state.as_str(), attempts, lease), ("stored_local", 0, None));
+}
+// === R5-6 / R5-9: the mark survives; a takeover sends nothing ===
+
+/// R5-6, the reviewer's sequence: a recovering record finds its recorded
+/// write absent at the same path and goes to write again, but GitHub answers
+/// the read before the PUT with a 429. The earlier request may still land, so
+/// the mark and recorded path stay; after the prefix changes, the next run
+/// holds instead of writing the report under `archive/`.
+#[tokio::test]
+async fn rate_limited_same_path_recovery_keeps_the_mark_and_later_holds() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local(&pool).await;
+    let server = MockServer::start().await;
+    let flow = github_flow(pool.clone(), Recording::new(&server.uri()));
+    first_attempt_left_unverified(&server, &flow, id).await;
+    let recorded = recorded_write(&pool, id).await;
+
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "object": { "sha": "head-without-report" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/"))
+        .and(query_param("ref", "head-without-report"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(serde_json::json!({"message": "Not Found"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/"))
+        .and(query_param("ref", "main"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "0")
+                .set_body_json(serde_json::json!({"message": "API rate limit exceeded"})),
+        )
+        .mount(&server)
+        .await;
+    let limited = flow.publish_remote_record(id, remote_opts()).await;
+
+    assert!(
+        matches!(&limited.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "github_rate_limit"),
+        "{:?}",
+        limited.status
+    );
+    assert_eq!(non_get_requests(&server).await, Vec::<String>::new());
+    assert_kept_and_refunded(&pool, id).await;
+    assert_eq!(
+        recorded_write(&pool, id).await.0,
+        recorded.0,
+        "the recorded path survives the rate limit"
+    );
+    let event = last_publish_failed(&pool).await;
+    assert_eq!(event["error_kind"], "github_rate_limit");
+    assert_eq!(event["recovery_mark_kept"], true);
+
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/git/ref/heads/main"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "object": { "sha": "head-without-report" }
+        })))
+        .mount(&server)
+        .await;
+    mount_absent_contents(&server).await;
+    let held = github_flow(
+        pool.clone(),
+        Recording::with_prefix(&server.uri(), "archive"),
+    )
+    .publish_remote_record(id, remote_opts())
+    .await;
+    assert!(
+        matches!(&held.status, PublishRemoteStatus::Failed { error_kind } if error_kind == UNVERIFIED),
+        "{:?}",
+        held.status
+    );
+    assert_eq!(non_get_requests(&server).await, Vec::<String>::new());
+}
+
+async fn mount_absent_contents(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(serde_json::json!({"message": "Not Found"})),
+        )
+        .mount(server)
+        .await;
+}
+
+/// The real target, except that another worker takes the record over (its
+/// lease owner changes) after the gate recorded the write and before the
+/// target's own reads — the reviewer's takeover window.
+struct TakenOverBeforeWrite {
+    inner: Arc<Recording>,
+    pool: SqlitePool,
+    id: i64,
+}
+
+#[async_trait]
+impl PublishTarget for TakenOverBeforeWrite {
+    async fn publish(&self, report: &RenderedReport) -> Result<PublishedArtifact, PublishError> {
+        self.inner.publish(report).await
+    }
+
+    async fn publish_guarded(
+        &self,
+        report: &RenderedReport,
+        guard: &dyn WriteGuard,
+    ) -> Result<PublishedArtifact, PublishError> {
+        sqlx::query("UPDATE publish_records SET lease_owner = 'another-worker' WHERE id = ?")
+            .bind(self.id)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        self.inner.publish_guarded(report, guard).await
+    }
+
+    fn target_identity(&self) -> Option<String> {
+        self.inner.target_identity()
+    }
+
+    fn remote_blob(&self, report: &RenderedReport) -> Option<RemoteBlob> {
+        self.inner.remote_blob(report)
+    }
+
+    fn receipt_target(&self, path: &str) -> Option<String> {
+        self.inner.receipt_target(path)
+    }
+}
+
+/// R5-9: the lease moved to another worker between the gate and the PUT
+/// (e.g. this worker's clock ran behind the one that reclaimed it). The owner
+/// check right before the PUT stops it: no PUT, and nothing of the record —
+/// now the other worker's — is released.
+#[tokio::test]
+async fn takeover_after_the_gate_sends_no_put() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local(&pool).await;
+    let server = MockServer::start().await;
+    mount_absent_contents(&server).await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "content": { "sha": "file-sha" },
+            "commit": { "sha": "stale-commit" }
+        })))
+        .mount(&server)
+        .await;
+    let target = Arc::new(TakenOverBeforeWrite {
+        inner: Recording::new(&server.uri()),
+        pool: pool.clone(),
+        id,
+    });
+    let taken = github_flow(pool.clone(), target)
+        .publish_remote_record(id, remote_opts())
+        .await;
+
+    assert!(
+        matches!(&taken.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "write_not_confirmed"),
+        "{:?}",
+        taken.status
+    );
+    assert_eq!(
+        non_get_requests(&server).await,
+        Vec::<String>::new(),
+        "no PUT"
+    );
+    let (state, _, _, kind, lease) = record_row(&pool, id).await;
+    assert_eq!(
+        (state.as_str(), kind.as_deref(), lease.as_deref()),
+        ("stored_local", Some(UNVERIFIED), Some("another-worker")),
+        "left to the worker that holds it, with the write it recorded"
+    );
+}
+
+/// R5-9, first line: one member of a batch is found taken over at its gate;
+/// the batch is one claim, so nothing is sent for any member and the members
+/// still held are released unsent (refunded, nothing recorded).
+#[tokio::test]
+async fn batch_member_taken_over_at_its_gate_sends_nothing() {
+    let (_dir, pool) = make_test_pool().await;
+    let kept = seed_stored_local(&pool).await;
+    let lost = seed_stored_local(&pool).await;
+    set_category(&pool, kept, "keptcat").await;
+    set_category(&pool, lost, "lostcat").await;
+    let target = scripted(vec![]);
+    let flow = flow_with_repo(
+        pool.clone(),
+        target.clone(),
+        UnrecordedReceipts::losing_lease_of(&pool, lost),
+    );
+
+    let outcome = flow
+        .publish_remote_batch(PublishRemoteBatchOptions {
+            items: vec![batch_item(kept, "Kept"), batch_item(lost, "Lost")],
+        })
+        .await;
+
+    let status = |id: i64| {
+        outcome
+            .items
+            .iter()
+            .find(|item| item.publish_record_id == id)
+            .unwrap()
+            .status
+            .clone()
+    };
+    assert_eq!(status(lost), PublishRemoteStatus::Conflicted);
+    assert!(
+        matches!(&status(kept), PublishRemoteStatus::Failed { error_kind } if error_kind == "write_not_confirmed"),
+        "{:?}",
+        status(kept)
+    );
+    assert_eq!(target.batches.load(Ordering::SeqCst), 0);
+    assert_eq!(target.written.load(Ordering::SeqCst), 0);
+    let (state, attempts, stage, _, lease) = record_row(&pool, kept).await;
+    assert_eq!(
+        (state.as_str(), attempts, stage, lease),
+        ("stored_local", 0, 0, None)
+    );
+    assert_eq!(
+        recorded_write(&pool, kept).await,
+        (None, None),
+        "nothing in flight"
+    );
 }

@@ -476,7 +476,9 @@ async fn publish_remote_deadline_releases_retryable_claim() {
         matches!(outcome.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "remote_timeout")
     );
     assert_record_state(&pool, id, "stored_local").await;
-    assert_last_error_kind(&pool, id, "remote_timeout").await;
+    // R5-6: the cut-off write may still land, so the recovery mark stays
+    // (charged as before; the outcome still says `remote_timeout`).
+    assert_last_error_kind(&pool, id, "remote_write_unverified").await;
     assert_referenced_articles_state(&pool, id, "ready_for_publish").await;
     let owner: Option<String> =
         sqlx::query_scalar("SELECT lease_owner FROM publish_records WHERE id = ?")
@@ -1153,9 +1155,11 @@ async fn publish_remote_timeout_without_the_report_at_head_keeps_the_timeout() {
     assert!(
         matches!(outcome.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "remote_timeout")
     );
-    // Last attempt of the stage: the fold makes the unverified record failed.
+    // Last attempt of the stage: the fold makes the unverified record failed;
+    // its persisted kind stays the recovery kind (R5-6: the cut-off write may
+    // still land, which the manual check must know).
     assert_record_state(&pool, id, "failed").await;
-    assert_last_error_kind(&pool, id, "remote_timeout").await;
+    assert_last_error_kind(&pool, id, "remote_write_unverified").await;
 }
 
 #[tokio::test]

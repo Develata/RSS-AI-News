@@ -14,18 +14,21 @@ use crate::{ClaimRequest, ReleaseFailureOutcome, StorageError, StoragePool, clas
 
 use super::{
     publish_record::{
-        ClaimedPublishRecord, NewPublishRecord, PublishAdvanceExtras, PublishRecord,
-        PublishRecordRepo, PublishRecordRepository, PublishState, PublishTimestampField,
-        TerminalAdvanceOutcome, TerminalAdvanceStatus, UnverifiedWriteUpdate,
+        ClaimedPublishRecord, DestinationCheck, NewPublishRecord, PublishAdvanceExtras,
+        PublishRecord, PublishRecordRepo, PublishRecordRepository, PublishState,
+        PublishTimestampField, RecordedWrite, TerminalAdvanceOutcome, TerminalAdvanceStatus,
+        UnverifiedWriteUpdate,
     },
     publish_record_sql::{
         ADVANCE_LOCAL_SQL, ADVANCE_REMOTE_SQL, ADVANCE_RENDERED_SQL, ADVANCE_SNAPSHOT_SQL,
-        CREATE_IF_NEW_SQL, FIND_REMOTE_DESTINATION_HOLDER_SQL, MARK_REMOTE_WRITE_PENDING_SQL,
-        PROMOTE_ARTICLE_PUBLISHED_SQL, PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL,
-        RECLAIM_PUBLISH_LEASES_SQL, RECLAIM_PUBLISH_LEASES_SQLITE_SQL,
-        RELEASE_DEFERRED_RETRY_RECORDING_SQL, RELEASE_DEFERRED_RETRY_SQL,
-        RELEASE_EMPTY_SNAPSHOT_SQL, RELEASE_FREEZE_CONFLICT_SQL, RELEASE_OWNERSHIP_CONFLICT_SQL,
-        RELEASE_PERMANENT_FAILURE_SQL, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL,
+        CREATE_IF_NEW_SQL, FIND_REMOTE_DESTINATION_HOLDER_PG_SQL,
+        FIND_REMOTE_DESTINATION_HOLDER_SQLITE_SQL, LOCK_REMOTE_DESTINATION_PG_SQL,
+        MARK_REMOTE_WRITE_PENDING_SQL, OWNS_PUBLISH_RECORD_SQL, PROMOTE_ARTICLE_PUBLISHED_SQL,
+        PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL, RECLAIM_PUBLISH_LEASES_SQL,
+        RECLAIM_PUBLISH_LEASES_SQLITE_SQL, RELEASE_DEFERRED_RETRY_RECORDING_SQL,
+        RELEASE_DEFERRED_RETRY_SQL, RELEASE_EMPTY_SNAPSHOT_SQL, RELEASE_FREEZE_CONFLICT_SQL,
+        RELEASE_OWNERSHIP_CONFLICT_SQL, RELEASE_PERMANENT_FAILURE_SQL,
+        RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_WRITE_SQL, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL,
         SELECT_PUBLISH_RECORD_BY_ID, SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY,
         TERMINALIZE_EXHAUSTED_PUBLISH_SQL, TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL,
         claim_pending_in_category_pg, claim_pending_in_category_sqlite, claim_publish_pg,
@@ -369,7 +372,7 @@ impl PublishRecordRepository for PublishRecordRepo {
         Ok(affected == 1)
     }
 
-    async fn mark_remote_write_pending(
+    async fn record_remote_write(
         &self,
         id: i64,
         owner: &str,
@@ -377,76 +380,85 @@ impl PublishRecordRepository for PublishRecordRepo {
         error: &str,
         kind: &str,
         blob: Option<&RemoteBlob>,
+        check: Option<DestinationCheck<'_>>,
         now: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
-        let path = blob.map(|blob| blob.path.as_str());
-        let blob_sha = blob.map(|blob| blob.blob_sha.as_str());
-        let affected = match self.storage_pool() {
-            StoragePool::Sqlite(p) => sqlx::query(MARK_REMOTE_WRITE_PENDING_SQL)
-                .bind(error)
-                .bind(kind)
-                .bind(path)
-                .bind(blob_sha)
-                .bind(now)
-                .bind(id)
-                .bind(owner)
-                .bind(state.as_str())
-                .execute(p)
-                .await
-                .map_err(StorageError::from)?
-                .rows_affected(),
-            StoragePool::Postgres(p) => sqlx::query(MARK_REMOTE_WRITE_PENDING_SQL)
-                .bind(error)
-                .bind(kind)
-                .bind(path)
-                .bind(blob_sha)
-                .bind(now)
-                .bind(id)
-                .bind(owner)
-                .bind(state.as_str())
-                .execute(p)
-                .await
-                .map_err(StorageError::from)?
-                .rows_affected(),
+    ) -> Result<RecordedWrite, StorageError> {
+        let write = PendingWrite {
+            id,
+            owner,
+            state,
+            error,
+            kind,
+            blob,
+            now,
         };
-        Ok(affected == 1)
+        // The holder check needs the destination path, i.e. a recorded blob.
+        let check = check.zip(blob).map(|(check, blob)| FoldedCheck {
+            category_key: check.category_key,
+            path: blob.path.to_ascii_lowercase(),
+            target_identity: check.target_identity.to_ascii_lowercase(),
+            receipt_target: check.receipt_target.to_ascii_lowercase(),
+        });
+        match self.storage_pool() {
+            StoragePool::Sqlite(p) => sqlite_record_remote_write(p, &write, check.as_ref()).await,
+            StoragePool::Postgres(p) => pg_record_remote_write(p, &write, check.as_ref()).await,
+        }
     }
 
-    async fn find_remote_destination_holder(
+    async fn release_retryable_failure_keeping_write(
         &self,
         id: i64,
-        category_key: &str,
-        path: &str,
-        unverified_kind: &str,
-        target_identity: &str,
-        receipt_target: &str,
-    ) -> Result<Option<i64>, StorageError> {
+        owner: &str,
+        error: &str,
+        kind: &str,
+        max_attempts: u32,
+        retry_not_before: Option<OffsetDateTime>,
+        now: OffsetDateTime,
+    ) -> Result<ReleaseFailureOutcome, StorageError> {
+        let release = RetryableRelease {
+            id,
+            owner,
+            error,
+            kind,
+            max_attempts,
+            retry_not_before,
+            now,
+        };
+        let sql = RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_WRITE_SQL;
         match self.storage_pool() {
-            StoragePool::Sqlite(p) => {
-                sqlx::query_scalar::<_, i64>(FIND_REMOTE_DESTINATION_HOLDER_SQL)
+            StoragePool::Sqlite(p) => sqlite_release_retryable_failure_with(p, sql, release).await,
+            StoragePool::Postgres(p) => pg_release_retryable_failure_with(p, sql, release).await,
+        }
+    }
+
+    async fn owns_publish_records(
+        &self,
+        ids: &[i64],
+        owner: &str,
+        state: PublishState,
+    ) -> Result<bool, StorageError> {
+        for &id in ids {
+            let held = match self.storage_pool() {
+                StoragePool::Sqlite(p) => sqlx::query_scalar::<_, i64>(OWNS_PUBLISH_RECORD_SQL)
                     .bind(id)
-                    .bind(category_key)
-                    .bind(path)
-                    .bind(unverified_kind)
-                    .bind(target_identity)
-                    .bind(receipt_target)
+                    .bind(owner)
+                    .bind(state.as_str())
                     .fetch_optional(p)
                     .await
-                    .map_err(StorageError::from)
-            }
-            StoragePool::Postgres(p) => {
-                sqlx::query_scalar::<_, i64>(FIND_REMOTE_DESTINATION_HOLDER_SQL)
+                    .map_err(StorageError::from)?,
+                StoragePool::Postgres(p) => sqlx::query_scalar::<_, i64>(OWNS_PUBLISH_RECORD_SQL)
                     .bind(id)
-                    .bind(category_key)
-                    .bind(path)
-                    .bind(unverified_kind)
-                    .bind(target_identity)
-                    .bind(receipt_target)
+                    .bind(owner)
+                    .bind(state.as_str())
                     .fetch_optional(p)
                     .await
-                    .map_err(StorageError::from)
+                    .map_err(StorageError::from)?,
+            };
+            if held.is_none() {
+                return Ok(false);
             }
         }
+        Ok(true)
     }
 
     async fn release_permanent_failure(
@@ -608,11 +620,145 @@ struct RetryableRelease<'a> {
     now: OffsetDateTime,
 }
 
+/// Arguments of [`PublishRecordRepository::record_remote_write`].
+struct PendingWrite<'a> {
+    id: i64,
+    owner: &'a str,
+    state: PublishState,
+    error: &'a str,
+    kind: &'a str,
+    blob: Option<&'a RemoteBlob>,
+    now: OffsetDateTime,
+}
+
+/// The R5-5 destination check with its comparands folded to ASCII lower
+/// case (R5-8); `receipt_target` is also the PostgreSQL lock key (R5-7).
+struct FoldedCheck<'a> {
+    category_key: &'a str,
+    path: String,
+    target_identity: String,
+    receipt_target: String,
+}
+
+/// SQLite: the guarded UPDATE comes first and takes the database write lock
+/// (the freeze convention, ADR 0012 §2), so a concurrent record-and-check of
+/// the same destination waits for this transaction and then sees its record.
+async fn sqlite_record_remote_write(
+    pool: &SqlitePool,
+    write: &PendingWrite<'_>,
+    check: Option<&FoldedCheck<'_>>,
+) -> Result<RecordedWrite, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    let recorded = sqlx::query(MARK_REMOTE_WRITE_PENDING_SQL)
+        .bind(write.error)
+        .bind(write.kind)
+        .bind(write.blob.map(|blob| blob.path.as_str()))
+        .bind(write.blob.map(|blob| blob.blob_sha.as_str()))
+        .bind(write.now)
+        .bind(write.id)
+        .bind(write.owner)
+        .bind(write.state.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?
+        .rows_affected();
+    if recorded != 1 {
+        tx.rollback().await.map_err(StorageError::from)?;
+        return Ok(RecordedWrite::LeaseLost);
+    }
+    if let Some(check) = check {
+        let holder = sqlx::query_scalar::<_, i64>(FIND_REMOTE_DESTINATION_HOLDER_SQLITE_SQL)
+            .bind(write.id)
+            .bind(check.category_key)
+            .bind(&check.path)
+            .bind(write.kind)
+            .bind(&check.target_identity)
+            .bind(&check.receipt_target)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+        if let Some(holder) = holder {
+            tx.rollback().await.map_err(StorageError::from)?;
+            return Ok(RecordedWrite::HeldBy(holder));
+        }
+    }
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(RecordedWrite::Recorded)
+}
+
+/// PostgreSQL: a row lock on this record serialises nothing, so the
+/// destination itself is locked (transaction-scoped advisory lock on its
+/// folded receipt). READ COMMITTED, set explicitly as in freeze, makes the
+/// holder query after the lock see whatever the previous holder committed.
+async fn pg_record_remote_write(
+    pool: &PgPool,
+    write: &PendingWrite<'_>,
+    check: Option<&FoldedCheck<'_>>,
+) -> Result<RecordedWrite, StorageError> {
+    let mut tx = pool.begin().await.map_err(StorageError::from)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?;
+    if let Some(check) = check {
+        sqlx::query(LOCK_REMOTE_DESTINATION_PG_SQL)
+            .bind(&check.receipt_target)
+            .execute(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+    }
+    let recorded = sqlx::query(MARK_REMOTE_WRITE_PENDING_SQL)
+        .bind(write.error)
+        .bind(write.kind)
+        .bind(write.blob.map(|blob| blob.path.as_str()))
+        .bind(write.blob.map(|blob| blob.blob_sha.as_str()))
+        .bind(write.now)
+        .bind(write.id)
+        .bind(write.owner)
+        .bind(write.state.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(StorageError::from)?
+        .rows_affected();
+    if recorded != 1 {
+        tx.rollback().await.map_err(StorageError::from)?;
+        return Ok(RecordedWrite::LeaseLost);
+    }
+    if let Some(check) = check {
+        let holder = sqlx::query_scalar::<_, i64>(FIND_REMOTE_DESTINATION_HOLDER_PG_SQL)
+            .bind(write.id)
+            .bind(check.category_key)
+            .bind(&check.path)
+            .bind(write.kind)
+            .bind(&check.target_identity)
+            .bind(&check.receipt_target)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StorageError::from)?;
+        if let Some(holder) = holder {
+            tx.rollback().await.map_err(StorageError::from)?;
+            return Ok(RecordedWrite::HeldBy(holder));
+        }
+    }
+    tx.commit().await.map_err(StorageError::from)?;
+    Ok(RecordedWrite::Recorded)
+}
+
 async fn sqlite_release_retryable_failure(
     pool: &SqlitePool,
     release: RetryableRelease<'_>,
 ) -> Result<ReleaseFailureOutcome, StorageError> {
-    let state = sqlx::query_scalar::<_, String>(RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL)
+    sqlite_release_retryable_failure_with(pool, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL, release)
+        .await
+}
+
+/// The retryable release with `sql` (clearing or keeping the recorded write).
+async fn sqlite_release_retryable_failure_with(
+    pool: &SqlitePool,
+    sql: &'static str,
+    release: RetryableRelease<'_>,
+) -> Result<ReleaseFailureOutcome, StorageError> {
+    let state = sqlx::query_scalar::<_, String>(sql)
         .bind(i64::from(release.max_attempts))
         .bind(release.error)
         .bind(release.kind)
@@ -859,7 +1005,16 @@ async fn pg_release_retryable_failure(
     pool: &PgPool,
     release: RetryableRelease<'_>,
 ) -> Result<ReleaseFailureOutcome, StorageError> {
-    let state = sqlx::query_scalar::<_, String>(RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL)
+    pg_release_retryable_failure_with(pool, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL, release).await
+}
+
+/// The retryable release with `sql` (clearing or keeping the recorded write).
+async fn pg_release_retryable_failure_with(
+    pool: &PgPool,
+    sql: &'static str,
+    release: RetryableRelease<'_>,
+) -> Result<ReleaseFailureOutcome, StorageError> {
+    let state = sqlx::query_scalar::<_, String>(sql)
         .bind(i64::from(release.max_attempts))
         .bind(release.error)
         .bind(release.kind)
