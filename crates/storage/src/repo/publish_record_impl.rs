@@ -23,12 +23,13 @@ use super::{
         ADVANCE_LOCAL_SQL, ADVANCE_REMOTE_SQL, ADVANCE_RENDERED_SQL, ADVANCE_SNAPSHOT_SQL,
         CREATE_IF_NEW_SQL, FIND_REMOTE_DESTINATION_HOLDER_PG_SQL,
         FIND_REMOTE_DESTINATION_HOLDER_SQLITE_SQL, LOCK_REMOTE_DESTINATION_PG_SQL,
-        MARK_REMOTE_WRITE_PENDING_SQL, OWNS_PUBLISH_RECORD_SQL, PROMOTE_ARTICLE_PUBLISHED_SQL,
+        MARK_REMOTE_WRITE_PENDING_SQL, PROMOTE_ARTICLE_PUBLISHED_SQL,
         PROMOTE_ARTICLES_PUBLISHED_BATCH_PG_SQL, RECLAIM_PUBLISH_LEASES_SQL,
         RECLAIM_PUBLISH_LEASES_SQLITE_SQL, RELEASE_DEFERRED_RETRY_RECORDING_SQL,
         RELEASE_DEFERRED_RETRY_SQL, RELEASE_EMPTY_SNAPSHOT_SQL, RELEASE_FREEZE_CONFLICT_SQL,
         RELEASE_OWNERSHIP_CONFLICT_SQL, RELEASE_PERMANENT_FAILURE_SQL,
-        RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_WRITE_SQL, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL,
+        RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_MARK_RECORDING_SQL,
+        RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_MARK_SQL, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL,
         SELECT_PUBLISH_RECORD_BY_ID, SELECT_PUBLISH_RECORD_BY_IDEMPOTENCY_KEY,
         TERMINALIZE_EXHAUSTED_PUBLISH_SQL, TERMINALIZE_EXHAUSTED_PUBLISH_SQLITE_SQL,
         claim_pending_in_category_pg, claim_pending_in_category_sqlite, claim_publish_pg,
@@ -405,7 +406,7 @@ impl PublishRecordRepository for PublishRecordRepo {
         }
     }
 
-    async fn release_retryable_failure_keeping_write(
+    async fn release_retryable_failure_keeping_mark(
         &self,
         id: i64,
         owner: &str,
@@ -413,6 +414,7 @@ impl PublishRecordRepository for PublishRecordRepo {
         kind: &str,
         max_attempts: u32,
         retry_not_before: Option<OffsetDateTime>,
+        unverified_write: UnverifiedWriteUpdate<'_>,
         now: OffsetDateTime,
     ) -> Result<ReleaseFailureOutcome, StorageError> {
         let release = RetryableRelease {
@@ -424,10 +426,25 @@ impl PublishRecordRepository for PublishRecordRepo {
             retry_not_before,
             now,
         };
-        let sql = RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_WRITE_SQL;
+        let (sql, recorded) = match unverified_write {
+            UnverifiedWriteUpdate::Keep => {
+                (RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_MARK_SQL, None)
+            }
+            UnverifiedWriteUpdate::Record(blob) => (
+                RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_MARK_RECORDING_SQL,
+                Some((
+                    blob.map(|blob| blob.path.as_str()),
+                    blob.map(|blob| blob.blob_sha.as_str()),
+                )),
+            ),
+        };
         match self.storage_pool() {
-            StoragePool::Sqlite(p) => sqlite_release_retryable_failure_with(p, sql, release).await,
-            StoragePool::Postgres(p) => pg_release_retryable_failure_with(p, sql, release).await,
+            StoragePool::Sqlite(p) => {
+                sqlite_release_retryable_failure_with(p, sql, release, recorded).await
+            }
+            StoragePool::Postgres(p) => {
+                pg_release_retryable_failure_with(p, sql, release, recorded).await
+            }
         }
     }
 
@@ -437,28 +454,58 @@ impl PublishRecordRepository for PublishRecordRepo {
         owner: &str,
         state: PublishState,
     ) -> Result<bool, StorageError> {
-        for &id in ids {
-            let held = match self.storage_pool() {
-                StoragePool::Sqlite(p) => sqlx::query_scalar::<_, i64>(OWNS_PUBLISH_RECORD_SQL)
-                    .bind(id)
-                    .bind(owner)
-                    .bind(state.as_str())
-                    .fetch_optional(p)
-                    .await
-                    .map_err(StorageError::from)?,
-                StoragePool::Postgres(p) => sqlx::query_scalar::<_, i64>(OWNS_PUBLISH_RECORD_SQL)
-                    .bind(id)
-                    .bind(owner)
-                    .bind(state.as_str())
-                    .fetch_optional(p)
-                    .await
-                    .map_err(StorageError::from)?,
-            };
-            if held.is_none() {
-                return Ok(false);
-            }
+        let ids = ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        if ids.is_empty() {
+            return Ok(true);
         }
-        Ok(true)
+        // One statement: one snapshot for the whole set, so no takeover can
+        // slip in between the rows of one check.
+        let held = match self.storage_pool() {
+            StoragePool::Sqlite(p) => {
+                let mut builder = QueryBuilder::<Sqlite>::new(
+                    "SELECT COUNT(*) FROM publish_records WHERE lease_owner = ",
+                );
+                builder
+                    .push_bind(owner)
+                    .push(" AND state = ")
+                    .push_bind(state.as_str())
+                    .push(" AND id IN (");
+                let mut separated = builder.separated(", ");
+                for id in &ids {
+                    separated.push_bind(*id);
+                }
+                separated.push_unseparated(")");
+                builder
+                    .build_query_scalar::<i64>()
+                    .fetch_one(p)
+                    .await
+                    .map_err(StorageError::from)?
+            }
+            StoragePool::Postgres(p) => {
+                let mut builder = QueryBuilder::<Postgres>::new(
+                    "SELECT COUNT(*) FROM publish_records WHERE lease_owner = ",
+                );
+                builder
+                    .push_bind(owner)
+                    .push(" AND state = ")
+                    .push_bind(state.as_str())
+                    .push(" AND id IN (");
+                let mut separated = builder.separated(", ");
+                for id in &ids {
+                    separated.push_bind(*id);
+                }
+                separated.push_unseparated(")");
+                builder
+                    .build_query_scalar::<i64>()
+                    .fetch_one(p)
+                    .await
+                    .map_err(StorageError::from)?
+            }
+        };
+        Ok(usize::try_from(held).is_ok_and(|held| held == ids.len()))
     }
 
     async fn release_permanent_failure(
@@ -748,8 +795,13 @@ async fn sqlite_release_retryable_failure(
     pool: &SqlitePool,
     release: RetryableRelease<'_>,
 ) -> Result<ReleaseFailureOutcome, StorageError> {
-    sqlite_release_retryable_failure_with(pool, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL, release)
-        .await
+    sqlite_release_retryable_failure_with(
+        pool,
+        RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL,
+        release,
+        None,
+    )
+    .await
 }
 
 /// The retryable release with `sql` (clearing or keeping the recorded write).
@@ -757,8 +809,9 @@ async fn sqlite_release_retryable_failure_with(
     pool: &SqlitePool,
     sql: &'static str,
     release: RetryableRelease<'_>,
+    recorded: Option<(Option<&str>, Option<&str>)>,
 ) -> Result<ReleaseFailureOutcome, StorageError> {
-    let state = sqlx::query_scalar::<_, String>(sql)
+    let mut query = sqlx::query_scalar::<_, String>(sql)
         .bind(i64::from(release.max_attempts))
         .bind(release.error)
         .bind(release.kind)
@@ -767,7 +820,11 @@ async fn sqlite_release_retryable_failure_with(
         .bind(release.owner)
         // Written rounded up to a whole millisecond and compared by
         // julianday against a rounded-down now: never claimable early.
-        .bind(release.retry_not_before.map(sqlite_stored_deadline))
+        .bind(release.retry_not_before.map(sqlite_stored_deadline));
+    if let Some((path, blob_sha)) = recorded {
+        query = query.bind(path).bind(blob_sha);
+    }
+    let state = query
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;
@@ -1005,7 +1062,8 @@ async fn pg_release_retryable_failure(
     pool: &PgPool,
     release: RetryableRelease<'_>,
 ) -> Result<ReleaseFailureOutcome, StorageError> {
-    pg_release_retryable_failure_with(pool, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL, release).await
+    pg_release_retryable_failure_with(pool, RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL, release, None)
+        .await
 }
 
 /// The retryable release with `sql` (clearing or keeping the recorded write).
@@ -1013,15 +1071,20 @@ async fn pg_release_retryable_failure_with(
     pool: &PgPool,
     sql: &'static str,
     release: RetryableRelease<'_>,
+    recorded: Option<(Option<&str>, Option<&str>)>,
 ) -> Result<ReleaseFailureOutcome, StorageError> {
-    let state = sqlx::query_scalar::<_, String>(sql)
+    let mut query = sqlx::query_scalar::<_, String>(sql)
         .bind(i64::from(release.max_attempts))
         .bind(release.error)
         .bind(release.kind)
         .bind(release.now)
         .bind(release.id)
         .bind(release.owner)
-        .bind(release.retry_not_before)
+        .bind(release.retry_not_before);
+    if let Some((path, blob_sha)) = recorded {
+        query = query.bind(path).bind(blob_sha);
+    }
+    let state = query
         .fetch_optional(pool)
         .await
         .map_err(StorageError::from)?;

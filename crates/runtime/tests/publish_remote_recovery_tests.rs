@@ -683,8 +683,14 @@ async fn batch_checks_each_unverified_record_on_its_own_before_writing() {
     ] {
         set_category(&pool, id, category).await;
     }
-    for id in [landed, failing, absent] {
-        mark_unverified(&pool, id).await;
+    // Recorded at their own paths (rows marked before migration 0010, with
+    // no recorded path, would hold every path of the target: R5-5).
+    for (id, path) in [
+        (landed, "dest/landedcat.md"),
+        (failing, "dest/failingcat.md"),
+        (absent, "dest/absentcat.md"),
+    ] {
+        record_unverified_write(&pool, id, path, SCRIPTED_BLOB).await;
     }
     let target = Arc::new(ScriptedTarget {
         landed: vec!["landedcat"],
@@ -1032,7 +1038,7 @@ impl PublishRecordRepository for UnrecordedReceipts {
             .record_remote_write(id, owner, state, error, kind, blob, check, now)
             .await
     }
-    async fn release_retryable_failure_keeping_write(
+    async fn release_retryable_failure_keeping_mark(
         &self,
         id: i64,
         owner: &str,
@@ -1040,16 +1046,18 @@ impl PublishRecordRepository for UnrecordedReceipts {
         kind: &str,
         max_attempts: u32,
         retry_not_before: Option<OffsetDateTime>,
+        unverified_write: UnverifiedWriteUpdate<'_>,
         now: OffsetDateTime,
     ) -> Result<ReleaseFailureOutcome, StorageError> {
         self.inner
-            .release_retryable_failure_keeping_write(
+            .release_retryable_failure_keeping_mark(
                 id,
                 owner,
                 error,
                 kind,
                 max_attempts,
                 retry_not_before,
+                unverified_write,
                 now,
             )
             .await
@@ -2039,7 +2047,9 @@ async fn rate_limited_same_path_recovery_keeps_the_mark_and_later_holds() {
         )
         .mount(&server)
         .await;
-    let limited = flow.publish_remote_record(id, remote_opts()).await;
+    // This attempt renders other bytes (a template change): its own blob
+    // differs from the one recorded at claim.
+    let limited = flow.publish_remote_record(id, retitled_opts()).await;
 
     assert!(
         matches!(&limited.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "github_rate_limit"),
@@ -2049,9 +2059,9 @@ async fn rate_limited_same_path_recovery_keeps_the_mark_and_later_holds() {
     assert_eq!(non_get_requests(&server).await, Vec::<String>::new());
     assert_kept_and_refunded(&pool, id).await;
     assert_eq!(
-        recorded_write(&pool, id).await.0,
-        recorded.0,
-        "the recorded path survives the rate limit"
+        recorded_write(&pool, id).await,
+        recorded,
+        "the write recorded at claim (path and blob) survives the rate limit"
     );
     let event = last_publish_failed(&pool).await;
     assert_eq!(event["error_kind"], "github_rate_limit");
@@ -2076,6 +2086,25 @@ async fn rate_limited_same_path_recovery_keeps_the_mark_and_later_holds() {
         matches!(&held.status, PublishRemoteStatus::Failed { error_kind } if error_kind == UNVERIFIED),
         "{:?}",
         held.status
+    );
+    assert_eq!(non_get_requests(&server).await, Vec::<String>::new());
+
+    // The earlier write lands late, with the bytes recorded at claim: it is
+    // recognised at its recorded path and recorded, without a write.
+    let (path, blob_sha) = recorded;
+    let path = path.expect("recorded");
+    server.reset().await;
+    mount_head_holding_only_at(&server, &path, blob_sha.expect("recorded")).await;
+    let landed = github_flow(
+        pool.clone(),
+        Recording::with_prefix(&server.uri(), "archive"),
+    )
+    .publish_remote_record(id, retitled_opts())
+    .await;
+    assert_eq!(landed.status, PublishRemoteStatus::PublishedRemote);
+    assert_eq!(
+        landed.remote_target,
+        Some(format!("github://owner/repo/main/{path}"))
     );
     assert_eq!(non_get_requests(&server).await, Vec::<String>::new());
 }
@@ -2222,6 +2251,41 @@ async fn batch_member_taken_over_at_its_gate_sends_nothing() {
     );
     assert_eq!(
         recorded_write(&pool, kept).await,
+        (None, None),
+        "nothing in flight"
+    );
+}
+
+/// R5-6: a fresh record whose attempt failed before its write was sent
+/// (GitHub answered the read before the PUT with a 503) leaves no recovery
+/// mark: nothing is in flight, so it must not hold other categories (R5-5)
+/// or a later path change (R5-4).
+#[tokio::test]
+async fn failure_before_the_put_leaves_no_recovery_mark() {
+    let (_dir, pool) = make_test_pool().await;
+    let id = seed_stored_local(&pool).await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/repos/owner/repo/contents/"))
+        .respond_with(
+            ResponseTemplate::new(503).set_body_json(serde_json::json!({"message": "unavailable"})),
+        )
+        .mount(&server)
+        .await;
+    let outcome = github_flow(pool.clone(), Recording::new(&server.uri()))
+        .publish_remote_record(id, remote_opts())
+        .await;
+
+    assert!(
+        matches!(&outcome.status, PublishRemoteStatus::Failed { error_kind } if error_kind == "github_api_error"),
+        "{:?}",
+        outcome.status
+    );
+    assert_eq!(non_get_requests(&server).await, Vec::<String>::new());
+    let (_, _, _, kind, _) = record_row(&pool, id).await;
+    assert_eq!(kind.as_deref(), Some("github_api_error"));
+    assert_eq!(
+        recorded_write(&pool, id).await,
         (None, None),
         "nothing in flight"
     );

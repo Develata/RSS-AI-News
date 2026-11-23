@@ -156,10 +156,14 @@ kind。下一次 claim 走上一条的恢复比对，命中即记回执、不发
 - **R5-6 不变量**：一旦有写入可能在途，恢复标记（`last_error_kind = remote_write_unverified` 与记录的路径 / blob）在除"成功推进"
   与"终态 `failed`"之外的每一次释放中都保留：
   - claim 时已在恢复中的记录：本次尝试的任何结果（429、409、422、5xx、存储错误、路径占用、写入未确认……）都不能证明先前那次请求
-    不会落地 → 一律保留（计预算与否照旧；计预算的释放改用 `release_retryable_failure_keeping_write`）；
+    不会落地 → 一律保留（计预算与否照旧；计预算的释放改用 `release_retryable_failure_keeping_mark`）。R5-3 的登记会把记录的写入
+    换成本次渲染的 blob；本次自己的写入被拒或根本没发出时，唯一可能落地的仍是先前那次，于是释放把 **claim 时读到的那一对**写回
+    （2026-11-23 第三次复审）；本次写入也可能落地时，保留最新登记的那一对（见下文代价）；
   - 新记录、本次写入已发出：只有 GitHub 以 4xx 拒绝了本次请求（含限流、认证失败）、或本次根本没发出（目标漂移、非法路径、写入未
     确认）才证明没有落地 → 清空；5xx、传输失败、截止时间、超大 2xx 一律保留（宁可多一次只读比对、宁可暂停）；
   - 新记录、写入之前就失败：没有在途写入 → 清空。
+  "已发出"以 R5-9 的 `WriteGuard` 为准：某个改动分支的请求在复核通过后才算发出；在此之前的失败（写前读取 503、发送前 deadline
+  已到、复核未通过）都算未发出（2026-11-23 第三次复审：此前单条与批量的错误出口一律按已发出处理，会留下虚假的登记）。
   保留时持久化的 kind 是恢复 kind（与归属败方的先例一致），事件里的 `error_kind` 仍是真实错误，另带 `recovery_mark_kept`。
   这取代了此前"同一次尝试内 5xx / 超时随即核对未找到 → 清空"的边界（R3F-S16 的计预算不变，只是不再清空标记）。GitHub 客户端
   每个写请求只发一次，批量只在 422 非快进拒绝后重建一次，所以一次调用最终返回 4xx 时，它发出的每个写请求都已被明确拒绝。
@@ -173,19 +177,38 @@ kind。下一次 claim 走上一条的恢复比对，命中即记回执、不发
   会多拦，与 validate-config 的大小写不敏感碰撞规则同向。存储的身份与回执原样不变（改动会让现存 `stored_local` 行触发目标漂移）。
 - **R5-9 发送前复核租约**：发布目标在每个改动分支的请求之前、在该请求所依赖的读取之后，调用 `WriteGuard::confirm`
   （单报告：取得文件 `sha` 之后、`PUT` 之前；批量：取得 HEAD 并建好 commit 之后、`PATCH ref` 之前，422 重建后再问一次）。runtime 的
-  实现按 lease owner（不看过期时间，因此与各机时钟无关）确认本次仍持有全部记录；不再持有或无法确认 → `WriteNotConfirmed`，不发送，
-  按 deferred 释放（已被他人接手的记录释放为 0 行）。复核之后才被接手的，由 GitHub 自己拒绝：被替换的 blob 与 `sha` 不再相符、
-  无 `sha` 的创建遇到已存在的文件、非快进的 ref 更新都会被拒。批量另有第一道线：任何成员在闸口发现租约已失，整批都不发送。
-- **R5-4 运维处理（普通记录）**：§Consequences 中的守卫式 UPDATE 写给 `--force` 记录；因目的地改变而暂停的普通记录用下面的
-  守卫语句（同样先按第 1 步读出 `state`、`render_version`、`updated_at`、`unverified_write_path`、`unverified_write_blob_sha`，
-  核实记录的路径在分支 HEAD 上确无该 blob；一次 HEAD 缺失仍不能排除在途请求稍后落地，置 `failed` 之前应确认原请求早已超时）：
-  - SQLite：`BEGIN IMMEDIATE; UPDATE publish_records SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL,
-    last_error_kind = 'operator_failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = <id> AND state = 'stored_local'
-    AND last_error_kind = 'remote_write_unverified' AND render_version = <读到的值> AND updated_at = '<读到的原文>'
-    AND unverified_write_path IS '<读到的路径>' AND unverified_write_blob_sha IS '<读到的 blob>' AND (lease_expires_at IS NULL OR
-    julianday(lease_expires_at) < julianday('now')) RETURNING id;` → 恰好一行 `COMMIT;`，否则 `ROLLBACK;`
-  - PostgreSQL：同上，`updated_at = '<读到的值>'::timestamptz`、`unverified_write_path IS NOT DISTINCT FROM '<路径>'`、
-    `unverified_write_blob_sha IS NOT DISTINCT FROM '<blob>'`、`lease_expires_at < now()`，`updated_at = now()`。
+  实现按 lease owner（不看过期时间，因此与各机时钟无关）以**一条语句**确认本次仍持有全部记录（同一快照，不会在逐行检查之间被
+  接手）；不再持有或无法确认 → `WriteNotConfirmed`，不发送，按 deferred 释放（已被他人接手的记录释放为 0 行）。批量另有第一道线：
+  任何成员在闸口发现租约已失，整批都不发送。
+  **未关闭的窗口**：复核通过之后、请求到达 GitHub 之前被接手的，lease 本身无法排除。只有当接手者**已经**改动了该文件或分支时，
+  GitHub 才会拒绝这次请求（被替换的 blob 与 `sha` 不符、无 `sha` 的创建遇到已存在的文件、非快进的 ref 更新）；接手者尚未写入时，
+  这次请求会被接受，随后接手者的恢复比对按记录的 blob 处理。彻底关闭需要目的地一侧的围栏令牌（fencing token），GitHub 不提供，
+  不在本 ADR 范围；接手本身需要 lease 过期（80% 的远端截止时间之后），窗口只在跨机时钟偏差大于这段余量时出现。
+- **R5-4 运维处理（普通记录）**：§Consequences 中的守卫式 UPDATE 写给 `--force` 记录（其第 1 步按 `force-%` 筛选，选不中普通
+  记录）。因目的地改变而暂停的普通记录**首选恢复原前缀 / 路径模板**：目的地相同，下一次运行即在原路径写入或记回执，不必人工终结。
+  只有接受"先前那次请求日后仍可能落地、其文章已随之再次发布"的风险时，才按下面步骤置 `failed`——一次 HEAD 缺失、本地早已超时都
+  不能证明那次请求不会晚到，协议层没有这样的证据：
+  1. 读出该记录（记下每一列的原值）：`SELECT id, state, render_version, updated_at, last_error_kind, remote_target,
+     unverified_write_path, unverified_write_blob_sha, lease_owner, lease_expires_at FROM publish_records WHERE id = <id>`；
+     要求 `state = 'stored_local'`、`last_error_kind = 'remote_write_unverified'`、无有效 lease。
+  2. 在目标分支 HEAD 上核对 `unverified_write_path` 处的 blob 不是 `unverified_write_blob_sha`（是则不要终结：记录会在下一次运行
+     记回执）。
+  3. 守卫式 UPDATE，恰好一行才提交，0 行即回滚并从第 1 步重来：
+     - SQLite：`BEGIN IMMEDIATE; UPDATE publish_records SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL,
+       last_error_kind = 'operator_failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = <id>
+       AND state = 'stored_local' AND last_error_kind = 'remote_write_unverified' AND render_version = <读到的值>
+       AND updated_at = '<读到的原文>' AND unverified_write_path IS '<读到的路径>' AND unverified_write_blob_sha IS '<读到的 blob>'
+       AND (lease_expires_at IS NULL OR julianday(lease_expires_at) < julianday('now')) RETURNING id;` → 恰好一行 `COMMIT;`，
+       否则 `ROLLBACK;`
+     - PostgreSQL：`BEGIN; UPDATE publish_records SET state = 'failed', lease_owner = NULL, lease_expires_at = NULL,
+       last_error_kind = 'operator_failed', updated_at = now() WHERE id = <id> AND state = 'stored_local'
+       AND last_error_kind = 'remote_write_unverified' AND render_version = <读到的值>
+       AND updated_at = '<读到的值>'::timestamptz AND unverified_write_path IS NOT DISTINCT FROM '<读到的路径>'
+       AND unverified_write_blob_sha IS NOT DISTINCT FROM '<读到的 blob>' AND (lease_expires_at IS NULL OR lease_expires_at < now())
+       RETURNING id;` → 恰好一行 `COMMIT;`，否则 `ROLLBACK;`
+- **0010 之前的恢复行**（R5-5 保守规则）：迁移 0010 之前就带恢复标记的行没有记录的路径。它们按当前渲染恢复（R4-1），并且在恢复
+  结束之前**占用其目标上的所有路径**：其它分类对同一目标的写入一律被 R5-5 挡下，直到该行补到回执、或按当前配置登记了自己的路径、
+  或被运维终结。这避免了"它在原路径补回执的同时，另一分类已登记同一路径并覆盖它"；代价是这样的行长期不出结论时会挡住其它分类。
 **代价（未解决）**：每次尝试都以"写入歧义 + 核对未完成"结束、此后比对也一直不出结论的记录（例如 GitHub 长期对读写都不可达）
 不会耗尽预算、一直持有文章归属；它每次运行最多再发一次只读比对。因此 `publish_max_attempts = 1` 或默认预算的最后一次尝试里
 "PATCH 已落地、响应丢失"也会记为 `published_remote`，而不是 `failed` 并释放文章归属。限流（`GitHubRateLimit`）不核对，
@@ -198,6 +221,14 @@ kind。下一次 claim 走上一条的恢复比对，命中即记回执、不发
 （未核对、归属释放）；预算未耗尽时，写请求之前已按 R5-3 记录恢复标记与路径 / blob，下一次运行的恢复比对在**原路径**上补回执
 （0010 之前的行与不记录 blob 的目标退回多报告幂等比对 / 单报告幂等，§3 下文，它们只在路径与内容未变时成立）。
 R5-1 的 deferred 释放与推进写同一个数据库：释放本身也失败时（例如数据库整段不可用），记录同样留着 lease，落入这条残留限制。
+**第三次独立复审之后仍未处理（2026-11-23，Develata 决定记录在案、不再追加轮次）**：
+- 已收到的 429 若响应体读取中断，会被合成为 503（限流头只留在诊断上下文），PUT 因而走歧义核对、可能在确认缺失后计预算。
+- 目标漂移守卫逐字节比较身份：只改 owner / repo 的大小写会让现存 `stored_local` 记录按漂移失败（R5-8 只用于占用比较）。
+- 公开的 `GitHubTarget::with_client` 接受调用方的 Octocrab，其默认重试策略会重发 5xx / 429；仓库自身只用关闭重试的构造器。
+- 回执串无法区分分支与路径的边界（`release` + `2026/x.md` 与 `release/2026` + `x.md` 同串），R5-5 可能误判占用。
+- 含 `.` 段的路径（`news/./day.md`）在跨运行占用比较中与规范路径不同键；GitHub 是否规范化点段未核实。
+- 0010 的两份 down 只做存在性与配对检查，未像 up 一样钉内容哈希。
+- 非 GitHub 目标的默认 trait 行为：`find_published` 的 `Ok(None)` 被当作缺失、默认 `publish_many` 丢逐项回执。
 
 ### 3a. 限流等待写入记录（2026-11-22，R1-P-S12，同属未发布的 migration 0008）
 

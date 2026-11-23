@@ -39,6 +39,9 @@ struct PreparedRemote {
     report: RenderedReport,
     /// R5-6: the record was recovering an unverified write at claim.
     recovering: bool,
+    /// R5-6: the write recorded at claim (restored if this batch's own write
+    /// is refused or never sent).
+    claimed_write: Option<RemoteBlob>,
 }
 
 // Start the shared preparation/remote budget before claiming so claim latency
@@ -225,11 +228,13 @@ struct MarkDecision<'a> {
 
 /// What [`PublishFlow::release_publish_error_for_record`] needs to decide the
 /// recovery mark (R5-6): the blob this attempt's write put (or would have
-/// put) at the destination, whether the record was recovering at claim, and
-/// whether this attempt sent its write.
+/// put) at the destination, the write recorded at claim, whether the record
+/// was recovering at claim, and whether this attempt actually sent its write
+/// (its [`LeaseGuard`] confirmed the mutating request).
 #[derive(Debug, Clone, Copy)]
 struct ReleaseContext<'a> {
     written: Option<&'a RemoteBlob>,
+    claimed_write: Option<&'a RemoteBlob>,
     recovering: bool,
     write_sent: bool,
 }
@@ -239,33 +244,38 @@ struct ReleaseContext<'a> {
 /// - [`PublishError::RemoteWriteUnverified`]: this attempt's own write may
 ///   have landed — record it (`written`; R5-4 let it through only for the
 ///   recorded path, so it replaces nothing that could land elsewhere);
-/// - [`PublishError::EarlierWriteUnverified`]: nothing settled — keep;
-/// - a record already `recovering` at claim: nothing this attempt does
-///   settles the earlier request — keep, whatever the error (a 429, a 409, a
-///   storage error, a path conflict, …);
+/// - [`PublishError::EarlierWriteUnverified`]: nothing settled, and the gate
+///   that records a new write did not run — keep;
+/// - a record already `recovering` at claim, whose own write this attempt
+///   was refused or never sent: only the earlier write can still land, but
+///   the gate replaced it with this attempt's blob — restore the write
+///   recorded at claim (`claimed_write`);
+/// - a record already `recovering` whose own write may have landed too:
+///   keep the latest recorded (one blob describes one render; ADR 0012 §3);
 /// - a fresh record whose write was sent (`write_sent`): only GitHub refusing
 ///   it ([`PublishError::is_definite_refusal`]) proves nothing landed —
 ///   clear; a 5xx, transport failure or deadline keeps it (errs toward a
 ///   hold: the next attempt starts with a read-only check);
-/// - a fresh record that failed before writing: nothing in flight — clear.
-fn mark_after<'a>(
-    error: &PublishError,
-    recovering: bool,
-    write_sent: bool,
-    written: Option<&'a RemoteBlob>,
-) -> MarkDecision<'a> {
-    let keep = MarkDecision {
-        keep: true,
-        update: UnverifiedWriteUpdate::Keep,
-    };
+/// - a fresh record that never sent its write: nothing in flight — clear.
+fn mark_after<'a>(error: &PublishError, context: ReleaseContext<'a>) -> MarkDecision<'a> {
+    let settled_unsent = !context.write_sent || error.is_definite_refusal();
     match error {
         PublishError::RemoteWriteUnverified { .. } => MarkDecision {
             keep: true,
-            update: UnverifiedWriteUpdate::Record(written),
+            update: UnverifiedWriteUpdate::Record(context.written),
         },
-        PublishError::EarlierWriteUnverified { .. } => keep,
-        _ if recovering => keep,
-        _ if write_sent && !error.is_definite_refusal() => keep,
+        PublishError::EarlierWriteUnverified { .. } => MarkDecision {
+            keep: true,
+            update: UnverifiedWriteUpdate::Keep,
+        },
+        _ if context.recovering && settled_unsent => MarkDecision {
+            keep: true,
+            update: UnverifiedWriteUpdate::Record(context.claimed_write),
+        },
+        _ if context.recovering || !settled_unsent => MarkDecision {
+            keep: true,
+            update: UnverifiedWriteUpdate::Keep,
+        },
         _ => MarkDecision {
             keep: false,
             update: UnverifiedWriteUpdate::Record(None),
@@ -274,12 +284,37 @@ fn mark_after<'a>(
 }
 
 /// R5-9: confirms, right before each mutating request, that this worker
-/// still holds every record the request writes for. Compares the lease owner
-/// (a takeover rewrites it), not the expiry, so no clock is involved.
+/// still holds every record the request writes for — one statement for the
+/// whole set. Compares the lease owner (a takeover rewrites it), not the
+/// expiry, so no clock is involved. A takeover after the confirmation, before
+/// the request reaches GitHub, is not excluded (ADR 0012 §3, R5-9).
+/// `confirmed` = a mutating request was cleared to go out: the attempt's
+/// write counts as sent from then on (R5-6).
 struct LeaseGuard<'a> {
     repo: &'a dyn rss_ai_news_storage::PublishRecordRepository,
     ids: Vec<i64>,
     owner: &'a str,
+    confirmed: std::sync::atomic::AtomicBool,
+}
+
+impl<'a> LeaseGuard<'a> {
+    fn new(
+        repo: &'a dyn rss_ai_news_storage::PublishRecordRepository,
+        ids: Vec<i64>,
+        owner: &'a str,
+    ) -> Self {
+        Self {
+            repo,
+            ids,
+            owner,
+            confirmed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Whether any mutating request of this attempt was cleared to go out.
+    fn write_sent(&self) -> bool {
+        self.confirmed.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 #[async_trait::async_trait]
@@ -290,7 +325,11 @@ impl WriteGuard for LeaseGuard<'_> {
             .owns_publish_records(&self.ids, self.owner, PublishState::StoredLocal)
             .await
         {
-            Ok(true) => Ok(()),
+            Ok(true) => {
+                self.confirmed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
             Ok(false) => Err(PublishError::WriteNotConfirmed {
                 reason: "another worker took the publish record over".to_string(),
             }),
@@ -562,6 +601,7 @@ impl PublishFlow {
                 &error,
                 ReleaseContext {
                     written: None,
+                    claimed_write: None,
                     recovering: unverified_write,
                     write_sent: false,
                 },
@@ -639,11 +679,20 @@ impl PublishFlow {
         let lease_seconds = self.ctx.lease.publish_duration_seconds;
         // R5-2: what a write of this report puts at the destination now.
         let written = target.remote_blob(&report);
+        // The write recorded at claim (R5-6 restores it when this attempt's
+        // own write is refused or never sent).
+        let recorded = claimed.unverified_write();
+        // R5-9: asked right before the PUT; whether it was ever cleared tells
+        // the release whether this attempt sent its write (R5-6).
+        let guard = LeaseGuard::new(
+            self.ctx.publish_record_repo.as_ref(),
+            vec![claimed.id],
+            &owner,
+        );
         // Gates in order: R4-1 recovery check (read-only, before any write)
         // → R5-4 hold on a changed destination → R5-5 destination held by
         // another category → R5-3 record the write → send.
         let settled = if unverified_write {
-            let recorded = claimed.unverified_write();
             match check_earlier_write(target.as_ref(), &report, recorded.as_ref(), deadline).await {
                 Ok(Some(found)) => Some(Ok(found)),
                 Ok(None) => destination_changed(recorded.as_ref(), written.as_ref()).map(Err),
@@ -675,11 +724,6 @@ impl PublishFlow {
                         item_count,
                     };
                 }
-                let guard = LeaseGuard {
-                    repo: self.ctx.publish_record_repo.as_ref(),
-                    ids: vec![claimed.id],
-                    owner: &owner,
-                };
                 send_report(target.as_ref(), &report, &guard, deadline, lease_seconds)
                     .await
                     .map(|artifact| (artifact, written.clone()))
@@ -695,8 +739,9 @@ impl PublishFlow {
                     &error,
                     ReleaseContext {
                         written: written.as_ref(),
+                        claimed_write: recorded.as_ref(),
                         recovering: unverified_write,
-                        write_sent: true,
+                        write_sent: guard.write_sent(),
                     },
                     "publish_remote",
                     &emitter,
@@ -881,6 +926,7 @@ impl PublishFlow {
                     &error,
                     ReleaseContext {
                         written: None,
+                        claimed_write: None,
                         recovering,
                         write_sent: false,
                     },
@@ -1002,6 +1048,7 @@ impl PublishFlow {
                             &error,
                             ReleaseContext {
                                 written: None,
+                                claimed_write: None,
                                 recovering: true,
                                 write_sent: false,
                             },
@@ -1031,6 +1078,7 @@ impl PublishFlow {
                         &hold,
                         ReleaseContext {
                             written: None,
+                            claimed_write: None,
                             recovering: true,
                             write_sent: false,
                         },
@@ -1058,6 +1106,7 @@ impl PublishFlow {
                 blob,
                 report,
                 recovering: unverified_write,
+                claimed_write: claimed.unverified_write(),
             });
         }
 
@@ -1133,11 +1182,11 @@ impl PublishFlow {
             .iter()
             .map(|item| item.report.clone())
             .collect::<Vec<_>>();
-        let guard = LeaseGuard {
-            repo: self.ctx.publish_record_repo.as_ref(),
-            ids: prepared.iter().map(|item| item.publish_record_id).collect(),
-            owner: &owner,
-        };
+        let guard = LeaseGuard::new(
+            self.ctx.publish_record_repo.as_ref(),
+            prepared.iter().map(|item| item.publish_record_id).collect(),
+            &owner,
+        );
 
         let result = if Instant::now() >= deadline {
             Err(PublishError::RemoteTimeout)
@@ -1169,8 +1218,14 @@ impl PublishFlow {
                         prepared.len()
                     ),
                 );
-                self.release_publish_error_for_prepared(&prepared, &owner, &error, true, &emitter)
-                    .await;
+                self.release_publish_error_for_prepared(
+                    &prepared,
+                    &owner,
+                    &error,
+                    guard.write_sent(),
+                    &emitter,
+                )
+                .await;
                 for item in prepared {
                     outcomes.push(PublishRemoteOutcome {
                         publish_record_id: item.publish_record_id,
@@ -1188,8 +1243,14 @@ impl PublishFlow {
                 };
             }
             Err(error) => {
-                self.release_publish_error_for_prepared(&prepared, &owner, &error, true, &emitter)
-                    .await;
+                self.release_publish_error_for_prepared(
+                    &prepared,
+                    &owner,
+                    &error,
+                    guard.write_sent(),
+                    &emitter,
+                )
+                .await;
                 for item in prepared {
                     outcomes.push(PublishRemoteOutcome {
                         publish_record_id: item.publish_record_id,
@@ -1343,13 +1404,15 @@ impl PublishFlow {
         let released = if error.is_retryable() {
             self.ctx
                 .publish_record_repo
-                .release_retryable_failure_keeping_write(
+                .release_retryable_failure_keeping_mark(
                     publish_record_id,
                     owner,
                     &message,
                     REMOTE_WRITE_UNVERIFIED_KIND,
                     self.ctx.retry.publish_max_attempts,
                     None,
+                    // The gate rolled back: the write recorded at claim is intact.
+                    UnverifiedWriteUpdate::Keep,
                     now,
                 )
                 .await
@@ -1389,7 +1452,7 @@ impl PublishFlow {
                     "error_kind": error.error_kind(),
                     "retryable": error.is_retryable(),
                     "budget_exhausted": budget_exhausted,
-                    "recovery_mark_kept": true,
+                    "recovery_mark_kept": matches!(released, Ok(true)),
                 })),
             )
             .await;
@@ -1461,7 +1524,7 @@ impl PublishFlow {
                     "holder_record_id": holder,
                     "budget_exhausted": false,
                     "attempt_refunded": matches!(released, Ok(true)),
-                    "recovery_mark_kept": recovering,
+                    "recovery_mark_kept": recovering && matches!(released, Ok(true)),
                 })),
             )
             .await;
@@ -1671,6 +1734,7 @@ impl PublishFlow {
                 error,
                 ReleaseContext {
                     written: item.blob.as_ref(),
+                    claimed_write: item.claimed_write.as_ref(),
                     recovering: item.recovering,
                     write_sent,
                 },
@@ -1700,12 +1764,7 @@ impl PublishFlow {
         let retry_not_before = rate_limit_retry_not_before(error, now);
         let mut budget_exhausted = false;
         let deferred = is_deferred_retry(error);
-        let decision = mark_after(
-            error,
-            context.recovering,
-            context.write_sent,
-            context.written,
-        );
+        let decision = mark_after(error, context);
         let kind = if decision.keep {
             REMOTE_WRITE_UNVERIFIED_KIND
         } else {
@@ -1730,13 +1789,14 @@ impl PublishFlow {
             let max_attempts = self.ctx.retry.publish_max_attempts;
             let repo = &self.ctx.publish_record_repo;
             let released = if decision.keep {
-                repo.release_retryable_failure_keeping_write(
+                repo.release_retryable_failure_keeping_mark(
                     publish_record_id,
                     owner,
                     &message,
                     kind,
                     max_attempts,
                     retry_not_before,
+                    decision.update,
                     now,
                 )
                 .await
@@ -1765,6 +1825,8 @@ impl PublishFlow {
         // R4-7: only a deferred release that updated the row refunded the
         // claim (`Ok(false)` = the lease was lost, nothing changed).
         let attempt_refunded = deferred && matches!(release_result, Ok(true));
+        // Reported only once the release that keeps it was persisted.
+        let mark_kept = decision.keep && matches!(release_result, Ok(true));
         if let Err(persist_err) = release_result {
             tracing::warn!(
                 publish_record_id,
@@ -1798,7 +1860,7 @@ impl PublishFlow {
                     "recorded_path": error.destination_change().map(|(recorded, _)| recorded),
                     "current_path": error.destination_change().and_then(|(_, current)| current),
                     // R5-6: the persisted kind stayed the recovery kind.
-                    "recovery_mark_kept": decision.keep,
+                    "recovery_mark_kept": mark_kept,
                 })),
             )
             .await;
@@ -1849,6 +1911,7 @@ impl PublishFlow {
                     &error,
                     ReleaseContext {
                         written: None,
+                        claimed_write: None,
                         recovering: unverified_write,
                         write_sent: false,
                     },
@@ -1898,18 +1961,28 @@ mod tests {
 
     /// R5-6: the recovery mark survives every release while a write may be
     /// in flight; only a fresh record whose own write GitHub refused (or that
-    /// sent nothing) clears it. `(error, recovering, write_sent)` → expected.
+    /// sent nothing) clears it, and a recovering record whose own write was
+    /// refused or never sent gets back the write recorded at claim.
+    /// `(error, recovering, write_sent)` → expected.
     #[test]
     fn recovery_mark_is_kept_while_a_write_may_be_in_flight() {
         #[derive(Debug, PartialEq, Clone, Copy)]
         enum Expect {
+            /// This attempt's blob recorded.
             Record,
+            /// The blob recorded at claim restored.
+            Restore,
+            /// Whatever is recorded kept.
             Keep,
             Clear,
         }
         let written = RemoteBlob {
             path: "reports/ai.md".to_string(),
-            blob_sha: "sha".to_string(),
+            blob_sha: "new".to_string(),
+        };
+        let claimed = RemoteBlob {
+            path: "reports/ai.md".to_string(),
+            blob_sha: "old".to_string(),
         };
         let unverified = || PublishError::RemoteWriteUnverified {
             write: Box::new(PublishError::RemoteTimeout),
@@ -1928,12 +2001,17 @@ mod tests {
             (unverified(), false, true, Expect::Record),
             (unverified(), true, true, Expect::Record),
             (earlier(), true, false, Expect::Keep),
-            // Recovering: nothing this attempt does settles the earlier write.
-            (rate_limited(), true, true, Expect::Keep),
-            (conflict(), true, true, Expect::Keep),
+            // Recovering, own write refused or never sent: only the earlier
+            // write can land — the one recorded at claim comes back.
+            (rate_limited(), true, true, Expect::Restore),
+            (rate_limited(), true, false, Expect::Restore),
+            (conflict(), true, true, Expect::Restore),
+            (unconfirmed(), true, false, Expect::Restore),
+            (server(), true, false, Expect::Restore),
+            (PublishError::RemoteTimeout, true, false, Expect::Restore),
+            // Recovering, own write may have landed too: the latest stays.
             (server(), true, true, Expect::Keep),
-            (unconfirmed(), true, false, Expect::Keep),
-            (PublishError::RemoteTimeout, true, false, Expect::Keep),
+            (PublishError::RemoteTimeout, true, true, Expect::Keep),
             // Fresh, write sent: only a refusal settles it.
             (rate_limited(), false, true, Expect::Clear),
             (conflict(), false, true, Expect::Clear),
@@ -1945,9 +2023,18 @@ mod tests {
             (PublishError::RemoteTimeout, false, false, Expect::Clear),
         ];
         for (error, recovering, write_sent, expect) in cases {
-            let decision = mark_after(&error, recovering, write_sent, Some(&written));
+            let decision = mark_after(
+                &error,
+                ReleaseContext {
+                    written: Some(&written),
+                    claimed_write: Some(&claimed),
+                    recovering,
+                    write_sent,
+                },
+            );
             let got = match decision.update {
                 UnverifiedWriteUpdate::Record(Some(blob)) if blob == &written => Expect::Record,
+                UnverifiedWriteUpdate::Record(Some(blob)) if blob == &claimed => Expect::Restore,
                 UnverifiedWriteUpdate::Keep => Expect::Keep,
                 UnverifiedWriteUpdate::Record(None) => Expect::Clear,
                 UnverifiedWriteUpdate::Record(Some(_)) => unreachable!(),

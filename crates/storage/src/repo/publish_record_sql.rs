@@ -251,12 +251,25 @@ RETURNING state
 /// R5-6: [`RELEASE_PUBLISH_RETRYABLE_FAILURE_SQL`] for an attempt that may
 /// leave a write in flight: charged the same way, but the recorded write is
 /// kept (the caller persists the recovery kind as `$3`).
-pub(super) const RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_WRITE_SQL: &str = r#"
+pub(super) const RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_MARK_SQL: &str = r#"
 UPDATE publish_records
 SET state = CASE WHEN stage_attempt_count >= $1 THEN 'failed' ELSE state END,
     lease_owner = NULL, lease_expires_at = NULL,
     last_error = $2, last_error_kind = $3, updated_at = $4,
     next_attempt_at = $7
+WHERE id = $5 AND lease_owner = $6
+RETURNING state
+"#;
+/// R5-6: [`RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_MARK_SQL`] that also
+/// sets the recorded write (`$8` path, `$9` blob) — e.g. back to the one
+/// recorded at claim when this attempt's own write was refused or never sent.
+pub(super) const RELEASE_PUBLISH_RETRYABLE_FAILURE_KEEPING_MARK_RECORDING_SQL: &str = r#"
+UPDATE publish_records
+SET state = CASE WHEN stage_attempt_count >= $1 THEN 'failed' ELSE state END,
+    lease_owner = NULL, lease_expires_at = NULL,
+    last_error = $2, last_error_kind = $3, updated_at = $4,
+    next_attempt_at = $7,
+    unverified_write_path = $8, unverified_write_blob_sha = $9
 WHERE id = $5 AND lease_owner = $6
 RETURNING state
 "#;
@@ -303,13 +316,15 @@ pub(super) const MARK_REMOTE_WRITE_PENDING_SQL: &str = "UPDATE publish_records S
 /// folding the branch and path as well errs toward holding, like the caseless
 /// collision rule of validate-config. SQLite's built-in `lower()` folds ASCII
 /// only; the PostgreSQL variant uses `translate` for the same result on
-/// non-ASCII text.
+/// non-ASCII text. A row marked for recovery before migration 0010 has
+/// no recorded path: it holds every path of its target, until its own
+/// recovery records one or settles (R5-5, conservative).
 pub(super) const FIND_REMOTE_DESTINATION_HOLDER_SQLITE_SQL: &str = r#"
 SELECT id FROM publish_records
 WHERE id <> $1
   AND category_key <> $2
-  AND ((state = 'stored_local' AND last_error_kind = $4
-        AND lower(unverified_write_path) = $3 AND lower(remote_target) = $5)
+  AND ((state = 'stored_local' AND last_error_kind = $4 AND lower(remote_target) = $5
+        AND (unverified_write_path IS NULL OR lower(unverified_write_path) = $3))
     OR (state = 'published_remote' AND lower(remote_target) = $6))
 ORDER BY id ASC
 LIMIT 1
@@ -320,8 +335,9 @@ SELECT id FROM publish_records
 WHERE id <> $1
   AND category_key <> $2
   AND ((state = 'stored_local' AND last_error_kind = $4
-        AND translate(unverified_write_path, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $3
-        AND translate(remote_target, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $5)
+        AND translate(remote_target, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $5
+        AND (unverified_write_path IS NULL
+             OR translate(unverified_write_path, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $3))
     OR (state = 'published_remote'
         AND translate(remote_target, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $6))
 ORDER BY id ASC
@@ -331,9 +347,6 @@ LIMIT 1
 /// (`$1` = its folded key) for the rest of the transaction.
 pub(super) const LOCK_REMOTE_DESTINATION_PG_SQL: &str =
     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))";
-/// R5-9: does `$2` still hold record `$1` in state `$3`?
-pub(super) const OWNS_PUBLISH_RECORD_SQL: &str =
-    "SELECT id FROM publish_records WHERE id = $1 AND lease_owner = $2 AND state = $3";
 pub(super) const RELEASE_DEFERRED_RETRY_RECORDING_SQL: &str = "UPDATE publish_records SET lease_owner = NULL, lease_expires_at = NULL, attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, stage_attempt_count = CASE WHEN stage_attempt_count > 0 THEN stage_attempt_count - 1 ELSE 0 END, last_error = $1, last_error_kind = $2, updated_at = $3, next_attempt_at = $7, unverified_write_path = $8, unverified_write_blob_sha = $9 WHERE id = $4 AND lease_owner = $5 AND state = $6";
 pub(super) const RECLAIM_PUBLISH_LEASES_SQL: &str = r#"
 UPDATE publish_records

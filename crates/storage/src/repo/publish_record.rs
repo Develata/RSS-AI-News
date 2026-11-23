@@ -335,11 +335,12 @@ pub trait PublishRecordRepository: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<RecordedWrite, StorageError>;
     /// R5-6: a charged retryable release (same budget fold as
-    /// [`Self::release_retryable_failure_until`]) that keeps the recorded
-    /// write, for an attempt that may leave one in flight; `kind` is the
-    /// recovery kind the caller persists.
+    /// [`Self::release_retryable_failure_until`]) that keeps the recovery
+    /// mark, for an attempt that may leave a write in flight; `kind` is the
+    /// recovery kind the caller persists, `unverified_write` keeps the
+    /// recorded write or sets it (e.g. back to the one recorded at claim).
     #[allow(clippy::too_many_arguments)]
-    async fn release_retryable_failure_keeping_write(
+    async fn release_retryable_failure_keeping_mark(
         &self,
         id: i64,
         owner: &str,
@@ -347,10 +348,12 @@ pub trait PublishRecordRepository: Send + Sync {
         kind: &str,
         max_attempts: u32,
         retry_not_before: Option<OffsetDateTime>,
+        unverified_write: UnverifiedWriteUpdate<'_>,
         now: OffsetDateTime,
     ) -> Result<ReleaseFailureOutcome, StorageError>;
-    /// R5-9: `true` iff `owner` still holds every record of `ids` in `state`.
-    /// Compares the lease owner, not the expiry, so no clock is involved.
+    /// R5-9: `true` iff `owner` still holds every record of `ids` in `state`
+    /// — one statement, so one snapshot for the whole set. Compares the lease
+    /// owner, not the expiry, so no clock is involved.
     async fn owns_publish_records(
         &self,
         ids: &[i64],

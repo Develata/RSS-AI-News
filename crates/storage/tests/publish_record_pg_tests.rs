@@ -1237,6 +1237,12 @@ async fn pg_record_remote_write_and_destination_holder() {
         ),
         (
             "UPDATE publish_records SET remote_target = 'O/R:main', \
+             unverified_write_path = NULL WHERE id = $1",
+            RecordedWrite::HeldBy(other),
+            "pre-0010 recovering row holds every path of its target",
+        ),
+        (
+            "UPDATE publish_records SET remote_target = 'O/R:main', \
              unverified_write_path = '报告/ai/É.md' WHERE id = $1",
             RecordedWrite::HeldBy(other),
             "unsettled write, other ASCII case",
@@ -1381,12 +1387,44 @@ async fn pg_concurrent_record_remote_write_clears_one_writer_per_destination() {
         .await
         .unwrap();
     drop(locker);
-    let mut outcomes = vec![a.await.unwrap(), b.await.unwrap()];
-    outcomes.sort_by_key(|outcome| format!("{outcome:?}"));
+    let outcomes = [(first, a.await.unwrap()), (second, b.await.unwrap())];
+    // Exactly one winner; the loser is held by the winner and its own row
+    // was rolled back (nothing recorded on it).
+    let winners = outcomes
+        .iter()
+        .filter(|(_, outcome)| *outcome == RecordedWrite::Recorded)
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    assert_eq!(winners.len(), 1, "{outcomes:?}");
+    let winner = winners[0];
+    let loser = if winner == first { second } else { first };
     assert!(
-        outcomes == vec![RecordedWrite::HeldBy(first), RecordedWrite::Recorded]
-            || outcomes == vec![RecordedWrite::HeldBy(second), RecordedWrite::Recorded],
+        outcomes.contains(&(loser, RecordedWrite::HeldBy(winner))),
         "{outcomes:?}"
+    );
+    let recorded = |id: i64| {
+        let pool = ctx.pg_pool().clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                "SELECT last_error_kind, unverified_write_path FROM publish_records WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        recorded(winner).await,
+        (
+            Some("remote_write_unverified".to_string()),
+            Some("p.md".to_string())
+        )
+    );
+    assert_eq!(
+        recorded(loser).await,
+        (None, None),
+        "the loser recorded nothing"
     );
 }
 

@@ -92,11 +92,11 @@ const PINNED_UP_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "migrations/sqlite/0010_publish_unverified_write_blob.up.sql",
-        "b68a67527b24ab70d363768fce78afc7c46186d38d0053924841daa40184c038",
+        "e438a45421cc3cb7593aa57a168f4fa26bd5b05c30b24ed42f983ec3cfbadb6c",
     ),
     (
         "migrations/postgres/0010_publish_unverified_write_blob.up.sql",
-        "b68a67527b24ab70d363768fce78afc7c46186d38d0053924841daa40184c038",
+        "e438a45421cc3cb7593aa57a168f4fa26bd5b05c30b24ed42f983ec3cfbadb6c",
     ),
 ];
 

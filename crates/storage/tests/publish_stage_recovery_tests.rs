@@ -728,8 +728,13 @@ async fn sqlite_record_remote_write_is_held_by_another_categorys_destination() {
         }
     };
     async fn set_destination_mine(repo: &PublishRecordRepo, me: i64, owner: &str) {
+        // One claim per round; the budget is not what this test is about.
+        let claim = ClaimRequest {
+            max_attempts: 50,
+            ..claim_at(now(), owner)
+        };
         let claimed = repo
-            .claim_publish_by_ids(&claim_at(now(), owner), PublishState::StoredLocal, &[me])
+            .claim_publish_by_ids(&claim, PublishState::StoredLocal, &[me])
             .await
             .unwrap();
         assert_eq!(claimed.len(), 1, "{owner}");
@@ -758,6 +763,20 @@ async fn sqlite_record_remote_write_is_held_by_another_categorys_destination() {
     )
     .await;
     attempt(RecordedWrite::Recorded, "another target's write").await;
+    release(&repo, me).await;
+
+    // Marked for recovery before migration 0010: no recorded path, so it
+    // holds every path of its target (conservative).
+    sqlx::query(
+        "UPDATE publish_records SET state = 'stored_local', category_key = 'theirs', \
+         remote_target = 'O/R:main', last_error_kind = 'remote_write_unverified', \
+         unverified_write_path = NULL WHERE id = ?",
+    )
+    .bind(other)
+    .execute(&pool)
+    .await
+    .unwrap();
+    attempt(RecordedWrite::HeldBy(other), "pre-0010 recovering row").await;
     release(&repo, me).await;
 
     set_destination(
@@ -864,12 +883,44 @@ async fn sqlite_concurrent_record_remote_write_clears_one_writer_per_destination
     assert!(!a.is_finished() && !b.is_finished(), "both parked");
     sqlx::query("COMMIT").execute(&mut *locker).await.unwrap();
     drop(locker);
-    let mut outcomes = vec![a.await.unwrap(), b.await.unwrap()];
-    outcomes.sort_by_key(|outcome| format!("{outcome:?}"));
+    let outcomes = [(first, a.await.unwrap()), (second, b.await.unwrap())];
+    // Exactly one winner; the loser is held by the winner and its own row
+    // was rolled back (nothing recorded on it).
+    let winners = outcomes
+        .iter()
+        .filter(|(_, outcome)| *outcome == RecordedWrite::Recorded)
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    assert_eq!(winners.len(), 1, "{outcomes:?}");
+    let winner = winners[0];
+    let loser = if winner == first { second } else { first };
     assert!(
-        outcomes == vec![RecordedWrite::HeldBy(first), RecordedWrite::Recorded]
-            || outcomes == vec![RecordedWrite::HeldBy(second), RecordedWrite::Recorded],
+        outcomes.contains(&(loser, RecordedWrite::HeldBy(winner))),
         "{outcomes:?}"
+    );
+    let recorded = |id: i64| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                "SELECT last_error_kind, unverified_write_path FROM publish_records WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        recorded(winner).await,
+        (
+            Some("remote_write_unverified".to_string()),
+            Some("p.md".to_string())
+        )
+    );
+    assert_eq!(
+        recorded(loser).await,
+        (None, None),
+        "the loser recorded nothing"
     );
 }
 

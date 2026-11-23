@@ -115,7 +115,7 @@ publish 的 claim 还要求 `next_attempt_at` 为空或已到（R1-P-S12）。sw
 写前恢复比对仍未出结论的尝试，R4-1；远端已有报告、回执落库失败的尝试，R5-1），以及所有限流（期限在未来时写入等待，已到 / 已过时写 NULL；R3F-S12，R4-4）。
 因此这两类记录不会被 sweep 收口，
 持续如此的记录会一直持有文章归属（ADR 0012 §3 / §3a 的已知代价）。
-另有 `release_retryable_failure_keeping_write(…)`（2026-11-23，R5-6）：与 `release_retryable_failure_until` 同样计预算、同样按
+另有 `release_retryable_failure_keeping_mark(…)`（2026-11-23，R5-6）：与 `release_retryable_failure_until` 同样计预算、同样按
 `stage_attempt_count` 折叠为 `failed`，但不清空记录的写入——用于写入可能仍在途的尝试（恢复中的记录，或新记录写后遇 5xx / 超时），
 调用方此时持久化的 kind 是 `remote_write_unverified`。
 

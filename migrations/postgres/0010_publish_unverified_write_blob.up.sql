@@ -6,7 +6,8 @@
 -- claim checks exactly this blob at this path, so changing github_path_prefix,
 -- path templates or report templates in between cannot send the recovery to
 -- another path and make it write the report a second time. Read only while
--- last_error_kind is remote_write_unverified; a stage advance and a charged
--- retryable release clear it. Existing rows: NULL (their recovery re-renders).
+-- last_error_kind is remote_write_unverified; a stage advance clears it, and
+-- a failed attempt keeps or clears it by the recovery rule (R5-6: kept while
+-- a write may still land). Existing rows: NULL (their recovery re-renders).
 ALTER TABLE publish_records ADD COLUMN unverified_write_path TEXT NULL;
 ALTER TABLE publish_records ADD COLUMN unverified_write_blob_sha TEXT NULL;
