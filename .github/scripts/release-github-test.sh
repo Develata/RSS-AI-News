@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Tests for release-github.sh against a file-backed fake GitHub
 # (release-github-fake.sh), and for the real adapter release-github-api.sh
-# with a stub gh; run by the static acceptance lane (needs jq).
+# with a stub gh and git; run by the static acceptance lane (needs jq).
 set -eu
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -16,13 +16,15 @@ case_no=0
 START='<!-- release-notes:start -->'
 END='<!-- release-notes:end -->'
 SHA=0123456789abcdef0123456789abcdef01234567
+OTHER=fedcba9876543210fedcba9876543210fedcba98
 
 fail() {
     echo "FAIL - $description: $*"
     failures=$((failures + 1))
 }
 
-# Starts a case with an empty fake GitHub whose remote has the given tags.
+# Starts a case with an empty fake GitHub whose remote has the given tags,
+# each at the run's commit $SHA.
 start() {
     description="$1"
     shift
@@ -30,10 +32,10 @@ start() {
     case_failures=$failures
     FAKE_GITHUB="$work/$case_no"
     export FAKE_GITHUB
-    mkdir -p "$FAKE_GITHUB/releases" "$FAKE_GITHUB/title" "$FAKE_GITHUB/notes" "$FAKE_GITHUB/target"
+    mkdir -p "$FAKE_GITHUB/releases" "$FAKE_GITHUB/title" "$FAKE_GITHUB/notes"
     : >"$FAKE_GITHUB/tags"
     : >"$FAKE_GITHUB/writes.log"
-    for t in "$@"; do echo "$t" >>"$FAKE_GITHUB/tags"; done
+    for t in "$@"; do echo "$t $SHA" >>"$FAKE_GITHUB/tags"; done
     unset FAKE_GH_FAIL FAKE_GH_FAIL_AFTER_WRITE FAKE_GH_DUPLICATE FAKE_GH_CREATE_DRAFT FAKE_GH_IGNORE_LATEST || true
     printf 'notes for this release\n' >"$work/notes.md"
 }
@@ -44,9 +46,10 @@ done_case() {
     fi
 }
 
-# release TAG STATE: an existing Release (`<draft> <prerelease>`).
+# release TAG STATE: an existing Release (`<draft> <prerelease>`) with a
+# fresh id.
 release() {
-    echo "$2" >"$FAKE_GITHUB/releases/$1"
+    echo "$((100 + $(find "$FAKE_GITHUB/releases" -type f | wc -l))) $2" >"$FAKE_GITHUB/releases/$1"
     echo "existing body" >"$FAKE_GITHUB/notes/$1"
 }
 
@@ -59,8 +62,9 @@ latest_is() {
     [ "$actual" = "$1" ] || fail "Latest is '$actual', expected $1"
 }
 
+# state_is TAG STATE: `<draft> <prerelease>` of TAG's Release, or `missing`.
 state_is() {
-    actual="$(cat "$FAKE_GITHUB/releases/$1" 2>/dev/null || echo missing)"
+    actual="$(cut -d ' ' -f 2- "$FAKE_GITHUB/releases/$1" 2>/dev/null || echo missing)"
     [ "$actual" = "$2" ] || fail "the Release of $1 is '$actual', expected '$2'"
 }
 
@@ -175,19 +179,37 @@ expect_rc 1
 stderr_has "exactly once each"
 done_case
 
-for link in '见 [plan/02](../../plan/02-extract.md)' '![图](img.png)' '[ref]: ../x.md' '[a](https://ok.test) 与 [b](rel.md)'; do
-    start "notes: a relative link fails ($link)"
+for link in '见 [plan/02](../../plan/02-extract.md)' '![图](img.png)' '[ref]: ../x.md' '> [ref]: ../old.md' \
+    '> > [ref]: old.md' '[a](https://ok.test) 与 [b](rel.md)' '[a](http://plain.test)' '[ref]: http://plain.test'; do
+    start "notes: a link that is not absolute https fails ($link)"
     printf '%s\n%s\n%s\n' "$START" "$link" "$END" >"$report"
     notes 1.2.3 "$report"
     expect_rc 1
-    stderr_has "use an absolute https URL"
+    stderr_has "is not an absolute https URL"
     done_case
 done
 
-start "notes: absolute, anchor and mailto links pass"
-printf '%s\n[a](https://x.test) [b](#c) [d](mailto:e@x.test) [f](<https://g.test>)\n[ref]: https://h.test\n%s\n' "$START" "$END" >"$report"
+start "notes: absolute, anchor, mailto, bracketed and code-only links pass"
+{
+    printf '%s\n' "$START"
+    printf '%s\n' '[a](https://x.test) [b](#c) [d](mailto:e@x.test) [f](<https://g.test>)'
+    printf '%s\n' '[ref]: https://h.test' '[ref2]: <https://example.test/page>' '> [ref3]: https://q.test'
+    # shellcheck disable=SC2016 # literal backticks: Markdown code
+    printf '%s\n' '示例：`[link](file.md)` 与 `![x](y.png)`'
+    printf '%s\n' '```markdown' '[in fence](relative.md)' '[ref]: ../fence.md' '```'
+    printf '%s\n' '~~~' '[tilde fence](rel.md)' '~~~'
+    printf '%s\n' "$END"
+} >"$report"
 notes 1.2.3 "$report"
 expect_rc 0
+done_case
+
+start "notes: a relative link after a closed fence still fails"
+# shellcheck disable=SC2016 # literal backticks: Markdown code
+printf '%s\n```\n[ok](rel.md)\n```\n[bad](rel.md)\n%s\n' "$START" "$END" >"$report"
+notes 1.2.3 "$report"
+expect_rc 1
+stderr_has "[bad](rel.md)"
 done_case
 
 start "notes: a malformed version is a usage error"
@@ -200,7 +222,7 @@ done_case
 
 # --- ensure ------------------------------------------------------------------
 
-start "ensure: the latest version gets a new Release marked Latest, at the run's commit" v0.10.4 v0.10.5
+start "ensure: the latest version gets a new Release marked Latest" v0.10.4 v0.10.5
 release v0.10.4 "false false"
 latest v0.10.4
 ensure 0.10.5 0.10.5
@@ -209,7 +231,6 @@ expect_out "release=v0.10.5 latest=true"
 state_is v0.10.5 "false false"
 latest_is v0.10.5
 [ "$(cat "$FAKE_GITHUB/title/v0.10.5")" = v0.10.5 ] || fail "title is '$(cat "$FAKE_GITHUB/title/v0.10.5")'"
-[ "$(cat "$FAKE_GITHUB/target/v0.10.5")" = "$SHA" ] || fail "target is '$(cat "$FAKE_GITHUB/target/v0.10.5")'"
 cmp -s "$work/notes.md" "$FAKE_GITHUB/notes/v0.10.5" || fail "the body is not the notes file"
 writes_are "create v0.10.5 latest=true;"
 done_case
@@ -236,15 +257,17 @@ latest_is v1.0.0
 no_writes
 done_case
 
-start "ensure: a higher version without any Release blocks a lower one's create" v0.9.9
+start "ensure: no Latest at all while the alias is higher names the release to complete" v0.9.9
 ensure 0.9.9 0.10.0
 expect_rc 1
+stderr_has "GitHub's Latest should be v0.10.0"
 stderr_has "nothing was written"
 state_is v0.9.9 missing
 no_writes
 done_case
 
-start "ensure: a re-run on a published Release keeps its notes and re-applies Latest" v0.10.5
+start "ensure: a re-run on a published Release keeps its notes and re-applies Latest by id" v0.10.5
+release v0.10.4 "false false"
 release v0.10.5 "false false"
 latest v0.10.4
 ensure 0.10.5 0.10.5
@@ -328,19 +351,49 @@ for setup in published older; do
     done_case
 done
 
+start "ensure: a tag moved to another commit stops the write" v0.10.5
+echo "v0.10.5 $OTHER" >"$FAKE_GITHUB/tags"
+ensure 0.10.5 0.10.5
+expect_rc 1
+stderr_has "v0.10.5 now names $OTHER, not this run's commit $SHA"
+stderr_has "nothing was written"
+no_writes
+done_case
+
+start "ensure: a tag moved before set-latest stops the write too" v0.10.5
+release v0.10.5 "false false"
+latest v0.10.4
+echo "v0.10.5 $OTHER" >"$FAKE_GITHUB/tags"
+ensure 0.10.5 0.10.5
+expect_rc 1
+stderr_has "now names $OTHER"
+latest_is v0.10.4
+no_writes
+done_case
+
+start "ensure: a tag missing on the remote is never created by the Release"
+ensure 0.10.5 0.10.5
+expect_rc 1
+stderr_has "v0.10.5 is not on the remote"
+state_is v0.10.5 missing
+no_writes
+done_case
+
+start "ensure: a tag read error fails with nothing written" v0.10.5
+FAKE_GH_FAIL="tag-commit"
+export FAKE_GH_FAIL
+ensure 0.10.5 0.10.5
+expect_rc 1
+stderr_has "reading the remote tag v0.10.5 failed"
+no_writes
+done_case
+
 start "ensure: a failed create fails" v0.10.5
 FAKE_GH_FAIL="create"
 export FAKE_GH_FAIL
 ensure 0.10.5 0.10.5
 expect_rc 1
 stderr_has "creating the Release of v0.10.5 failed (it may or may not exist now)"
-done_case
-
-start "ensure: a tag missing on the remote is never created by the Release"
-ensure 0.10.5 0.10.5
-expect_rc 1
-stderr_has "creating the Release of v0.10.5 failed"
-state_is v0.10.5 missing
 done_case
 
 start "ensure: a failed set-latest fails" v0.10.5
@@ -358,7 +411,7 @@ FAKE_GH_CREATE_DRAFT=1
 export FAKE_GH_CREATE_DRAFT
 ensure 0.10.5 0.10.5
 expect_rc 1
-stderr_has "reads back as 'true false'"
+stderr_has "reads back as"
 stderr_has "the write went through but is not confirmed"
 done_case
 
@@ -427,13 +480,15 @@ expect_rc 2
 no_writes
 done_case
 
-# --- release-github-api.sh (the real adapter) with a stub gh ----------------
+# --- release-github-api.sh (the real adapter) with a stub gh and git --------
 # Stub gh logs its argv (one argument per line, then `--`) to $STUB_GH/argv.
 # `gh api --paginate <path> --jq <filter>` applies the filter with jq to each
-# $STUB_GH/page<N>.json in turn (as gh does per page); page<N>.rc makes that
+# $STUB_GH/page<N>.json in turn, as gh does per page (an empty page file is
+# an answer without a body: gh skips the filter); page<N>.rc makes that
 # page's request fail after the earlier pages printed. `gh api <path> --jq
-# <filter>` reads $STUB_GH/single.json. `gh release ...` exits with
-# $STUB_GH/write.rc (default 0).
+# <filter>` reads $STUB_GH/single.json. `gh api -X ...` and `gh release ...`
+# exit with $STUB_GH/write.rc (default 0). Stub git prints
+# $STUB_GH/lsremote.out and exits with $STUB_GH/lsremote.rc (default 0).
 
 mkdir -p "$work/bin"
 cat >"$work/bin/gh" <<'EOF'
@@ -441,29 +496,39 @@ cat >"$work/bin/gh" <<'EOF'
 set -eu
 for a in "$@"; do printf '%s\n' "$a" >>"$STUB_GH/argv"; done
 echo -- >>"$STUB_GH/argv"
-if [ "$1" = release ]; then
+if [ "$1" = release ] || [ "${2:-}" = -X ]; then
     exit "$(cat "$STUB_GH/write.rc" 2>/dev/null || echo 0)"
 fi
 [ "$1" = api ] || exit 9
 shift
 paginate=false
 if [ "$1" = --paginate ]; then paginate=true; shift; fi
-path="$1"
 [ "$2" = --jq ] || exit 9
 filter="$3"
-: "$path"
+apply() {
+    [ -s "$1" ] || return 0
+    jq -r "$filter" "$1"
+}
 if [ "$paginate" = true ]; then
     n=1
     while [ -f "$STUB_GH/page$n.json" ]; do
         if [ -f "$STUB_GH/page$n.rc" ]; then exit "$(cat "$STUB_GH/page$n.rc")"; fi
-        jq -r "$filter" "$STUB_GH/page$n.json" || exit 1
+        apply "$STUB_GH/page$n.json" || exit 1
         n=$((n + 1))
     done
 else
-    jq -r "$filter" "$STUB_GH/single.json" || exit 1
+    apply "$STUB_GH/single.json" || exit 1
 fi
 EOF
-chmod +x "$work/bin/gh"
+cat >"$work/bin/git" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+for a in "$@"; do printf '%s\n' "$a" >>"$STUB_GH/argv"; done
+echo -- >>"$STUB_GH/argv"
+[ ! -f "$STUB_GH/lsremote.out" ] || cat "$STUB_GH/lsremote.out"
+exit "$(cat "$STUB_GH/lsremote.rc" 2>/dev/null || echo 0)"
+EOF
+chmod +x "$work/bin/gh" "$work/bin/git"
 
 start_adapter() {
     description="adapter: $1"
@@ -475,7 +540,7 @@ start_adapter() {
     : >"$STUB_GH/argv"
 }
 
-# adapter ARGS...: runs the real adapter with the stub gh; sets out and rc.
+# adapter ARGS...: runs the real adapter with the stubs; sets out and rc.
 adapter() {
     set +e
     out="$(PATH="$work/bin:$PATH" GITHUB_REPOSITORY=o/r sh "$adapter" "$@" 2>"$work/stderr")"
@@ -485,29 +550,29 @@ adapter() {
 
 argv_is() {
     actual="$(tr '\n' ' ' <"$STUB_GH/argv")"
-    [ "$actual" = "$1" ] || fail "gh argv is '$actual', expected '$1'"
+    [ "$actual" = "$1" ] || fail "argv is '$actual', expected '$1'"
 }
 
 not_called() {
-    [ ! -s "$STUB_GH/argv" ] || fail "gh was called: $(tr '\n' ' ' <"$STUB_GH/argv")"
+    [ ! -s "$STUB_GH/argv" ] || fail "a stub was called: $(tr '\n' ' ' <"$STUB_GH/argv")"
 }
 
 entry() {
-    printf '{"tag_name":"%s","draft":%s,"prerelease":%s}' "$1" "$2" "$3"
+    printf '{"id":%s,"tag_name":"%s","draft":%s,"prerelease":%s}' "$1" "$2" "$3" "$4"
 }
 
 start_adapter "find reads every page and matches on page 2"
-printf '[%s,%s]\n' "$(entry v0.9.0 false false)" "$(entry v0.10.4 false false)" >"$STUB_GH/page1.json"
-printf '[%s]\n' "$(entry v0.10.5 true false)" >"$STUB_GH/page2.json"
+printf '[%s,%s]\n' "$(entry 1 v0.9.0 false false)" "$(entry 2 v0.10.4 false false)" >"$STUB_GH/page1.json"
+printf '[%s]\n' "$(entry 3 v0.10.5 true false)" >"$STUB_GH/page2.json"
 adapter find v0.10.5
 expect_rc 0
-expect_out "true false"
+expect_out "3 true false"
 head -3 "$STUB_GH/argv" | tr '\n' ' ' | grep -qx 'api --paginate repos/o/r/releases?per_page=100 ' ||
     fail "gh argv starts '$(head -3 "$STUB_GH/argv" | tr '\n' ' ')'"
 done_case
 
 start_adapter "find with no match prints nothing and succeeds"
-printf '[%s]\n' "$(entry v0.9.0 false false)" >"$STUB_GH/page1.json"
+printf '[%s]\n' "$(entry 1 v0.9.0 false false)" >"$STUB_GH/page1.json"
 printf '[]\n' >"$STUB_GH/page2.json"
 adapter find v0.10.5
 expect_rc 0
@@ -515,14 +580,21 @@ expect_out ""
 done_case
 
 start_adapter "find fails when a later page fails"
-printf '[%s]\n' "$(entry v0.9.0 false false)" >"$STUB_GH/page1.json"
+printf '[%s]\n' "$(entry 1 v0.9.0 false false)" >"$STUB_GH/page1.json"
 printf '[]\n' >"$STUB_GH/page2.json"
 echo 1 >"$STUB_GH/page2.rc"
 adapter find v0.10.5
 [ "$rc" -ne 0 ] || fail "exit 0"
 done_case
 
-for body in '[{"draft":true,"prerelease":false}]' '[{"tag_name":"v0.10.5","draft":"false","prerelease":false}]' '{"message":"Not Found"}' '[1]'; do
+start_adapter "find fails on an answer without a body (204: gh skips the filter)"
+: >"$STUB_GH/page1.json"
+adapter find v0.10.5
+[ "$rc" -ne 0 ] || fail "exit 0, output '$out'"
+done_case
+
+for body in '[{"tag_name":"v0.10.5","draft":true,"prerelease":false}]' '[{"id":3,"draft":true,"prerelease":false}]' \
+    '[{"id":3,"tag_name":"v0.10.5","draft":"false","prerelease":false}]' '{"message":"Not Found"}' '[1]'; do
     start_adapter "find rejects a malformed listing: $body"
     printf '%s\n' "$body" >"$STUB_GH/page1.json"
     adapter find v0.10.5
@@ -531,27 +603,27 @@ for body in '[{"draft":true,"prerelease":false}]' '[{"tag_name":"v0.10.5","draft
 done
 
 for bad in 0.10.5 v0.10 "$(printf 'v0.10.5\nx')" 'v0.10.5"'; do
-    start_adapter "find refuses tag '$(printf '%s' "$bad" | tr '\n' '|')' without calling gh"
+    start_adapter "find and tag-commit refuse tag '$(printf '%s' "$bad" | tr '\n' '|')' without calling a stub"
     adapter find "$bad"
+    expect_rc 1
+    adapter tag-commit "$bad"
     expect_rc 1
     not_called
     done_case
 done
 
 for flag in false true; do
-    start_adapter "create passes --verify-tag, --target and --latest=$flag"
+    start_adapter "create passes --verify-tag and --latest=$flag, no --target"
     echo body >"$STUB_GH/notes.md"
-    adapter create v0.10.5 v0.10.5 "$STUB_GH/notes.md" "$flag" "$SHA"
+    adapter create v0.10.5 v0.10.5 "$STUB_GH/notes.md" "$flag"
     expect_rc 0
-    argv_is "release create v0.10.5 --repo o/r --verify-tag --target $SHA --title v0.10.5 --notes-file $STUB_GH/notes.md --latest=$flag -- "
+    argv_is "release create v0.10.5 --repo o/r --verify-tag --title v0.10.5 --notes-file $STUB_GH/notes.md --latest=$flag -- "
     done_case
 done
 
-start_adapter "create refuses a bad latest value or commit without calling gh"
+start_adapter "create refuses a bad latest value without calling gh"
 echo body >"$STUB_GH/notes.md"
-adapter create v0.10.5 v0.10.5 "$STUB_GH/notes.md" yes "$SHA"
-expect_rc 1
-adapter create v0.10.5 v0.10.5 "$STUB_GH/notes.md" true "main"
+adapter create v0.10.5 v0.10.5 "$STUB_GH/notes.md" yes
 expect_rc 1
 not_called
 done_case
@@ -559,14 +631,20 @@ done_case
 start_adapter "create reports gh's failure"
 echo body >"$STUB_GH/notes.md"
 echo 1 >"$STUB_GH/write.rc"
-adapter create v0.10.5 v0.10.5 "$STUB_GH/notes.md" true "$SHA"
+adapter create v0.10.5 v0.10.5 "$STUB_GH/notes.md" true
 [ "$rc" -ne 0 ] || fail "exit 0"
 done_case
 
-start_adapter "set-latest edits the Release with --latest"
-adapter set-latest v0.10.5
+start_adapter "set-latest patches only make_latest of the Release id"
+adapter set-latest 397351165
 expect_rc 0
-argv_is "release edit v0.10.5 --repo o/r --latest -- "
+argv_is "api -X PATCH repos/o/r/releases/397351165 -f make_latest=true --jq .id -- "
+done_case
+
+start_adapter "set-latest refuses a non-numeric id"
+adapter set-latest v0.10.5
+expect_rc 1
+not_called
 done_case
 
 start_adapter "latest reads the tag of releases/latest"
@@ -574,7 +652,41 @@ printf '{"tag_name":"v0.9.0"}\n' >"$STUB_GH/single.json"
 adapter latest
 expect_rc 0
 expect_out v0.9.0
-argv_is "api repos/o/r/releases/latest --jq .tag_name -- "
+head -3 "$STUB_GH/argv" | tr '\n' ' ' | grep -qx 'api repos/o/r/releases/latest --jq ' ||
+    fail "gh argv starts '$(head -3 "$STUB_GH/argv" | tr '\n' ' ')'"
+done_case
+
+for body in '{"tag_name":false}' '{"tag_name":123}' '{"tag_name":""}' '{"tag_name":"v1\nx"}' '{}' '[]'; do
+    start_adapter "latest rejects a malformed answer: $(printf '%s' "$body" | tr '\134' '/')"
+    printf '%s\n' "$body" >"$STUB_GH/single.json"
+    adapter latest
+    [ "$rc" -ne 0 ] || fail "exit 0, output '$out'"
+    done_case
+done
+
+start_adapter "tag-commit prints the peeled commit of an annotated tag"
+printf '%s\trefs/tags/v0.10.5\n%s\trefs/tags/v0.10.5^{}\n' "$OTHER" "$SHA" >"$STUB_GH/lsremote.out"
+adapter tag-commit v0.10.5
+expect_rc 0
+expect_out "$SHA"
+argv_is "ls-remote origin refs/tags/v0.10.5 refs/tags/v0.10.5^{} -- "
+done_case
+
+start_adapter "tag-commit prints a lightweight tag's commit; nothing for a missing tag"
+printf '%s\trefs/tags/v0.10.5\n' "$SHA" >"$STUB_GH/lsremote.out"
+adapter tag-commit v0.10.5
+expect_rc 0
+expect_out "$SHA"
+: >"$STUB_GH/lsremote.out"
+adapter tag-commit v0.10.5
+expect_rc 0
+expect_out ""
+done_case
+
+start_adapter "tag-commit fails when git fails"
+echo 128 >"$STUB_GH/lsremote.rc"
+adapter tag-commit v0.10.5
+[ "$rc" -ne 0 ] || fail "exit 0"
 done_case
 
 if [ "$failures" -ne 0 ]; then

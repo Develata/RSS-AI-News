@@ -138,7 +138,9 @@ Jobs：
     中断后若较高的 `vC` tag 又被删除，低版本的重跑会看到一侧别名停在 `C`（高于目标，保持不动）、另一侧仍旧，于是按"会停在不同
     版本"零写入失败，不能自动补齐。恢复前提是 `C` / `C-scheduler` 两个精确版本镜像仍在 registry：把 `vC` 按原 commit 重新推送
     （`git push origin <commit>:refs/tags/vC`；commit 不变，版本 tag 的 revision 校验仍成立），推送会触发 `vC` 的新 release run，
-    其 publish-image 复用已有版本 tag、promote-tags 补齐别名；或由维护者用
+    其 publish-image 复用已有版本 tag、promote-tags 补齐别名。这条路只适用于原 commit 已含现行 `release.yml`（镜像复用与本节
+    晋升策略）的版本：新 run 用的是 `vC` commit 上的 workflow，`v0.10.4` 及更早的 commit 会重建并覆盖版本镜像、直接移动别名
+    （R3-1；30 天重跑期限只约束重跑原 run，重新推送 tag 是新 run，不受它限制）。这些历史版本只能用按 digest 对齐的办法（现行版本也可以用）：由维护者用
     `docker buildx imagetools create --prefer-index=false -t <image>:<alias>-scheduler <image>@<C-scheduler 的 digest>` 把落后的
     一侧对齐到 `C`，再重跑该别名所在 `X.Y` 线（`latest` 时任一）现行 release 的 promote-tags 复核。
   - 串行：job 级 `concurrency: release-promote-<repo>`、`cancel-in-progress: false`、`queue: max`（最多 100 个等待中的 job，按
@@ -180,41 +182,47 @@ Jobs：
   之后：它失败时已推送的镜像与别名保持原样，单独重跑这个 job 即可补齐，不会回头改镜像。
   - 正文：`docs/reports/releases/vX.Y.Z.md` 中 `<!-- release-notes:start -->` 与 `<!-- release-notes:end -->` 两行之间的内容
     （各恰好一次、独占一行、start 在前；行尾单个 CR 忽略，CRLF 检出读法相同；去掉首尾空行），末尾追加一个指向 `main` 上该报告的
-    Markdown 链接（tag 后补录的发布证据在那里）。标记段内的链接必须是绝对 `https` URL（或 `#锚点`、`mailto:`）：相对路径在
-    Release 页面会按 Releases 的 URL 解析而失效，所以 `](相对路径)` 与 `[ref]: 相对路径` 都会失败。两行标记是保留字：代码块里的
+    Markdown 链接（tag 后补录的发布证据在那里）。标记段内的链接目标必须是 `https://` URL、`#锚点` 或 `mailto:`：相对路径在
+    Release 页面会按 Releases 的 URL 解析而失效，`http://` 也不接受。检查行内链接与图片 `](目标)`、引用定义 `[ref]: 目标`
+    （含块引用里的），目标可带尖括号；行内代码与围栏代码块（```` ``` ```` / `~~~`）里的文字不检查。两行标记是保留字：代码块里的
     同样两行也会被识别。正文取自 tag 的 checkout，随 tag 冻结；release lane 的 `release-notes` 步骤在 `verify-release` 里跑同一个
-    抽取，缺标记、标记重复或顺序颠倒、标记之间只有空行、相对链接，都会让 tag 在推镜像之前失败。标题为 `vX.Y.Z`。
+    抽取，缺标记、标记重复或顺序颠倒、标记之间只有空行、链接不合规，都会让 tag 在推镜像之前失败。标题为 `vX.Y.Z`。
   - Latest：与 `latest` 镜像别名同一策略（最高的已发布 stable 版本）。job 用 `release-promotion.sh alias-version` 现读 `latest`
     别名的版本 label：等于本 tag 的版本 → 本 tag 必须成为 Latest（`--latest`）；否则显式 `--latest=false`，且 GitHub 当前的
-    Latest 必须已经是别名所在版本的 tag，否则说明更高版本的 Release 缺失、未发布或未标 Latest，job 在写入前失败并指出先补哪个
-    （重跑那个 tag 的 github-release；其 run 早于本 job 时手建）。不用 GitHub 按日期与版本自动判断的默认值（给旧版本线发补丁时
-    它可能抢走 Latest），也不沿用 promote-tags 的输出（两个 tag 相继发布时会过期）。本 job 与 promote-tags 共用
-    `concurrency: release-promote-<repo>`（`cancel-in-progress: false`、`queue: max`）：任何 tag 的别名晋升都不会插进本 job 的
-    "读别名 → 写 Latest"之间。别名只升不降，高版本的 Release job 总在其晋升之后运行，所以 Latest 最终停在最高版本。代价：低版本
-    的 Release job 只要在"别名已升到更高版本、但那个版本的 Release 还没标 Latest"时运行，就会按上面的检查失败（零写入）——
-    包括高版本的 Release job **还没轮到**的正常情况：两个 tag 相隔几分钟推送时，FIFO 队列可能排成 `promote-tags(B)` →
-    `github-release(A)` → `github-release(B)`，A 因此失败。恢复：等 B 的 github-release 成功后重跑 A 的 github-release job；B 的
-    失败也同样不会被 A 掩盖。
+    Latest 必须已经是别名所在版本的 tag，否则说明更高版本的 Release 缺失、未发布、未标 Latest 或还没轮到，job 在写入前失败并指出
+    先补哪个（重跑那个 tag 的 github-release；还在排队就等它；其 run 早于本 job 时手建）。不用 GitHub 按日期与版本自动判断的
+    默认值（给旧版本线发补丁时它可能抢走 Latest），也不沿用 promote-tags 的输出（两个 tag 相继发布时会过期）。本 job 与
+    promote-tags 共用 `concurrency: release-promote-<repo>`（`cancel-in-progress: false`、`queue: max`）：任何 tag 的别名晋升都
+    不会插进本 job 的"读别名 → 写 Latest"之间。别名只升不降，高版本的 Release job 总在其晋升之后运行，所以 Latest 最终停在最高
+    版本。代价：低版本的 Release job 只要在"别名已升到更高版本、但那个版本的 Release 还没标 Latest"时运行，就会按上面的检查失败
+    （零写入）——包括高版本的 Release job **还没轮到**的正常情况：两个 tag 相隔几分钟推送时，FIFO 队列可能排成
+    `promote-tags(B)` → `github-release(A)` → `github-release(B)`，A 因此失败。恢复：等 B 的 github-release 成功后重跑 A 的
+    github-release job；B 的失败也同样不会被 A 掩盖。
   - 顺序与幂等：所有读取与检查都在第一次写之前——列出全部 Release（分页，含 draft），按 tag 名匹配；"不存在"只由完整列表判定，
-    不看 `404`（`GET /releases/tags/{tag}` 只返回已发布的 Release，对 draft 同样回 `404`），列表任一页失败或结构不符（非数组、
-    条目缺少字符串 `tag_name` / 布尔 `draft`、`prerelease`）都是读错误；draft、prerelease、同一 tag 有多个 Release（draft 可以
-    同名）、读错误、上述 Latest 不一致 → job 失败、**零写入**，由维护者处理后重跑。然后至多一次写：没有 Release → `gh release
-    create --verify-tag --target <本 run 的 commit>`；已发布且应标 Latest、但尚未是 Latest → `gh release edit --latest`；已发布的
-    Release 的标题与正文**原样保留**（重跑或手建的 Release）。最后读回：Release 存在、已发布、非 prerelease，GitHub 的 Latest 等于
-    预期；写之后的读回失败报告为"已写入、未确认"，重跑会先读状态再补齐或确认，不会删除已发布的 Release。
-  - tag 归属：写之前（读完别名之后、紧挨着 `ensure`）用 `release-promotion.sh tag-commit` 核对远端 tag 仍指向本 run 的 commit，
-    与 publish-image 相同。gh 的 `--verify-tag` 与创建是两次请求；tag 若恰在其间被删除，GitHub 会按 `--target` 重新创建，此时指向
-    本 run 的 commit 而非默认分支。核对与创建之间仍有几秒的窗口（tag 恰在其间移动或删除），workflow 内无法消除，只有禁止更新与
-    删除 `v*` tag 的 tag 保护规则（ruleset）能根除。2026-11-24 查询 `GET /repos/{repo}/rulesets` 为空：本仓库尚未启用；启用与否
-    由维护者决定（publish-image 的同类窗口同样受益）。
+    不看 `404`（`GET /releases/tags/{tag}` 只返回已发布的 Release，对 draft 同样回 `404`）。列表任一页失败、结构不符（非数组、
+    条目缺少数字 `id`、字符串 `tag_name`、布尔 `draft` / `prerelease`），或一页都没解析到（gh 对没有正文的 `204` 回答不执行
+    `--jq`，因此每页额外输出一个标记行，没有标记即读错误）都是读错误；`/releases/latest` 的回答也要是带合法 `tag_name` 字符串的
+    对象。draft、prerelease、同一 tag 有多个 Release（draft 可以同名）、读错误、上述 Latest 不一致 → job 失败、**零写入**，由维护者
+    处理后重跑。然后至多一次写：没有 Release → `gh release create --verify-tag`；已发布且应标 Latest、但尚未是 Latest →
+    `PATCH /releases/{id}`，只带 `make_latest=true`（id 来自上面的列表，不在 gh 内再按 tag 查找，也不回传 tag、target、标题与正文）；
+    已发布的 Release 的标题与正文**原样保留**（重跑或手建的 Release）。最后读回：Release 存在、已发布、非 prerelease，GitHub 的
+    Latest 等于预期；写之后的读回失败报告为"已写入、未确认"，重跑会先读状态再补齐或确认，不会删除已发布的 Release。
+  - tag 归属：写之前的最后一项检查是 `git ls-remote origin` 读远端 tag（annotated tag 取 `^{}`），必须仍指向本 run 的 commit
+    （正文与镜像都出自它），与 publish-image 相同；tag 缺失或已移动都零写入。不加 `--target`：GitHub 会检查 target 提交（省略时
+    为默认分支 head）相对默认分支是否改动了 `.github/workflows/`，有改动时对 `GITHUB_TOKEN` 一律回 `404`（REST "Create a release"
+    的说明；`GITHUB_TOKEN` 无法获得 workflows 权限），落后于 main 的 tag 或旧版本线的 tag 都会撞上。gh 的 `--verify-tag` 与创建是
+    两次请求；核对与创建之间仍有几秒的窗口，tag 若恰在其间被移动，Release 会挂到新提交上；若被删除，GitHub 会从默认分支重新
+    创建它。workflow 内无法消除，只有禁止更新与删除 `v*` tag 的 tag 保护规则（ruleset）能根除。2026-11-24 查询
+    `GET /repos/{repo}/rulesets` 为空：本仓库尚未启用；启用与否由维护者决定（publish-image 的同类窗口同样受益）。
   - 权限：`contents: write`（创建 Release）与 `packages: read`（读别名，同 promote-tags 经 `imagetools inspect`，所以同样
     固定 Buildx 并登录 GHCR）。用 `GITHUB_TOKEN` 创建的 Release 不触发其他 workflow；本 workflow 只由 tag push 触发，不受影响。
   - 测试：static lane 的 `release-github` 步骤用文件后端的假 GitHub（`release-github-fake.sh`）离线覆盖正文抽取（各种标记错误、
-    CRLF、相对链接）、新建 / 已发布 / draft / prerelease / 重复 Release、Latest 不一致、写前读错误零写入、写后读错误报"未确认"、
-    创建与 Latest 的读回；同一脚本用 stub `gh`（以 jq 执行真实的 `--jq` 过滤器）覆盖真实适配器 `release-github-api.sh`：第二页
-    命中、后续页失败、畸形列表、参数拒绝，以及 `--paginate`、`--verify-tag`、`--target`、`--latest=<bool>` 的确切 argv。
-    `release-promotion` 步骤覆盖 `alias-version`（含经真实 registry 适配器读到带空白的 label 时失败）。真实 gh 的只读调用已对本仓库
-    实测（列表匹配、缺失为空、读 Latest）；创建与标 Latest 要到首个真实 tag 才能确认。
+    CRLF、链接规则的正反例）、新建 / 已发布 / draft / prerelease / 重复 Release、Latest 不一致、tag 移动或缺失、写前读错误零写入、
+    写后读错误报"未确认"、创建与 Latest 的读回；同一脚本用 stub `gh`（以 jq 执行真实的 `--jq` 过滤器）与 stub `git` 覆盖真实适配器
+    `release-github-api.sh`：第二页命中、后续页失败、无正文回答、畸形列表与畸形 Latest、参数拒绝、annotated / lightweight /
+    缺失 tag，以及 `--paginate`、`--verify-tag`、`--latest=<bool>`、`PATCH … make_latest=true` 的确切 argv。`release-promotion`
+    步骤覆盖 `alias-version`（含经真实 registry 适配器读到带空白、尾随换行或非字符串的 label 时失败）。真实 gh / git 的只读调用已对
+    本仓库实测（列表匹配与 id、缺失为空、读 Latest、tag 的 peeled commit）；创建与标 Latest 要到首个真实 tag 才能确认。
 
   四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit 不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
 
@@ -223,7 +231,7 @@ Jobs：
 GitHub 重跑一个 workflow run 时沿用**原始**的 commit、ref 与该 commit 上的 workflow 文件
 （[Re-running workflows and jobs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs)），
 不会采用 `main` 上的新 `release.yml`。`v0.10.4` 及更早 tag 的 release run 用的是旧 workflow，门槛按版本不同（读各 tag 上的
-`release.yml`）：`v0.7.x` / `v0.8.x` 只有 `publish-image`，`v0.9.x` 先跑一个 `verify` job，`v0.10.0`…`v0.10.4` 先跑
+`release.yml`）：`v0.7.x` / `v0.8.x` 只有 `publish-image`，`v0.9.0` 先跑一个 `verify` job，`v0.9.1`…`v0.10.4` 先跑
 `verify-test` 与 `verify-release`。它们都直接把 `latest` / `X.Y`（及 `-scheduler`）推到本 tag，不经过 PostgreSQL lane、
 `cargo audit` 门槛，也不读别名当前的版本 label、不进新的晋升队列。只要本仓库的 workflow 仍对 GHCR package 有写权限，重跑这些
 旧 run 就可能覆盖较新的生产别名。GitHub 只允许在首次运行后 30 天内重跑（同上文档），所以风险随时间自然消失：截至 2026-11-24

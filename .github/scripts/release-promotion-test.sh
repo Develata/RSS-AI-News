@@ -782,7 +782,7 @@ called "^HEAD $TAG_URL head-anon\$"
 called "^image $IMAGE@$DIGEST\$"
 done_case
 
-for labels in '"1.2.3 ","c123"' '"1.2.3","c123 "' '"1.2.3\tx","c123"' '"1.2.3","c\n123"'; do
+for labels in '"1.2.3 ","c123"' '"1.2.3","c123 "' '"1.2.3\tx","c123"' '"1.2.3","c\n123"' '"1.2.3\n","c123"' '"1.2.3","c123\n"' '1.2,"c123"'; do
     start_adapter "a label with whitespace is a read error ($(printf '%s' "$labels" | tr '\134' '/'))"
     printf '{"config":{"Labels":{"org.opencontainers.image.version":%s,"org.opencontainers.image.revision":%s}}}\n' \
         "${labels%%,*}" "${labels#*,}" >"$STUB_HTTP/image.out"

@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
 # File-backed stand-in for release-github-api.sh, used by
 # release-github-test.sh. State lives in $FAKE_GITHUB:
-#   tags              the remote's tags, one per line (create's --verify-tag)
-#   releases/<tag>    `<draft> <prerelease>` of that tag's Release
-#   title/<tag>, notes/<tag>, target/<tag>
+#   tags              the remote's tags, one `<tag> <commit>` per line
+#   releases/<tag>    `<id> <draft> <prerelease>` of that tag's Release
+#   title/<tag>, notes/<tag>
 #                     what create wrote
 #   latest            the tag GitHub marks Latest (absent: none, a 404)
 #   writes.log        one line per successful write
@@ -31,15 +31,17 @@ case "$command" in
         fi
         ;;
     create)
-        grep -qx "$2" "$dir/tags" 2>/dev/null || { echo "fake: tag $2 is not on the remote" >&2; exit 1; }
+        [ "$#" -eq 5 ] || { echo "fake: create takes 4 arguments" >&2; exit 2; }
+        awk -v t="$2" '$1 == t { found = 1 } END { exit !found }' "$dir/tags" ||
+            { echo "fake: tag $2 is not on the remote" >&2; exit 1; }
         [ ! -e "$dir/releases/$2" ] || { echo "fake: a Release of $2 exists" >&2; exit 1; }
+        id=$((900 + $(find "$dir/releases" -type f | wc -l)))
         if [ -n "${FAKE_GH_CREATE_DRAFT:-}" ]; then
-            echo "true false" >"$dir/releases/$2"
+            echo "$id true false" >"$dir/releases/$2"
         else
-            echo "false false" >"$dir/releases/$2"
+            echo "$id false false" >"$dir/releases/$2"
         fi
         printf '%s\n' "$3" >"$dir/title/$2"
-        printf '%s\n' "$6" >"$dir/target/$2"
         cp "$4" "$dir/notes/$2"
         if [ "$5" = true ] && [ -z "${FAKE_GH_IGNORE_LATEST:-}" ]; then
             echo "$2" >"$dir/latest"
@@ -47,14 +49,21 @@ case "$command" in
         echo "create $2 latest=$5" >>"$dir/writes.log"
         ;;
     set-latest)
-        [ "$(cat "$dir/releases/$2" 2>/dev/null)" = "false false" ] ||
-            { echo "fake: no published Release of $2" >&2; exit 1; }
-        [ -n "${FAKE_GH_IGNORE_LATEST:-}" ] || echo "$2" >"$dir/latest"
-        echo "set-latest $2" >>"$dir/writes.log"
+        tag=""
+        for f in "$dir"/releases/*; do
+            [ -f "$f" ] || continue
+            if [ "$(cat "$f")" = "$2 false false" ]; then tag="$(basename "$f")"; fi
+        done
+        [ -n "$tag" ] || { echo "fake: no published Release with id $2" >&2; exit 1; }
+        [ -n "${FAKE_GH_IGNORE_LATEST:-}" ] || echo "$tag" >"$dir/latest"
+        echo "set-latest $tag" >>"$dir/writes.log"
         ;;
     latest)
         [ -f "$dir/latest" ] || { echo "fake: HTTP 404" >&2; exit 1; }
         cat "$dir/latest"
+        ;;
+    tag-commit)
+        awk -v t="$2" '$1 == t { print $2 }' "$dir/tags"
         ;;
     *)
         echo "fake: unknown command '$command'" >&2

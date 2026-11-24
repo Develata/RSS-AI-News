@@ -160,12 +160,17 @@ inspect_tag() {
         if type == "object" and has("config") then .config.Labels
         else [ .[]? | objects | select(has("config")) | .config.Labels ] | first
         end // {}')" || die "unexpected image config for $ref"
-    version="$(printf '%s' "$labels" | jq -r '.["org.opencontainers.image.version"] // "-" | if . == "" then "-" else . end')" ||
-        die "unexpected labels for $ref"
-    revision="$(printf '%s' "$labels" | jq -r '.["org.opencontainers.image.revision"] // "-" | if . == "" then "-" else . end')" ||
-        die "unexpected labels for $ref"
     # The three fields are space-separated and split by the caller, which
-    # would fold whitespace away (`1.2.3 ` would read as `1.2.3`).
+    # would fold whitespace away (`1.2.3 ` would read as `1.2.3`), and a
+    # command substitution drops trailing newlines: a label with whitespace
+    # anywhere, or that is not a string, is refused inside jq, on the raw
+    # value. The shell check below is a second line.
+    version="$(printf '%s' "$labels" | jq -r '.["org.opencontainers.image.version"] // "-"
+        | if type != "string" or test("\\s") then error("bad version label") elif . == "" then "-" else . end')" ||
+        die "unexpected labels for $ref (a version label that is not a string, or has whitespace)"
+    revision="$(printf '%s' "$labels" | jq -r '.["org.opencontainers.image.revision"] // "-"
+        | if type != "string" or test("\\s") then error("bad revision label") elif . == "" then "-" else . end')" ||
+        die "unexpected labels for $ref (a revision label that is not a string, or has whitespace)"
     case "$version$revision" in
         *[[:space:]]*) die "labels of $ref contain whitespace (version '$version', revision '$revision'); refusing to read them" ;;
     esac
