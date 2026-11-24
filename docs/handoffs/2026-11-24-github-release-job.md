@@ -141,7 +141,9 @@ Latest 跟随 `latest` 镜像别名。
   404，需手工标 Latest。
 - 升级步骤（先停 scheduler 再迁移）来自另一个 session 的交接，不在本次需求内：`3dbc984` 整笔是它，`41327aa` 与第三轮修复提交
   中各有一段（`41327aa` 同时含 Latest PATCH 的权限说明，不能整笔丢弃）。要撤回只撤 `ci-and-release.md` "镜像版本提升"一节的改动。
-- tag 核对与创建之间的几秒窗口：只有 `v*` tag ruleset（禁止更新、删除）能根除，是否启用由 Develata 决定。
+- （已解决，2026-11-25）tag 核对与创建之间的几秒窗口：经 Develata 同意启用 ruleset `release tags v*: no update, no deletion`
+  （id `28007887`，禁止更新与删除 `refs/tags/v*`，无 bypass），记在 `docs/operations/ci-and-release.md` github-release 的
+  "tag 归属"。拒绝推送的效果未实测。
 - 别名被"保留在更高版本"（更高 tag 已删除）时，GitHub 的 Latest 必须仍是那个版本，否则低版本的 run 失败。
 
 ## 给下一位 Agent 的备注
