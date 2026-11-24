@@ -328,13 +328,16 @@ workflow 发布 GHCR images 并创建 GitHub Release（自 github-release job �
 # 2. 拉新版
 docker compose -f docker-compose.scheduler.yml pull
 
-# 3. 若有 schema 变化，先用同一服务一次性 migrate（不动正在运行的 scheduler 容器）；
-#    entrypoint 换成 CLI，版本与随后启动的 scheduler 相同
+# 3. 停 scheduler：迁移窗口内 cron 不再触发旧二进制（旧二进制遇到它不认识的已应用迁移会拒绝运行，
+#    正在跑的旧 run 也不应与迁移并发），与 troubleshooting.md 的升级清单一致
+docker compose -f docker-compose.scheduler.yml stop rss-ai-news-scheduler
+
+# 4. 若有 schema 变化，用同一服务一次性 migrate；entrypoint 换成 CLI，版本与随后启动的 scheduler 相同
 docker compose -f docker-compose.scheduler.yml run --rm --no-deps \
   --entrypoint /usr/local/bin/rss-ai-news \
   rss-ai-news-scheduler --config-dir /app/configs migrate run
 
-# 4. 升级 scheduler
+# 5. 以新版启动 scheduler
 docker compose -f docker-compose.scheduler.yml up -d --force-recreate
 ```
 
