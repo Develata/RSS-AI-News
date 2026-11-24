@@ -260,7 +260,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    # One reconcile at a time across tags. `queue: max` keeps up to 100
+    # One reconcile at a time across tags; github-release shares the group,
+    # so the alias never moves while a Release job reads it and writes
+    # GitHub's Latest. `queue: max` keeps up to 100
     # waiting runs instead of the default single pending slot, in which a
     # later (possibly lower) tag's run would cancel a waiting one. latest does
     # not depend on it: every run reconciles latest to the highest released
@@ -313,14 +315,18 @@ jobs:
   #   - the body is the release report's marked notes section at the tag
   #     (verify-release already ran the same extraction), plus a link to the
   #     report on main, where the post-release evidence is added;
-  #   - Latest follows the `latest` image alias: read here, not handed over
-  #     from promote-tags (stale once another tag's promotion ran in between),
-  #     under one serialized group across tags, so two runs' alias read and
-  #     Latest write never interleave;
-  #   - a published Release is never rewritten; a draft or prerelease one, or
-  #     several for the tag, fail with nothing written;
-  #   - `gh release create --verify-tag` never creates a tag, and the remote
-  #     tag must still name this run's commit, as in publish-image.
+  #   - Latest follows the `latest` image alias, read in this job. The job
+  #     shares promote-tags' concurrency group, so no promotion of any tag
+  #     moves the alias between that read and the Latest write;
+  #   - every read and check comes before the one write; a published
+  #     Release is never rewritten; a draft or prerelease one, several for
+  #     the tag, or an older tag still Latest while the alias is higher fail
+  #     with nothing written;
+  #   - right before the write the remote tag must still name this run's
+  #     commit (as in publish-image), and `gh release create --verify-tag
+  #     --target <sha>` never creates a tag from the default branch. A tag
+  #     moved or deleted within the remaining seconds is only excluded by a
+  #     tag protection rule (docs/operations/ci-and-release.md).
   # `queue` is in GitHub's job concurrency schema; see promote-tags.
   github-release:
     name: publish the GitHub Release
@@ -331,18 +337,11 @@ jobs:
       contents: write
       packages: read
     concurrency:
-      group: release-github-${{ github.repository }}
+      group: release-promote-${{ github.repository }}
       cancel-in-progress: false
       queue: max
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-
-      - name: the tag still names this commit
-        run: |
-          set -euo pipefail
-          ref="refs/tags/${GITHUB_REF_NAME}"
-          git ls-remote origin "$ref" "${ref}^{}" \
-            | sh .github/scripts/release-promotion.sh tag-commit "${GITHUB_REF_NAME#v}" "$GITHUB_SHA"
 
       # Reading the alias's labels goes through `imagetools inspect`
       # (release-registry.sh), as in promote-tags.
@@ -370,9 +369,12 @@ jobs:
           sh .github/scripts/release-github.sh notes "$version" "$report" \
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/main/${report}" >"$notes"
           latest="$(sh .github/scripts/release-promotion.sh alias-version "$image" latest)"
+          ref="refs/tags/${GITHUB_REF_NAME}"
+          git ls-remote origin "$ref" "${ref}^{}" \
+            | sh .github/scripts/release-promotion.sh tag-commit "$version" "$GITHUB_SHA"
           {
             echo '### GitHub Release'
             echo '```text'
-            sh .github/scripts/release-github.sh ensure "$version" "$latest" "$notes" 2>&1
+            sh .github/scripts/release-github.sh ensure "$version" "$GITHUB_SHA" "$latest" "$notes" 2>&1
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"

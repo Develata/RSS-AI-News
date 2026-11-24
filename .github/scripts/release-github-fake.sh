@@ -3,11 +3,12 @@
 # release-github-test.sh. State lives in $FAKE_GITHUB:
 #   tags              the remote's tags, one per line (create's --verify-tag)
 #   releases/<tag>    `<draft> <prerelease>` of that tag's Release
-#   title/<tag>, notes/<tag>
+#   title/<tag>, notes/<tag>, target/<tag>
 #                     what create wrote
 #   latest            the tag GitHub marks Latest (absent: none, a 404)
 #   writes.log        one line per successful write
 # Fault injection: FAKE_GH_FAIL=<command> makes that command fail;
+# FAKE_GH_FAIL_AFTER_WRITE=<command> makes it fail once a write happened;
 # FAKE_GH_DUPLICATE=1 lists every Release twice; FAKE_GH_CREATE_DRAFT=1
 # leaves a created Release a draft; FAKE_GH_IGNORE_LATEST=1 makes create and
 # set-latest leave Latest where it was (read-back checks).
@@ -17,6 +18,10 @@ set -eu
 dir="${FAKE_GITHUB:?FAKE_GITHUB is not set}"
 command="${1:-}"
 [ "$command" != "${FAKE_GH_FAIL:-}" ] || { echo "fake: $command failed" >&2; exit 1; }
+if [ "$command" = "${FAKE_GH_FAIL_AFTER_WRITE:-}" ] && [ -s "$dir/writes.log" ]; then
+    echo "fake: $command failed after a write" >&2
+    exit 1
+fi
 
 case "$command" in
     find)
@@ -34,6 +39,7 @@ case "$command" in
             echo "false false" >"$dir/releases/$2"
         fi
         printf '%s\n' "$3" >"$dir/title/$2"
+        printf '%s\n' "$6" >"$dir/target/$2"
         cp "$4" "$dir/notes/$2"
         if [ "$5" = true ] && [ -z "${FAKE_GH_IGNORE_LATEST:-}" ]; then
             echo "$2" >"$dir/latest"

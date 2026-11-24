@@ -84,7 +84,10 @@ die() {
     exit 1
 }
 
+# One line of digits and dots only (grep -E alone would accept a multi-line
+# argument with one matching line), then the X.Y.Z structure.
 is_version() {
+    case "$1" in '' | *[!0-9.]*) return 1 ;; esac
     printf '%s\n' "$1" | grep -Eq "$VERSION_ERE"
 }
 

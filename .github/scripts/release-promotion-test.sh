@@ -590,6 +590,8 @@ case_failures=$failures
 tag 1.0.0 c100 >"$work/tags"
 tag_commit 1.0 c100
 expect_rc 2
+tag_commit "$(printf '1.0.0\nx')" c100
+expect_rc 2
 done_case
 
 # --- alias-version (the version the latest alias carries) -------------------
@@ -778,6 +780,25 @@ expect_rc 0
 [ "$out" = "$DIGEST 1.2.3 c123" ] || fail "got '$out'"
 called "^HEAD $TAG_URL head-anon\$"
 called "^image $IMAGE@$DIGEST\$"
+done_case
+
+for labels in '"1.2.3 ","c123"' '"1.2.3","c123 "' '"1.2.3\tx","c123"' '"1.2.3","c\n123"'; do
+    start_adapter "a label with whitespace is a read error ($(printf '%s' "$labels" | tr '\134' '/'))"
+    printf '{"config":{"Labels":{"org.opencontainers.image.version":%s,"org.opencontainers.image.revision":%s}}}\n' \
+        "${labels%%,*}" "${labels#*,}" >"$STUB_HTTP/image.out"
+    adapter_inspect
+    expect_rc 1
+    done_case
+done
+
+start_adapter "alias-version through the real adapter rejects a label with trailing whitespace"
+printf '{"config":{"Labels":{"org.opencontainers.image.version":"1.2.3 ","org.opencontainers.image.revision":"c123"}}}\n' \
+    >"$STUB_HTTP/image.out"
+set +e
+out="$(PATH="$work/bin:$PATH" RELEASE_REGISTRY="$adapter" sh "$script" alias-version "$IMAGE" 1.2.3 2>"$work/stderr")"
+rc=$?
+set -e
+expect_rc 1
 done_case
 
 start_adapter "an existing tag behind a bearer challenge (token auth)"

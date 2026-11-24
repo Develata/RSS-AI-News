@@ -8,45 +8,56 @@
 #   find <tag>        exit 0: one line `<draft> <prerelease>` (each `true` or
 #                     `false`) per Release whose tag is <tag>, nothing when
 #                     there is none; any other exit: a read error. Absence is
-#                     decided from the full Release listing, never from a 404.
-#   create <tag> <title> <notes-file> <latest>
+#                     decided from the full Release listing, never from a 404,
+#                     and a malformed listing is a read error.
+#   create <tag> <title> <notes-file> <latest> <commit>
 #                     publishes a Release (not a draft, not a prerelease) for
-#                     the tag <tag>, which must already be on the remote (the
-#                     adapter never creates a tag), with the body read from
-#                     <notes-file> and make_latest = <latest> (`true`/`false`).
+#                     the tag <tag>, which must already be on the remote, with
+#                     the body read from <notes-file>, make_latest = <latest>
+#                     (`true` / `false`) and target <commit> (used by GitHub
+#                     only if the tag vanished in between, so a tag it would
+#                     recreate names the run's commit, not the default branch).
 #   set-latest <tag>  marks the published Release of <tag> as Latest.
-#   latest            exit 0: the tag of the Release GitHub marks Latest.
+#   latest            exit 0: the tag of the Release GitHub marks Latest; any
+#                     other exit: a read error (a repository without any
+#                     published Release also answers 404).
 #
 # Usage:
 #   release-github.sh notes <X.Y.Z> <report> [<report-url>]
 #       Prints the Release body: the lines of <report> strictly between the
 #       line `<!-- release-notes:start -->` and the line
 #       `<!-- release-notes:end -->` (each exactly once, whole line, start
-#       first), without leading or trailing blank lines; then, when
-#       <report-url> is given, a line linking the full report. Fails when the
-#       report is missing, a marker is missing or repeated, the end comes
-#       first, or the markers enclose only blank lines. The release
-#       acceptance lane runs it on the candidate's report, so a tag whose
-#       report has no notes fails verify-release and never reaches the images.
+#       first; a trailing CR is ignored, so a CRLF checkout reads the same),
+#       without leading or trailing blank lines; then, when <report-url> is
+#       given, a Markdown link to the full report. Fails when the report is
+#       missing, a marker is missing or repeated, the end comes first, the
+#       markers enclose only blank lines, or a notes line has a relative
+#       Markdown link (`](path)` or `[ref]: path`; on the Release page it
+#       would resolve against the Releases URL, not the report: use an
+#       absolute https URL). The release acceptance lane runs it on the
+#       candidate's report, so a tag whose notes are missing or broken fails
+#       verify-release and never reaches the images.
 #
-#   release-github.sh ensure <X.Y.Z> <latest-version> <notes-file>
+#   release-github.sh ensure <X.Y.Z> <commit> <latest-version> <notes-file>
 #       Makes the Release of vX.Y.Z exist, published. <latest-version> is the
 #       version the `latest` image alias carries (release-promotion.sh
-#       alias-version), read after this run's promote-tags: the Release is
-#       marked Latest exactly when that is X.Y.Z, so the GitHub Release and
-#       the image alias follow one policy (the highest released stable
-#       version). Otherwise it is created with make_latest=false and GitHub's
-#       current Latest stays.
-#         - no Release of vX.Y.Z: create it, title `vX.Y.Z`, body <notes-file>;
-#         - a published one (a re-run, or one written by hand): its title and
-#           body are left as they are; only Latest is applied when due;
-#         - a draft or a prerelease: fail with nothing written (publishing or
-#           replacing it is a maintainer's decision);
-#         - more than one Release of vX.Y.Z (drafts may share a tag): fail.
-#       Then reads back: the Release exists, published and not a prerelease,
-#       and, when due, GitHub's Latest is vX.Y.Z. The caller holds one
-#       serialized concurrency group across tags, so the `latest` alias read
-#       and the Latest write of two runs never interleave.
+#       alias-version). The caller reads it and runs this under the same
+#       concurrency group as promote-tags, so the alias cannot move between
+#       that read and the writes here. GitHub's Latest follows the alias:
+#         - X.Y.Z is the alias version: vX.Y.Z must end as Latest;
+#         - otherwise GitHub's Latest must already be v<latest-version> and
+#           stay there (make_latest=false). If it is not, the higher
+#           version's Release is missing, unpublished or not Latest; the run
+#           fails before any write and names the release to complete first.
+#       Order: every read and check comes before the first write, so a read
+#       error, a draft or prerelease Release of vX.Y.Z, several Releases of
+#       it (drafts may share a tag) or the Latest mismatch above fail with
+#       nothing written. Then at most one write: create (no Release yet) or
+#       set-latest (published, Latest due and not already set); a published
+#       Release's title and body are never rewritten. Then a read-back of the
+#       Release state and of Latest; a failure there is reported as "written,
+#       not confirmed", and a re-run, which reads first, completes or
+#       confirms it.
 
 set -eu
 
@@ -61,8 +72,17 @@ die() {
     exit 1
 }
 
+# One line of digits and dots only (grep -E alone would accept a multi-line
+# argument with one matching line), then the X.Y.Z structure.
 is_version() {
+    case "$1" in '' | *[!0-9.]*) return 1 ;; esac
     printf '%s\n' "$1" | grep -Eq "$VERSION_ERE"
+}
+
+# A full commit SHA (SHA-1 or SHA-256 object format).
+is_commit() {
+    case "$1" in '' | *[!0-9a-f]*) return 1 ;; esac
+    [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]
 }
 
 cmd_notes() {
@@ -73,9 +93,24 @@ cmd_notes() {
     is_version "$1" || { echo "release-github: expected X.Y.Z, got '$1'" >&2; exit 2; }
     [ -f "$2" ] || die "$2 does not exist; write the v$1 release report before the tag (docs/operations/ci-and-release.md)"
     # Errors are exit codes, not awk output: 2 = marker count, 3 = order,
-    # 4 = only blank lines between the markers.
+    # 4 = only blank lines between the markers, 5 = a relative link (the
+    # offending line is printed).
     set +e
     body="$(LC_ALL=C awk -v s="$NOTES_START" -v e="$NOTES_END" '
+        function relative(l,   rest, i) {
+            if (l ~ /^[ ]*\[[^]]*\]:/) {
+                rest = l
+                sub(/^[ ]*\[[^]]*\]:[ \t]*/, "", rest)
+                if (rest !~ /^(https?:\/\/|#|mailto:)/) return 1
+            }
+            rest = l
+            while ((i = index(rest, "](")) > 0) {
+                rest = substr(rest, i + 2)
+                if (rest !~ /^[ \t]*<?(https?:\/\/|#|mailto:)/) return 1
+            }
+            return 0
+        }
+        { sub(/\r$/, "") }
         $0 == s { ns++; if (ne > 0) late = 1; inside = 1; next }
         $0 == e { ne++; inside = 0; next }
         inside { n++; line[n] = $0 }
@@ -87,6 +122,7 @@ cmd_notes() {
             last = n
             while (last >= first && line[last] ~ /^[ \t]*$/) last--
             if (first > last) exit 4
+            for (i = first; i <= last; i++) if (relative(line[i])) { print line[i]; exit 5 }
             for (i = first; i <= last; i++) print line[i]
         }' "$2")"
     rc=$?
@@ -96,82 +132,122 @@ cmd_notes() {
         2) die "$2 must contain the line '$NOTES_START' and the line '$NOTES_END' exactly once each" ;;
         3) die "$2: '$NOTES_END' comes before '$NOTES_START'" ;;
         4) die "$2: no release notes between '$NOTES_START' and '$NOTES_END'" ;;
+        5) die "$2: a release-notes line links a relative path, which breaks on the Release page; use an absolute https URL: $body" ;;
         *) die "reading $2 failed (exit $rc)" ;;
     esac
     printf '%s\n' "$body"
     if [ "$#" -eq 3 ]; then
-        printf '\n完整发布报告（含 tag 后补录的发布证据）：%s\n' "$3"
+        printf '\n完整发布报告（含 tag 后补录的发布证据）：[%s](%s)\n' "$2" "$3"
     fi
 }
 
-# find_release TAG -> prints `<draft> <prerelease>`, or nothing when TAG has
-# no Release; fails on a read error, a malformed answer or several Releases.
+# What a failed read means for the repository: before the write nothing
+# changed; after it the write went through and only its confirmation failed.
+phase_note() {
+    if [ "$1" = before ]; then
+        echo "nothing was written"
+    else
+        echo "the write went through but is not confirmed; re-run the github-release job, which reads first"
+    fi
+}
+
+# find_release TAG PHASE -> prints `<draft> <prerelease>`, or nothing when
+# TAG has no Release; fails on a read error, a malformed answer or several
+# Releases.
 find_release() {
     set +e
     found="$(sh "$github" find "$1")"
     rc=$?
     set -e
-    [ "$rc" -eq 0 ] || die "listing the Releases failed (exit $rc); nothing is written on an unreadable state"
+    [ "$rc" -eq 0 ] || die "listing the Releases failed (exit $rc); $(phase_note "$2")"
     [ -n "$found" ] || return 0
     count="$(printf '%s\n' "$found" | wc -l | tr -d ' ')"
-    [ "$count" -eq 1 ] || die "$count Releases name $1 (drafts may share a tag); resolve them by hand, then re-run"
+    [ "$count" -eq 1 ] || die "$count Releases name $1 (drafts may share a tag); resolve them by hand, then re-run; $(phase_note "$2")"
     case "$found" in
         'false false' | 'false true' | 'true false' | 'true true') ;;
-        *) die "unexpected Release state for $1: '$found'" ;;
+        *) die "unexpected Release state for $1: '$found'; $(phase_note "$2")" ;;
     esac
     printf '%s\n' "$found"
 }
 
+# read_latest PHASE -> prints the tag GitHub marks Latest.
+read_latest() {
+    set +e
+    current="$(sh "$github" latest)"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] ||
+        die "reading GitHub's Latest Release failed (exit $rc; a repository without a published Release answers 404 too); $(phase_note "$1")"
+    case "$current" in
+        '' | *[!A-Za-z0-9._/-]*) die "unexpected Latest Release tag '$current'; $(phase_note "$1")" ;;
+    esac
+    printf '%s\n' "$current"
+}
+
 cmd_ensure() {
-    [ "$#" -eq 3 ] || { echo "usage: release-github.sh ensure <X.Y.Z> <latest-version> <notes-file>" >&2; exit 2; }
+    [ "$#" -eq 4 ] || { echo "usage: release-github.sh ensure <X.Y.Z> <commit> <latest-version> <notes-file>" >&2; exit 2; }
     version="$1"
-    latest_version="$2"
-    notes_file="$3"
+    commit="$2"
+    latest_version="$3"
+    notes_file="$4"
     is_version "$version" || { echo "release-github: expected X.Y.Z, got '$version'" >&2; exit 2; }
-    is_version "$latest_version" || die "the latest alias version '$latest_version' is not X.Y.Z"
-    [ -s "$notes_file" ] || die "notes file '$notes_file' is missing or empty"
+    is_commit "$commit" || { echo "release-github: expected a full commit SHA, got '$commit'" >&2; exit 2; }
+    is_version "$latest_version" || die "the latest alias version '$latest_version' is not X.Y.Z; nothing was written"
+    [ -s "$notes_file" ] || die "notes file '$notes_file' is missing or empty; nothing was written"
     tag="v$version"
+    latest_tag="v$latest_version"
     if [ "$latest_version" = "$version" ]; then
         make_latest=true
     else
         make_latest=false
     fi
 
-    state="$(find_release "$tag")" || exit 1
+    # 1. Every read and check before the first write.
+    state="$(find_release "$tag" before)" || exit 1
     case "$state" in
-        '')
-            sh "$github" create "$tag" "$tag" "$notes_file" "$make_latest" >&2 ||
-                die "creating the Release of $tag failed; re-run the github-release job"
+        '' | 'false false') ;;
+        'true '*) die "the Release of $tag is a draft; publish or delete it by hand, then re-run the github-release job; nothing was written" ;;
+        *) die "the Release of $tag is a prerelease; a stable tag gets a stable Release: fix it by hand, then re-run the github-release job; nothing was written" ;;
+    esac
+    if [ "$make_latest" = true ]; then
+        if [ -z "$state" ]; then
+            action=create
+        else
+            current="$(read_latest before)" || exit 1
+            if [ "$current" = "$tag" ]; then action=none; else action=set-latest; fi
+        fi
+    else
+        current="$(read_latest before)" || exit 1
+        [ "$current" = "$latest_tag" ] ||
+            die "GitHub marks $current as Latest, but the latest image alias is at $latest_version: the Release of $latest_tag is missing, unpublished or not Latest. Complete it first (re-run the github-release job of $latest_tag, or create that Release by hand if its run predates this job), then re-run this one; nothing was written"
+        if [ -z "$state" ]; then action=create; else action=none; fi
+    fi
+
+    # 2. At most one write.
+    case "$action" in
+        create)
+            sh "$github" create "$tag" "$tag" "$notes_file" "$make_latest" "$commit" >&2 ||
+                die "creating the Release of $tag failed (it may or may not exist now); re-run the github-release job, which reads the state first"
             echo "release $tag: created (latest=$make_latest; the latest image alias is at $latest_version)" >&2
             ;;
-        'false false')
-            if [ "$make_latest" = true ]; then
-                sh "$github" set-latest "$tag" >&2 ||
-                    die "marking the Release of $tag Latest failed; re-run the github-release job"
-                echo "release $tag: exists, title and notes left as published; marked Latest" >&2
-            else
-                echo "release $tag: exists, left unchanged (the latest image alias is at $latest_version)" >&2
-            fi
+        set-latest)
+            sh "$github" set-latest "$tag" >&2 ||
+                die "marking the Release of $tag Latest failed (it may or may not be Latest now); re-run the github-release job, which reads the state first"
+            echo "release $tag: exists, title and notes left as published; marked Latest" >&2
             ;;
-        'true '*)
-            die "the Release of $tag is a draft; publish or delete it by hand, then re-run the github-release job"
-            ;;
-        *)
-            die "the Release of $tag is a prerelease; a stable tag gets a stable Release: fix it by hand, then re-run the github-release job"
+        none)
+            echo "release $tag: exists, nothing to write (Latest is $current; the latest image alias is at $latest_version)" >&2
             ;;
     esac
 
-    state="$(find_release "$tag")" || exit 1
+    # 3. Read back (after no write, a failure here still changed nothing).
+    if [ "$action" = none ]; then phase=before; else phase=after; fi
+    state="$(find_release "$tag" "$phase")" || exit 1
     [ "$state" = 'false false' ] ||
-        die "the Release of $tag reads back as '${state:-missing}', expected published and not a prerelease"
-    if [ "$make_latest" = true ]; then
-        set +e
-        current="$(sh "$github" latest)"
-        rc=$?
-        set -e
-        [ "$rc" -eq 0 ] || die "reading GitHub's Latest Release failed (exit $rc)"
-        [ "$current" = "$tag" ] || die "GitHub marks '$current' as Latest, expected $tag"
-    fi
+        die "the Release of $tag reads back as '${state:-missing}', expected published and not a prerelease; $(phase_note "$phase")"
+    if [ "$make_latest" = true ]; then expected="$tag"; else expected="$latest_tag"; fi
+    current="$(read_latest "$phase")" || exit 1
+    [ "$current" = "$expected" ] || die "GitHub marks $current as Latest, expected $expected; $(phase_note "$phase")"
     echo "release=$tag latest=$make_latest"
 }
 

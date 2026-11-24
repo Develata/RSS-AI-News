@@ -164,6 +164,11 @@ inspect_tag() {
         die "unexpected labels for $ref"
     revision="$(printf '%s' "$labels" | jq -r '.["org.opencontainers.image.revision"] // "-" | if . == "" then "-" else . end')" ||
         die "unexpected labels for $ref"
+    # The three fields are space-separated and split by the caller, which
+    # would fold whitespace away (`1.2.3 ` would read as `1.2.3`).
+    case "$version$revision" in
+        *[[:space:]]*) die "labels of $ref contain whitespace (version '$version', revision '$revision'); refusing to read them" ;;
+    esac
     printf '%s %s %s\n' "$digest" "$version" "$revision"
 }
 
