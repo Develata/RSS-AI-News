@@ -181,12 +181,13 @@ Jobs：
   [`.github/scripts/release-github.sh`](../../.github/scripts/release-github.sh) 创建该 tag 的 GitHub Release。排在镜像与别名
   之后：它失败时已推送的镜像与别名保持原样，单独重跑这个 job 即可补齐，不会回头改镜像。
   - 正文：`docs/reports/releases/vX.Y.Z.md` 中 `<!-- release-notes:start -->` 与 `<!-- release-notes:end -->` 两行之间的内容
-    （各恰好一次、独占一行、start 在前；行尾单个 CR 忽略，CRLF 检出读法相同；去掉首尾空行），末尾追加一个指向 `main` 上该报告的
-    Markdown 链接（tag 后补录的发布证据在那里）。标记段内的链接目标必须是 `https://` URL、`#锚点` 或 `mailto:`：相对路径在
-    Release 页面会按 Releases 的 URL 解析而失效，`http://` 也不接受。检查行内链接与图片 `](目标)`、引用定义 `[ref]: 目标`
-    （含块引用里的），目标可带尖括号；行内代码与围栏代码块（```` ``` ```` / `~~~`）里的文字不检查。两行标记是保留字：代码块里的
-    同样两行也会被识别。正文取自 tag 的 checkout，随 tag 冻结；release lane 的 `release-notes` 步骤在 `verify-release` 里跑同一个
-    抽取，缺标记、标记重复或顺序颠倒、标记之间只有空行、链接不合规，都会让 tag 在推镜像之前失败。标题为 `vX.Y.Z`。
+    （各恰好一次、独占一行、start 在前；行尾单个 CR 忽略，CRLF 检出读法相同；去掉首尾空行），原样复制；末尾追加一个指向**该 tag**
+    上报告的 Markdown 链接（`blob/vX.Y.Z/…`，总是存在；tag 后补录的发布证据在 main 的同一路径，报告只在维护分支上时 main 没有它）。
+    标记段内的链接应写成绝对 `https://` URL（或 `#锚点`）：相对路径在 Release 页面按 Releases 的 URL 解析而失效。这是写报告时的
+    约定，**不做机器检查**：分辨链接与代码、HTML 需要 Markdown 解析器，按行的检查在复审中既漏过真实链接、又会拒绝合法正文（而
+    拒绝会挡住推镜像）。两行标记是保留字：代码块里的同样两行也会被识别。正文取自 tag 的 checkout，随 tag 冻结；release lane 的
+    `release-notes` 步骤在 `verify-release` 里跑同一个抽取，缺标记、标记重复或顺序颠倒、标记之间只有空行，都会让 tag 在推镜像之前
+    失败。标题为 `vX.Y.Z`。
   - Latest：与 `latest` 镜像别名同一策略（最高的已发布 stable 版本）。job 用 `release-promotion.sh alias-version` 现读 `latest`
     别名的版本 label：等于本 tag 的版本 → 本 tag 必须成为 Latest（`--latest`）；否则显式 `--latest=false`，且 GitHub 当前的
     Latest 必须已经是别名所在版本的 tag，否则说明更高版本的 Release 缺失、未发布、未标 Latest 或还没轮到，job 在写入前失败并指出
@@ -201,30 +202,35 @@ Jobs：
   - 顺序与幂等：所有读取与检查都在第一次写之前——列出全部 Release（分页，含 draft），按 tag 名匹配；"不存在"只由完整列表判定，
     不看 `404`（`GET /releases/tags/{tag}` 只返回已发布的 Release，对 draft 同样回 `404`）。列表任一页失败、结构不符（非数组、
     条目缺少数字 `id`、字符串 `tag_name`、布尔 `draft` / `prerelease`），或一页都没解析到（gh 对没有正文的 `204` 回答不执行
-    `--jq`，因此每页额外输出一个标记行，没有标记即读错误）都是读错误；`/releases/latest` 的回答也要是带合法 `tag_name` 字符串的
-    对象。draft、prerelease、同一 tag 有多个 Release（draft 可以同名）、读错误、上述 Latest 不一致 → job 失败、**零写入**，由维护者
+    `--jq`，因此每页额外输出一个标记行，没有标记即读错误；这只覆盖第一页，之后某页回 `204` 会让列表提前结束而不被发现，GitHub
+    未记载这种回答）都是读错误；`/releases/latest` 的回答也要是对象，`tag_name` 为不含空白与控制字符的非空字符串，且
+    `refs/tags/<tag_name>` 通过 `git check-ref-format`。draft、prerelease、同一 tag 有多个 Release（draft 可以同名）、读错误、上述 Latest 不一致 → job 失败、**零写入**，由维护者
     处理后重跑。然后至多一次写：没有 Release → `gh release create --verify-tag`；已发布且应标 Latest、但尚未是 Latest →
     `PATCH /releases/{id}`，只带 `make_latest=true`（id 来自上面的列表，不在 gh 内再按 tag 查找，也不回传 tag、target、标题与正文）。
-    REST "Update a release" 对现有 target 有同样的 workflow 文件限制：本 job 创建的 Release 与已有的手建 Release（`v0.9.0` 实测）
-    的 `target_commitish` 都是 `main`，解析为默认分支 head，不受影响；target 是某个提交 SHA 的 Release 若与默认分支的 workflow
-    文件不同，PATCH 会得到 `404`，job 失败，需维护者在页面上手工标 Latest；
+    REST "Update a release" 对现有 target 有同样的 workflow 文件限制：本 job 创建的 Release 不带 target，`target_commitish` 为默认
+    分支，不受影响；已有的手建 Release 只查过 `v0.9.0`（`main`）。target 是某个提交、且该提交相对默认分支新增或修改了 workflow
+    文件的 Release，PATCH 会得到 `404`（部分认证路径为 `403`），job 失败，需维护者在页面上手工标 Latest；
     已发布的 Release 的标题与正文**原样保留**（重跑或手建的 Release）。最后读回：Release 存在、已发布、非 prerelease，GitHub 的
     Latest 等于预期；写之后的读回失败报告为"已写入、未确认"，重跑会先读状态再补齐或确认，不会删除已发布的 Release。
-  - tag 归属：写之前的最后一项检查是 `git ls-remote origin` 读远端 tag（annotated tag 取 `^{}`），必须仍指向本 run 的 commit
-    （正文与镜像都出自它），与 publish-image 相同；tag 缺失或已移动都零写入。不加 `--target`：GitHub 会检查 target 提交（省略时
-    为默认分支 head）相对默认分支是否改动了 `.github/workflows/`，有改动时对 `GITHUB_TOKEN` 一律回 `404`（REST "Create a release"
-    的说明；`GITHUB_TOKEN` 无法获得 workflows 权限），落后于 main 的 tag 或旧版本线的 tag 都会撞上。gh 的 `--verify-tag` 与创建是
+  - tag 归属：其余读取都完成之后、写之前（无需写入时也做）的最后一项检查是 `git ls-remote origin` 读远端 tag（annotated tag
+    取 `^{}`），必须仍指向本 run 的 commit（正文与镜像都出自它），与 publish-image 相同；tag 缺失或已移动都零写入，也不报成功。
+    不加 `--target`：GitHub 会检查 target 提交（省略时为默认分支 head）相对默认分支是否**新增或修改**了 `.github/workflows/` 下的
+    文件，有的话凭据须有 workflows 权限，否则回 `404`（部分认证路径为 `403`；REST "Create a release" 的说明），而 `GITHUB_TOKEN`
+    无法获得该权限。tag 所在提交与默认分支的 workflow 文件不同（例如旧版本线上改过 workflow 的 tag）时，带 `--target <sha>`
+    就会撞上；省略时用默认分支 head，不受影响。gh 的 `--verify-tag` 与创建是
     两次请求；核对与创建之间仍有几秒的窗口，tag 若恰在其间被移动，Release 会挂到新提交上；若被删除，GitHub 会从默认分支重新
     创建它。workflow 内无法消除，只有禁止更新与删除 `v*` tag 的 tag 保护规则（ruleset）能根除。2026-11-24 查询
     `GET /repos/{repo}/rulesets` 为空：本仓库尚未启用；启用与否由维护者决定（publish-image 的同类窗口同样受益）。
   - 权限：`contents: write`（创建 Release）与 `packages: read`（读别名，同 promote-tags 经 `imagetools inspect`，所以同样
     固定 Buildx 并登录 GHCR）。用 `GITHUB_TOKEN` 创建的 Release 不触发其他 workflow；本 workflow 只由 tag push 触发，不受影响。
   - 测试：static lane 的 `release-github` 步骤用文件后端的假 GitHub（`release-github-fake.sh`）离线覆盖正文抽取（各种标记错误、
-    CRLF、链接规则的正反例）、新建 / 已发布 / draft / prerelease / 重复 Release、Latest 不一致、tag 移动或缺失、写前读错误零写入、
-    写后读错误报"未确认"、创建与 Latest 的读回；同一脚本用 stub `gh`（以 jq 执行真实的 `--jq` 过滤器）与 stub `git` 覆盖真实适配器
-    `release-github-api.sh`：第二页命中、后续页失败、无正文回答、畸形列表与畸形 Latest、参数拒绝、annotated / lightweight /
-    缺失 tag，以及 `--paginate`、`--verify-tag`、`--latest=<bool>`、`PATCH … make_latest=true` 的确切 argv。`release-promotion`
-    步骤覆盖 `alias-version`（含经真实 registry 适配器读到带空白、尾随换行或非字符串的 label 时失败）。真实 gh / git 的只读调用已对
+    CRLF、链接原样复制）、新建 / 已发布 / draft / prerelease / 重复 Release、Latest 不一致、tag 移动（含在列表或 Latest 读取期间
+    移动、无需写入时移动）或缺失、各路径的调用顺序（tag 总是写前最后一项读取）、写前读错误零写入（按调用记录断言连写入尝试都
+    没有）、写后读错误报"未确认"、创建与 Latest 的读回；同一脚本用 stub `gh`（以 jq 执行真实的 `--jq` 过滤器）与 stub `git`（`check-ref-format`
+    交给真实 git）覆盖真实适配器 `release-github-api.sh`：第二页命中、后续页失败、无正文回答、畸形列表、畸形或非法 ref 的 Latest、
+    参数拒绝、annotated / lightweight / 缺失 tag，以及 `--paginate`、`--verify-tag`、`--latest=<bool>`、`PATCH … make_latest=true`
+    的确切 argv。`release-promotion` 步骤覆盖 `alias-version`（含经真实 registry 适配器读到带空白、尾随换行、控制字符或非字符串的
+    label 时失败）。真实 gh / git 的只读调用已对
     本仓库实测（列表匹配与 id、缺失为空、读 Latest、tag 的 peeled commit）；创建与标 Latest 要到首个真实 tag 才能确认。
 
   四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit 不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
@@ -332,8 +338,9 @@ workflow 发布 GHCR images 并创建 GitHub Release（自 github-release job �
 docker compose -f docker-compose.scheduler.yml pull
 
 # 3. 停 scheduler：迁移窗口内 cron 不再触发旧二进制（旧二进制遇到它不认识的已应用迁移会拒绝运行，
-#    正在跑的旧 run 也不应与迁移并发），与 troubleshooting.md 的升级清单一致。stop 会终止正在执行的一轮
-#    （其 lease 过期后回收）；不想打断，就等当前一轮结束再停
+#    正在跑的旧 run 也不应与迁移并发），与 troubleshooting.md 的升级清单一致。supercronic 收到 SIGTERM 后不再调度、
+#    等正在执行的一轮结束（v0.2.49 源码），compose 默认只等 10 秒，之后强杀（其 lease 过期后回收）。长任务用
+#    `stop -t <秒>` 给足时间；`stop` 返回成功后再迁移
 docker compose -f docker-compose.scheduler.yml stop rss-ai-news-scheduler
 
 # 4. 若有 schema 变化，用同一服务一次性 migrate；entrypoint 换成 CLI，版本与随后启动的 scheduler 相同

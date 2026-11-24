@@ -36,7 +36,8 @@ start() {
     : >"$FAKE_GITHUB/tags"
     : >"$FAKE_GITHUB/writes.log"
     for t in "$@"; do echo "$t $SHA" >>"$FAKE_GITHUB/tags"; done
-    unset FAKE_GH_FAIL FAKE_GH_FAIL_AFTER_WRITE FAKE_GH_DUPLICATE FAKE_GH_CREATE_DRAFT FAKE_GH_IGNORE_LATEST || true
+    unset FAKE_GH_FAIL FAKE_GH_FAIL_AFTER_WRITE FAKE_GH_DUPLICATE FAKE_GH_CREATE_DRAFT FAKE_GH_IGNORE_LATEST \
+        FAKE_GH_MOVE_TAG_ON FAKE_GH_MOVE_TAG_TO || true
     printf 'notes for this release\n' >"$work/notes.md"
 }
 
@@ -70,6 +71,18 @@ state_is() {
 
 no_writes() {
     [ ! -s "$FAKE_GITHUB/writes.log" ] || fail "unexpected writes: $(tr '\n' ' ' <"$FAKE_GITHUB/writes.log")"
+}
+
+# calls_are "c1 c2 ...": the adapter commands, in call order.
+calls_are() {
+    actual="$(tr '\n' ' ' <"$FAKE_GITHUB/calls.log" | sed 's/ $//')"
+    [ "$actual" = "$1" ] || fail "calls are '$actual', expected '$1'"
+}
+
+# No write was even attempted (calls.log records failed attempts too).
+no_write_attempts() {
+    ! grep -Eqx 'create|set-latest' "$FAKE_GITHUB/calls.log" ||
+        fail "a write was attempted: $(tr '\n' ' ' <"$FAKE_GITHUB/calls.log")"
 }
 
 writes_are() {
@@ -113,7 +126,7 @@ start "notes: the lines between the markers, trimmed, then the report link"
 printf '# Release v1.2.3\n\n- 状态：draft\n%s\n\n## 核心交付\n\n- 修复 A  \n  续行，见 [plan](https://example.test/p.md#s) 与 [下文](#x)\n\n%s\n\n## 验收证据\n' "$START" "$END" >"$report"
 notes 1.2.3 "$report" https://example.test/r.md
 expect_rc 0
-expected="$(printf '## 核心交付\n\n- 修复 A  \n  续行，见 [plan](https://example.test/p.md#s) 与 [下文](#x)\n\n完整发布报告（含 tag 后补录的发布证据）：[%s](https://example.test/r.md)' "$report")"
+expected="$(printf '## 核心交付\n\n- 修复 A  \n  续行，见 [plan](https://example.test/p.md#s) 与 [下文](#x)\n\n完整发布报告（tag 时的版本；tag 后补录的发布证据在 main 分支的同一路径）：[%s](https://example.test/r.md)' "$report")"
 expect_out "$expected"
 done_case
 
@@ -179,37 +192,17 @@ expect_rc 1
 stderr_has "exactly once each"
 done_case
 
-for link in '见 [plan/02](../../plan/02-extract.md)' '![图](img.png)' '[ref]: ../x.md' '> [ref]: ../old.md' \
-    '> > [ref]: old.md' '[a](https://ok.test) 与 [b](rel.md)' '[a](http://plain.test)' '[ref]: http://plain.test'; do
-    start "notes: a link that is not absolute https fails ($link)"
-    printf '%s\n%s\n%s\n' "$START" "$link" "$END" >"$report"
-    notes 1.2.3 "$report"
-    expect_rc 1
-    stderr_has "is not an absolute https URL"
-    done_case
-done
-
-start "notes: absolute, anchor, mailto, bracketed and code-only links pass"
+start "notes: links are copied verbatim, never judged (no Markdown parser here)"
 {
     printf '%s\n' "$START"
-    printf '%s\n' '[a](https://x.test) [b](#c) [d](mailto:e@x.test) [f](<https://g.test>)'
-    printf '%s\n' '[ref]: https://h.test' '[ref2]: <https://example.test/page>' '> [ref3]: https://q.test'
-    # shellcheck disable=SC2016 # literal backticks: Markdown code
-    printf '%s\n' '示例：`[link](file.md)` 与 `![x](y.png)`'
-    printf '%s\n' '```markdown' '[in fence](relative.md)' '[ref]: ../fence.md' '```'
-    printf '%s\n' '~~~' '[tilde fence](rel.md)' '~~~'
+    printf '%s\n' '见 [plan/02](../../plan/02-extract.md) 与 <a href="rel.md">x</a>' '> [ref]: ../old.md'
+    printf '%s\n' '```' '[in fence](relative.md)' '```'
     printf '%s\n' "$END"
 } >"$report"
 notes 1.2.3 "$report"
 expect_rc 0
-done_case
-
-start "notes: a relative link after a closed fence still fails"
-# shellcheck disable=SC2016 # literal backticks: Markdown code
-printf '%s\n```\n[ok](rel.md)\n```\n[bad](rel.md)\n%s\n' "$START" "$END" >"$report"
-notes 1.2.3 "$report"
-expect_rc 1
-stderr_has "[bad](rel.md)"
+expected="$(printf '%s\n' '见 [plan/02](../../plan/02-extract.md) 与 <a href="rel.md">x</a>' '> [ref]: ../old.md' '```' '[in fence](relative.md)' '```')"
+expect_out "$expected"
 done_case
 
 start "notes: a malformed version is a usage error"
@@ -371,12 +364,51 @@ latest_is v0.10.4
 no_writes
 done_case
 
+start "ensure: create path reads the tag last before the write" v0.10.5
+ensure 0.10.5 0.10.5
+expect_rc 0
+calls_are "find tag-commit create find latest"
+done_case
+
+start "ensure: lower-line create path reads Latest, then the tag, then writes" v0.9.2 v0.10.5
+release v0.10.5 "false false"
+latest v0.10.5
+ensure 0.9.2 0.10.5
+expect_rc 0
+calls_are "find latest tag-commit create find latest"
+done_case
+
+for during in find latest; do
+    start "ensure: a tag moved while $during runs is caught before the write" v0.10.5
+    release v0.10.5 "false false"
+    latest v0.10.4
+    FAKE_GH_MOVE_TAG_ON="$during"
+    FAKE_GH_MOVE_TAG_TO="$OTHER"
+    export FAKE_GH_MOVE_TAG_ON FAKE_GH_MOVE_TAG_TO
+    ensure 0.10.5 0.10.5
+    expect_rc 1
+    stderr_has "now names $OTHER"
+    no_write_attempts
+    latest_is v0.10.4
+    done_case
+done
+
+start "ensure: a moved tag fails even when nothing is to be written" v0.10.5
+release v0.10.5 "false false"
+latest v0.10.5
+echo "v0.10.5 $OTHER" >"$FAKE_GITHUB/tags"
+ensure 0.10.5 0.10.5
+expect_rc 1
+stderr_has "now names $OTHER"
+no_write_attempts
+done_case
+
 start "ensure: a tag missing on the remote is never created by the Release"
 ensure 0.10.5 0.10.5
 expect_rc 1
 stderr_has "v0.10.5 is not on the remote"
 state_is v0.10.5 missing
-no_writes
+no_write_attempts
 done_case
 
 start "ensure: a tag read error fails with nothing written" v0.10.5
@@ -385,7 +417,7 @@ export FAKE_GH_FAIL
 ensure 0.10.5 0.10.5
 expect_rc 1
 stderr_has "reading the remote tag v0.10.5 failed"
-no_writes
+no_write_attempts
 done_case
 
 start "ensure: a failed create fails" v0.10.5
@@ -490,6 +522,8 @@ done_case
 # exit with $STUB_GH/write.rc (default 0). Stub git prints
 # $STUB_GH/lsremote.out and exits with $STUB_GH/lsremote.rc (default 0).
 
+REAL_GIT="$(command -v git)"
+export REAL_GIT
 mkdir -p "$work/bin"
 cat >"$work/bin/gh" <<'EOF'
 #!/usr/bin/env sh
@@ -523,6 +557,7 @@ EOF
 cat >"$work/bin/git" <<'EOF'
 #!/usr/bin/env sh
 set -eu
+if [ "$1" = check-ref-format ]; then exec "$REAL_GIT" "$@"; fi
 for a in "$@"; do printf '%s\n' "$a" >>"$STUB_GH/argv"; done
 echo -- >>"$STUB_GH/argv"
 [ ! -f "$STUB_GH/lsremote.out" ] || cat "$STUB_GH/lsremote.out"
@@ -656,7 +691,15 @@ head -3 "$STUB_GH/argv" | tr '\n' ' ' | grep -qx 'api repos/o/r/releases/latest 
     fail "gh argv starts '$(head -3 "$STUB_GH/argv" | tr '\n' ' ')'"
 done_case
 
-for body in '{"tag_name":false}' '{"tag_name":123}' '{"tag_name":""}' '{"tag_name":"v1\nx"}' '{}' '[]'; do
+start_adapter "latest accepts any valid tag name, e.g. v1.2.3+build.1"
+printf '{"tag_name":"v1.2.3+build.1"}\n' >"$STUB_GH/single.json"
+adapter latest
+expect_rc 0
+expect_out "v1.2.3+build.1"
+done_case
+
+for body in '{"tag_name":false}' '{"tag_name":123}' '{"tag_name":""}' '{"tag_name":"v1\nx"}' '{}' '[]' \
+    '{"tag_name":".."}' '{"tag_name":"a b"}' '{"tag_name":"v1\u0000"}' '{"tag_name":"bad..name"}'; do
     start_adapter "latest rejects a malformed answer: $(printf '%s' "$body" | tr '\134' '/')"
     printf '%s\n' "$body" >"$STUB_GH/single.json"
     adapter latest

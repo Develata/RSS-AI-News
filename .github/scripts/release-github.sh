@@ -32,17 +32,16 @@
 #       `<!-- release-notes:end -->` (each exactly once, whole line, start
 #       first; a trailing CR is ignored, so a CRLF checkout reads the same),
 #       without leading or trailing blank lines; then, when <report-url> is
-#       given, a Markdown link to the full report. Fails when the report is
-#       missing, a marker is missing or repeated, the end comes first, the
-#       markers enclose only blank lines, or a link in the notes is not an
-#       absolute https URL, an #anchor or mailto: (on the Release page a
-#       relative path resolves against the Releases URL, not the report).
-#       Links are inline `](target)` (images included) and reference
-#       definitions `[ref]: target` (also inside block quotes); text in
-#       backtick code spans and fenced code blocks is not checked. The
-#       release acceptance lane runs it on the candidate's report, so a tag
-#       whose notes are missing or broken fails verify-release and never
-#       reaches the images.
+#       given, a Markdown link to the full report at the tag. Fails when the
+#       report is missing, a marker is missing or repeated, the end comes
+#       first, or the markers enclose only blank lines. The notes are copied
+#       verbatim: links in them are not checked (telling relative links from
+#       code or HTML needs a Markdown parser; a line-based check both missed
+#       real links and rejected valid notes), so the rule that they must be
+#       absolute https URLs is the report author's (docs/reports/README.md).
+#       The release acceptance lane runs it on the candidate's report, so a
+#       tag whose notes are missing fails verify-release and never reaches
+#       the images.
 #
 #   release-github.sh ensure <X.Y.Z> <commit> <latest-version> <notes-file>
 #       Makes the Release of vX.Y.Z exist, published. <latest-version> is the
@@ -58,8 +57,9 @@
 #       Order: every read and check comes before the first write, so a read
 #       error, a draft or prerelease Release of vX.Y.Z, several Releases of
 #       it (drafts may share a tag) or the Latest mismatch above fail with
-#       nothing written. The last check before the write: the remote tag
-#       vX.Y.Z still names <commit> (the notes and images are that commit's).
+#       nothing written. The last check, also when nothing is to be written:
+#       the remote tag vX.Y.Z still names <commit> (the notes and images are
+#       that commit's), so a success never vouches for a moved tag.
 #       Then at most one write: create (no Release yet) or set-latest by id
 #       (published, Latest due and not already set); a published Release's
 #       title and body are never rewritten. Then a read-back of the Release
@@ -101,32 +101,9 @@ cmd_notes() {
     is_version "$1" || { echo "release-github: expected X.Y.Z, got '$1'" >&2; exit 2; }
     [ -f "$2" ] || die "$2 does not exist; write the v$1 release report before the tag (docs/operations/ci-and-release.md)"
     # Errors are exit codes, not awk output: 2 = marker count, 3 = order,
-    # 4 = only blank lines between the markers, 5 = a link that is not
-    # absolute (the offending line is printed).
+    # 4 = only blank lines between the markers.
     set +e
     body="$(LC_ALL=C awk -v s="$NOTES_START" -v e="$NOTES_END" '
-        function absolute(t) {
-            sub(/^[ \t]*</, "", t)
-            return t ~ /^(https:\/\/|#|mailto:)/
-        }
-        # A notes line with a link that is not absolute: inline links and
-        # images `](target)`, and reference definitions `[ref]: target`
-        # (block quote markers stripped). Code spans are removed first.
-        function bad_link(l,   rest, i) {
-            gsub(/`[^`]*`/, "", l)
-            rest = l
-            sub(/^[ \t]*(>[ \t]*)*/, "", rest)
-            if (rest ~ /^\[[^]]*\]:/) {
-                sub(/^\[[^]]*\]:[ \t]*/, "", rest)
-                if (!absolute(rest)) return 1
-            }
-            rest = l
-            while ((i = index(rest, "](")) > 0) {
-                rest = substr(rest, i + 2)
-                if (!absolute(rest)) return 1
-            }
-            return 0
-        }
         { sub(/\r$/, "") }
         $0 == s { ns++; if (ne > 0) late = 1; inside = 1; next }
         $0 == e { ne++; inside = 0; next }
@@ -139,11 +116,6 @@ cmd_notes() {
             last = n
             while (last >= first && line[last] ~ /^[ \t]*$/) last--
             if (first > last) exit 4
-            fence = 0
-            for (i = first; i <= last; i++) {
-                if (line[i] ~ /^[ ]*(```|~~~)/) { fence = !fence; continue }
-                if (!fence && bad_link(line[i])) { print line[i]; exit 5 }
-            }
             for (i = first; i <= last; i++) print line[i]
         }' "$2")"
     rc=$?
@@ -153,12 +125,11 @@ cmd_notes() {
         2) die "$2 must contain the line '$NOTES_START' and the line '$NOTES_END' exactly once each" ;;
         3) die "$2: '$NOTES_END' comes before '$NOTES_START'" ;;
         4) die "$2: no release notes between '$NOTES_START' and '$NOTES_END'" ;;
-        5) die "$2: a release-notes link is not an absolute https URL (relative paths break on the Release page): $body" ;;
         *) die "reading $2 failed (exit $rc)" ;;
     esac
     printf '%s\n' "$body"
     if [ "$#" -eq 3 ]; then
-        printf '\n完整发布报告（含 tag 后补录的发布证据）：[%s](%s)\n' "$2" "$3"
+        printf '\n完整发布报告（tag 时的版本；tag 后补录的发布证据在 main 分支的同一路径）：[%s](%s)\n' "$2" "$3"
     fi
 }
 
@@ -197,8 +168,9 @@ read_latest() {
     set -e
     [ "$rc" -eq 0 ] ||
         die "reading GitHub's Latest Release failed (exit $rc; a repository without a published Release answers 404 too)${2:+; $2}; $(phase_note "$1")"
+    # The adapter checks the ref format; here: one non-empty word.
     case "$current" in
-        '' | *[!A-Za-z0-9._/-]*) die "unexpected Latest Release tag '$current'; $(phase_note "$1")" ;;
+        '' | *[[:space:]]* | *[[:cntrl:]]*) die "unexpected Latest Release tag '$current'; $(phase_note "$1")" ;;
     esac
     printf '%s\n' "$current"
 }
@@ -243,16 +215,14 @@ cmd_ensure() {
         [ "$current" = "$latest_tag" ] || die "GitHub marks $current as Latest, but $behind; nothing was written"
         if [ -z "$id" ]; then action=create; else action=none; fi
     fi
-    if [ "$action" != none ]; then
-        set +e
-        remote="$(sh "$github" tag-commit "$tag")"
-        rc=$?
-        set -e
-        [ "$rc" -eq 0 ] || die "reading the remote tag $tag failed (exit $rc); nothing was written"
-        [ -n "$remote" ] || die "$tag is not on the remote (deleted?); nothing was written"
-        [ "$remote" = "$commit" ] ||
-            die "$tag now names $remote, not this run's commit $commit (moved tag?); nothing was written, run the release for the tag's current commit"
-    fi
+    set +e
+    remote="$(sh "$github" tag-commit "$tag")"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || die "reading the remote tag $tag failed (exit $rc); nothing was written"
+    [ -n "$remote" ] || die "$tag is not on the remote (deleted?); nothing was written"
+    [ "$remote" = "$commit" ] ||
+        die "$tag now names $remote, not this run's commit $commit (moved tag?); nothing was written, run the release for the tag's current commit"
 
     # 2. At most one write.
     case "$action" in

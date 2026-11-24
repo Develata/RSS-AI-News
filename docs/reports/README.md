@@ -50,8 +50,8 @@
 两行 `release-notes` 标记之间是 GitHub Release 的正文（各恰好一次、独占一行；release lane 的 `release-notes` 步骤与
 release workflow 的 github-release job 用同一个抽取，见
 [../operations/ci-and-release.md](../operations/ci-and-release.md)）。只放面向使用者的内容；验收与发布证据放在标记之外。
-标记段内的链接用绝对 `https` URL（或 `#锚点`）：相对路径在 Release 页面会失效，抽取会拒绝它。两行标记是保留字，代码块里的同样两行
-也会被识别（上面的模板本身放在代码块中，复制时去掉围栏）。
+标记段内的链接用绝对 `https` URL（或 `#锚点`）：相对路径在 Release 页面会失效。这一条靠作者遵守，抽取不检查链接。两行标记是
+保留字，代码块里的同样两行也会被识别（上面的模板本身放在代码块中，复制时去掉围栏）。
 
 ## 与其它目录的关系
 

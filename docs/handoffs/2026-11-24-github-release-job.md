@@ -1,12 +1,12 @@
 # release workflow 自动创建 GitHub Release
 
 - 日期：2026-11-24
-- 作者 / Agent：Claude Code（Opus 5.5，实现）+ Codex gpt-6.2-astra（独立复审，high，两轮）
+- 作者 / Agent：Claude Code（Opus 5.5，实现）+ Codex gpt-6.2-astra（独立复审，high，三轮；第三轮只审增量）
 - 分支：`ci/github-release`（基于 `main` `7da74bb`）
 - 当前 HEAD：见分支
 - 相关 commit：`397b4d7`（初版）及其后的复审修复提交（`7da74bb..ci/github-release`）
 - 相关 tag / release：N/A（未推送、未打 tag、未补建旧 Release）
-- 状态：`validated`（仅本地）；第二轮复审修复后未再复审
+- 状态：`validated`（仅本地）；第三轮复审修复后按约定不再复审
 
 ## 工作摘要
 
@@ -28,9 +28,9 @@ Latest 跟随 `latest` 镜像别名。
 - `github-release`（`needs: [promote-tags]`，`contents: write` + `packages: read`，与 promote-tags **共用**
   `release-promote-<repo>` group、`queue: max`）：抽取 notes → 现读 `latest` 别名版本 → `release-github.sh ensure <版本> <commit>
   <别名版本> <notes>`；ensure 在写入前的最后一项读取中核对远端 tag 仍指向本 run 的 commit。
-- 正文：`<!-- release-notes:start -->` / `<!-- release-notes:end -->` 两行之间（各恰好一次、独占一行，行尾单个 CR 忽略），末尾附
-  `main` 上报告的 Markdown 链接；标记段内的相对链接被拒绝。release lane 跑同一抽取，因此缺标记或有相对链接的 tag 在推镜像前就
-  失败；main 上的 release lane 用 workspace 版本，所以版本号与报告须同进 main。
+- 正文：`<!-- release-notes:start -->` / `<!-- release-notes:end -->` 两行之间（各恰好一次、独占一行，行尾单个 CR 忽略），原样复制，
+  末尾附该 tag 上报告的 Markdown 链接。链接写成绝对 https 是作者约定，不做机器检查（第三轮撤销了链接检查，见下）。release lane
+  跑同一抽取，因此缺标记的 tag 在推镜像前就失败；main 上的 release lane 用 workspace 版本，所以版本号与报告须同进 main。
 - Latest：别名版本 = 本版本 → 本 tag 须成为 Latest；否则 `--latest=false`，且 GitHub 当前 Latest 必须已是别名版本的 tag，不是则
   写前失败并指出先补哪个 Release。
 - 顺序：全部读取与检查在第一次写之前（draft / prerelease / 同 tag 多个 Release / 读错误 / Latest 不一致 → 零写入）；至多一次写
@@ -74,12 +74,34 @@ Latest 跟随 `latest` 镜像别名。
     因此撤销；tag 在核对与创建之间被删除时由默认分支重建的残留窗口，只有 tag ruleset 能根除。
 - 第二轮修复后未再做独立复审。
 
+## 独立复审第三轮（Codex，增量 `774f623..41327aa`）
+
+- 约定：只修本分支引入的缺陷（来源 a）；GitHub / gh 的残留限制（b）与 main 上原有的问题（c）列给 Develata，不开第四轮。
+- 判定（只计 a）**BLOCKER**。来源 a 的处理：
+  - B1 按行的链接检查既漏过真实链接（`<http://…>`、`www.` 自动链接、HTML `href` / `src`、列表项里的引用定义、四反引号围栏）、
+    又拒绝合法正文（块引用里的围栏、双反引号代码、目标换行的引用定义）→ 撤销链接检查，规则改为写作约定。真正的检查需要
+    Markdown 解析器（例如在 Rust 验收工具里引入解析库），是另一项改动。
+  - B2 `grep -vx page || true` 会吞掉 grep 的错误 → 改用 awk 过滤，错误照常失败。
+  - S3 无需写入时跳过 tag 核对，移动的 tag 也能报成功 → 核对无条件执行。
+  - S4 Latest 的字符白名单接受 `..`、拒绝 `v1.2.3+build.1` → jq 只拒绝空值、空白与控制字符，再用 `git check-ref-format` 校验。
+  - S5 registry label 的 `// "-"` 把 `false` 变成 `-`、NUL 被命令替换吞掉 → 先区分缺失与存在的非法值，在 jq 内拒绝非字符串与控制字符。
+  - S6 测试没锁住顺序 → fake 记录调用顺序（含失败的写入尝试），在 `find` / `latest` 运行时移动 tag，断言各路径的调用序列与零写入尝试。
+  - S7 `compose stop` 并不必然中断当前一轮 → 按 supercronic v0.2.49 源码（SIGTERM 后 `wg.Wait()`）与 compose 默认 10 秒宽限改写。
+  - S8 404 的条件写得过宽、报告链接指向 main 可能 404 → 按 REST 原文写明条件与 403；链接改指 `blob/vX.Y.Z/…`。
+  - N9 交接里"可丢弃提交"不精确 → 见下方风险条目。
+- 来源 b（未改，列给 Develata）：gh `--verify-tag` 与创建之间的 tag 竞态（只有 tag ruleset 能根除）；第二页之后回 204 会提前结束
+  列表（GitHub 未记载，已收窄文档表述）。
+- 来源 c（未改，列给 Develata）：升级命令块缺少 `migrate check` 预检与"失败即停"、shell 里导出的旧 `RSS_AI_NEWS_VERSION` 会盖过
+  `.env`；troubleshooting.md 回滚清单写了产品没有的 `migrate down`。
+
 ## 验证与验收
 
 ### 自动化验证
 
-- `sh` / `/bin/dash` / `dash` + `mawk`（runner 的组合，本机经 Homebrew 装了 mawk 1.3.4）下：`release-github-test.sh` 76 例、
+- `sh` / `/bin/dash` / `dash` + `mawk`（runner 的组合，本机经 Homebrew 装了 mawk 1.3.4）下：`release-github-test.sh` 77 例（第三轮后）、
   `release-promotion-test.sh`（含 `alias-version` 与 label 空白用例）全部通过
+- 第三轮变异核对（dash + mawk）：tag 核对只在写入时做、tag 核对提前到列表之前、去掉 `git check-ref-format`、registry 先 `//`
+  再查类型，各自至少一例失败
 - 第二轮变异核对（dash + mawk）：跳过写前 tag 核对、不去块引用前缀、保留行内代码、忽略围栏、放行 `http://`、不查页标记、
   不查 Latest 形状、不查列表 id、registry 不在 jq 内查空白，各自至少一例失败
 - 第一轮变异核对（临时副本，dash + mawk）：去掉 Latest 不一致检查、已是 Latest 时跳过写入、写前读 Latest、CR 去除、相对链接拒绝、
@@ -113,12 +135,13 @@ Latest 跟随 `latest` 镜像别名。
   `sha256:5dc83692…`）。下一个 tag 若是最高版本（如 `v0.10.5` / `v0.11.0`）会直接成为
   Latest；若在合入后先发一个低于 `0.10.4` 的补丁，它会按 Latest 不一致失败，需先补建 `v0.10.4` 的 Release。
 - 旧 tag（`v0.1.0`…`v0.7.1`、`v0.9.1`、`v0.10.0`…`v0.10.4`）的 Release 补建是对外发布，需 Develata 单独决定；补建时按版本升序、
-  只给最高版本标 Latest，且不得重跑旧 release run（R3-1）。除 `v0.10.4` 外，旧报告没有 notes 标记。
+  只给最高版本标 Latest，且不得重跑旧 release run（R3-1）。除 `v0.10.4` 外，旧报告没有 notes 标记；`v0.10.4` 的标记也只在本分支
+  的报告里，tag `v0.10.4` 上的报告没有，补建时用本分支（合并后为 main）的版本。
 - 标 Latest 用 `PATCH /releases/{id}`：REST "Update a release" 对现有 target 也有 workflow 文件限制。本 job 创建的与现有手建的
   Release（`v0.9.0` 实测）target 都是 `main`，不受影响；target 为某个 SHA 且 workflow 文件与默认分支不同的 Release 会让 PATCH 得到
   404，需手工标 Latest。
-- `3dbc984` / 其后一提交改的是升级步骤（先停 scheduler 再迁移），不在本次需求与两轮复审范围内，来自另一个 session 的交接；
-  `compose stop` 会终止正在执行的一轮。可单独丢弃。
+- 升级步骤（先停 scheduler 再迁移）来自另一个 session 的交接，不在本次需求内：`3dbc984` 整笔是它，`41327aa` 与第三轮修复提交
+  中各有一段（`41327aa` 同时含 Latest PATCH 的权限说明，不能整笔丢弃）。要撤回只撤 `ci-and-release.md` "镜像版本提升"一节的改动。
 - tag 核对与创建之间的几秒窗口：只有 `v*` tag ruleset（禁止更新、删除）能根除，是否启用由 Develata 决定。
 - 别名被"保留在更高版本"（更高 tag 已删除）时，GitHub 的 Latest 必须仍是那个版本，否则低版本的 run 失败。
 

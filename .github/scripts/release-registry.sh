@@ -162,15 +162,23 @@ inspect_tag() {
         end // {}')" || die "unexpected image config for $ref"
     # The three fields are space-separated and split by the caller, which
     # would fold whitespace away (`1.2.3 ` would read as `1.2.3`), and a
-    # command substitution drops trailing newlines: a label with whitespace
-    # anywhere, or that is not a string, is refused inside jq, on the raw
-    # value. The shell check below is a second line.
-    version="$(printf '%s' "$labels" | jq -r '.["org.opencontainers.image.version"] // "-"
-        | if type != "string" or test("\\s") then error("bad version label") elif . == "" then "-" else . end')" ||
-        die "unexpected labels for $ref (a version label that is not a string, or has whitespace)"
-    revision="$(printf '%s' "$labels" | jq -r '.["org.opencontainers.image.revision"] // "-"
-        | if type != "string" or test("\\s") then error("bad revision label") elif . == "" then "-" else . end')" ||
-        die "unexpected labels for $ref (a revision label that is not a string, or has whitespace)"
+    # command substitution drops trailing newlines and NULs: a label that is
+    # present but not a string, or holds whitespace or control characters
+    # (NUL included), is refused inside jq on the raw value. Only an absent
+    # (or null) or empty label reads as `-`. The shell check below is a
+    # second line.
+    # shellcheck disable=SC2016 # a jq program; $k is a jq variable (--arg)
+    label_filter='if (type == "object" | not) or (has($k) | not) or .[$k] == null then "-"
+        else .[$k]
+            | if type != "string" then error("label \($k) is not a string")
+              elif (explode | any(. < 32 or . == 127)) or test("\\s") then error("label \($k) has whitespace or control characters")
+              elif . == "" then "-"
+              else . end
+        end'
+    version="$(printf '%s' "$labels" | jq -r --arg k org.opencontainers.image.version "$label_filter")" ||
+        die "unexpected labels for $ref (a version label that is not a string, or has whitespace or control characters)"
+    revision="$(printf '%s' "$labels" | jq -r --arg k org.opencontainers.image.revision "$label_filter")" ||
+        die "unexpected labels for $ref (a revision label that is not a string, or has whitespace or control characters)"
     case "$version$revision" in
         *[[:space:]]*) die "labels of $ref contain whitespace (version '$version', revision '$revision'); refusing to read them" ;;
     esac

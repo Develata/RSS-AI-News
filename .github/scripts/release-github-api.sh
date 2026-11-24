@@ -14,9 +14,10 @@
 #                     non-zero). Every parsed page also emits a marker line:
 #                     gh returns an answer without a body (HTTP 204) without
 #                     running the filter, so no marker at all means nothing
-#                     was read, never "no Release". (A later page answering
-#                     204 would end the pagination early; GitHub's listing
-#                     does not do that.) Not `GET /releases/tags/{tag}`: it
+#                     was read, never "no Release". This covers the first
+#                     page only: a later page answering 204 would end the
+#                     listing early, unnoticed (GitHub does not document
+#                     such an answer for this endpoint). Not `GET /releases/tags/{tag}`: it
 #                     serves published Releases only and answers 404 for a
 #                     draft as for a missing Release.
 #   create <tag> <title> <notes-file> <latest>
@@ -36,8 +37,10 @@
 #                     make_latest=true: no lookup by tag inside gh, and the
 #                     tag, target, title and body are not sent.
 #   latest            tag_name of `GET /repos/{repo}/releases/latest`; an
-#                     answer that is not an object with a non-empty tag-like
-#                     string tag_name is an error.
+#                     answer that is not an object with a non-empty string
+#                     tag_name free of whitespace and control characters, or
+#                     whose `refs/tags/<tag_name>` fails `git check-ref-format`,
+#                     is an error.
 #   tag-commit <tag>  the commit the remote tag names (the peeled `^{}` line
 #                     of an annotated tag), from `git ls-remote origin`;
 #                     nothing when the tag is not on the remote; a git error
@@ -76,7 +79,9 @@ case "${1:-}" in
                   else empty end)
             end')" || die "listing the Releases failed"
         printf '%s\n' "$listing" | grep -qx page || die "the Releases listing returned no page (an answer without a body?)"
-        printf '%s\n' "$listing" | grep -vx page || true
+        # awk, not `grep -v || true`: a filter error must fail, not read as
+        # "no Release".
+        printf '%s\n' "$listing" | awk '$0 != "page"'
         ;;
     create)
         [ "$#" -eq 5 ] || die "usage: create <tag> <title> <notes-file> <latest>"
@@ -95,10 +100,13 @@ case "${1:-}" in
         ;;
     latest)
         [ "$#" -eq 1 ] || die "usage: latest"
-        gh api "repos/$repo/releases/latest" --jq '
-            if type == "object" and (.tag_name | type) == "string" and (.tag_name | test("^[A-Za-z0-9._/-]+$"))
+        tag="$(gh api "repos/$repo/releases/latest" --jq '
+            if type == "object" and (.tag_name | type) == "string" and (.tag_name | length) > 0
+               and ((.tag_name | explode | any(. < 33 or . == 127)) | not) and ((.tag_name | test("\\s")) | not)
             then .tag_name
-            else error("unexpected answer from releases/latest") end'
+            else error("unexpected answer from releases/latest") end')" || die "reading releases/latest failed"
+        git check-ref-format "refs/tags/$tag" || die "releases/latest names '$tag', not a valid tag name"
+        printf '%s\n' "$tag"
         ;;
     tag-commit)
         [ "$#" -eq 2 ] || die "usage: tag-commit <tag>"

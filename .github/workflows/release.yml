@@ -314,7 +314,7 @@ jobs:
   # against a fake GitHub):
   #   - the body is the release report's marked notes section at the tag
   #     (verify-release already ran the same extraction), plus a link to the
-  #     report on main, where the post-release evidence is added;
+  #     report at the tag (it always exists there; main may lack it);
   #   - Latest follows the `latest` image alias, read in this job. The job
   #     shares promote-tags' concurrency group, so no promotion of any tag
   #     moves the alias between that read and the Latest write;
@@ -322,8 +322,9 @@ jobs:
   #     Release is never rewritten; a draft or prerelease one, several for
   #     the tag, or an older tag still Latest while the alias is higher fail
   #     with nothing written;
-  #   - the last check before the write: the remote tag still names this
-  #     run's commit (as in publish-image); `gh release create --verify-tag`
+  #   - the last check before the write, also when there is nothing to
+  #     write: the remote tag still names this run's commit (as in
+  #     publish-image); `gh release create --verify-tag`
   #     needs the tag on the remote. No `--target`: GitHub refuses a
   #     GITHUB_TOKEN a target whose workflow files differ from the default
   #     branch. A tag moved or deleted within the remaining seconds is only
@@ -368,7 +369,7 @@ jobs:
           report="docs/reports/releases/v${version}.md"
           notes="$(mktemp)"
           sh .github/scripts/release-github.sh notes "$version" "$report" \
-            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/main/${report}" >"$notes"
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/${report}" >"$notes"
           latest="$(sh .github/scripts/release-promotion.sh alias-version "$image" latest)"
           {
             echo '### GitHub Release'

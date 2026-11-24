@@ -7,16 +7,25 @@
 #                     what create wrote
 #   latest            the tag GitHub marks Latest (absent: none, a 404)
 #   writes.log        one line per successful write
+#   calls.log         every command, in call order, before it runs (so a
+#                     write attempt that fails is still recorded)
 # Fault injection: FAKE_GH_FAIL=<command> makes that command fail;
 # FAKE_GH_FAIL_AFTER_WRITE=<command> makes it fail once a write happened;
 # FAKE_GH_DUPLICATE=1 lists every Release twice; FAKE_GH_CREATE_DRAFT=1
 # leaves a created Release a draft; FAKE_GH_IGNORE_LATEST=1 makes create and
-# set-latest leave Latest where it was (read-back checks).
+# set-latest leave Latest where it was (read-back checks);
+# FAKE_GH_MOVE_TAG_ON=<command> with FAKE_GH_MOVE_TAG_TO=<sha> points every
+# tag at <sha> while that command runs (a tag moved between two reads).
 
 set -eu
 
 dir="${FAKE_GITHUB:?FAKE_GITHUB is not set}"
 command="${1:-}"
+echo "$command" >>"$dir/calls.log"
+if [ "$command" = "${FAKE_GH_MOVE_TAG_ON:-}" ]; then
+    awk -v c="${FAKE_GH_MOVE_TAG_TO:?}" '{ print $1, c }' "$dir/tags" >"$dir/tags.moved"
+    mv "$dir/tags.moved" "$dir/tags"
+fi
 [ "$command" != "${FAKE_GH_FAIL:-}" ] || { echo "fake: $command failed" >&2; exit 1; }
 if [ "$command" = "${FAKE_GH_FAIL_AFTER_WRITE:-}" ] && [ -s "$dir/writes.log" ]; then
     echo "fake: $command failed after a write" >&2
