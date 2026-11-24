@@ -190,8 +190,11 @@ Jobs：
     （重跑那个 tag 的 github-release；其 run 早于本 job 时手建）。不用 GitHub 按日期与版本自动判断的默认值（给旧版本线发补丁时
     它可能抢走 Latest），也不沿用 promote-tags 的输出（两个 tag 相继发布时会过期）。本 job 与 promote-tags 共用
     `concurrency: release-promote-<repo>`（`cancel-in-progress: false`、`queue: max`）：任何 tag 的别名晋升都不会插进本 job 的
-    "读别名 → 写 Latest"之间。别名只升不降，高版本的 Release job 总在其晋升之后运行，所以 Latest 最终停在最高版本；高版本的
-    Release job 失败时 Latest 暂时落后，之后任何低版本的 run 都会按上面的检查失败而不是掩盖它。
+    "读别名 → 写 Latest"之间。别名只升不降，高版本的 Release job 总在其晋升之后运行，所以 Latest 最终停在最高版本。代价：低版本
+    的 Release job 只要在"别名已升到更高版本、但那个版本的 Release 还没标 Latest"时运行，就会按上面的检查失败（零写入）——
+    包括高版本的 Release job **还没轮到**的正常情况：两个 tag 相隔几分钟推送时，FIFO 队列可能排成 `promote-tags(B)` →
+    `github-release(A)` → `github-release(B)`，A 因此失败。恢复：等 B 的 github-release 成功后重跑 A 的 github-release job；B 的
+    失败也同样不会被 A 掩盖。
   - 顺序与幂等：所有读取与检查都在第一次写之前——列出全部 Release（分页，含 draft），按 tag 名匹配；"不存在"只由完整列表判定，
     不看 `404`（`GET /releases/tags/{tag}` 只返回已发布的 Release，对 draft 同样回 `404`），列表任一页失败或结构不符（非数组、
     条目缺少字符串 `tag_name` / 布尔 `draft`、`prerelease`）都是读错误；draft、prerelease、同一 tag 有多个 Release（draft 可以

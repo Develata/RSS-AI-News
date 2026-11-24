@@ -83,7 +83,11 @@ Latest 跟随 `latest` 镜像别名。
 
 ## 风险与后续事项
 
-- 当前 GitHub Latest 是 `v0.9.0`，`latest` 别名在 `0.10.4`。下一个 tag 若是最高版本（如 `v0.10.5` / `v0.11.0`）会直接成为
+- 两个 tag 相隔几分钟推送时，共享的 FIFO 队列可能排成 `promote-tags(B)` → `github-release(A)` → `github-release(B)`：较低的 A
+  因"GitHub Latest 还不是别名版本"失败（零写入），等 B 的 Release job 成功后重跑 A 的 github-release 即可。这是 B3 修复的代价，
+  未放宽检查。
+- 当前 GitHub Latest 是 `v0.9.0`；`latest` 别名在 `0.10.4`（2026-11-24 匿名读 GHCR：`latest` 与 `0.10.4` 的 digest 同为
+  `sha256:5dc83692…`）。下一个 tag 若是最高版本（如 `v0.10.5` / `v0.11.0`）会直接成为
   Latest；若在合入后先发一个低于 `0.10.4` 的补丁，它会按 Latest 不一致失败，需先补建 `v0.10.4` 的 Release。
 - 旧 tag（`v0.1.0`…`v0.7.1`、`v0.9.1`、`v0.10.0`…`v0.10.4`）的 Release 补建是对外发布，需 Develata 单独决定；补建时按版本升序、
   只给最高版本标 Latest，且不得重跑旧 release run（R3-1）。除 `v0.10.4` 外，旧报告没有 notes 标记。
