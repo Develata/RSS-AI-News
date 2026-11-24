@@ -204,7 +204,10 @@ Jobs：
     `--jq`，因此每页额外输出一个标记行，没有标记即读错误）都是读错误；`/releases/latest` 的回答也要是带合法 `tag_name` 字符串的
     对象。draft、prerelease、同一 tag 有多个 Release（draft 可以同名）、读错误、上述 Latest 不一致 → job 失败、**零写入**，由维护者
     处理后重跑。然后至多一次写：没有 Release → `gh release create --verify-tag`；已发布且应标 Latest、但尚未是 Latest →
-    `PATCH /releases/{id}`，只带 `make_latest=true`（id 来自上面的列表，不在 gh 内再按 tag 查找，也不回传 tag、target、标题与正文）；
+    `PATCH /releases/{id}`，只带 `make_latest=true`（id 来自上面的列表，不在 gh 内再按 tag 查找，也不回传 tag、target、标题与正文）。
+    REST "Update a release" 对现有 target 有同样的 workflow 文件限制：本 job 创建的 Release 与已有的手建 Release（`v0.9.0` 实测）
+    的 `target_commitish` 都是 `main`，解析为默认分支 head，不受影响；target 是某个提交 SHA 的 Release 若与默认分支的 workflow
+    文件不同，PATCH 会得到 `404`，job 失败，需维护者在页面上手工标 Latest；
     已发布的 Release 的标题与正文**原样保留**（重跑或手建的 Release）。最后读回：Release 存在、已发布、非 prerelease，GitHub 的
     Latest 等于预期；写之后的读回失败报告为"已写入、未确认"，重跑会先读状态再补齐或确认，不会删除已发布的 Release。
   - tag 归属：写之前的最后一项检查是 `git ls-remote origin` 读远端 tag（annotated tag 取 `^{}`），必须仍指向本 run 的 commit
@@ -329,7 +332,8 @@ workflow 发布 GHCR images 并创建 GitHub Release（自 github-release job �
 docker compose -f docker-compose.scheduler.yml pull
 
 # 3. 停 scheduler：迁移窗口内 cron 不再触发旧二进制（旧二进制遇到它不认识的已应用迁移会拒绝运行，
-#    正在跑的旧 run 也不应与迁移并发），与 troubleshooting.md 的升级清单一致
+#    正在跑的旧 run 也不应与迁移并发），与 troubleshooting.md 的升级清单一致。stop 会终止正在执行的一轮
+#    （其 lease 过期后回收）；不想打断，就等当前一轮结束再停
 docker compose -f docker-compose.scheduler.yml stop rss-ai-news-scheduler
 
 # 4. 若有 schema 变化，用同一服务一次性 migrate；entrypoint 换成 CLI，版本与随后启动的 scheduler 相同

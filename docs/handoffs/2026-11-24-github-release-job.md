@@ -78,7 +78,7 @@ Latest 跟随 `latest` 镜像别名。
 
 ### 自动化验证
 
-- `sh` / `/bin/dash` / `dash` + `mawk`（runner 的组合，本机经 Homebrew 装了 mawk 1.3.4）下：`release-github-test.sh` 75 例、
+- `sh` / `/bin/dash` / `dash` + `mawk`（runner 的组合，本机经 Homebrew 装了 mawk 1.3.4）下：`release-github-test.sh` 76 例、
   `release-promotion-test.sh`（含 `alias-version` 与 label 空白用例）全部通过
 - 第二轮变异核对（dash + mawk）：跳过写前 tag 核对、不去块引用前缀、保留行内代码、忽略围栏、放行 `http://`、不查页标记、
   不查 Latest 形状、不查列表 id、registry 不在 jq 内查空白，各自至少一例失败
@@ -114,6 +114,11 @@ Latest 跟随 `latest` 镜像别名。
   Latest；若在合入后先发一个低于 `0.10.4` 的补丁，它会按 Latest 不一致失败，需先补建 `v0.10.4` 的 Release。
 - 旧 tag（`v0.1.0`…`v0.7.1`、`v0.9.1`、`v0.10.0`…`v0.10.4`）的 Release 补建是对外发布，需 Develata 单独决定；补建时按版本升序、
   只给最高版本标 Latest，且不得重跑旧 release run（R3-1）。除 `v0.10.4` 外，旧报告没有 notes 标记。
+- 标 Latest 用 `PATCH /releases/{id}`：REST "Update a release" 对现有 target 也有 workflow 文件限制。本 job 创建的与现有手建的
+  Release（`v0.9.0` 实测）target 都是 `main`，不受影响；target 为某个 SHA 且 workflow 文件与默认分支不同的 Release 会让 PATCH 得到
+  404，需手工标 Latest。
+- `3dbc984` / 其后一提交改的是升级步骤（先停 scheduler 再迁移），不在本次需求与两轮复审范围内，来自另一个 session 的交接；
+  `compose stop` 会终止正在执行的一轮。可单独丢弃。
 - tag 核对与创建之间的几秒窗口：只有 `v*` tag ruleset（禁止更新、删除）能根除，是否启用由 Develata 决定。
 - 别名被"保留在更高版本"（更高 tag 已删除）时，GitHub 的 Latest 必须仍是那个版本，否则低版本的 run 失败。
 
