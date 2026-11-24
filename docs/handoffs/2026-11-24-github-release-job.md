@@ -131,12 +131,11 @@ Latest 跟随 `latest` 镜像别名。
 - 两个 tag 相隔几分钟推送时，共享的 FIFO 队列可能排成 `promote-tags(B)` → `github-release(A)` → `github-release(B)`：较低的 A
   因"GitHub Latest 还不是别名版本"失败（零写入），等 B 的 Release job 成功后重跑 A 的 github-release 即可。这是 B3 修复的代价，
   未放宽检查。
-- 当前 GitHub Latest 是 `v0.9.0`；`latest` 别名在 `0.10.4`（2026-11-24 匿名读 GHCR：`latest` 与 `0.10.4` 的 digest 同为
-  `sha256:5dc83692…`）。下一个 tag 若是最高版本（如 `v0.10.5` / `v0.11.0`）会直接成为
-  Latest；若在合入后先发一个低于 `0.10.4` 的补丁，它会按 Latest 不一致失败，需先补建 `v0.10.4` 的 Release。
-- 旧 tag（`v0.1.0`…`v0.7.1`、`v0.9.1`、`v0.10.0`…`v0.10.4`）的 Release 补建是对外发布，需 Develata 单独决定；补建时按版本升序、
-  只给最高版本标 Latest，且不得重跑旧 release run（R3-1）。除 `v0.10.4` 外，旧报告没有 notes 标记；`v0.10.4` 的标记也只在本分支
-  的报告里，tag `v0.10.4` 上的报告没有，补建时用本分支（合并后为 main）的版本。
+- （已解决，2026-11-25）合入时 GitHub Latest 是 `v0.9.0`、`latest` 别名在 `0.10.4`（2026-11-24 匿名读 GHCR：`latest` 与
+  `0.10.4` 的 digest 同为 `sha256:5dc83692…`）。PR #13 合并后，经 Develata 同意补建了 19 个旧 tag 的 Release（按版本升序，
+  只有 `v0.10.4` 标 Latest），GitHub Latest 现为 `v0.10.4`，与别名一致。补建方式与正文来源记在
+  `docs/operations/ci-and-release.md` 的"已知发布事件"。读回：19 个均为已发布、非 prerelease、`target_commitish` 为 `main`，
+  正文与草稿逐字节一致（忽略尾部换行）；22 个 tag 都有 Release。
 - 标 Latest 用 `PATCH /releases/{id}`：REST "Update a release" 对现有 target 也有 workflow 文件限制。本 job 创建的与现有手建的
   Release（`v0.9.0` 实测）target 都是 `main`，不受影响；target 为某个 SHA 且 workflow 文件与默认分支不同的 Release 会让 PATCH 得到
   404，需手工标 Latest。

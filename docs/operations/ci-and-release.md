@@ -385,9 +385,12 @@ docker compose -f docker-compose.scheduler.yml up -d --force-recreate
 > 当前约定：每个 tag 都写 report，含 `release-notes` 标记段：release lane 的 `release-notes` 步骤要求它存在，
 > github-release job 用它作 GitHub Release 正文（此前"纯 bugfix patch 可不写"的约定随该 job 废止）。
 >
-> GitHub Release：`v0.8.0`、`v0.8.1`、`v0.9.0` 是手工创建的；上表其余 tag 没有 Release（`v0.7.0` 起曾约定 workflow 不创建
-> Release）。github-release job 合入后的 tag 由 workflow 创建；旧 tag 的补建属于对外发布，由维护者单独决定，不重跑旧 run
-> （见上文 R3-1）。
+> GitHub Release：`v0.8.0`、`v0.8.1`、`v0.9.0` 是当时手工创建的（`v0.7.0` 起曾约定 workflow 不创建 Release）。其余 19 个 tag
+> （`v0.1.0`…`v0.7.1`、`v0.9.1`、`v0.10.0`…`v0.10.4`）的 Release 于 2026-11-25 经维护者同意在本地用 `gh release create
+> --verify-tag` 补建，没有重跑旧 run（见上文 R3-1）：标题为 tag 名；正文开头注明补建，有 release report 的取其面向用户的几节
+> （`v0.10.4` 取 notes 标记段），`v0.5.1`…`v0.5.3`、`v0.6.1`、`v0.6.2` 取 annotated tag 的说明；相对链接改为指向 main 的绝对
+> 地址；只有 `v0.10.4` 标 Latest（与 `latest` 镜像别名一致），其余 `--latest=false`。github-release job 合入后的 tag 由 workflow
+> 创建。
 
 ## 相关文档
 
