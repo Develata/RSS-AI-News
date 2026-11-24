@@ -47,14 +47,14 @@ cargo acceptance run --lane release --expected-version 0.10.4
 
 | Lane | local | full | 责任 |
 |---|---:|---:|---|
-| `static` | ✓ | ✓ | rustfmt、Clippy、rustdoc（`RUSTDOCFLAGS=-D warnings`）、swallowed-error、dependency policy、release 镜像策略脚本测试（含真实适配器 `release-registry.sh` 的 stub-curl + stub-docker 用例，需 `jq`；GitHub `ubuntu-latest` runner 预装）、scheduler entrypoint 测试、工具链 pin 一致性（`toolchain-pins`） |
+| `static` | ✓ | ✓ | rustfmt、Clippy、rustdoc（`RUSTDOCFLAGS=-D warnings`）、swallowed-error、dependency policy、release 镜像策略脚本测试（含真实适配器 `release-registry.sh` 的 stub-curl + stub-docker 用例，需 `jq`；GitHub `ubuntu-latest` runner 预装）、GitHub Release 策略脚本测试（`release-github`，假 GitHub）、scheduler entrypoint 测试、工具链 pin 一致性（`toolchain-pins`） |
 | `workspace` | ✓ | ✓ | workspace locked build/test |
 | `sqlite` | ✓ | ✓ | release binary、SQLite migrate run/check、CLI contract smokes |
 | `postgres` |  | ✓ | storage `--ignored`（只跑 PG / Docker 用例，普通用例由 workspace lane 覆盖）与 CLI migrate parity；要求 `DATABASE_URL` + Docker |
 | `docker` |  | ✓ | runtime/debug/scheduler build 与 container smokes |
 | `release` | ✓ | ✓ | workspace/lock/binary/README/version identity、部署镜像版本（compose `RSS_AI_NEWS_VERSION` 默认值与部署文档示例，`deployment-versions`；compose 另单独校验
 `services.rss-ai-news-scheduler.image` 的实际值必须恰为 `ghcr.io/develata/rss-ai-news:${RSS_AI_NEWS_VERSION:-<候选>}-scheduler`，
-注释不算数，`0.10.4-rc.1` 之类整段 tag 不再按数字前缀读成 `0.10.4`）与 Git diff check |
+注释不算数，`0.10.4-rc.1` 之类整段 tag 不再按数字前缀读成 `0.10.4`）、候选版本 release report 的 GitHub Release 正文段（`release-notes`）与 Git diff check |
 
 `toolchain-pins` 与 compose 镜像检查是**按行扫描**，只防本仓库文件的无意漂移，不防刻意绕过（R3-9 / R3-10，按决议仅文档化，
 不引入 YAML 解析器）：前者不解析 GitHub 的 env 作用域，job / step 级 `env` 对 `RUST_TOOLCHAIN` 的覆盖（块状或行内）配合

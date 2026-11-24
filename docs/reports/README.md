@@ -9,7 +9,7 @@
 
 | 子目录 | 内容 | 当前文件 |
 |---|---|---|
-| [releases/](./releases/) | 每个 surface-bearing release tag 一份快照 | [v0.1.0](./releases/v0.1.0.md) / [v0.2.0](./releases/v0.2.0.md) / [v0.3.0](./releases/v0.3.0.md) / [v0.4.0](./releases/v0.4.0.md) / [v0.5.0](./releases/v0.5.0.md) / [v0.6.0](./releases/v0.6.0.md) / [v0.7.0](./releases/v0.7.0.md) / [v0.7.1](./releases/v0.7.1.md) / [v0.8.0](./releases/v0.8.0.md) |
+| [releases/](./releases/) | 每个 stable release tag 一份快照（github-release job 合入前的 patch tag 可能没有） | [v0.1.0](./releases/v0.1.0.md) / [v0.2.0](./releases/v0.2.0.md) / [v0.3.0](./releases/v0.3.0.md) / [v0.4.0](./releases/v0.4.0.md) / [v0.5.0](./releases/v0.5.0.md) / [v0.6.0](./releases/v0.6.0.md) / [v0.7.0](./releases/v0.7.0.md) / [v0.7.1](./releases/v0.7.1.md) / [v0.8.0](./releases/v0.8.0.md) |
 
 ## 顶层文件
 
@@ -26,8 +26,13 @@
 - 日期：YYYY-MM-DD
 - 范围：上一个 tag .. vX.Y.Z
 
+<!-- release-notes:start -->
 ## 核心交付
 - ...
+
+## 升级与行为变更
+- ...
+<!-- release-notes:end -->
 
 ## 文档同步
 - 更新了 plan/0X-...md（具体差异）
@@ -35,12 +40,18 @@
 - 新增 / 更新 acceptance-case AC-...
 
 ## CI / 镜像
-- GHCR 镜像：`ghcr.io/<owner>/rss-ai-news:vX.Y.Z`
+- GHCR 镜像：`ghcr.io/<owner>/rss-ai-news:X.Y.Z`
 - workflow：`.github/workflows/release.yml`
 
 ## 后续 follow-up
 - 未结清的小修：链接到 handoffs/ 或下个版本的 plan 章节
 ```
+
+两行 `release-notes` 标记之间是 GitHub Release 的正文（各恰好一次、独占一行；release lane 的 `release-notes` 步骤与
+release workflow 的 github-release job 用同一个抽取，见
+[../operations/ci-and-release.md](../operations/ci-and-release.md)）。只放面向使用者的内容；验收与发布证据放在标记之外。
+标记段内的链接用绝对 `https` URL（或 `#锚点`）：相对路径在 Release 页面会失效。这一条靠作者遵守，抽取不检查链接。两行标记是
+保留字，代码块里的同样两行也会被识别（上面的模板本身放在代码块中，复制时去掉围栏）。
 
 ## 与其它目录的关系
 

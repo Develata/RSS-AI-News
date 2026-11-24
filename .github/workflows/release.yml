@@ -1,7 +1,8 @@
 name: release
 
-# 触发：push tag v*（如 v0.1.0 / v0.1.1 / v1.0.0）。
-# 由 `git push origin <tag>` 或在 GitHub Releases 页面创建 release 触发。
+# 触发：push tag v*（如 v0.1.0 / v0.1.1 / v1.0.0），由 `git push origin <tag>` 触发。
+# GitHub Release 由最后的 github-release job 创建：不要先在 Releases 页面手建（已发布的
+# 手建 Release 原样保留，draft / prerelease 会让该 job 失败）。
 #
 # 不触发于 branch push / PR —— release 必须经过显式 tag。
 on:
@@ -9,7 +10,8 @@ on:
     tags: ['v*']
 
 # GITHUB_TOKEN 默认 contents:read packages:none；只有 publish-image / promote-tags
-# 两个 job 声明 packages:write。
+# 两个 job 声明 packages:write，只有 github-release 声明 contents:write（另加
+# packages:read，只读 `latest` 别名）。
 permissions:
   contents: read
 
@@ -258,7 +260,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    # One reconcile at a time across tags. `queue: max` keeps up to 100
+    # One reconcile at a time across tags; github-release shares the group,
+    # so the alias never moves while a Release job reads it and writes
+    # GitHub's Latest. `queue: max` keeps up to 100
     # waiting runs instead of the default single pending slot, in which a
     # later (possibly lower) tag's run would cancel a waiting one. latest does
     # not depend on it: every run reconciles latest to the highest released
@@ -301,5 +305,75 @@ jobs:
             echo '### Image aliases'
             echo '```text'
             sh .github/scripts/release-promotion.sh reconcile "$image" "${GITHUB_REF_NAME#v}" <"$tags" 2>&1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The GitHub Release of the tag, last: a failure here leaves the images and
+  # aliases as they are, and re-running this job alone completes it. Policy
+  # in .github/scripts/release-github.sh (tested offline by the static lane
+  # against a fake GitHub):
+  #   - the body is the release report's marked notes section at the tag
+  #     (verify-release already ran the same extraction), plus a link to the
+  #     report at the tag (it always exists there; main may lack it);
+  #   - Latest follows the `latest` image alias, read in this job. The job
+  #     shares promote-tags' concurrency group, so no promotion of any tag
+  #     moves the alias between that read and the Latest write;
+  #   - every read and check comes before the one write; a published
+  #     Release is never rewritten; a draft or prerelease one, several for
+  #     the tag, or an older tag still Latest while the alias is higher fail
+  #     with nothing written;
+  #   - the last check before the write, also when there is nothing to
+  #     write: the remote tag still names this run's commit (as in
+  #     publish-image); `gh release create --verify-tag`
+  #     needs the tag on the remote. No `--target`: GitHub refuses a
+  #     GITHUB_TOKEN a target whose workflow files differ from the default
+  #     branch. A tag moved or deleted within the remaining seconds is only
+  #     excluded by a tag ruleset (docs/operations/ci-and-release.md).
+  # `queue` is in GitHub's job concurrency schema; see promote-tags.
+  github-release:
+    name: publish the GitHub Release
+    needs: [promote-tags]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      packages: read
+    concurrency:
+      group: release-promote-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      # Reading the alias's labels goes through `imagetools inspect`
+      # (release-registry.sh), as in promote-tags.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.38.2
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: create or complete the Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          image="$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+          report="docs/reports/releases/v${version}.md"
+          notes="$(mktemp)"
+          sh .github/scripts/release-github.sh notes "$version" "$report" \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/${report}" >"$notes"
+          latest="$(sh .github/scripts/release-promotion.sh alias-version "$image" latest)"
+          {
+            echo '### GitHub Release'
+            echo '```text'
+            sh .github/scripts/release-github.sh ensure "$version" "$GITHUB_SHA" "$latest" "$notes" 2>&1
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"

@@ -61,6 +61,15 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         &[],
         0,
     );
+    // The release workflow's GitHub Release policy (notes extraction,
+    // create / complete, Latest), against a file-backed fake GitHub.
+    executor.command(
+        "release-github",
+        "sh",
+        &strings([".github/scripts/release-github-test.sh"]),
+        &[],
+        0,
+    );
     // Crontab selection and input rejection of the scheduler entrypoint, with
     // a stub supercronic (no scheduler is started).
     executor.command(

@@ -2,6 +2,11 @@
 # bash 在 MSYS2 / WSL 下对 CRLF 极其敏感（`set -euo pipefail` 会因 CRLF 失败）。
 .githooks/pre-commit text eol=lf
 docker/scheduler-entrypoint.sh text eol=lf
+.github/scripts/*.sh text eol=lf
+
+# Release reports: the release lane and the release workflow read the
+# release-notes markers as whole lines (a trailing CR is tolerated as well).
+docs/reports/releases/*.md text eol=lf
 
 # 迁移文件强制 LF（W17-fix2）：sqlx::migrate! 的校验和按原始字节计算，
 # autocrlf 在 Windows 检出 CRLF 会让本机构建与 Linux/CI 构建嵌入不同

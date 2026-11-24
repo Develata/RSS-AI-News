@@ -58,6 +58,15 @@
 #       interrupted between two writes (see docs/operations/ci-and-release.md
 #       for the case where the higher tag is deleted in between).
 #
+#   release-promotion.sh alias-version <image> <alias>
+#       Prints the version `C` the runtime alias <alias> (e.g. `latest`)
+#       carries: its `org.opencontainers.image.version` label, which must be
+#       a stable version. Reads only. A missing alias, a label that is not a
+#       runtime version (e.g. `C-scheduler`, `-`) or a read error fails. The
+#       github-release job marks a GitHub Release Latest exactly when this
+#       is the release's version, so the Release and the image alias follow
+#       the one policy above (release-github.sh).
+#
 # Versions: stable `X.Y.Z` only, each component `0` or `[1-9][0-9]*` (SemVer
 # 2.0.0 §2), of any length, like the Rust acceptance validator
 # (`validate_version`). Without leading zeros a longer component is larger
@@ -75,7 +84,10 @@ die() {
     exit 1
 }
 
+# One line of digits and dots only (grep -E alone would accept a multi-line
+# argument with one matching line), then the X.Y.Z structure.
 is_version() {
+    case "$1" in '' | *[!0-9.]*) return 1 ;; esac
     printf '%s\n' "$1" | grep -Eq "$VERSION_ERE"
 }
 
@@ -338,14 +350,24 @@ $(plan_pair "$image" "$latest_line" "$latest_target")" || exit 1
     apply_plan "$image" "$plan"
 }
 
+cmd_alias_version() {
+    [ "$#" -eq 2 ] || { echo "usage: release-promotion.sh alias-version <image> <alias>" >&2; exit 2; }
+    registry_inspect "$1:$2"
+    [ "$inspect_rc" -eq 0 ] || die "$1:$2 does not exist; run promote-tags first"
+    is_version "$inspect_version" ||
+        die "$1:$2 has no stable runtime org.opencontainers.image.version label ('$inspect_version')"
+    printf '%s\n' "$inspect_version"
+}
+
 command="${1:-}"
 [ "$#" -gt 0 ] && shift
 case "$command" in
     tag-commit) cmd_tag_commit "$@" ;;
     existing) cmd_existing "$@" ;;
     reconcile) cmd_reconcile "$@" ;;
+    alias-version) cmd_alias_version "$@" ;;
     *)
-        echo "usage: release-promotion.sh tag-commit|existing|reconcile ..." >&2
+        echo "usage: release-promotion.sh tag-commit|existing|reconcile|alias-version ..." >&2
         exit 2
         ;;
 esac

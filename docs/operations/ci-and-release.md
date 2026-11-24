@@ -87,7 +87,8 @@ CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks �
 
 ```yaml
 permissions:
-  contents: read    # 顶层只读；只有 publish-image / promote-tags 两个 job 声明 packages: write
+  contents: read    # 顶层只读；只有 publish-image / promote-tags 两个 job 声明 packages: write，
+                    # 只有 github-release 声明 contents: write（另加 packages: read）
 env:
   RUST_TOOLCHAIN: "1.97.0"     # 与 ci.yml 保持一致
   IMAGE_NAME: ghcr.io/${{ github.repository }}   # 自动 lowercase
@@ -137,11 +138,14 @@ Jobs：
     中断后若较高的 `vC` tag 又被删除，低版本的重跑会看到一侧别名停在 `C`（高于目标，保持不动）、另一侧仍旧，于是按"会停在不同
     版本"零写入失败，不能自动补齐。恢复前提是 `C` / `C-scheduler` 两个精确版本镜像仍在 registry：把 `vC` 按原 commit 重新推送
     （`git push origin <commit>:refs/tags/vC`；commit 不变，版本 tag 的 revision 校验仍成立），推送会触发 `vC` 的新 release run，
-    其 publish-image 复用已有版本 tag、promote-tags 补齐别名；或由维护者用
+    其 publish-image 复用已有版本 tag、promote-tags 补齐别名。这条路只适用于原 commit 已含现行 `release.yml`（镜像复用与本节
+    晋升策略）的版本：新 run 用的是 `vC` commit 上的 workflow，`v0.10.4` 及更早的 commit 会重建并覆盖版本镜像、直接移动别名
+    （R3-1；30 天重跑期限只约束重跑原 run，重新推送 tag 是新 run，不受它限制）。这些历史版本只能用按 digest 对齐的办法（现行版本也可以用）：由维护者用
     `docker buildx imagetools create --prefer-index=false -t <image>:<alias>-scheduler <image>@<C-scheduler 的 digest>` 把落后的
     一侧对齐到 `C`，再重跑该别名所在 `X.Y` 线（`latest` 时任一）现行 release 的 promote-tags 复核。
-  - 串行：job 级 `concurrency: release-promote-<repo>`、`cancel-in-progress: false`、`queue: max`（最多 100 个等待中的 run，按
-    FIFO；默认的单个 pending 名额会让后到的 run 取消正在等待的 run）。`queue` 属于 GitHub 的 job concurrency schema，actionlint
+  - 串行：job 级 `concurrency: release-promote-<repo>`、`cancel-in-progress: false`、`queue: max`（最多 100 个等待中的 job，按
+    FIFO；默认的单个 pending 名额会让后到的 run 取消正在等待的 run）。github-release job 共用这个 group（见下），每个 run 在其中
+    排两个 job。`queue` 属于 GitHub 的 job concurrency schema，actionlint
     1.7.12 尚不认识，见 `.github/actionlint.yaml`。`latest` 的正确性不依赖排队：每次 reconcile 都把它对齐到最高已发布版本。
     排队溢出或被人工取消的 run 若是某条 `X.Y` 线的唯一晋升，则必须重跑**该 `X.Y` 线**某个 release 的 promote-tags；别的线的
     run 不会处理它（R3G-S3）。
@@ -173,21 +177,81 @@ Jobs：
     不存在的仓库）一律回 `401` + Bearer 质询（realm `https://ghcr.io/token`）；经 `curl -K -` 传入匿名 token 后，已有 tag 回 `200`
     且带 `docker-content-digest`，不存在的 tag 回 `404`。真实 curl 经 `-K -` 发出的 Basic 与 Bearer 头已在本地替身服务器上核对。
     用 `GITHUB_TOKEN` 的 Basic 凭据换 token、以及包尚不存在时的回答，要到首个真实 tag 才能确认。
+- `github-release`（`needs: [promote-tags]`）—— 用
+  [`.github/scripts/release-github.sh`](../../.github/scripts/release-github.sh) 创建该 tag 的 GitHub Release。排在镜像与别名
+  之后：它失败时已推送的镜像与别名保持原样，单独重跑这个 job 即可补齐，不会回头改镜像。
+  - 正文：`docs/reports/releases/vX.Y.Z.md` 中 `<!-- release-notes:start -->` 与 `<!-- release-notes:end -->` 两行之间的内容
+    （各恰好一次、独占一行、start 在前；行尾单个 CR 忽略，CRLF 检出读法相同；去掉首尾空行），原样复制；末尾追加一个指向**该 tag**
+    上报告的 Markdown 链接（`blob/vX.Y.Z/…`，总是存在；tag 后补录的发布证据在 main 的同一路径，报告只在维护分支上时 main 没有它）。
+    标记段内的链接应写成绝对 `https://` URL（或 `#锚点`）：相对路径在 Release 页面按 Releases 的 URL 解析而失效。这是写报告时的
+    约定，**不做机器检查**：分辨链接与代码、HTML 需要 Markdown 解析器，按行的检查在复审中既漏过真实链接、又会拒绝合法正文（而
+    拒绝会挡住推镜像）。两行标记是保留字：代码块里的同样两行也会被识别。正文取自 tag 的 checkout，随 tag 冻结；release lane 的
+    `release-notes` 步骤在 `verify-release` 里跑同一个抽取，缺标记、标记重复或顺序颠倒、标记之间只有空行，都会让 tag 在推镜像之前
+    失败。标题为 `vX.Y.Z`。
+  - Latest：与 `latest` 镜像别名同一策略（最高的已发布 stable 版本）。job 用 `release-promotion.sh alias-version` 现读 `latest`
+    别名的版本 label：等于本 tag 的版本 → 本 tag 必须成为 Latest（`--latest`）；否则显式 `--latest=false`，且 GitHub 当前的
+    Latest 必须已经是别名所在版本的 tag，否则说明更高版本的 Release 缺失、未发布、未标 Latest 或还没轮到，job 在写入前失败并指出
+    先补哪个（重跑那个 tag 的 github-release；还在排队就等它；其 run 早于本 job 时手建）。不用 GitHub 按日期与版本自动判断的
+    默认值（给旧版本线发补丁时它可能抢走 Latest），也不沿用 promote-tags 的输出（两个 tag 相继发布时会过期）。本 job 与
+    promote-tags 共用 `concurrency: release-promote-<repo>`（`cancel-in-progress: false`、`queue: max`）：任何 tag 的别名晋升都
+    不会插进本 job 的"读别名 → 写 Latest"之间。别名只升不降，高版本的 Release job 总在其晋升之后运行，所以 Latest 最终停在最高
+    版本。代价：低版本的 Release job 只要在"别名已升到更高版本、但那个版本的 Release 还没标 Latest"时运行，就会按上面的检查失败
+    （零写入）——包括高版本的 Release job **还没轮到**的正常情况：两个 tag 相隔几分钟推送时，FIFO 队列可能排成
+    `promote-tags(B)` → `github-release(A)` → `github-release(B)`，A 因此失败。恢复：等 B 的 github-release 成功后重跑 A 的
+    github-release job；B 的失败也同样不会被 A 掩盖。
+  - 顺序与幂等：所有读取与检查都在第一次写之前——列出全部 Release（分页，含 draft），按 tag 名匹配；"不存在"只由完整列表判定，
+    不看 `404`（`GET /releases/tags/{tag}` 只返回已发布的 Release，对 draft 同样回 `404`）。列表任一页失败、结构不符（非数组、
+    条目缺少数字 `id`、字符串 `tag_name`、布尔 `draft` / `prerelease`），或一页都没解析到（gh 对没有正文的 `204` 回答不执行
+    `--jq`，因此每页额外输出一个标记行，没有标记即读错误；这只覆盖第一页，之后某页回 `204` 会让列表提前结束而不被发现，GitHub
+    未记载这种回答）都是读错误；`/releases/latest` 的回答也要是对象，`tag_name` 为不含空白与控制字符的非空字符串，且
+    `refs/tags/<tag_name>` 通过 `git check-ref-format`。draft、prerelease、同一 tag 有多个 Release（draft 可以同名）、读错误、上述 Latest 不一致 → job 失败、**零写入**，由维护者
+    处理后重跑。然后至多一次写：没有 Release → `gh release create --verify-tag`；已发布且应标 Latest、但尚未是 Latest →
+    `PATCH /releases/{id}`，只带 `make_latest=true`（id 来自上面的列表，不在 gh 内再按 tag 查找，也不回传 tag、target、标题与正文）。
+    REST "Update a release" 对现有 target 有同样的 workflow 文件限制：本 job 创建的 Release 不带 target，`target_commitish` 为默认
+    分支，不受影响；已有的手建 Release 只查过 `v0.9.0`（`main`）。target 是某个提交、且该提交相对默认分支新增或修改了 workflow
+    文件的 Release，PATCH 会得到 `404`（部分认证路径为 `403`），job 失败，需维护者在页面上手工标 Latest；
+    已发布的 Release 的标题与正文**原样保留**（重跑或手建的 Release）。最后读回：Release 存在、已发布、非 prerelease，GitHub 的
+    Latest 等于预期；写之后的读回失败报告为"已写入、未确认"，重跑会先读状态再补齐或确认，不会删除已发布的 Release。
+  - tag 归属：其余读取都完成之后、写之前（无需写入时也做）的最后一项检查是 `git ls-remote origin` 读远端 tag（annotated tag
+    取 `^{}`），必须仍指向本 run 的 commit（正文与镜像都出自它），与 publish-image 相同；tag 缺失或已移动都零写入，也不报成功。
+    不加 `--target`：GitHub 会检查 target 提交（省略时为默认分支 head）相对默认分支是否**新增或修改**了 `.github/workflows/` 下的
+    文件，有的话凭据须有 workflows 权限，否则回 `404`（部分认证路径为 `403`；REST "Create a release" 的说明），而 `GITHUB_TOKEN`
+    无法获得该权限。tag 所在提交与默认分支的 workflow 文件不同（例如旧版本线上改过 workflow 的 tag）时，带 `--target <sha>`
+    就会撞上；省略时用默认分支 head，不受影响。gh 的 `--verify-tag` 与创建是
+    两次请求；核对与创建之间仍有几秒的窗口，tag 若恰在其间被移动，Release 会挂到新提交上；若被删除，GitHub 会从默认分支重新
+    创建它。workflow 内无法消除，只有禁止更新与删除 `v*` tag 的 tag 保护规则（ruleset）能根除。2026-11-24 查询
+    `GET /repos/{repo}/rulesets` 为空：本仓库尚未启用；启用与否由维护者决定（publish-image 的同类窗口同样受益）。
+  - 权限：`contents: write`（创建 Release）与 `packages: read`（读别名，同 promote-tags 经 `imagetools inspect`，所以同样
+    固定 Buildx 并登录 GHCR）。用 `GITHUB_TOKEN` 创建的 Release 不触发其他 workflow；本 workflow 只由 tag push 触发，不受影响。
+  - 测试：static lane 的 `release-github` 步骤用文件后端的假 GitHub（`release-github-fake.sh`）离线覆盖正文抽取（各种标记错误、
+    CRLF、链接原样复制）、新建 / 已发布 / draft / prerelease / 重复 Release、Latest 不一致、tag 移动（含在列表或 Latest 读取期间
+    移动、无需写入时移动）或缺失、各路径的调用顺序（tag 总是写前最后一项读取）、写前读错误零写入（按调用记录断言连写入尝试都
+    没有）、写后读错误报"未确认"、创建与 Latest 的读回；同一脚本用 stub `gh`（以 jq 执行真实的 `--jq` 过滤器）与 stub `git`（`check-ref-format`
+    交给真实 git）覆盖真实适配器 `release-github-api.sh`：第二页命中、后续页失败、无正文回答、畸形列表、畸形或非法 ref 的 Latest、
+    参数拒绝、annotated / lightweight / 缺失 tag，以及 `--paginate`、`--verify-tag`、`--latest=<bool>`、`PATCH … make_latest=true`
+    的确切 argv。`release-promotion` 步骤覆盖 `alias-version`（含经真实 registry 适配器读到带空白、尾随换行、控制字符或非字符串的
+    label 时失败）。真实 gh / git 的只读调用已对
+    本仓库实测（列表匹配与 id、缺失为空、读 Latest、tag 的 peeled commit）；创建与标 Latest 要到首个真实 tag 才能确认。
+
   四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit 不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
 
 ### 修复前 release run 的重跑边界（R3-1）
 
 GitHub 重跑一个 workflow run 时沿用**原始**的 commit、ref 与该 commit 上的 workflow 文件
 （[Re-running workflows and jobs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs)），
-不会采用 `main` 上的新 `release.yml`。`v0.10.4` 及更早 tag 的 release run 用的是旧 workflow：它们在两个 verify job 之后直接把
-`latest` / `X.Y`（及 `-scheduler`）推到本 tag，不经过 PostgreSQL lane、`cargo audit` 门槛，也不读别名当前的版本 label、不进
-新的晋升队列。只要本仓库的 workflow 仍对 GHCR package 有写权限，重跑这些旧 run 就可能覆盖较新的生产别名。约定：
+不会采用 `main` 上的新 `release.yml`。`v0.10.4` 及更早 tag 的 release run 用的是旧 workflow，门槛按版本不同（读各 tag 上的
+`release.yml`）：`v0.7.x` / `v0.8.x` 只有 `publish-image`，`v0.9.0` 先跑一个 `verify` job，`v0.9.1`…`v0.10.4` 先跑
+`verify-test` 与 `verify-release`。它们都直接把 `latest` / `X.Y`（及 `-scheduler`）推到本 tag，不经过 PostgreSQL lane、
+`cargo audit` 门槛，也不读别名当前的版本 label、不进新的晋升队列。只要本仓库的 workflow 仍对 GHCR package 有写权限，重跑这些
+旧 run 就可能覆盖较新的生产别名。GitHub 只允许在首次运行后 30 天内重跑（同上文档），所以风险随时间自然消失：截至 2026-11-24
+仍可重跑的旧 run 只有 `v0.10.0`（首次运行 2026-10-31）与 `v0.10.1`…`v0.10.4`（2026-11-17 至 11-20），最晚一个在 2026-12-20
+前后过期。约定：
 
 - **不要重跑** `v0.10.4` 及更早 tag 的 release run（包括其中单个 job），只重跑使用本文件现行 `release.yml` 的 run。
 - GHCR 的 Actions 写权限按**仓库**授予（package 设置 → Manage Actions access），无法收窄到单个 workflow 文件：保持只有本仓库
   有 write 角色、不给其他仓库授权；`GITHUB_TOKEN` 的 `packages: write` 只在现行 `release.yml` 的两个镜像 job 上声明。
-- 想从技术上排除旧 run 被重跑，只能删除这些 run（`gh run delete <run-id>`）。这会同时删除其日志与发布证据链接，属于不可逆的
-  批量删除，需由维护者单独决定；本仓库目前**不**这样做，靠上面的约定。
+- 30 天期限之前，想从技术上排除旧 run 被重跑，只能删除这些 run（`gh run delete <run-id>`）。这会同时删除其日志与发布证据
+  链接，属于不可逆的批量删除，需由维护者单独决定；本仓库目前**不**这样做，靠上面的约定等期限自然到期。
 - 若旧 run 已被误重跑：重跑一个现行 release 的 `promote-tags` job，且该 release 须属于被旧 run 拉低的那条 `X.Y` 线（它同时
   补齐 `latest`）；该线若没有现行 release，`latest` 可由任一现行 release 补齐，那条 `X.Y` 线则只能等该线的下一个 release 或由
   维护者手工对齐（R3G-S3）。reconcile 只认别名的版本 label 与已发布版本，会把被旧 run 拉低的别名重新对齐到最高已发布版本。旧 run 还会重建并覆盖它自己的 `X.Y.Z` / `X.Y.Z-scheduler`（digest 因重建
@@ -224,7 +288,10 @@ git checkout main && git pull
 #    本项目只发 stable tag，不创建 prerelease tag；release.yml 的 verify gate 只接受 X.Y.Z，
 #    推送 prerelease tag 会在 verify 失败、不推镜像（下方 rc 行仅说明 metadata-action 的映射规则）
 
-# 3. 在 tag 前写好 release report，使 release notes 随 tag 一起冻结
+# 3. 在 tag 前写好 release report，使 release notes 随 tag 一起冻结。面向用户的部分（核心交付、已知限制、
+#    升级与行为变更）放在 `<!-- release-notes:start -->` 与 `<!-- release-notes:end -->` 两行之间，github-release
+#    job 用它作 GitHub Release 正文。release lane 默认按 workspace 版本检查这份报告，所以版本号改动与报告要在
+#    同一个 commit / PR 里进 main，否则 main 的 test-pg job 会失败
 $EDITOR docs/reports/releases/v0.7.0.md
 git add docs/reports/releases/v0.7.0.md
 git commit -m "docs(reports): prepare v0.7.0 release notes"
@@ -251,10 +318,15 @@ docker run --rm ghcr.io/develata/rss-ai-news:0.7.0 --help
 docker pull ghcr.io/develata/rss-ai-news:0.7.0-scheduler
 docker run --rm --entrypoint /usr/local/bin/rss-ai-news \
   ghcr.io/develata/rss-ai-news:0.7.0-scheduler --version
+
+# 8. 读回 GitHub Release（github-release job 创建；不要事先手建）
+gh release view v0.7.0 --json isDraft,isPrerelease,url
+gh api repos/Develata/RSS-AI-News/releases/latest --jq .tag_name   # 本版是最高版本时应为 v0.7.0
 ```
 
-workflow 只发布 GHCR images，不创建 GitHub Release。release 完成后把 run id、manifest digest 与 smoke
-结果回填到 report，作为 post-release evidence。
+workflow 发布 GHCR images 并创建 GitHub Release（自 github-release job 合入后的第一个 tag 起；更早的 tag 见
+[已知发布事件](#已知发布事件)）。release 完成后把 run id、manifest digest、smoke 结果与 Release 链接回填到 report，
+作为 post-release evidence。
 
 ## 镜像版本提升
 
@@ -265,13 +337,18 @@ workflow 只发布 GHCR images，不创建 GitHub Release。release 完成后把
 # 2. 拉新版
 docker compose -f docker-compose.scheduler.yml pull
 
-# 3. 若有 schema 变化，先用同一服务一次性 migrate（不动正在运行的 scheduler 容器）；
-#    entrypoint 换成 CLI，版本与随后启动的 scheduler 相同
+# 3. 停 scheduler：迁移窗口内 cron 不再触发旧二进制（旧二进制遇到它不认识的已应用迁移会拒绝运行，
+#    正在跑的旧 run 也不应与迁移并发），与 troubleshooting.md 的升级清单一致。supercronic 收到 SIGTERM 后不再调度、
+#    等正在执行的一轮结束（v0.2.49 源码），compose 默认只等 10 秒，之后强杀（其 lease 过期后回收）。长任务用
+#    `stop -t <秒>` 给足时间；`stop` 返回成功后再迁移
+docker compose -f docker-compose.scheduler.yml stop rss-ai-news-scheduler
+
+# 4. 若有 schema 变化，用同一服务一次性 migrate；entrypoint 换成 CLI，版本与随后启动的 scheduler 相同
 docker compose -f docker-compose.scheduler.yml run --rm --no-deps \
   --entrypoint /usr/local/bin/rss-ai-news \
   rss-ai-news-scheduler --config-dir /app/configs migrate run
 
-# 4. 升级 scheduler
+# 5. 以新版启动 scheduler
 docker compose -f docker-compose.scheduler.yml up -d --force-recreate
 ```
 
@@ -305,7 +382,12 @@ docker compose -f docker-compose.scheduler.yml up -d --force-recreate
 | v0.10.3 | 2026-11-18 | [../reports/releases/v0.10.3.md](../reports/releases/v0.10.3.md) |
 | v0.10.4 | 2026-11-21 | [../reports/releases/v0.10.4.md](../reports/releases/v0.10.4.md) |
 
-> 当前约定：minor / major release 写 report；纯 bugfix patch 可不写。改变公开 surface 或 release tooling 的 patch 仍写 report。
+> 当前约定：每个 tag 都写 report，含 `release-notes` 标记段：release lane 的 `release-notes` 步骤要求它存在，
+> github-release job 用它作 GitHub Release 正文（此前"纯 bugfix patch 可不写"的约定随该 job 废止）。
+>
+> GitHub Release：`v0.8.0`、`v0.8.1`、`v0.9.0` 是手工创建的；上表其余 tag 没有 Release（`v0.7.0` 起曾约定 workflow 不创建
+> Release）。github-release job 合入后的 tag 由 workflow 创建；旧 tag 的补建属于对外发布，由维护者单独决定，不重跑旧 run
+> （见上文 R3-1）。
 
 ## 相关文档
 
