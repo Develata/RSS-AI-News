@@ -32,7 +32,7 @@
 #                     an older line would hit. gh checks the tag and creates
 #                     the Release in two requests; a tag deleted in between
 #                     would be recreated from the default branch, which only a
-#                     tag ruleset excludes (docs/operations/ci-and-release.md).
+#                     tag ruleset excludes (enabled: docs/operations/ci-and-release.md).
 #   set-latest <id>   `PATCH /repos/{repo}/releases/{id}` with only
 #                     make_latest=true: no lookup by tag inside gh, and the
 #                     tag, target, title and body are not sent.

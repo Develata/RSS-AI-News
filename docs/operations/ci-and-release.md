@@ -112,7 +112,8 @@ Jobs：
   第一次推送之前（持有该版本的锁时）先用 `release-promotion.sh tag-commit` 核对 `git ls-remote origin refs/tags/vV
   'refs/tags/vV^{}'`：远端 tag 解引用后的 commit 必须等于本次 run 的 `GITHUB_SHA`，tag 缺失或已指向别的 commit 即停止、不推任何
   镜像（R3G-B4）。原因：重跑沿用原始 `GITHUB_SHA`，`vV` 若已移到新 commit，旧 run 会先占用不可变的版本 tag，使新 commit 的
-  正常 run 无法发布。核对与推送之间仍有一个很短的窗口（tag 恰在其间移动），无法在 workflow 内消除；tag 保护规则才能根除。
+  正常 run 无法发布。核对与推送之间仍有一个很短的窗口（tag 恰在其间移动），无法在 workflow 内消除；tag 保护规则才能根除，
+  本仓库已于 2026-11-25 启用（见下方 github-release 的"tag 归属"）。
 - `promote-tags`（`needs: [publish-image]`）—— 用
   [`.github/scripts/release-promotion.sh`](../../.github/scripts/release-promotion.sh) `reconcile` 把别名**对齐到最高的已发布
   stable 版本**，与触发它的是哪个 tag 无关（R3-2 / R3-3 / R3-4 / R3-22）：
@@ -219,8 +220,12 @@ Jobs：
     无法获得该权限。tag 所在提交与默认分支的 workflow 文件不同（例如旧版本线上改过 workflow 的 tag）时，带 `--target <sha>`
     就会撞上；省略时用默认分支 head，不受影响。gh 的 `--verify-tag` 与创建是
     两次请求；核对与创建之间仍有几秒的窗口，tag 若恰在其间被移动，Release 会挂到新提交上；若被删除，GitHub 会从默认分支重新
-    创建它。workflow 内无法消除，只有禁止更新与删除 `v*` tag 的 tag 保护规则（ruleset）能根除。2026-11-24 查询
-    `GET /repos/{repo}/rulesets` 为空：本仓库尚未启用；启用与否由维护者决定（publish-image 的同类窗口同样受益）。
+    创建它。workflow 内无法消除，只有禁止更新与删除 `v*` tag 的 tag 保护规则（ruleset）能根除。本仓库 2026-11-25 起启用
+    ruleset `release tags v*: no update, no deletion`（id `28007887`，`target: tag`，`refs/tags/v*`，规则 `update` + `deletion`，
+    无 bypass，读回 `current_user_can_bypass: never`）：已推送的 `v*` tag 不能再被移动或删除，上述窗口与 publish-image 的同类窗口
+    随之关闭；新建 tag 不受限制。维护者确需删除或改指某个 `v*` tag（例如打错了 tag，或上文"把 `vC` 按原 commit 重新推送"的恢复
+    流程）时，先在 Settings → Rules → Rulesets 停用它（或 `gh api -X PUT repos/{repo}/rulesets/28007887 -f enforcement=disabled`），
+    操作完立即改回 `active`。规则是否真的拒绝推送未实测（实测需移动或删除一个真实的 `v*` tag）。
   - 权限：`contents: write`（创建 Release）与 `packages: read`（读别名，同 promote-tags 经 `imagetools inspect`，所以同样
     固定 Buildx 并登录 GHCR）。用 `GITHUB_TOKEN` 创建的 Release 不触发其他 workflow；本 workflow 只由 tag push 触发，不受影响。
   - 测试：static lane 的 `release-github` 步骤用文件后端的假 GitHub（`release-github-fake.sh`）离线覆盖正文抽取（各种标记错误、
@@ -385,9 +390,12 @@ docker compose -f docker-compose.scheduler.yml up -d --force-recreate
 > 当前约定：每个 tag 都写 report，含 `release-notes` 标记段：release lane 的 `release-notes` 步骤要求它存在，
 > github-release job 用它作 GitHub Release 正文（此前"纯 bugfix patch 可不写"的约定随该 job 废止）。
 >
-> GitHub Release：`v0.8.0`、`v0.8.1`、`v0.9.0` 是手工创建的；上表其余 tag 没有 Release（`v0.7.0` 起曾约定 workflow 不创建
-> Release）。github-release job 合入后的 tag 由 workflow 创建；旧 tag 的补建属于对外发布，由维护者单独决定，不重跑旧 run
-> （见上文 R3-1）。
+> GitHub Release：`v0.8.0`、`v0.8.1`、`v0.9.0` 是当时手工创建的（`v0.7.0` 起曾约定 workflow 不创建 Release）。其余 19 个 tag
+> （`v0.1.0`…`v0.7.1`、`v0.9.1`、`v0.10.0`…`v0.10.4`）的 Release 于 2026-11-25 经维护者同意在本地用 `gh release create
+> --verify-tag` 补建，没有重跑旧 run（见上文 R3-1）：标题为 tag 名；正文开头注明补建，有 release report 的取其面向用户的几节
+> （`v0.10.4` 取 notes 标记段），`v0.5.1`…`v0.5.3`、`v0.6.1`、`v0.6.2` 取 annotated tag 的说明；相对链接改为指向 main 的绝对
+> 地址；只有 `v0.10.4` 标 Latest（与 `latest` 镜像别名一致），其余 `--latest=false`。github-release job 合入后的 tag 由 workflow
+> 创建。
 
 ## 相关文档
 
