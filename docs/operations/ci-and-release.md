@@ -87,7 +87,8 @@ CI 通过是 PR 合入 `main` 的硬门槛。文档变更也不豁免（hooks �
 
 ```yaml
 permissions:
-  contents: read    # 顶层只读；只有 publish-image / promote-tags 两个 job 声明 packages: write
+  contents: read    # 顶层只读；只有 publish-image / promote-tags 两个 job 声明 packages: write，
+                    # 只有 github-release 声明 contents: write（另加 packages: read）
 env:
   RUST_TOOLCHAIN: "1.97.0"     # 与 ci.yml 保持一致
   IMAGE_NAME: ghcr.io/${{ github.repository }}   # 自动 lowercase
@@ -173,6 +174,32 @@ Jobs：
     不存在的仓库）一律回 `401` + Bearer 质询（realm `https://ghcr.io/token`）；经 `curl -K -` 传入匿名 token 后，已有 tag 回 `200`
     且带 `docker-content-digest`，不存在的 tag 回 `404`。真实 curl 经 `-K -` 发出的 Basic 与 Bearer 头已在本地替身服务器上核对。
     用 `GITHUB_TOKEN` 的 Basic 凭据换 token、以及包尚不存在时的回答，要到首个真实 tag 才能确认。
+- `github-release`（`needs: [promote-tags]`）—— 用
+  [`.github/scripts/release-github.sh`](../../.github/scripts/release-github.sh) 创建该 tag 的 GitHub Release。排在镜像与别名
+  之后：它失败时已推送的镜像与别名保持原样，单独重跑这个 job 即可补齐，不会回头改镜像。
+  - 正文：`docs/reports/releases/vX.Y.Z.md` 中 `<!-- release-notes:start -->` 与 `<!-- release-notes:end -->` 两行之间的内容
+    （各恰好一次、独占一行、start 在前，去掉首尾空行），末尾追加一行指向 `main` 上该报告的链接（tag 后补录的发布证据在那里）。
+    正文取自 tag 的 checkout，随 tag 冻结；release lane 的 `release-notes` 步骤在 `verify-release` 里跑同一个抽取，缺标记、
+    标记重复或顺序颠倒、标记之间只有空行，都会让 tag 在推镜像之前失败。标题为 `vX.Y.Z`。
+  - Latest：与 `latest` 镜像别名同一策略（最高的已发布 stable 版本）。job 在自己的步骤里用 `release-promotion.sh
+    alias-version` 现读 `latest` 别名的版本 label，等于本 tag 的版本才标 Latest（`--latest`），否则显式 `--latest=false`，
+    不用 GitHub 按日期与版本自动判断的默认值（给旧版本线发补丁时它可能抢走 Latest）。不沿用 promote-tags 的输出：两个 tag
+    相继发布时，那个值在本 job 运行时可能已过期。job 级 `concurrency: release-github-<repo>`、`cancel-in-progress: false`、
+    `queue: max`，跨 tag 串行，两次 run 的"读别名 → 写 Latest"不会交错；别名只升不降，因此最后标 Latest 的总是最高版本。
+  - 幂等：先列出全部 Release（分页，含 draft），按 tag 名匹配；"不存在"只由完整列表判定，不看 `404`（`GET
+    /releases/tags/{tag}` 只返回已发布的 Release，对 draft 同样回 `404`）。不存在 → `gh release create --verify-tag` 创建
+    （远端没有该 tag 时中止，不会像直接 `POST /releases` 那样从默认分支新建 tag）；已发布 → 标题与正文**原样保留**（重跑或
+    手建的 Release），只在应标 Latest 时 `gh release edit --latest`；draft、prerelease，或同一 tag 有多个 Release（draft 可以
+    同名）→ job 失败、零写入，由维护者手工处理后重跑。写后读回：Release 存在、已发布、非 prerelease；应标 Latest 时 GitHub 的
+    Latest 必须是本 tag。
+  - 与 publish-image 相同，写之前先用 `release-promotion.sh tag-commit` 核对远端 tag 仍指向本 run 的 commit。
+  - 权限：`contents: write`（创建 Release）与 `packages: read`（读别名，同 promote-tags 经 `imagetools inspect`，所以同样
+    固定 Buildx 并登录 GHCR）。用 `GITHUB_TOKEN` 创建的 Release 不触发其他 workflow；本 workflow 只由 tag push 触发，不受影响。
+  - 测试：static lane 的 `release-github` 步骤用文件后端的假 GitHub（`release-github-fake.sh`）离线覆盖正文抽取的各种标记
+    错误、新建 / 已发布 / draft / prerelease / 重复 Release、读错误零写入、创建与 Latest 的读回；`release-promotion` 步骤覆盖
+    `alias-version`。真实适配器 `release-github-api.sh`（gh CLI）的只读调用已对本仓库实测（列表匹配、缺失为空、读 Latest）；
+    创建与标 Latest 要到首个真实 tag 才能确认。
+
   四个 verify job 都检出 tag 指向的同一 SHA，因此 postgres lane 与 audit 不再依赖"tag 前人工确认 exact-SHA CI"这一步来保证。
 
 ### 修复前 release run 的重跑边界（R3-1）
@@ -224,7 +251,10 @@ git checkout main && git pull
 #    本项目只发 stable tag，不创建 prerelease tag；release.yml 的 verify gate 只接受 X.Y.Z，
 #    推送 prerelease tag 会在 verify 失败、不推镜像（下方 rc 行仅说明 metadata-action 的映射规则）
 
-# 3. 在 tag 前写好 release report，使 release notes 随 tag 一起冻结
+# 3. 在 tag 前写好 release report，使 release notes 随 tag 一起冻结。面向用户的部分（核心交付、已知限制、
+#    升级与行为变更）放在 `<!-- release-notes:start -->` 与 `<!-- release-notes:end -->` 两行之间，github-release
+#    job 用它作 GitHub Release 正文。release lane 默认按 workspace 版本检查这份报告，所以版本号改动与报告要在
+#    同一个 commit / PR 里进 main，否则 main 的 test-pg job 会失败
 $EDITOR docs/reports/releases/v0.7.0.md
 git add docs/reports/releases/v0.7.0.md
 git commit -m "docs(reports): prepare v0.7.0 release notes"
@@ -251,10 +281,15 @@ docker run --rm ghcr.io/develata/rss-ai-news:0.7.0 --help
 docker pull ghcr.io/develata/rss-ai-news:0.7.0-scheduler
 docker run --rm --entrypoint /usr/local/bin/rss-ai-news \
   ghcr.io/develata/rss-ai-news:0.7.0-scheduler --version
+
+# 8. 读回 GitHub Release（github-release job 创建；不要事先手建）
+gh release view v0.7.0 --json isDraft,isPrerelease,url
+gh api repos/Develata/RSS-AI-News/releases/latest --jq .tag_name   # 本版是最高版本时应为 v0.7.0
 ```
 
-workflow 只发布 GHCR images，不创建 GitHub Release。release 完成后把 run id、manifest digest 与 smoke
-结果回填到 report，作为 post-release evidence。
+workflow 发布 GHCR images 并创建 GitHub Release（自 github-release job 合入后的第一个 tag 起；更早的 tag 见
+[已知发布事件](#已知发布事件)）。release 完成后把 run id、manifest digest、smoke 结果与 Release 链接回填到 report，
+作为 post-release evidence。
 
 ## 镜像版本提升
 
@@ -305,7 +340,12 @@ docker compose -f docker-compose.scheduler.yml up -d --force-recreate
 | v0.10.3 | 2026-11-18 | [../reports/releases/v0.10.3.md](../reports/releases/v0.10.3.md) |
 | v0.10.4 | 2026-11-21 | [../reports/releases/v0.10.4.md](../reports/releases/v0.10.4.md) |
 
-> 当前约定：minor / major release 写 report；纯 bugfix patch 可不写。改变公开 surface 或 release tooling 的 patch 仍写 report。
+> 当前约定：每个 tag 都写 report，含 `release-notes` 标记段：release lane 的 `release-notes` 步骤要求它存在，
+> github-release job 用它作 GitHub Release 正文（此前"纯 bugfix patch 可不写"的约定随该 job 废止）。
+>
+> GitHub Release：`v0.8.0`、`v0.8.1`、`v0.9.0` 是手工创建的；上表其余 tag 没有 Release（`v0.7.0` 起曾约定 workflow 不创建
+> Release）。github-release job 合入后的 tag 由 workflow 创建；旧 tag 的补建属于对外发布，由维护者单独决定，不重跑旧 run
+> （见上文 R3-1）。
 
 ## 相关文档
 

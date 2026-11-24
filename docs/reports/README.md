@@ -26,8 +26,13 @@
 - 日期：YYYY-MM-DD
 - 范围：上一个 tag .. vX.Y.Z
 
+<!-- release-notes:start -->
 ## 核心交付
 - ...
+
+## 升级与行为变更
+- ...
+<!-- release-notes:end -->
 
 ## 文档同步
 - 更新了 plan/0X-...md（具体差异）
@@ -41,6 +46,10 @@
 ## 后续 follow-up
 - 未结清的小修：链接到 handoffs/ 或下个版本的 plan 章节
 ```
+
+两行 `release-notes` 标记之间是 GitHub Release 的正文（各恰好一次、独占一行；release lane 的 `release-notes` 步骤与
+release workflow 的 github-release job 用同一个抽取，见
+[../operations/ci-and-release.md](../operations/ci-and-release.md)）。只放面向使用者的内容；验收与发布证据放在标记之外。
 
 ## 与其它目录的关系
 

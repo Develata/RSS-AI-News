@@ -592,6 +592,53 @@ tag_commit 1.0 c100
 expect_rc 2
 done_case
 
+# --- alias-version (the version the latest alias carries) -------------------
+
+alias_version() {
+    set +e
+    out="$(sh "$script" alias-version "$IMAGE" "$1" 2>"$work/stderr")"
+    rc=$?
+    set -e
+}
+
+start "alias-version: prints the runtime alias's version label"
+case_failures=$failures
+publish 0.10.5 c5
+point latest 0.10.5
+alias_version latest
+expect_rc 0
+[ "$out" = 0.10.5 ] || fail "printed '$out', expected 0.10.5"
+no_writes
+done_case
+
+start "alias-version: a missing alias fails"
+case_failures=$failures
+alias_version latest
+expect_rc 1
+done_case
+
+start "alias-version: a scheduler or unlabelled image under the alias fails"
+case_failures=$failures
+publish 0.10.5 c5
+printf 'sha256:sc-0.10.5\n' >"$FAKE_REGISTRY/tags/latest"
+alias_version latest
+expect_rc 1
+echo "- -" >"$FAKE_REGISTRY/blobs/sha256:bare"
+printf 'sha256:bare\n' >"$FAKE_REGISTRY/tags/latest"
+alias_version latest
+expect_rc 1
+done_case
+
+start "alias-version: a read error fails"
+case_failures=$failures
+publish 0.10.5 c5
+point latest 0.10.5
+FAKE_FAIL_INSPECT=latest
+export FAKE_FAIL_INSPECT
+alias_version latest
+expect_rc 1
+done_case
+
 
 # --- release-registry.sh (the real adapter) with stub curl and docker --------
 # Stub curl answers per request kind from $STUB_HTTP/<kind>.{code,headers,body,rc}:

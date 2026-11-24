@@ -663,4 +663,4 @@
       :path ".github/workflows/release.yml"
       :kind module
       :state active
-      :notes "push tag v* 触发；同时 push runtime + scheduler 两套镜像到 GHCR。")
+      :notes "push tag v* 触发；同时 push runtime + scheduler 两套镜像到 GHCR，最后由 github-release job 创建 GitHub Release（正文取 release report 的 release-notes 段）。")

@@ -1,7 +1,8 @@
 name: release
 
-# 触发：push tag v*（如 v0.1.0 / v0.1.1 / v1.0.0）。
-# 由 `git push origin <tag>` 或在 GitHub Releases 页面创建 release 触发。
+# 触发：push tag v*（如 v0.1.0 / v0.1.1 / v1.0.0），由 `git push origin <tag>` 触发。
+# GitHub Release 由最后的 github-release job 创建：不要先在 Releases 页面手建（已发布的
+# 手建 Release 原样保留，draft / prerelease 会让该 job 失败）。
 #
 # 不触发于 branch push / PR —— release 必须经过显式 tag。
 on:
@@ -9,7 +10,8 @@ on:
     tags: ['v*']
 
 # GITHUB_TOKEN 默认 contents:read packages:none；只有 publish-image / promote-tags
-# 两个 job 声明 packages:write。
+# 两个 job 声明 packages:write，只有 github-release 声明 contents:write（另加
+# packages:read，只读 `latest` 别名）。
 permissions:
   contents: read
 
@@ -301,5 +303,76 @@ jobs:
             echo '### Image aliases'
             echo '```text'
             sh .github/scripts/release-promotion.sh reconcile "$image" "${GITHUB_REF_NAME#v}" <"$tags" 2>&1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The GitHub Release of the tag, last: a failure here leaves the images and
+  # aliases as they are, and re-running this job alone completes it. Policy
+  # in .github/scripts/release-github.sh (tested offline by the static lane
+  # against a fake GitHub):
+  #   - the body is the release report's marked notes section at the tag
+  #     (verify-release already ran the same extraction), plus a link to the
+  #     report on main, where the post-release evidence is added;
+  #   - Latest follows the `latest` image alias: read here, not handed over
+  #     from promote-tags (stale once another tag's promotion ran in between),
+  #     under one serialized group across tags, so two runs' alias read and
+  #     Latest write never interleave;
+  #   - a published Release is never rewritten; a draft or prerelease one, or
+  #     several for the tag, fail with nothing written;
+  #   - `gh release create --verify-tag` never creates a tag, and the remote
+  #     tag must still name this run's commit, as in publish-image.
+  # `queue` is in GitHub's job concurrency schema; see promote-tags.
+  github-release:
+    name: publish the GitHub Release
+    needs: [promote-tags]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      packages: read
+    concurrency:
+      group: release-github-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: the tag still names this commit
+        run: |
+          set -euo pipefail
+          ref="refs/tags/${GITHUB_REF_NAME}"
+          git ls-remote origin "$ref" "${ref}^{}" \
+            | sh .github/scripts/release-promotion.sh tag-commit "${GITHUB_REF_NAME#v}" "$GITHUB_SHA"
+
+      # Reading the alias's labels goes through `imagetools inspect`
+      # (release-registry.sh), as in promote-tags.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.38.2
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: create or complete the Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          image="$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+          report="docs/reports/releases/v${version}.md"
+          notes="$(mktemp)"
+          sh .github/scripts/release-github.sh notes "$version" "$report" \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/main/${report}" >"$notes"
+          latest="$(sh .github/scripts/release-promotion.sh alias-version "$image" latest)"
+          {
+            echo '### GitHub Release'
+            echo '```text'
+            sh .github/scripts/release-github.sh ensure "$version" "$latest" "$notes" 2>&1
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"

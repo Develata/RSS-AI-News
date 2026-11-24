@@ -42,6 +42,21 @@ pub(super) fn run(executor: &mut LaneExecutor<'_>) {
         "compose default image version and deployment docs name the candidate version",
         check_deployment_image_versions(executor.repo_root(), &expected),
     );
+    // The candidate's release report carries the GitHub Release notes: the
+    // same extraction the release workflow's github-release job runs, so a
+    // tag without them fails verify-release before any image is pushed.
+    executor.command(
+        "release-notes",
+        "sh",
+        &[
+            ".github/scripts/release-github.sh".to_string(),
+            "notes".to_string(),
+            expected.clone(),
+            format!("docs/reports/releases/v{expected}.md"),
+        ],
+        &[],
+        0,
+    );
     executor.command(
         "git-diff-check",
         "git",
