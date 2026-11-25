@@ -19,10 +19,10 @@ pub struct AiTask {
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
-/// The OpenAI Chat Completions `reasoning_effort` level. The set is the union
-/// accepted by OpenAI, DeepSeek and the new-api gateway (which maps the levels a
-/// provider lacks onto its nearest one); providers without reasoning may reject
-/// the field outright, which is why it is opt-in.
+/// The OpenAI Chat Completions `reasoning_effort` level: the values OpenAI
+/// and DeepSeek document (DeepSeek maps minimal → low and medium/xhigh →
+/// high). Providers without reasoning may reject the field outright, which is
+/// why it is opt-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningEffort {
     None,
