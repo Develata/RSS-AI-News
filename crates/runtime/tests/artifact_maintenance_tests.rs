@@ -80,6 +80,7 @@ async fn ai_start_purges_artifacts_before_claim_and_records_actual_count() {
         max_input_chars: 100,
         max_tokens: 20,
         temperature: 0.0,
+        reasoning_effort: None,
         min_importance_score: Score0To100::try_new(0).unwrap(),
         max_batches: 1,
         category_key: "ai".into(),

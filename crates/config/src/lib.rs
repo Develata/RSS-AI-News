@@ -20,7 +20,8 @@ mod rsshub;
 pub use app::{
     AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, DatabaseConfig, DatabaseDriver,
     DedupConfig, DoctorConfig, ExtractorConfig, HttpConfig, LeaseConfig, ObservabilityConfig,
-    PublishConfig, PublishTemplateConfig, RetentionPolicy, RetryConfig, RuntimeConfig,
+    PublishConfig, PublishTemplateConfig, ReasoningEffortSetting, RetentionPolicy, RetryConfig,
+    RuntimeConfig,
 };
 pub use category::{AiOverride, CategoryConfig, CategoryMeta, PublishOverride, SourceConfig};
 pub use credentials::{AiCredentials, audit_ai_credentials};

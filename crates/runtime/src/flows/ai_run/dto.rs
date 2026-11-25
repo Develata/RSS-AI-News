@@ -19,6 +19,8 @@ pub struct AiRunOptions {
     pub max_input_chars: u32,
     pub max_tokens: u32,
     pub temperature: f32,
+    /// 板块生效的 `reasoning_effort`；`None` = 请求不带该字段。整条回退链共用。
+    pub reasoning_effort: Option<rss_ai_news_domain::dto::ai::ReasoningEffort>,
     /// 0..=100 的发布门槛。type-level invariant 在反序列化 / CLI 解析时已被
     /// `Score0To100` 锁死（F5-4），ai-run 路径同样使用 newtype 而不在中途
     /// 退化为 `i32`，与 publish / config 两侧保持类型契约一致（F6-1）。

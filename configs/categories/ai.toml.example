@@ -31,6 +31,9 @@ model = ""
 # 两者相互独立（可只换 key 不换 endpoint）。api_key_env 的值是 env 变量名引用——key 本身
 # 绝不写进 toml，部署时在 .env 或进程环境配置该变量。全部板块自带凭证时全局 OPENAI_*
 # 可不设；本板块凭证缺失会在 ai-run 启动时报错（错误只含变量名，不含值）。
+# 板块推理档位覆盖（可选）。省略 = 继承 [ai].reasoning_effort；"omit" = 本板块不发该
+# 字段（如本板块模型不支持）；其余取值同 [ai]。
+# reasoning_effort = "low"
 # base_url = "https://api.deepseek.com/v1"
 # api_key_env = "DEEPSEEK_API_KEY"
 

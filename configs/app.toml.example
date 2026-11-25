@@ -25,6 +25,11 @@ model = "gpt-4o-mini"
 fallback_models = []
 max_tokens = 4096
 temperature = 0.3
+# 推理档位（可选）。省略 = 请求不带 reasoning_effort（与旧版一致，非推理模型如
+# gpt-4o-mini 必须省略，否则可能 400）。推理模型推荐 "low"：比 "none" 通用，且明显
+# 少于默认档位的推理 token。取值 none/minimal/low/medium/high/xhigh/max，或 "omit"。
+# 整条 fallback 链共用；板块可在 [category.ai_override].reasoning_effort 覆盖。
+# reasoning_effort = "low"
 request_timeout_seconds = 60
 max_input_chars = 8000
 

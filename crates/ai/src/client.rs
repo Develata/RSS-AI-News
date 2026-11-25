@@ -132,7 +132,7 @@ impl AiClient for OpenAiCompatClient {
             },
         );
 
-        let request_body = json!({
+        let mut request_body = json!({
             "model": task.model_id,
             "messages": [
                 { "role": "system", "content": SYSTEM_MESSAGE },
@@ -141,6 +141,11 @@ impl AiClient for OpenAiCompatClient {
             "max_tokens": task.max_tokens,
             "temperature": task.temperature,
         });
+        // Opt-in: without a configured level the key stays absent, so the
+        // body matches what non-reasoning endpoints have always received.
+        if let Some(effort) = task.reasoning_effort {
+            request_body["reasoning_effort"] = json!(effort.as_str());
+        }
 
         let request = self
             .http_client

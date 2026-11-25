@@ -330,6 +330,7 @@ fn app_config() -> AppConfig {
             fallback_models: Vec::new(),
             max_tokens: 1,
             temperature: 0.0,
+            reasoning_effort: None,
             request_timeout_seconds: 1,
             max_input_chars: 1024,
             rate_limit: AiRateLimitConfig {

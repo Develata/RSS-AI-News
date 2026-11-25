@@ -452,6 +452,7 @@ fn opts_for_category(category_key: &str) -> AiRunOptions {
         max_input_chars: 1024,
         max_tokens: 128,
         temperature: 0.0,
+        reasoning_effort: None,
         min_importance_score: Score0To100::try_new(30).expect("0..=100"),
         max_batches: 0,
         category_key: category_key.to_string(),
@@ -629,6 +630,50 @@ async fn ai_live_tasks_are_bounded_by_concurrency() {
     assert!(
         peak <= 3,
         "{peak} context owners: only flow + 2 live tasks allowed"
+    );
+}
+
+/// The configured `reasoning_effort` reaches every model of the fallback chain.
+#[tokio::test]
+async fn reasoning_effort_reaches_every_model_in_the_chain() {
+    use rss_ai_news_domain::dto::ai::ReasoningEffort;
+
+    #[derive(Default)]
+    struct RecordEffort {
+        seen: std::sync::Mutex<Vec<(String, Option<ReasoningEffort>)>>,
+    }
+    #[async_trait]
+    impl AiClient for RecordEffort {
+        async fn invoke(&self, task: &AiTask) -> Result<AiResponse, AiError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((task.model_id.clone(), task.reasoning_effort));
+            Err(AiError::HttpStatus {
+                code: 503,
+                message: "unavailable".into(),
+            })
+        }
+    }
+
+    let (_dir, pool) = make_test_pool().await;
+    seed_persisted_article(&pool, "effort", "title", "body").await;
+    let client = Arc::new(RecordEffort::default());
+    let app = Arc::new(app_config(RetentionPolicy::Always, 1));
+    let flow = AiRunFlow::new(Arc::new(common::ai_deps(pool, app, client.clone())));
+    let mut options = opts();
+    options.fallback_models = vec!["fallback-model".to_string()];
+    options.reasoning_effort = Some(ReasoningEffort::Low);
+    flow.task_gen(&options).await;
+    let summary = flow.process_ai_tasks(&options).await;
+    assert_eq!(summary.claimed, 1);
+
+    let seen = client.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "primary and fallback were both tried");
+    assert_eq!(seen[1].0, "fallback-model");
+    assert!(
+        seen.iter()
+            .all(|(_, effort)| *effort == Some(ReasoningEffort::Low))
     );
 }
 

@@ -108,6 +108,8 @@ base_url = "https://api.deepseek.com/v1"  # 可选：板块独立 endpoint。空
                          # 全局 OPENAI_BASE_URL。见 ./14-ai-fallback.md §B（W14-B）
 api_key_env = "DEEPSEEK_API_KEY"          # 可选：板块独立 key 的 env 变量名引用
                          # （key 本身绝不入 toml）。空/省略 = 继承全局 OPENAI_API_KEY
+reasoning_effort = "low" # 可选：推理档位。省略 = 继承 [ai].reasoning_effort（全局也省略 =
+                         # 不发该字段）；"omit" = 本板块不发。见 ./03-ai.md §2.1
 
 [category.publish_override]   # 可选：覆盖 [publish] 的子集
 max_items_per_report = 50

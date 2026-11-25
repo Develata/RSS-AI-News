@@ -1,7 +1,7 @@
 use std::{num::NonZeroU32, path::PathBuf};
 
-use rss_ai_news_domain::Score0To100;
-use serde::Deserialize;
+use rss_ai_news_domain::{Score0To100, dto::ai::ReasoningEffort};
+use serde::{Deserialize, Deserializer};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct AppConfig {
@@ -65,9 +65,57 @@ pub struct AiConfig {
     pub fallback_models: Vec<String>,
     pub max_tokens: u32,
     pub temperature: f32,
+    /// Optional `reasoning_effort` for reasoning models. Omitted (or `"omit"`)
+    /// = the key is left out of the request, as before this field existed.
+    /// Categories override it via `[category.ai_override].reasoning_effort`.
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffortSetting>,
     pub request_timeout_seconds: u64,
     pub max_input_chars: u32,
     pub rate_limit: AiRateLimitConfig,
+}
+
+/// A configured `reasoning_effort`: a level to send, or `"omit"` to leave the
+/// key out of the request. `"omit"` lets a category undo a global level, e.g.
+/// for a model that rejects the field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReasoningEffortSetting {
+    Omit,
+    Send(ReasoningEffort),
+}
+
+impl ReasoningEffortSetting {
+    /// The level to send; `None` = leave the key out.
+    pub const fn effort(self) -> Option<ReasoningEffort> {
+        match self {
+            Self::Omit => None,
+            Self::Send(effort) => Some(effort),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ReasoningEffortSetting {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value == "omit" {
+            return Ok(Self::Omit);
+        }
+        ReasoningEffort::parse(&value)
+            .map(Self::Send)
+            .ok_or_else(|| {
+                let allowed: Vec<&str> = ReasoningEffort::ALL
+                    .iter()
+                    .map(|effort| effort.as_str())
+                    .collect();
+                serde::de::Error::custom(format!(
+                    "unknown reasoning_effort {value:?}, expected \"omit\" or one of {}",
+                    allowed.join(", ")
+                ))
+            })
+    }
 }
 
 /// Reserved RPM/TPM inputs, currently without a rate-limiter implementation.
@@ -304,6 +352,50 @@ mod tests {
         assert_eq!(config.ai.rate_limit.tokens_per_minute, 0);
         assert!(!config.publish.include_unscored);
         assert_eq!(config.runtime.max_batches_per_run, 10);
+        assert_eq!(config.ai.reasoning_effort, None);
+    }
+
+    #[derive(Deserialize)]
+    struct EffortHolder {
+        reasoning_effort: Option<ReasoningEffortSetting>,
+    }
+
+    fn parse_effort(toml: &str) -> Result<Option<ReasoningEffortSetting>, toml::de::Error> {
+        toml::from_str::<EffortHolder>(toml).map(|holder| holder.reasoning_effort)
+    }
+
+    #[test]
+    fn reasoning_effort_parses_levels_and_omit() {
+        assert_eq!(parse_effort("").unwrap(), None);
+        assert_eq!(
+            parse_effort(r#"reasoning_effort = "omit""#).unwrap(),
+            Some(ReasoningEffortSetting::Omit)
+        );
+        for effort in ReasoningEffort::ALL {
+            let toml = format!("reasoning_effort = \"{}\"", effort.as_str());
+            assert_eq!(
+                parse_effort(&toml).unwrap(),
+                Some(ReasoningEffortSetting::Send(effort))
+            );
+        }
+    }
+
+    #[test]
+    fn reasoning_effort_rejects_unknown_or_miscased_values() {
+        for bad in [
+            "\"\"",
+            "\"LOW\"",
+            "\" low\"",
+            "\"off\"",
+            "\"disabled\"",
+            "1",
+        ] {
+            let error = parse_effort(&format!("reasoning_effort = {bad}"))
+                .expect_err("invalid reasoning_effort must be rejected");
+            if bad.starts_with('"') {
+                assert!(error.to_string().contains("expected \"omit\" or one of"));
+            }
+        }
     }
 
     #[test]
