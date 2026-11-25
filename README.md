@@ -538,7 +538,7 @@ include_unscored = true
 |---|---|---|
 | `model` | `"gpt-4o-mini"` | 按你的 OpenAI 兼容 API 实际可用模型填；模型 ID 不存在会跑时报错 |
 | `fallback_models` | `[]` | 主模型失败时依次回退的备选模型（W14-A）；仅"换模型可能有救"的失败触发（quota/限流/模型不可用/5xx/解析失败），凭证错与连不上不回退；链上所有模型共用该次运行的板块凭证（W14-B 板块可经 `[category.ai_override].base_url`/`api_key_env` 自带凭证），不跨 provider 路由。注意 `lease.ai_duration_seconds` 要覆盖 `(1+链长)` 倍批耗时（ai-run 启动时会预算校验）。板块可在 `[category.ai_override].fallback_models` 覆盖（省略=继承 / `[]`=禁用） |
-| `reasoning_effort` | 省略 | 推理模型的思考档位，按 OpenAI `reasoning_effort` 发送（new-api 等网关会转换到 Anthropic 格式）。省略 = 不发该字段（非推理模型必须省略，否则可能 400）；推理模型推荐 `"low"`，可大幅减少按输出计费的推理 token。取值 `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`；整条 fallback 链共用。不认该字段的 endpoint 回 400（不可重试），链上都不认时文章落到 `permanent_failed`，上线先小批量验证。板块可在 `[category.ai_override].reasoning_effort` 覆盖（省略=继承 / `"omit"`=本板块不发） |
+| `reasoning_effort` | 省略 | 推理模型的思考档位，按 OpenAI `reasoning_effort` 发送（new-api 等网关会转换到 Anthropic 格式）。省略 = 不发该字段（非推理模型必须省略，否则可能 400）。档位低于模型默认档位时可减少按输出计费的推理 token（如 DeepSeek `deepseek-flash` 默认 `high`，设 `"low"`）；模型默认不推理时（如 GPT-5.1 默认 `none`）设 `"low"` 反而开启推理。取值 `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`；整条 fallback 链共用，`doctor` 探针带全局值。不认该字段的 endpoint 回 400（不可重试），链上都不认时 `article_ai_results` 落 `permanent_failed`、文章停在 `ai_pending`，上线先小批量验证。板块可在 `[category.ai_override].reasoning_effort` 覆盖（省略=继承 / `"omit"`=本板块不发） |
 | `max_input_chars` | `8000` | 单篇文章送入 AI 前的字符截断；越大成本越高，越小可能丢上下文 |
 | `request_timeout_seconds` | `60` | 慢模型 / 长输入要调到 `120`+；过短会让 AI 阶段大量 `timeout` 重试 |
 | `ai.rate_limit.requests_per_minute` | `60` | 保留兼容字段，当前不执行 RPM 限流；通过并发上限与外部调度控制调用负载 |

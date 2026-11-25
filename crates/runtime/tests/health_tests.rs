@@ -78,6 +78,57 @@ async fn openai_check_reports_ok_for_chat_completion_shape() {
     assert!(matches!(check.run().await, CheckOutcome::Ok(_)));
 }
 
+/// The probe carries the configured `reasoning_effort`, so an endpoint that
+/// rejects the field fails `doctor` the way it would fail `ai-run`.
+#[tokio::test]
+async fn openai_check_sends_reasoning_effort_only_when_configured() {
+    use rss_ai_news_domain::dto::ai::ReasoningEffort;
+
+    let server = MockServer::start().await;
+    // Accepts requests without the field, rejects any that carry it.
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(wiremock::matchers::body_partial_json(
+            serde_json::json!({"reasoning_effort": "low"}),
+        ))
+        .respond_with(ResponseTemplate::new(400))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}]
+        })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let check = |effort| {
+        OpenAiPingCheck::new(
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+            Some(server.uri()),
+            Some("sk-test".into()),
+            "gpt-test".to_string(),
+            true,
+        )
+        .with_reasoning_effort(effort)
+    };
+    assert!(matches!(check(None).run().await, CheckOutcome::Ok(_)));
+    assert!(matches!(
+        check(Some(ReasoningEffort::Low)).run().await,
+        CheckOutcome::Fail(_)
+    ));
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    let bodies: Vec<serde_json::Value> = requests
+        .iter()
+        .map(|request| serde_json::from_slice(&request.body).expect("json body"))
+        .collect();
+    assert!(bodies[0].get("reasoning_effort").is_none());
+    assert_eq!(bodies[1]["reasoning_effort"], "low");
+}
+
 #[tokio::test]
 async fn openai_check_reports_fail_for_unauthorized() {
     let server = MockServer::start().await;

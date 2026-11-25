@@ -661,6 +661,82 @@ async fn ai_run_without_category_prompt_sends_article_title_and_body() {
     assert!(prompt.contains("math"), "category key missing: {prompt}");
 }
 
+/// Runs `ai-run` for `math` against a mock endpoint with `[ai]
+/// reasoning_effort = "low"` and the given extra `ai_override` line, and
+/// returns the request body the endpoint received.
+async fn ai_run_request_body(category_override: &str) -> serde_json::Value {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "{\"summary\":\"ok\",\"tags\":[],\"importance_score\":80,\"keep_decision\":true}"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("rss.sqlite");
+    write_config_with(temp.path(), &db_path, &temp.path().join("output"), true);
+    rewrite(&temp.path().join("app.toml"), |toml| {
+        toml.replacen(
+            "temperature = 0.0",
+            "temperature = 0.0\nreasoning_effort = \"low\"",
+            1,
+        )
+    });
+    rewrite(&temp.path().join("categories/math.toml"), |toml| {
+        toml.replace(
+            "api_key_env = \"RSS_AI_NEWS_TEST_UNSET_KEY\"",
+            &format!(
+                "api_key_env = \"PATH\"\nbase_url = \"{}\"\n{category_override}",
+                server.uri()
+            ),
+        )
+    });
+    let pool = migrated_pool(&db_path).await;
+    seed_persisted_article(&pool, "math").await;
+    pool.close().await;
+
+    let mut cli = cli_for(temp.path(), "math");
+    cli.command = Command::AiRun(AiRunArgs {
+        batch_size: 5,
+        ..AiRunArgs::default()
+    });
+    let args = match &cli.command {
+        Command::AiRun(args) => args,
+        _ => unreachable!(),
+    };
+    let summary = ai_run::run(&cli, args).await.expect("ai-run");
+    assert_eq!(summary.process_succeeded, 1, "{summary:?}");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 1);
+    serde_json::from_slice(&requests[0].body).expect("json body")
+}
+
+#[tokio::test]
+async fn ai_run_sends_the_configured_reasoning_effort() {
+    let inherited = ai_run_request_body("").await;
+    assert_eq!(inherited["reasoning_effort"], json!("low"));
+
+    let overridden = ai_run_request_body("reasoning_effort = \"high\"").await;
+    assert_eq!(overridden["reasoning_effort"], json!("high"));
+
+    let omitted = ai_run_request_body("reasoning_effort = \"omit\"").await;
+    assert!(
+        omitted.get("reasoning_effort").is_none(),
+        "\"omit\" leaves the key out: {omitted}"
+    );
+}
+
 fn rewrite(path: &Path, edit: impl FnOnce(String) -> String) {
     let content = fs::read_to_string(path).expect("read category");
     fs::write(path, edit(content)).expect("write category");
