@@ -585,6 +585,7 @@ mod tests {
             max_input_chars: 0,
             max_tokens: 0,
             temperature: 0.0,
+            reasoning_effort: None,
             min_importance_score: Score0To100::try_new(50).unwrap(),
             max_batches: 0,
             category_key: "x".to_string(),

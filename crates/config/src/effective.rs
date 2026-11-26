@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-use rss_ai_news_domain::Score0To100;
+use rss_ai_news_domain::{Score0To100, dto::ai::ReasoningEffort};
 
 use crate::{CategoryConfig, LoadedConfig};
 
@@ -38,6 +38,9 @@ pub struct EffectiveConfig<'a> {
     /// Category `prompt_template`; omitted or blank (trim) inherits
     /// [`DEFAULT_PROMPT_TEMPLATE`], like `model` and `path_template`.
     pub prompt_template: String,
+    /// `reasoning_effort` to send: the category override, else `[ai]`; `None`
+    /// (unset at both, or `"omit"` at the deciding level) = leave it out.
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl LoadedConfig {
@@ -99,6 +102,10 @@ impl LoadedConfig {
                 .filter(|template| !template.trim().is_empty())
                 .cloned()
                 .unwrap_or_else(|| DEFAULT_PROMPT_TEMPLATE.to_string()),
+            reasoning_effort: ai_override
+                .and_then(|override_| override_.reasoning_effort)
+                .or(self.app.ai.reasoning_effort)
+                .and_then(|setting| setting.effort()),
         })
     }
 }
@@ -128,9 +135,10 @@ fn resolve_fallback_models(
 mod tests {
     use std::num::NonZeroU32;
 
-    use rss_ai_news_domain::Score0To100;
+    use rss_ai_news_domain::{Score0To100, dto::ai::ReasoningEffort};
 
     use crate::{
+        ReasoningEffortSetting,
         app::{
             AiConfig, AiRateLimitConfig, AppConfig, ArtifactConfig, DatabaseConfig, DatabaseDriver,
             DedupConfig, DoctorConfig, ExtractorConfig, HttpConfig, LeaseConfig,
@@ -205,6 +213,7 @@ mod tests {
                     fallback_models: Vec::new(),
                     max_tokens: 4096,
                     temperature: 0.3,
+                    reasoning_effort: None,
                     request_timeout_seconds: 60,
                     max_input_chars: 8000,
                     rate_limit: AiRateLimitConfig {
@@ -527,5 +536,35 @@ mod tests {
             .prompt_template = Some(template.to_string());
         let effective = config.effective_for_category("ai").unwrap();
         assert_eq!(effective.prompt_template, template);
+    }
+
+    fn effective_reasoning(
+        global: Option<ReasoningEffortSetting>,
+        category: Option<ReasoningEffortSetting>,
+    ) -> Option<ReasoningEffort> {
+        let mut config = loaded(false, None, None);
+        config.app.ai.reasoning_effort = global;
+        config.categories[0]
+            .ai_override
+            .as_mut()
+            .expect("test category has an ai_override")
+            .reasoning_effort = category;
+        config
+            .effective_for_category("ai")
+            .unwrap()
+            .reasoning_effort
+    }
+
+    #[test]
+    fn reasoning_effort_is_omitted_unless_configured() {
+        use ReasoningEffortSetting::{Omit, Send};
+        let low = Some(Send(ReasoningEffort::Low));
+        let high = Some(Send(ReasoningEffort::High));
+        assert_eq!(effective_reasoning(None, None), None);
+        assert_eq!(effective_reasoning(low, None), Some(ReasoningEffort::Low));
+        assert_eq!(effective_reasoning(low, high), Some(ReasoningEffort::High));
+        assert_eq!(effective_reasoning(None, high), Some(ReasoningEffort::High));
+        assert_eq!(effective_reasoning(low, Some(Omit)), None);
+        assert_eq!(effective_reasoning(Some(Omit), None), None);
     }
 }

@@ -96,6 +96,7 @@ pub(super) async fn process_one(
         model_id: String::new(),
         max_tokens: opts.max_tokens,
         temperature: opts.temperature,
+        reasoning_effort: opts.reasoning_effort,
     };
 
     for (attempt_index, model) in chain.iter().enumerate() {

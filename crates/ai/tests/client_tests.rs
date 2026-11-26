@@ -3,7 +3,7 @@ mod common;
 use std::time::Duration;
 
 use rss_ai_news_ai::{AiClient, AiError};
-use rss_ai_news_domain::error::ClassifiedError;
+use rss_ai_news_domain::{dto::ai::ReasoningEffort, error::ClassifiedError};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -493,4 +493,67 @@ async fn provider_diagnostics_are_bounded_after_decoding_and_redaction() {
             }
         }
     }
+}
+
+fn ok_completion() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "{\"summary\":\"ok\",\"tags\":[],\"importance_score\":80,\"keep_decision\":true}"
+            }
+        }]
+    }))
+}
+
+async fn sent_body(server: &MockServer) -> serde_json::Value {
+    let requests = server.received_requests().await.expect("recording on");
+    assert_eq!(requests.len(), 1);
+    serde_json::from_slice(&requests[0].body).expect("request body is JSON")
+}
+
+#[tokio::test]
+async fn invoke_sends_configured_reasoning_effort() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ok_completion())
+        .mount(&server)
+        .await;
+
+    let mut task = test_task();
+    task.reasoning_effort = Some(ReasoningEffort::Low);
+    test_client(server.uri())
+        .invoke(&task)
+        .await
+        .expect("200 succeeds");
+
+    assert_eq!(sent_body(&server).await["reasoning_effort"], json!("low"));
+}
+
+#[tokio::test]
+async fn invoke_omits_reasoning_effort_when_unset() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ok_completion())
+        .mount(&server)
+        .await;
+
+    let task = test_task();
+    assert_eq!(task.reasoning_effort, None);
+    test_client(server.uri())
+        .invoke(&task)
+        .await
+        .expect("200 succeeds");
+
+    let body = sent_body(&server).await;
+    let mut keys: Vec<&str> = body
+        .as_object()
+        .expect("object body")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["max_tokens", "messages", "model", "temperature"]);
 }

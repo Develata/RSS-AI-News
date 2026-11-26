@@ -32,5 +32,6 @@ pub fn test_task() -> AiTask {
         model_id: "gpt-test".to_string(),
         max_tokens: 256,
         temperature: 0.2,
+        reasoning_effort: None,
     }
 }

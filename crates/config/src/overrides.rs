@@ -67,6 +67,7 @@ mod tests {
                 fallback_models: Vec::new(),
                 max_tokens: 4096,
                 temperature: 0.3,
+                reasoning_effort: None,
                 request_timeout_seconds: 60,
                 max_input_chars: 8000,
                 rate_limit: AiRateLimitConfig {

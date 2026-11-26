@@ -14,6 +14,56 @@ pub struct AiTask {
     pub model_id: String,
     pub max_tokens: u32,
     pub temperature: f32,
+    /// Sent as `reasoning_effort` only when `Some`; `None` leaves the key out
+    /// of the request body, so the provider's own default applies.
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+/// The OpenAI Chat Completions `reasoning_effort` level: the values OpenAI
+/// and DeepSeek document (DeepSeek maps minimal → low and medium/xhigh →
+/// high). Providers without reasoning may reject the field outright, which is
+/// why it is opt-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub const ALL: [Self; 7] = [
+        Self::None,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::Xhigh,
+        Self::Max,
+    ];
+
+    /// The wire value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// Parses a wire value exactly (lowercase, no trimming).
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|effort| effort.as_str() == value)
+    }
 }
 
 /// Successful AI output.

@@ -215,6 +215,7 @@ async fn ai_orchestration() {
         max_input_chars: 1024,
         max_tokens: 128,
         temperature: 0.0,
+        reasoning_effort: None,
         min_importance_score: Score0To100::try_new(30).unwrap(),
         max_batches: 0,
         category_key: "ai".into(),

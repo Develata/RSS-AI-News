@@ -33,6 +33,9 @@ pub struct AiOverride {
     /// 板块独立 key 的 **env 变量名引用**（W14-B），key 本身绝不入 toml。
     /// 省略或空串（trim）= 继承全局 `OPENAI_API_KEY`。
     pub api_key_env: Option<String>,
+    /// 板块 `reasoning_effort` 覆盖。`None`（省略）= 继承全局
+    /// `[ai].reasoning_effort`；`"omit"` = 本板块不发该字段；其余为发送的档位。
+    pub reasoning_effort: Option<crate::app::ReasoningEffortSetting>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]

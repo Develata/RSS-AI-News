@@ -134,6 +134,7 @@ pub mod openai_check {
         api_key: Option<SecretString>,
         model: String,
         enabled: bool,
+        reasoning_effort: Option<rss_ai_news_domain::dto::ai::ReasoningEffort>,
     }
 
     impl OpenAiPingCheck {
@@ -150,7 +151,19 @@ pub mod openai_check {
                 api_key,
                 model,
                 enabled,
+                reasoning_effort: None,
             }
+        }
+
+        /// Probe with the global `reasoning_effort` `ai-run` sends, so an
+        /// endpoint that rejects the field fails here instead of in `ai-run`.
+        /// `None` (the default) leaves the key out, as before.
+        pub fn with_reasoning_effort(
+            mut self,
+            effort: Option<rss_ai_news_domain::dto::ai::ReasoningEffort>,
+        ) -> Self {
+            self.reasoning_effort = effort;
+            self
         }
     }
 
@@ -179,17 +192,21 @@ pub mod openai_check {
                 .unwrap_or("https://api.openai.com/v1")
                 .trim_end_matches('/');
             let url = format!("{base}/chat/completions");
+            let mut body = serde_json::json!({
+                "model": self.model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "stream": false,
+            });
+            if let Some(effort) = self.reasoning_effort {
+                body["reasoning_effort"] = serde_json::json!(effort.as_str());
+            }
             let response = self
                 .http
                 .post(&url)
                 .timeout(HEALTH_REQUEST_TIMEOUT)
                 .bearer_auth(api_key.expose_secret())
-                .json(&serde_json::json!({
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": "ping"}],
-                    "max_tokens": 1,
-                    "stream": false,
-                }))
+                .json(&body)
                 .send()
                 .await;
 

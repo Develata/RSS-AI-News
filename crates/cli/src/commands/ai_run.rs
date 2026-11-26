@@ -374,6 +374,7 @@ async fn run_category(
             max_input_chars: effective.max_input_chars,
             max_tokens: loaded.app.ai.max_tokens,
             temperature: loaded.app.ai.temperature,
+            reasoning_effort: effective.reasoning_effort,
             min_importance_score,
             // F6-3: 从 app.runtime.max_batches_per_run 取生效值（CLI > config > 默认）。
             // 仅约束 process 阶段 claim 循环；task_gen 是 one-shot sweep。

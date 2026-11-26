@@ -35,13 +35,16 @@ pub async fn run(cli: &Cli, args: &DoctorArgs) -> Result<DoctorCommandSummary, C
         Box::new(ConfigCheck::new(deps.loaded.clone())),
         Box::new(DatabaseConnectivityCheck::new(deps.pool.clone())),
         Box::new(MigrationVersionCheck::new(deps.pool.clone())),
-        Box::new(OpenAiPingCheck::new(
-            deps.http_client.clone(),
-            env.openai_base_url.clone(),
-            env.openai_api_key.clone(),
-            app.ai.model.clone(),
-            app.ai.enabled,
-        )),
+        Box::new(
+            OpenAiPingCheck::new(
+                deps.http_client.clone(),
+                env.openai_base_url.clone(),
+                env.openai_api_key.clone(),
+                app.ai.model.clone(),
+                app.ai.enabled,
+            )
+            .with_reasoning_effort(app.ai.reasoning_effort.and_then(|setting| setting.effort())),
+        ),
         Box::new(GitHubPingCheck::new(deps.http_client.clone(), github_token)),
         Box::new(RsshubPingCheck::new(
             deps.http_client.clone(),

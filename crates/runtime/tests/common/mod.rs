@@ -129,6 +129,7 @@ pub fn app_config(retention_policy: RetentionPolicy, concurrent_feeds: u32) -> A
             fallback_models: Vec::new(),
             max_tokens: 1024,
             temperature: 0.0,
+            reasoning_effort: None,
             request_timeout_seconds: 5,
             max_input_chars: 1024,
             rate_limit: AiRateLimitConfig {
